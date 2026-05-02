@@ -2,6 +2,9 @@
 
 Metalcraft Agent is a Rust application leveraging the Metalcraft framework to create reactive agents with various personas and functionalities. This agent can run interactively or execute specific tasks based on provided commands.
 
+<img width="1542" height="867" alt="image" src="https://github.com/user-attachments/assets/6765878a-1484-4426-a7fd-cfd56c5f420f" />
+
+
 ## Features
 
 - **Reactive Agent Creation**: Utilizes Metalcraft for creating agents with customizable behaviors.
