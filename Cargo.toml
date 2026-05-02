@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-metalcraft = { path = "../metalcraft", features = ["rig"] }
+metalcraft = { version = "0.3.1", features = ["rig"] }
 rig = "0.36"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
