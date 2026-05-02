@@ -1,0 +1,18 @@
+[package]
+name = "metalcraft-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+metalcraft = { version = "0.2", features = ["rig"] }
+rig = "0.36"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
+dotenvy = "0.15"
+
+[dev-dependencies]
+spice-framework = "0.1"
