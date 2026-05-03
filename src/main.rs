@@ -68,22 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
 
-    let system_prompt = persona.build_system_prompt(&skills_dir, &cwd);
-
     let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
-    let model_name = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
-
-    let tool_config = metalcraft_agent::tools::ToolConfig {
-        api_key: api_key.clone(),
-        model_name: model_name.clone(),
-        system_prompt: system_prompt.clone(),
-        skills_dir: skills_dir.clone(),
-        available_skills: persona.skills.clone(),
-    };
-    let registry = metalcraft_agent::tools::create_registry_for_with_config(
-        &persona.tools,
-        Some(&tool_config),
-    );
+    let model_name = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string());
 
     let approval_mode = if auto_approve {
         ApprovalMode::AutoApprove
@@ -91,27 +77,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ApprovalMode::default_interactive()
     };
 
-    println!("[{}] {}", persona.name, persona.description);
-    println!("Tools: {}", persona.tools.join(", "));
-    if !persona.skills.is_empty() {
-        println!("Skills: {}", persona.skills.join(", "));
-    }
-    if auto_approve {
-        println!("Mode: auto-approve");
-    } else {
-        println!("Mode: interactive (read-only tools auto-approved)");
-    }
-    println!();
-
-    let client = openai::Client::new(&api_key)?;
-    let model = client.completion_model(&model_name);
-    // Second model instance for context compaction (the first is moved into the graph)
-    let compaction_model = client.completion_model(&model_name);
     let compaction_config = CompactionConfig::default();
 
-    let hook = approval::build_hook(approval_mode);
-    let graph = create_react_agent_with_hooks(model, registry, &system_prompt, hook)?.into_arc();
+    // Build agent graph for a persona
+    let build_agent = |persona: &Persona, cwd: &str, api_key: &str, model_name: &str, approval_mode: ApprovalMode| {
+        let system_prompt = persona.build_system_prompt(&skills_dir, cwd);
+        let tool_config = metalcraft_agent::tools::ToolConfig {
+            api_key: api_key.to_string(),
+            model_name: model_name.to_string(),
+            system_prompt: system_prompt.clone(),
+            skills_dir: skills_dir.clone(),
+            available_skills: persona.skills.clone(),
+        };
+        let registry = metalcraft_agent::tools::create_registry_for_with_config(
+            &persona.tools,
+            Some(&tool_config),
+        );
+        let client = openai::Client::new(api_key)?;
+        let model = client.completion_model(model_name);
+        let compaction_model = client.completion_model(model_name);
+        let hook = approval::build_hook(approval_mode);
+        let graph = create_react_agent_with_hooks(model, registry, &system_prompt, hook)?.into_arc();
+        Ok::<_, Box<dyn std::error::Error>>((graph, compaction_model))
+    };
+
+    fn print_persona_banner(persona: &Persona, persona_slug: &str, model_name: &str, auto_approve: bool) {
+        println!("╭─────────────────────────────────────────────╮");
+        println!("│  Persona: {:<33}│", persona.name);
+        println!("│  Slug:    {:<33}│", persona_slug);
+        println!("│  Model:   {:<33}│", model_name);
+        println!("╰─────────────────────────────────────────────╯");
+        println!("  {}", persona.description);
+        println!("  Tools: {}", persona.tools.join(", "));
+        if !persona.skills.is_empty() {
+            println!("  Skills: {}", persona.skills.join(", "));
+        }
+        if auto_approve {
+            println!("  Mode: auto-approve");
+        } else {
+            println!("  Mode: interactive (read-only tools auto-approved)");
+        }
+        println!();
+    }
+
+    print_persona_banner(&persona, persona_slug, &model_name, auto_approve);
+
+    let (mut graph, mut compaction_model) = build_agent(&persona, &cwd, &api_key, &model_name, approval_mode.clone())?;
     let step_guard = guard::build_agent_guard(guard::GuardConfig::default());
+    let mut current_persona_slug = persona_slug.to_string();
 
     // One-shot mode
     if let Some(task) = one_shot_task {
@@ -133,10 +146,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Interactive mode
-    println!("Interactive mode. Type /quit to exit, /clear to reset, /tokens for usage.\n");
+    println!("Interactive mode. Commands: /quit, /clear, /tokens, /persona [list|set <name>]\n");
 
     let mut rl = DefaultEditor::new()?;
-    let prompt_str = format!("[{}]> ", persona_slug);
+    let mut prompt_str = format!("[{}]> ", current_persona_slug);
     let mut state: Option<AgentState> = None;
 
     loop {
@@ -169,6 +182,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match &state {
                 Some(s) => println!("~{} tokens, {} messages\n", context::estimate_tokens(s), s.messages.len()),
                 None => println!("No conversation yet.\n"),
+            }
+            continue;
+        }
+        if input == "/persona" || input == "/persona list" {
+            println!("Current persona: {}\n", current_persona_slug);
+            println!("Available personas:");
+            let available = Persona::list_available(&personas_dir);
+            for slug in &available {
+                let marker = if *slug == current_persona_slug { " <-- active" } else { "" };
+                if let Ok(p) = Persona::load(slug, &personas_dir) {
+                    println!("  {:<24} {}{}", slug, p.description, marker);
+                } else {
+                    println!("  {}", slug);
+                }
+            }
+            println!("\nUse: /persona set <name>");
+            println!();
+            continue;
+        }
+        if let Some(new_slug) = input.strip_prefix("/persona set ") {
+            let new_slug = new_slug.trim();
+            match Persona::load(new_slug, &personas_dir) {
+                Ok(new_persona) => {
+                    match build_agent(&new_persona, &cwd, &api_key, &model_name, approval_mode.clone()) {
+                        Ok((new_graph, new_compaction_model)) => {
+                            graph = new_graph;
+                            compaction_model = new_compaction_model;
+                            current_persona_slug = new_slug.to_string();
+                            prompt_str = format!("[{}]> ", current_persona_slug);
+                            state = None;
+                            println!();
+                            print_persona_banner(&new_persona, new_slug, &model_name, auto_approve);
+                            println!("Conversation cleared (new persona context).\n");
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to build agent for '{}': {}\n", new_slug, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{}\n", e);
+                    println!("Available: {:?}\n", Persona::list_available(&personas_dir));
+                }
             }
             continue;
         }
