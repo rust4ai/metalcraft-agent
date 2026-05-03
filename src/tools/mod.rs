@@ -6,6 +6,7 @@ pub mod list_files;
 pub mod load_skill;
 pub mod read_file;
 pub mod sub_agent;
+pub mod web_fetch;
 pub mod write_file;
 
 use std::path::PathBuf;
@@ -51,6 +52,7 @@ pub fn create_registry_for_with_config(
                     registry
                 }
             }
+            "web_fetch" => registry.register(web_fetch::WebFetchTool),
             "sub_agent" => {
                 if let Some(cfg) = config {
                     registry.register(sub_agent::SubAgentTool::new(

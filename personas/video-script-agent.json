@@ -9,6 +9,7 @@
     "grep",
     "find_files",
     "bash",
+    "web_fetch",
     "sub_agent",
     "load_skill"
   ],
