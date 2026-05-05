@@ -3,12 +3,13 @@ use metalcraft_agent::approval::{self, ApprovalMode};
 use metalcraft_agent::context::{self, CompactionConfig};
 use metalcraft_agent::guard;
 use metalcraft_agent::persona::Persona;
+use metalcraft_agent::ui;
 use rig::client::CompletionClient;
 use rig::providers::openai;
 use rustyline::DefaultEditor;
 
 fn print_usage(personas_dir: &std::path::Path) {
-    eprintln!("Usage: metalcraft-agent [--auto-approve] <persona> [task]");
+    eprintln!("{} {}", ui::error("Usage:"), ui::command("metalcraft-agent [--auto-approve] <persona> [task]"));
     eprintln!();
     eprintln!("  If [task] is given, run once and exit.");
     eprintln!("  If [task] is omitted, enter interactive mode.");
@@ -16,17 +17,36 @@ fn print_usage(personas_dir: &std::path::Path) {
     eprintln!();
     let available = Persona::list_available(personas_dir);
     if available.is_empty() {
-        eprintln!("No personas found in {}", personas_dir.display());
+        eprintln!("{} {}", ui::warning("No personas found in"), ui::path(personas_dir.display().to_string()));
     } else {
-        eprintln!("Available personas:");
+        eprintln!("{}", ui::heading("Available personas:"));
         for slug in &available {
             if let Ok(p) = Persona::load(slug, personas_dir) {
-                eprintln!("  {:<20} {}", slug, p.description);
+                eprintln!("  {:<20} {}", ui::accent(slug), p.description);
             } else {
-                eprintln!("  {}", slug);
+                eprintln!("  {}", ui::accent(slug));
             }
         }
     }
+}
+
+fn print_persona_banner(persona: &Persona, persona_slug: &str, model_name: &str, auto_approve: bool) {
+    println!("{}", ui::heading("╭─────────────────────────────────────────────╮"));
+    println!("│  {} {:<33}│", ui::label("Persona:"), persona.name);
+    println!("│  {} {:<33}│", ui::label("Slug:"), persona_slug);
+    println!("│  {} {:<33}│", ui::label("Model:"), model_name);
+    println!("{}", ui::heading("╰─────────────────────────────────────────────╯"));
+    println!("  {}", persona.description);
+    println!("  {} {}", ui::label("Tools:"), persona.tools.join(", "));
+    if !persona.skills.is_empty() {
+        println!("  {} {}", ui::label("Skills:"), persona.skills.join(", "));
+    }
+    if auto_approve {
+        println!("  {} {}", ui::label("Mode:"), ui::success("auto-approve"));
+    } else {
+        println!("  {} {}", ui::label("Mode:"), ui::dim("interactive (read-only tools auto-approved)"));
+    }
+    println!();
 }
 
 #[tokio::main]
@@ -58,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let persona = Persona::load(persona_slug, &personas_dir)
         .map_err(|e| {
-            eprintln!("Error: {}", e);
+            eprintln!("{} {}", ui::error("Error:"), e);
             print_usage(&personas_dir);
             std::process::exit(1);
         })
@@ -69,7 +89,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| ".".to_string());
 
     let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
-    let model_name = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string());
+    let mut model_name = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string());
+    let available_models = vec!["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"];
 
     let approval_mode = if auto_approve {
         ApprovalMode::AutoApprove
@@ -79,7 +100,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let compaction_config = CompactionConfig::default();
 
-    // Build agent graph for a persona
     let build_agent = |persona: &Persona, cwd: &str, api_key: &str, model_name: &str, approval_mode: ApprovalMode| {
         let system_prompt = persona.build_system_prompt(&skills_dir, cwd);
         let tool_config = metalcraft_agent::tools::ToolConfig {
@@ -101,52 +121,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok::<_, Box<dyn std::error::Error>>((graph, compaction_model))
     };
 
-    fn print_persona_banner(persona: &Persona, persona_slug: &str, model_name: &str, auto_approve: bool) {
-        println!("╭─────────────────────────────────────────────╮");
-        println!("│  Persona: {:<33}│", persona.name);
-        println!("│  Slug:    {:<33}│", persona_slug);
-        println!("│  Model:   {:<33}│", model_name);
-        println!("╰─────────────────────────────────────────────╯");
-        println!("  {}", persona.description);
-        println!("  Tools: {}", persona.tools.join(", "));
-        if !persona.skills.is_empty() {
-            println!("  Skills: {}", persona.skills.join(", "));
-        }
-        if auto_approve {
-            println!("  Mode: auto-approve");
-        } else {
-            println!("  Mode: interactive (read-only tools auto-approved)");
-        }
-        println!();
-    }
-
     print_persona_banner(&persona, persona_slug, &model_name, auto_approve);
 
     let (mut graph, mut compaction_model) = build_agent(&persona, &cwd, &api_key, &model_name, approval_mode.clone())?;
     let step_guard = guard::build_agent_guard(guard::GuardConfig::default());
     let mut current_persona_slug = persona_slug.to_string();
 
-    // One-shot mode
     if let Some(task) = one_shot_task {
-        println!("Task: {}\n", task);
+        println!("{} {}\n", ui::label("Task:"), task);
 
         let executor = Executor::new_from_arc(graph).max_steps(30).with_step_guard(step_guard.clone());
         let outcome = executor.run(AgentState::new(&task), "agent").await?;
 
         match outcome {
             RunOutcome::Completed(state) => {
-                println!("\n--- Done ---");
+                println!("\n{}", ui::success("--- Done ---"));
                 println!("{}", state.final_answer().unwrap_or("(no answer)"));
             }
             RunOutcome::Interrupted { reason, .. } => {
-                println!("\nInterrupted: {reason}");
+                println!("\n{} {reason}", ui::warning("Interrupted:"));
             }
         }
         return Ok(());
     }
 
-    // Interactive mode
-    println!("Interactive mode. Commands: /quit, /clear, /tokens, /persona [list|set <name>]\n");
+    println!(
+        "{} {}\n",
+        ui::heading("Interactive mode."),
+        ui::dim("Commands: /quit, /clear, /tokens, /persona [list|set <name>], /model [list|use <name>]")
+    );
 
     let mut rl = DefaultEditor::new()?;
     let mut prompt_str = format!("[{}]> ", current_persona_slug);
@@ -156,11 +159,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let line = match rl.readline(&prompt_str) {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => {
-                println!("\nBye.");
+                println!("\n{}", ui::dim("Bye."));
                 break;
             }
             Err(e) => {
-                eprintln!("Input error: {}", e);
+                eprintln!("{} {}", ui::error("Input error:"), e);
                 break;
             }
         };
@@ -170,34 +173,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         if input == "/quit" || input == "/exit" {
-            println!("Bye.");
+            println!("{}", ui::dim("Bye."));
             break;
         }
         if input == "/clear" {
             state = None;
-            println!("Conversation cleared.\n");
+            println!("{}\n", ui::dim("Conversation cleared."));
             continue;
         }
         if input == "/tokens" {
             match &state {
-                Some(s) => println!("~{} tokens, {} messages\n", context::estimate_tokens(s), s.messages.len()),
-                None => println!("No conversation yet.\n"),
+                Some(s) => println!("{} ~{} tokens, {} messages\n", ui::label("Context:"), context::estimate_tokens(s), s.messages.len()),
+                None => println!("{}\n", ui::dim("No conversation yet.")),
             }
             continue;
         }
         if input == "/persona" || input == "/persona list" {
-            println!("Current persona: {}\n", current_persona_slug);
-            println!("Available personas:");
+            println!("{} {}\n", ui::label("Current persona:"), ui::accent(&current_persona_slug));
+            println!("{}", ui::heading("Available personas:"));
             let available = Persona::list_available(&personas_dir);
             for slug in &available {
-                let marker = if *slug == current_persona_slug { " <-- active" } else { "" };
+                let marker = if *slug == current_persona_slug { format!(" {}", ui::success("<-- active")) } else { String::new() };
                 if let Ok(p) = Persona::load(slug, &personas_dir) {
-                    println!("  {:<24} {}{}", slug, p.description, marker);
+                    println!("  {:<24} {}{}", ui::accent(slug), p.description, marker);
                 } else {
-                    println!("  {}", slug);
+                    println!("  {}", ui::accent(slug));
                 }
             }
-            println!("\nUse: /persona set <name>");
+            println!("\n{}", ui::dim("Use: /persona set <name>"));
             println!();
             continue;
         }
@@ -214,16 +217,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state = None;
                             println!();
                             print_persona_banner(&new_persona, new_slug, &model_name, auto_approve);
-                            println!("Conversation cleared (new persona context).\n");
+                            println!("{}\n", ui::dim("Conversation cleared (new persona context)."));
                         }
                         Err(e) => {
-                            eprintln!("Failed to build agent for '{}': {}\n", new_slug, e);
+                            eprintln!("{} '{}': {}\n", ui::error("Failed to build agent for"), new_slug, e);
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("{}\n", e);
-                    println!("Available: {:?}\n", Persona::list_available(&personas_dir));
+                    eprintln!("{}\n", ui::error(e));
+                    println!("{} {:?}\n", ui::label("Available:"), Persona::list_available(&personas_dir));
+                }
+            }
+            continue;
+        }
+        if input == "/model" || input == "/model list" {
+            println!("{} {}\n", ui::label("Current model:"), ui::accent(&model_name));
+            println!("{}", ui::heading("Available models:"));
+            for m in &available_models {
+                let marker = if *m == model_name { format!(" {}", ui::success("<-- active")) } else { String::new() };
+                println!("  {}{}", ui::accent(m), marker);
+            }
+            println!("\n{}", ui::dim("Use: /model use <name>"));
+            println!();
+            continue;
+        }
+        if let Some(new_model) = input.strip_prefix("/model use ") {
+            let new_model = new_model.trim();
+            if !available_models.contains(&new_model) {
+                eprintln!("{} '{}' . {}\n", ui::error("Unknown model"), new_model, ui::dim(format!("Available: {}", available_models.join(", "))));
+                continue;
+            }
+            let current_persona = Persona::load(&current_persona_slug, &personas_dir).unwrap();
+            match build_agent(&current_persona, &cwd, &api_key, new_model, approval_mode.clone()) {
+                Ok((new_graph, new_compaction_model)) => {
+                    model_name = new_model.to_string();
+                    graph = new_graph;
+                    compaction_model = new_compaction_model;
+                    state = None;
+                    println!();
+                    print_persona_banner(&current_persona, &current_persona_slug, &model_name, auto_approve);
+                    println!("{}\n", ui::dim("Conversation cleared (new model context)."));
+                }
+                Err(e) => {
+                    eprintln!("{} '{}': {}\n", ui::error("Failed to switch to model"), new_model, e);
                 }
             }
             continue;
@@ -236,14 +273,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None => AgentState::new(input),
         };
 
-        // Compact context if approaching token limit
         match context::compact_if_needed(&mut turn_state, &compaction_model, &compaction_config).await {
             Ok(true) => {
-                println!("(context compacted to ~{} tokens)", context::estimate_tokens(&turn_state));
+                println!("{} ~{} tokens", ui::dim("(context compacted to"), context::estimate_tokens(&turn_state));
             }
             Ok(false) => {}
             Err(e) => {
-                eprintln!("Warning: compaction failed: {}", e);
+                eprintln!("{} {}", ui::warning("Warning: compaction failed:"), e);
             }
         }
 
@@ -256,11 +292,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state = Some(completed_state);
             }
             Ok(RunOutcome::Interrupted { state: s, reason, .. }) => {
-                println!("\nInterrupted: {reason}");
+                println!("\n{} {reason}", ui::warning("Interrupted:"));
                 state = Some(s);
             }
             Err(e) => {
-                eprintln!("\nError: {}", e);
+                eprintln!("\n{} {}", ui::error("Error:"), e);
                 state = None;
             }
         }

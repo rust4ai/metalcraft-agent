@@ -1,19 +1,90 @@
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use metalcraft::BeforeToolCallAction;
-use std::collections::HashSet;
+use crate::{diff_preview, ui};
+use std::collections::HashMap;
 use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 
-/// Build a `BeforeToolCallHook` for metalcraft based on approval mode.
-pub fn build_hook(mode: ApprovalMode) -> Option<metalcraft::BeforeToolCallHook> {
-    match mode {
-        ApprovalMode::AutoApprove => None,
-        ApprovalMode::Interactive { auto_approve_tools } => {
-            Some(Arc::new(move |name: &str, args: &serde_json::Value| {
-                if auto_approve_tools.contains(name) {
-                    return BeforeToolCallAction::Proceed;
+/// How sensitive/destructive an operation is
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PermissionLevel {
+    /// Always auto-approved, no prompt needed
+    AutoApprove,
+    /// Prompt user for approval
+    RequiresApproval,
+}
+
+/// Classification of what a tool call is actually doing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OperationKind {
+    ReadFile,
+    ListFiles,
+    Search,        // grep, find_files
+    WriteNewFile,  // write_file when path doesn't exist
+    OverwriteFile, // write_file when path already exists
+    EditFile,      // edit_file
+    Execute,       // bash
+    NetworkFetch,  // web_fetch
+    SubAgent,      // sub_agent
+    LoadSkill,     // load_skill
+}
+
+impl OperationKind {
+    /// Classify a tool call into an OperationKind.
+    pub fn classify(tool_name: &str, args: &serde_json::Value) -> Self {
+        match tool_name {
+            "read_file" => Self::ReadFile,
+            "list_files" => Self::ListFiles,
+            "grep" | "find_files" => Self::Search,
+            "write_file" => {
+                let path = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !path.is_empty() && Path::new(path).exists() {
+                    Self::OverwriteFile
+                } else {
+                    Self::WriteNewFile
                 }
-                prompt_user(name, args)
-            }))
+            }
+            "edit_file" => Self::EditFile,
+            "bash" => Self::Execute,
+            "web_fetch" => Self::NetworkFetch,
+            "sub_agent" => Self::SubAgent,
+            "load_skill" => Self::LoadSkill,
+            // Default unknown tools to Execute (requires approval)
+            _ => Self::Execute,
+        }
+    }
+
+    /// Default permission policy for each operation kind.
+    pub fn default_permission(&self) -> PermissionLevel {
+        match self {
+            Self::ReadFile | Self::ListFiles | Self::Search | Self::LoadSkill => PermissionLevel::AutoApprove,
+            Self::WriteNewFile => PermissionLevel::AutoApprove,
+            Self::OverwriteFile => PermissionLevel::RequiresApproval,
+            Self::EditFile => PermissionLevel::RequiresApproval,
+            Self::Execute => PermissionLevel::RequiresApproval,
+            Self::NetworkFetch => PermissionLevel::RequiresApproval,
+            Self::SubAgent => PermissionLevel::RequiresApproval,
+        }
+    }
+
+    /// Human-readable label for the prompt display.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ReadFile => "ReadFile",
+            Self::ListFiles => "ListFiles",
+            Self::Search => "Search",
+            Self::WriteNewFile => "WriteNewFile",
+            Self::OverwriteFile => "OverwriteFile",
+            Self::EditFile => "EditFile",
+            Self::Execute => "Execute",
+            Self::NetworkFetch => "NetworkFetch",
+            Self::SubAgent => "SubAgent",
+            Self::LoadSkill => "LoadSkill",
         }
     }
 }
@@ -22,24 +93,47 @@ pub fn build_hook(mode: ApprovalMode) -> Option<metalcraft::BeforeToolCallHook> 
 pub enum ApprovalMode {
     /// Always auto-approve everything.
     AutoApprove,
-    /// Prompt for tools not in the auto-approve set.
-    Interactive { auto_approve_tools: HashSet<String> },
+    /// Use data-driven permission policy with optional overrides.
+    Interactive {
+        /// Override default permissions for specific operation kinds.
+        overrides: HashMap<OperationKind, PermissionLevel>,
+    },
 }
 
 impl ApprovalMode {
-    /// Default policy: read-only tools auto-approve, everything else prompts.
+    /// Default policy: uses OperationKind::default_permission() with no overrides.
     pub fn default_interactive() -> Self {
-        let auto = ["read_file", "list_files", "grep", "find_files"]
-            .into_iter()
-            .map(String::from)
-            .collect();
         Self::Interactive {
-            auto_approve_tools: auto,
+            overrides: HashMap::new(),
         }
     }
 }
 
-fn prompt_user(tool_name: &str, args: &serde_json::Value) -> BeforeToolCallAction {
+/// Build a `BeforeToolCallHook` for metalcraft based on approval mode.
+pub fn build_hook(mode: ApprovalMode) -> Option<metalcraft::BeforeToolCallHook> {
+    match mode {
+        ApprovalMode::AutoApprove => None,
+        ApprovalMode::Interactive { overrides } => {
+            Some(Arc::new(move |name: &str, args: &serde_json::Value| {
+                let op = OperationKind::classify(name, args);
+                let level = overrides
+                    .get(&op)
+                    .copied()
+                    .unwrap_or_else(|| op.default_permission());
+                match level {
+                    PermissionLevel::AutoApprove => BeforeToolCallAction::Proceed,
+                    PermissionLevel::RequiresApproval => prompt_user(&op, name, args),
+                }
+            }))
+        }
+    }
+}
+
+fn prompt_user(
+    op: &OperationKind,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> BeforeToolCallAction {
     let args_display = match tool_name {
         "bash" => args
             .get("command")
@@ -55,19 +149,145 @@ fn prompt_user(tool_name: &str, args: &serde_json::Value) -> BeforeToolCallActio
     };
 
     eprintln!();
-    eprintln!("  \x1b[33m⚡ {}\x1b[0m {}", tool_name, args_display);
-    eprint!("  Approve? [Y/n] ");
-    io::stderr().flush().ok();
-
-    let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
-        return BeforeToolCallAction::Deny("Failed to read input".into());
+    eprintln!(
+        "  {} {} {}",
+        ui::warning("⚡"),
+        ui::label(op.label()),
+        ui::dim(format!("→ {}", args_display))
+    );
+    // Show diff preview for edit_file
+    if tool_name == "edit_file" {
+        if let (Some(old_s), Some(new_s)) = (
+            args.get("old_string").and_then(|v| v.as_str()),
+            args.get("new_string").and_then(|v| v.as_str()),
+        ) {
+            let diff = diff_preview::preview_edit_diff(old_s, new_s);
+            let colored = diff_preview::colorize_diff(&diff);
+            eprintln!();
+            for line in colored.lines() {
+                eprintln!("    {line}");
+            }
+        }
     }
 
-    let answer = input.trim().to_lowercase();
-    if matches!(answer.as_str(), "" | "y" | "yes") {
-        BeforeToolCallAction::Proceed
+    // Show diff preview for write_file (overwrite case)
+    if tool_name == "write_file" {
+        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+            if let (Ok(old_content), Some(new_content)) = (
+                std::fs::read_to_string(path),
+                args.get("content").and_then(|v| v.as_str()),
+            ) {
+                let diff = diff_preview::preview_edit_diff(&old_content, new_content);
+                let colored = diff_preview::colorize_diff(&diff);
+                eprintln!();
+                for line in colored.lines() {
+                    eprintln!("    {line}");
+                }
+            }
+        }
+    }
+
+    eprintln!("  {}", ui::command("Approve?"));
+    eprintln!("    1. Yes");
+    eprintln!("    2. No");
+    eprintln!("  {}", ui::dim("Use ↑/↓, Enter, or press 1/2."));
+
+    match prompt_approval_choice() {
+        Ok(true) => BeforeToolCallAction::Proceed,
+        Ok(false) => BeforeToolCallAction::Deny(format!("User denied tool '{tool_name}'")),
+        Err(err) => BeforeToolCallAction::Deny(format!("Failed to read approval input: {err}")),
+    }
+}
+
+fn prompt_approval_choice() -> io::Result<bool> {
+    struct RawModeGuard;
+
+    impl Drop for RawModeGuard {
+        fn drop(&mut self) {
+            let _ = disable_raw_mode();
+        }
+    }
+
+    let mut selected = 0usize;
+    enable_raw_mode()?;
+    let _raw_mode_guard = RawModeGuard;
+
+    loop {
+        render_approval_menu(selected)?;
+
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            match key.code {
+                KeyCode::Enter => return Ok(selected == 0),
+                KeyCode::Up => selected = 0,
+                KeyCode::Down => selected = 1,
+                KeyCode::Char('1') => return Ok(true),
+                KeyCode::Char('2') => return Ok(false),
+                KeyCode::Char('y') | KeyCode::Char('Y') => return Ok(true),
+                KeyCode::Char('n') | KeyCode::Char('N') => return Ok(false),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn render_approval_menu(selected: usize) -> io::Result<()> {
+    eprint!("\r\x1b[2K  ");
+    if selected == 0 {
+        eprint!("{}    2. No", ui::success("> 1. Yes"));
     } else {
-        BeforeToolCallAction::Deny(format!("User denied tool '{tool_name}'"))
+        eprint!("  1. Yes    {}", ui::error("> 2. No"));
+    }
+    io::stderr().flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_read_operations() {
+        let args = serde_json::json!({});
+        assert_eq!(OperationKind::classify("read_file", &args), OperationKind::ReadFile);
+        assert_eq!(OperationKind::classify("list_files", &args), OperationKind::ListFiles);
+        assert_eq!(OperationKind::classify("grep", &args), OperationKind::Search);
+        assert_eq!(OperationKind::classify("find_files", &args), OperationKind::Search);
+    }
+
+    #[test]
+    fn test_classify_write_new_file() {
+        let args = serde_json::json!({"path": "/tmp/nonexistent_metalcraft_test_file_xyz.txt"});
+        assert_eq!(OperationKind::classify("write_file", &args), OperationKind::WriteNewFile);
+    }
+
+    #[test]
+    fn test_classify_other_tools() {
+        let args = serde_json::json!({});
+        assert_eq!(OperationKind::classify("edit_file", &args), OperationKind::EditFile);
+        assert_eq!(OperationKind::classify("bash", &args), OperationKind::Execute);
+        assert_eq!(OperationKind::classify("web_fetch", &args), OperationKind::NetworkFetch);
+        assert_eq!(OperationKind::classify("sub_agent", &args), OperationKind::SubAgent);
+        assert_eq!(OperationKind::classify("load_skill", &args), OperationKind::LoadSkill);
+    }
+
+    #[test]
+    fn test_default_permissions() {
+        assert_eq!(OperationKind::ReadFile.default_permission(), PermissionLevel::AutoApprove);
+        assert_eq!(OperationKind::ListFiles.default_permission(), PermissionLevel::AutoApprove);
+        assert_eq!(OperationKind::Search.default_permission(), PermissionLevel::AutoApprove);
+        assert_eq!(OperationKind::WriteNewFile.default_permission(), PermissionLevel::AutoApprove);
+        assert_eq!(OperationKind::OverwriteFile.default_permission(), PermissionLevel::RequiresApproval);
+        assert_eq!(OperationKind::EditFile.default_permission(), PermissionLevel::RequiresApproval);
+        assert_eq!(OperationKind::Execute.default_permission(), PermissionLevel::RequiresApproval);
+    }
+
+    #[test]
+    fn test_unknown_tool_defaults_to_execute() {
+        let args = serde_json::json!({});
+        assert_eq!(OperationKind::classify("unknown_tool", &args), OperationKind::Execute);
+        assert_eq!(OperationKind::Execute.default_permission(), PermissionLevel::RequiresApproval);
     }
 }

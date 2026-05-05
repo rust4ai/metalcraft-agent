@@ -1,6 +1,6 @@
 [package]
 name = "metalcraft-agent"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 
 [dependencies]
@@ -14,8 +14,10 @@ log = "0.4"
 env_logger = "0.11"
 dotenvy = "0.15"
 rustyline = "15"
+crossterm = "0.29"
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 htmd = "0.1"
+chalk-plus = "0.1.0"
 
 [dev-dependencies]
 spice-framework = "0.1"

@@ -8,6 +8,7 @@
 //! - **Loop detection**: The same tool call (name + args) repeated within a window.
 
 use metalcraft::{AgentMessage, AgentState, GuardAction, StepEvent, StepGuard};
+use crate::ui;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -63,7 +64,12 @@ impl GuardTracker {
     }
 
     fn check(&mut self, state: &AgentState) -> GuardAction {
-        // Only look at new messages since last check
+        // Clamp in case state was reset with fewer messages than we've seen
+        if self.seen_up_to > state.messages.len() {
+            self.seen_up_to = 0;
+            self.consecutive_error_turns = 0;
+            self.recent_calls.clear();
+        }
         let new_messages = &state.messages[self.seen_up_to..];
         self.seen_up_to = state.messages.len();
 
@@ -76,7 +82,7 @@ impl GuardTracker {
                 AgentMessage::ToolCall { name, args, .. } => {
                     if self.config.verbose {
                         let args_brief = summarize_args(args);
-                        eprintln!("  \x1b[36m▶ {name}\x1b[0m({args_brief})");
+                        eprintln!("  {}({args_brief})", ui::tool(format!("▶ {name}")));
                     }
                     let hash = call_hash(name, args);
                     new_tool_calls.push(hash);
@@ -85,9 +91,9 @@ impl GuardTracker {
                     let is_error = result.starts_with("ERROR:");
                     if self.config.verbose {
                         if is_error {
-                            eprintln!("  \x1b[31m✗ {name}\x1b[0m: {}", truncate(result, 120));
+                            eprintln!("  {}: {}", ui::error(format!("✗ {name}")), truncate(result, 120));
                         } else {
-                            eprintln!("  \x1b[32m✓ {name}\x1b[0m {}", truncate(result, 80));
+                            eprintln!("  {} {}", ui::success(format!("✓ {name}")), truncate(result, 80));
                         }
                     }
                     batch_results.push(is_error);
@@ -167,6 +173,8 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        // Find a valid char boundary at or before `max`
+        let end = s.floor_char_boundary(max);
+        format!("{}…", &s[..end])
     }
 }
