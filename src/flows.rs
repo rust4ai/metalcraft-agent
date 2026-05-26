@@ -1,6 +1,7 @@
 use metalcraft_flows::{validate, CoreNodeType, FlowNodeType, SavedFlow};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 #[derive(Debug, Clone)]
 pub enum FlowSchedule {
@@ -78,6 +79,8 @@ pub fn parse_schedule(flow: &SavedFlow) -> Result<FlowSchedule, String> {
                 .get("cron")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| format!("flow '{}' is missing entry.data.cron", flow.id))?;
+            cron::Schedule::from_str(expr)
+                .map_err(|e| format!("flow '{}' has invalid cron expression '{}': {}", flow.id, expr, e))?;
             Ok(FlowSchedule::Cron(expr.to_string()))
         }
         other => Err(format!("flow '{}' has unsupported schedule_type '{other}'", flow.id)),

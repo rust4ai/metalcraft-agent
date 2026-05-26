@@ -4,10 +4,13 @@ use metalcraft_agent::runtime::{self, AgentRuntimeContext, RunOneShotRequest, DE
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::str::FromStr;
+use std::time::Duration;
+
+use chrono::Local;
 
 struct FlowRunState {
-    last_started_at: Option<Instant>,
+    last_started_at: Option<chrono::DateTime<Local>>,
     is_running: bool,
 }
 
@@ -94,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             state.is_running = true;
-            state.last_started_at = Some(Instant::now());
+            state.last_started_at = Some(Local::now());
 
             log::info!("Running flow '{}' ({})", flow.saved.id, flow.saved.name);
 
@@ -169,8 +172,18 @@ fn is_due(state: Option<&FlowRunState>, schedule: &FlowSchedule) -> bool {
         FlowSchedule::EveryMinutes(minutes) => elapsed_due(state, Duration::from_secs(minutes * 60)),
         FlowSchedule::EveryHours(hours) => elapsed_due(state, Duration::from_secs(hours * 60 * 60)),
         FlowSchedule::Cron(expr) => {
-            log::warn!("Cron schedule '{}' is not implemented yet; skipping run", expr);
-            false
+            let schedule = match cron::Schedule::from_str(expr) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("Invalid cron expression '{}': {}", expr, e);
+                    return false;
+                }
+            };
+            let now = Local::now();
+            let after = state
+                .and_then(|s| s.last_started_at)
+                .unwrap_or(now - chrono::TimeDelta::seconds(1));
+            schedule.after(&after).next().map_or(false, |next| next <= now)
         }
     }
 }
@@ -178,7 +191,13 @@ fn is_due(state: Option<&FlowRunState>, schedule: &FlowSchedule) -> bool {
 fn elapsed_due(state: Option<&FlowRunState>, interval: Duration) -> bool {
     match state.and_then(|s| s.last_started_at) {
         None => true,
-        Some(last) => last.elapsed() >= interval,
+        Some(last) => {
+            let elapsed = Local::now() - last;
+            match chrono::TimeDelta::from_std(interval) {
+                Ok(td) => elapsed >= td,
+                Err(_) => true,
+            }
+        }
     }
 }
 
