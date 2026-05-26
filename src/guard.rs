@@ -8,8 +8,8 @@
 //! - **Loop detection**: The same tool call (name + args) repeated within a window.
 
 use metalcraft::{AgentMessage, AgentState, GuardAction, StepEvent, StepGuard};
+use crate::diagnostics::DiagnosticsLogger;
 use crate::ui;
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 /// Configuration for the agent step guard.
@@ -35,10 +35,16 @@ impl Default for GuardConfig {
 }
 
 /// Build a step guard that checks for error spirals and loops.
-pub fn build_agent_guard(config: GuardConfig) -> StepGuard<AgentState> {
+pub fn build_agent_guard(
+    config: GuardConfig,
+    diagnostics: Option<Arc<DiagnosticsLogger>>,
+) -> StepGuard<AgentState> {
     let state_tracker = Arc::new(Mutex::new(GuardTracker::new(config.clone())));
 
     Arc::new(move |state: &AgentState, _event: &StepEvent| {
+        if let Some(ref logger) = diagnostics {
+            logger.log_turn(state);
+        }
         let mut tracker = state_tracker.lock().unwrap();
         tracker.check(state)
     })
@@ -92,6 +98,29 @@ impl GuardTracker {
                     if self.config.verbose {
                         if is_error {
                             eprintln!("  {}: {}", ui::error(format!("✗ {name}")), truncate(result, 120));
+                        } else if name == "bash" {
+                            // For bash results, parse the JSON and show full stdout/stderr
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+                                let exit_code = parsed.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+                                let stdout = parsed.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+                                let stderr = parsed.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+                                if exit_code == 0 {
+                                    eprintln!("  {}", ui::success(format!("✓ {name} (exit 0)")));
+                                } else {
+                                    eprintln!("  {}", ui::warning(format!("✗ {name} (exit {exit_code})")));
+                                }
+                                if !stdout.trim().is_empty() {
+                                    eprintln!("{}", ui::dim("── stdout ──"));
+                                    eprintln!("{}", stdout.trim());
+                                }
+                                if !stderr.trim().is_empty() {
+                                    eprintln!("{}", ui::dim("── stderr ──"));
+                                    eprintln!("{}", stderr.trim());
+                                }
+                                eprintln!("{}", ui::dim("────────────"));
+                            } else {
+                                eprintln!("  {} {}", ui::success(format!("✓ {name}")), truncate(result, 200));
+                            }
                         } else {
                             eprintln!("  {} {}", ui::success(format!("✓ {name}")), truncate(result, 80));
                         }
@@ -120,10 +149,13 @@ impl GuardTracker {
         }
 
         // --- Loop detection ---
-        if self.config.loop_window > 0 {
-            let existing: HashSet<u64> = self.recent_calls.iter().copied().collect();
-            for &hash in &new_tool_calls {
-                if existing.contains(&hash) {
+        // Detect true loops: the same tool call appearing consecutively (back-to-back)
+        // or the same sequence repeating. A tool like `cargo check` legitimately runs
+        // multiple times between edits, so we only flag it when the *most recent* call
+        // is identical to the new one (i.e. nothing different happened in between).
+        if self.config.loop_window > 0 && !new_tool_calls.is_empty() {
+            if let Some(&last) = self.recent_calls.last() {
+                if new_tool_calls[0] == last {
                     return GuardAction::Stop(
                         "Loop detected: repeated identical tool call".into(),
                     );

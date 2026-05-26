@@ -1,2 +1,8 @@
 /target
 .env
+/logs
+/flows
+/logs/
+/flows/
+target
+.env

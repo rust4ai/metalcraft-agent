@@ -83,7 +83,7 @@ impl AgentUnderTest for PersonaAgent {
                         BeforeToolCallAction::Proceed
                     }
                 });
-            create_react_agent_with_hooks(model, registry, &system_prompt, Some(hook))
+            create_react_agent_with_hooks(model, registry, &system_prompt, Some(hook), None)
         }
         .map_err(|e| spice_framework::SpiceError::ConfigError(e.to_string()))?;
 

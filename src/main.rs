@@ -1,13 +1,15 @@
-use metalcraft::{create_react_agent_with_hooks, AgentState, Executor, RunOutcome};
-use metalcraft_agent::approval::{self, ApprovalMode};
+use metalcraft::{AgentState, Executor, LlmCallHook, RunOutcome};
+use metalcraft_agent::approval::ApprovalMode;
 use metalcraft_agent::context::{self, CompactionConfig};
+use metalcraft_agent::diagnostics::DiagnosticsLogger;
 use metalcraft_agent::guard;
 use metalcraft_agent::persona::Persona;
+use metalcraft_agent::runtime::{self, AgentRuntimeContext, AVAILABLE_MODELS, DEFAULT_MODEL};
 use metalcraft_agent::ui;
 use rig::client::CompletionClient;
-use rig::providers::openai;
 use rustyline::DefaultEditor;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 fn resolve_cd_target(input: &str, current: &Path) -> Result<PathBuf, String> {
     let trimmed = input.trim();
@@ -58,11 +60,12 @@ fn build_prompt_str(persona_slug: &str, cwd: &str) -> String {
 }
 
 fn print_usage(personas_dir: &std::path::Path) {
-    eprintln!("{} {}", ui::error("Usage:"), ui::command("metalcraft-agent [--auto-approve] <persona> [task]"));
+    eprintln!("{} {}", ui::error("Usage:"), ui::command("metalcraft-agent [--auto-approve] [--diagnostics] <persona> [task]"));
     eprintln!();
     eprintln!("  If [task] is given, run once and exit.");
     eprintln!("  If [task] is omitted, enter interactive mode.");
     eprintln!("  --auto-approve  Skip approval prompts for all tools.");
+    eprintln!("  --diagnostics   Log full LLM call details to logs/.");
     eprintln!();
     let available = Persona::list_available(personas_dir);
     if available.is_empty() {
@@ -102,18 +105,15 @@ fn print_persona_banner(persona: &Persona, persona_slug: &str, model_name: &str,
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
-    dotenvy::dotenv().ok();
 
-    let personas_dir = std::fs::canonicalize(Persona::default_personas_dir())
-        .unwrap_or_else(|_| Persona::default_personas_dir());
-    let skills_dir = std::fs::canonicalize(Persona::default_skills_dir())
-        .unwrap_or_else(|_| Persona::default_skills_dir());
+    let runtime_context = AgentRuntimeContext::from_environment()?;
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let auto_approve = raw_args.iter().any(|a| a == "--auto-approve");
+    let diagnostics_enabled = raw_args.iter().any(|a| a == "--diagnostics");
     let args: Vec<String> = raw_args
         .into_iter()
-        .filter(|a| a != "--auto-approve")
+        .filter(|a| a != "--auto-approve" && a != "--diagnostics")
         .collect();
 
     let default_persona = "coding-agent".to_string();
@@ -128,10 +128,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let persona = Persona::load(persona_slug, &personas_dir)
+    let persona = Persona::load(persona_slug, &runtime_context.personas_dir)
         .map_err(|e| {
             eprintln!("{} {}", ui::error("Error:"), e);
-            print_usage(&personas_dir);
+            print_usage(&runtime_context.personas_dir);
             std::process::exit(1);
         })
         .unwrap();
@@ -140,9 +140,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
 
-    let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
-    let mut model_name = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string());
-    let available_models = vec!["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"];
+    let mut model_name = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+    let available_models = AVAILABLE_MODELS.to_vec();
 
     let approval_mode = if auto_approve {
         ApprovalMode::AutoApprove
@@ -152,40 +151,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let compaction_config = CompactionConfig::default();
 
-    let build_agent = |persona: &Persona, cwd: &str, api_key: &str, model_name: &str, approval_mode: ApprovalMode| {
-        let system_prompt = persona.build_system_prompt(&skills_dir, cwd);
-        let tool_config = metalcraft_agent::tools::ToolConfig {
-            api_key: api_key.to_string(),
-            model_name: model_name.to_string(),
-            system_prompt: system_prompt.clone(),
-            skills_dir: skills_dir.clone(),
-            available_skills: persona.skills.clone(),
-        };
-        let registry = metalcraft_agent::tools::create_registry_for_with_config(
-            &persona.tools,
-            Some(&tool_config),
-        );
-        let client = openai::Client::new(api_key)?;
-        let model = client.completion_model(model_name);
-        let compaction_model = client.completion_model(model_name);
-        let hook = approval::build_hook(approval_mode);
-        let graph = create_react_agent_with_hooks(model, registry, &system_prompt, hook)?.into_arc();
-        Ok::<_, Box<dyn std::error::Error>>((graph, compaction_model))
-    };
-
     print_persona_banner(&persona, persona_slug, &model_name, &cwd, auto_approve);
 
-    let (mut graph, mut compaction_model) = build_agent(&persona, &cwd, &api_key, &model_name, approval_mode.clone())?;
-    let step_guard = guard::build_agent_guard(guard::GuardConfig::default());
+    let diagnostics: Option<Arc<DiagnosticsLogger>> = if diagnostics_enabled {
+        match DiagnosticsLogger::new() {
+            Ok(logger) => {
+                let system_prompt = persona.build_system_prompt(&runtime_context.skills_dir, &cwd);
+                logger.log_session_info(
+                    &persona.name,
+                    persona_slug,
+                    &model_name,
+                    &cwd,
+                    &system_prompt,
+                    &persona.tools,
+                    &persona.skills,
+                    auto_approve,
+                );
+                println!("  {} {}\n", ui::label("Diagnostics:"), ui::path(logger.session_dir().display().to_string()));
+                Some(Arc::new(logger))
+            }
+            Err(e) => {
+                eprintln!("{} failed to create diagnostics logger: {e}", ui::warning("Warning:"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let llm_call_hook: Option<LlmCallHook> = diagnostics.as_ref().map(|d| {
+        let logger = d.clone();
+        Arc::new(move |snapshot: &metalcraft::LlmCallSnapshot| {
+            logger.log_llm_request(snapshot);
+        }) as LlmCallHook
+    });
+
+    let runtime::BuiltAgentRuntime {
+        mut graph,
+        mut compaction_model,
+    } = runtime::build_agent_runtime(
+        &runtime_context,
+        &persona,
+        &cwd,
+        &model_name,
+        approval_mode.clone(),
+        llm_call_hook.clone(),
+        |client, model_name| client.completion_model(model_name),
+    )?;
+    let step_guard = guard::build_agent_guard(guard::GuardConfig::default(), diagnostics.clone());
     let mut current_persona_slug = persona_slug.to_string();
 
     if let Some(task) = one_shot_task {
         println!("{} {}\n", ui::label("Task:"), task);
 
-        let executor = Executor::new_from_arc(graph).max_steps(90).with_step_guard(step_guard.clone());
-        let outcome = executor.run(AgentState::new(&task), "agent").await?;
-
-        match outcome {
+        match runtime::run_one_shot_task(
+            &runtime_context,
+            runtime::RunOneShotRequest {
+                persona_slug,
+                cwd: &cwd,
+                model_name: &model_name,
+                task: &task,
+                approval_mode: approval_mode.clone(),
+                diagnostics: diagnostics.clone(),
+            },
+        )
+        .await?
+        {
             RunOutcome::Completed(state) => {
                 println!("\n{}", ui::success("--- Done ---"));
                 println!("{}", state.final_answer().unwrap_or("(no answer)"));
@@ -253,9 +284,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     cwd = new_path.display().to_string();
-                    let current_persona = Persona::load(&current_persona_slug, &personas_dir).unwrap();
-                    match build_agent(&current_persona, &cwd, &api_key, &model_name, approval_mode.clone()) {
-                        Ok((new_graph, new_compaction_model)) => {
+                    let current_persona = Persona::load(&current_persona_slug, &runtime_context.personas_dir).unwrap();
+                    match runtime::build_agent_runtime(
+                        &runtime_context,
+                        &current_persona,
+                        &cwd,
+                        &model_name,
+                        approval_mode.clone(),
+                        llm_call_hook.clone(),
+                        |client, model_name| client.completion_model(model_name),
+                    ) {
+                        Ok(runtime::BuiltAgentRuntime {
+                            graph: new_graph,
+                            compaction_model: new_compaction_model,
+                        }) => {
                             graph = new_graph;
                             compaction_model = new_compaction_model;
                             prompt_str = build_prompt_str(&current_persona_slug, &cwd);
@@ -275,10 +317,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if input == "/persona" || input == "/persona list" {
             println!("{} {}\n", ui::label("Current persona:"), ui::accent(&current_persona_slug));
             println!("{}", ui::heading("Available personas:"));
-            let available = Persona::list_available(&personas_dir);
+            let available = Persona::list_available(&runtime_context.personas_dir);
             for slug in &available {
                 let marker = if *slug == current_persona_slug { format!(" {}", ui::success("<-- active")) } else { String::new() };
-                if let Ok(p) = Persona::load(slug, &personas_dir) {
+                if let Ok(p) = Persona::load(slug, &runtime_context.personas_dir) {
                     println!("  {:<24} {}{}", ui::accent(slug), p.description, marker);
                 } else {
                     println!("  {}", ui::accent(slug));
@@ -290,10 +332,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(new_slug) = input.strip_prefix("/persona set ") {
             let new_slug = new_slug.trim();
-            match Persona::load(new_slug, &personas_dir) {
+            match Persona::load(new_slug, &runtime_context.personas_dir) {
                 Ok(new_persona) => {
-                    match build_agent(&new_persona, &cwd, &api_key, &model_name, approval_mode.clone()) {
-                        Ok((new_graph, new_compaction_model)) => {
+                    match runtime::build_agent_runtime(
+                        &runtime_context,
+                        &new_persona,
+                        &cwd,
+                        &model_name,
+                        approval_mode.clone(),
+                        llm_call_hook.clone(),
+                        |client, model_name| client.completion_model(model_name),
+                    ) {
+                        Ok(runtime::BuiltAgentRuntime {
+                            graph: new_graph,
+                            compaction_model: new_compaction_model,
+                        }) => {
                             graph = new_graph;
                             compaction_model = new_compaction_model;
                             current_persona_slug = new_slug.to_string();
@@ -301,6 +354,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state = None;
                             println!();
                             print_persona_banner(&new_persona, new_slug, &model_name, &cwd, auto_approve);
+                            if let Some(ref d) = diagnostics {
+                                d.log_config_change("persona_switch", serde_json::json!({
+                                    "new_persona": new_slug,
+                                    "model": &model_name,
+                                }));
+                            }
                             println!("{}\n", ui::dim("Conversation cleared (new persona context)."));
                         }
                         Err(e) => {
@@ -310,7 +369,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(e) => {
                     eprintln!("{}\n", ui::error(e));
-                    println!("{} {:?}\n", ui::label("Available:"), Persona::list_available(&personas_dir));
+                    println!("{} {:?}\n", ui::label("Available:"), Persona::list_available(&runtime_context.personas_dir));
                 }
             }
             continue;
@@ -332,15 +391,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("{} '{}' . {}\n", ui::error("Unknown model"), new_model, ui::dim(format!("Available: {}", available_models.join(", "))));
                 continue;
             }
-            let current_persona = Persona::load(&current_persona_slug, &personas_dir).unwrap();
-            match build_agent(&current_persona, &cwd, &api_key, new_model, approval_mode.clone()) {
-                Ok((new_graph, new_compaction_model)) => {
+            let current_persona = Persona::load(&current_persona_slug, &runtime_context.personas_dir).unwrap();
+            match runtime::build_agent_runtime(
+                &runtime_context,
+                &current_persona,
+                &cwd,
+                new_model,
+                approval_mode.clone(),
+                llm_call_hook.clone(),
+                |client, model_name| client.completion_model(model_name),
+            ) {
+                Ok(runtime::BuiltAgentRuntime {
+                    graph: new_graph,
+                    compaction_model: new_compaction_model,
+                }) => {
                     model_name = new_model.to_string();
                     graph = new_graph;
                     compaction_model = new_compaction_model;
                     state = None;
                     println!();
                     print_persona_banner(&current_persona, &current_persona_slug, &model_name, &cwd, auto_approve);
+                    if let Some(ref d) = diagnostics {
+                        d.log_config_change("model_switch", serde_json::json!({
+                            "new_model": new_model,
+                            "persona": &current_persona_slug,
+                        }));
+                    }
                     println!("{}\n", ui::dim("Conversation cleared (new model context)."));
                 }
                 Err(e) => {

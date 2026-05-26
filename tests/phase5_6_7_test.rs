@@ -114,7 +114,12 @@ fn sub_agent_skipped_without_config() {
 // ============================================================================
 
 fn dummy_event() -> StepEvent {
-    StepEvent { node: "tools".into(), next: "agent".into() }
+    StepEvent {
+        node: "tools".into(),
+        next: "agent".into(),
+        duration: std::time::Duration::from_millis(0),
+        outcome: metalcraft::StepOutcome::Success,
+    }
 }
 
 #[test]
@@ -122,7 +127,7 @@ fn guard_detects_error_spiral() {
     let guard = build_agent_guard(GuardConfig {
         verbose: false, max_consecutive_errors: 2,
         loop_window: 0,
-    });
+    }, None);
 
     let mut state = AgentState::new("test");
 
@@ -154,7 +159,7 @@ fn guard_resets_on_success() {
     let guard = build_agent_guard(GuardConfig {
         verbose: false, max_consecutive_errors: 2,
         loop_window: 0,
-    });
+    }, None);
 
     let mut state = AgentState::new("test");
 
@@ -201,7 +206,7 @@ fn guard_detects_repeated_tool_call() {
     let guard = build_agent_guard(GuardConfig {
         verbose: false, max_consecutive_errors: 0,
         loop_window: 5,
-    });
+    }, None);
 
     let mut state = AgentState::new("test");
 
@@ -231,7 +236,7 @@ fn guard_allows_different_args() {
     let guard = build_agent_guard(GuardConfig {
         verbose: false, max_consecutive_errors: 0,
         loop_window: 5,
-    });
+    }, None);
 
     let mut state = AgentState::new("test");
 

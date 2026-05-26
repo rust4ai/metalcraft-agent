@@ -155,18 +155,20 @@ fn prompt_user(
         ui::label(op.label()),
         ui::dim(format!("→ {}", args_display))
     );
-    // Show diff preview for edit_file
+    eprintln!();
+
+    // Show diff preview for edit_file (with file context + line numbers)
     if tool_name == "edit_file" {
-        if let (Some(old_s), Some(new_s)) = (
+        if let (Some(path), Some(old_s), Some(new_s)) = (
+            args.get("path").and_then(|v| v.as_str()),
             args.get("old_string").and_then(|v| v.as_str()),
             args.get("new_string").and_then(|v| v.as_str()),
         ) {
-            let diff = diff_preview::preview_edit_diff(old_s, new_s);
-            let colored = diff_preview::colorize_diff(&diff);
-            eprintln!();
-            for line in colored.lines() {
-                eprintln!("    {line}");
+            let diff = diff_preview::preview_file_edit(path, old_s, new_s);
+            for line in diff.lines() {
+                eprintln!("{line}");
             }
+            eprintln!();
         }
     }
 
@@ -177,12 +179,11 @@ fn prompt_user(
                 std::fs::read_to_string(path),
                 args.get("content").and_then(|v| v.as_str()),
             ) {
-                let diff = diff_preview::preview_edit_diff(&old_content, new_content);
-                let colored = diff_preview::colorize_diff(&diff);
-                eprintln!();
-                for line in colored.lines() {
-                    eprintln!("    {line}");
+                let diff = diff_preview::preview_file_edit(path, &old_content, new_content);
+                for line in diff.lines() {
+                    eprintln!("{line}");
                 }
+                eprintln!();
             }
         }
     }
@@ -200,6 +201,17 @@ fn prompt_user(
 }
 
 fn prompt_approval_choice() -> io::Result<bool> {
+    // Run the raw-mode prompt on a dedicated OS thread to avoid blocking
+    // the tokio runtime and to isolate terminal state from rustyline.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(prompt_approval_inner());
+    });
+    rx.recv()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+}
+
+fn prompt_approval_inner() -> io::Result<bool> {
     struct RawModeGuard;
 
     impl Drop for RawModeGuard {
@@ -215,8 +227,16 @@ fn prompt_approval_choice() -> io::Result<bool> {
     loop {
         render_approval_menu(selected)?;
 
+        // Timeout so we don't hang forever if the terminal can't deliver events
+        if !event::poll(std::time::Duration::from_secs(60))? {
+            // Timed out — fall back to deny
+            eprintln!("\r\x1b[2K  {}", ui::dim("(timed out, denying)"));
+            return Ok(false);
+        }
+
         if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
+            // Accept Press and Repeat events; skip Release to avoid double-firing.
+            if key.kind == KeyEventKind::Release {
                 continue;
             }
 
