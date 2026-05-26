@@ -1,7 +1,8 @@
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode};
 use metalcraft::BeforeToolCallAction;
 use crate::{diff_preview, ui};
+use std::cmp;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::Path;
@@ -148,72 +149,99 @@ fn prompt_user(
         _ => serde_json::to_string(args).unwrap_or_default(),
     };
 
-    eprintln!();
-    eprintln!(
+    // Build header lines (always shown)
+    let header = format!(
         "  {} {} {}",
         ui::warning("⚡"),
         ui::label(op.label()),
         ui::dim(format!("→ {}", args_display))
     );
-    eprintln!();
 
-    // Show diff preview for edit_file (with file context + line numbers)
-    if tool_name == "edit_file" {
-        if let (Some(path), Some(old_s), Some(new_s)) = (
-            args.get("path").and_then(|v| v.as_str()),
-            args.get("old_string").and_then(|v| v.as_str()),
-            args.get("new_string").and_then(|v| v.as_str()),
-        ) {
-            let diff = diff_preview::preview_file_edit(path, old_s, new_s);
-            for line in diff.lines() {
+    // Collect diff lines if applicable
+    let diff_lines = collect_diff_lines(tool_name, args);
+
+    let result = if diff_lines.is_empty() {
+        // No diff — use simple inline approval (bash commands, etc.)
+        eprintln!();
+        eprintln!("{header}");
+        eprintln!();
+        simple_approval_prompt()
+    } else {
+        // Has diff — check if it fits on screen or needs scrollable viewer
+        let term_height = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
+        let footer_lines = 4; // blank + "Approve?" + options + hints
+        let header_lines = 3; // blank + header + blank
+        let viewport_height = term_height.saturating_sub(footer_lines + header_lines);
+
+        if diff_lines.len() <= viewport_height {
+            // Small diff — print inline and use simple approval
+            eprintln!();
+            eprintln!("{header}");
+            eprintln!();
+            for line in &diff_lines {
                 eprintln!("{line}");
             }
             eprintln!();
+            simple_approval_prompt()
+        } else {
+            // Large diff — use interactive scrollable viewer
+            interactive_diff_approval(&header, &diff_lines)
         }
-    }
+    };
 
-    // Show diff preview for write_file (overwrite case)
-    if tool_name == "write_file" {
-        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-            if let (Ok(old_content), Some(new_content)) = (
-                std::fs::read_to_string(path),
-                args.get("content").and_then(|v| v.as_str()),
-            ) {
-                let diff = diff_preview::preview_file_edit(path, &old_content, new_content);
-                for line in diff.lines() {
-                    eprintln!("{line}");
-                }
-                eprintln!();
-            }
-        }
-    }
-
-    eprintln!("  {}", ui::command("Approve?"));
-    eprintln!("    1. Yes");
-    eprintln!("    2. No");
-    eprintln!("  {}", ui::dim("Use ↑/↓, Enter, or press 1/2."));
-
-    match prompt_approval_choice() {
+    match result {
         Ok(true) => BeforeToolCallAction::Proceed,
         Ok(false) => BeforeToolCallAction::Deny(format!("User denied tool '{tool_name}'")),
         Err(err) => BeforeToolCallAction::Deny(format!("Failed to read approval input: {err}")),
     }
 }
 
-fn prompt_approval_choice() -> io::Result<bool> {
-    // Run the raw-mode prompt on a dedicated OS thread to avoid blocking
-    // the tokio runtime and to isolate terminal state from rustyline.
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(prompt_approval_inner());
-    });
-    rx.recv()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+/// Collect diff preview lines for edit_file / write_file operations.
+fn collect_diff_lines(tool_name: &str, args: &serde_json::Value) -> Vec<String> {
+    match tool_name {
+        "edit_file" => {
+            if let (Some(path), Some(old_s), Some(new_s)) = (
+                args.get("path").and_then(|v| v.as_str()),
+                args.get("old_string").and_then(|v| v.as_str()),
+                args.get("new_string").and_then(|v| v.as_str()),
+            ) {
+                let diff = diff_preview::preview_file_edit(path, old_s, new_s);
+                diff.lines().map(|l| l.to_string()).collect()
+            } else {
+                Vec::new()
+            }
+        }
+        "write_file" => {
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                if let (Ok(old_content), Some(new_content)) = (
+                    std::fs::read_to_string(path),
+                    args.get("content").and_then(|v| v.as_str()),
+                ) {
+                    let diff = diff_preview::preview_file_edit(path, &old_content, new_content);
+                    diff.lines().map(|l| l.to_string()).collect()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
 }
 
-fn prompt_approval_inner() -> io::Result<bool> {
-    struct RawModeGuard;
+/// Simple inline approval prompt (no scrolling needed).
+fn simple_approval_prompt() -> io::Result<bool> {
+    eprintln!("  {}", ui::command("Approve?"));
+    eprintln!("    1. Yes");
+    eprintln!("    2. No");
+    eprintln!("  {}", ui::dim("Use ↑/↓, Enter, or press y/n."));
 
+    run_on_thread(|| simple_approval_inner())
+}
+
+fn simple_approval_inner() -> io::Result<bool> {
+    struct RawModeGuard;
     impl Drop for RawModeGuard {
         fn drop(&mut self) {
             let _ = disable_raw_mode();
@@ -222,36 +250,192 @@ fn prompt_approval_inner() -> io::Result<bool> {
 
     let mut selected = 0usize;
     enable_raw_mode()?;
-    let _raw_mode_guard = RawModeGuard;
+    let _guard = RawModeGuard;
 
     loop {
         render_approval_menu(selected)?;
 
-        // Timeout so we don't hang forever if the terminal can't deliver events
         if !event::poll(std::time::Duration::from_secs(60))? {
-            // Timed out — fall back to deny
             eprintln!("\r\x1b[2K  {}", ui::dim("(timed out, denying)"));
             return Ok(false);
         }
 
         if let Event::Key(key) = event::read()? {
-            // Accept Press and Repeat events; skip Release to avoid double-firing.
             if key.kind == KeyEventKind::Release {
                 continue;
             }
-
             match key.code {
                 KeyCode::Enter => return Ok(selected == 0),
                 KeyCode::Up => selected = 0,
                 KeyCode::Down => selected = 1,
-                KeyCode::Char('1') => return Ok(true),
-                KeyCode::Char('2') => return Ok(false),
-                KeyCode::Char('y') | KeyCode::Char('Y') => return Ok(true),
-                KeyCode::Char('n') | KeyCode::Char('N') => return Ok(false),
+                KeyCode::Char('1') | KeyCode::Char('y') | KeyCode::Char('Y') => return Ok(true),
+                KeyCode::Char('2') | KeyCode::Char('n') | KeyCode::Char('N') => return Ok(false),
                 _ => {}
             }
         }
     }
+}
+
+/// Interactive scrollable diff viewer with integrated approval prompt.
+fn interactive_diff_approval(header: &str, diff_lines: &[String]) -> io::Result<bool> {
+    let header = header.to_string();
+    let diff_lines = diff_lines.to_vec();
+    run_on_thread(move || interactive_diff_inner(&header, &diff_lines))
+}
+
+fn interactive_diff_inner(header: &str, diff_lines: &[String]) -> io::Result<bool> {
+    struct RawModeGuard;
+    impl Drop for RawModeGuard {
+        fn drop(&mut self) {
+            let _ = disable_raw_mode();
+            // Show cursor, leave alternate screen
+            let _ = crossterm::execute!(
+                io::stderr(),
+                crossterm::cursor::Show,
+                terminal::LeaveAlternateScreen
+            );
+        }
+    }
+
+    // Enter alternate screen for clean rendering
+    crossterm::execute!(
+        io::stderr(),
+        terminal::EnterAlternateScreen,
+        crossterm::cursor::Hide
+    )?;
+    enable_raw_mode()?;
+    let _guard = RawModeGuard;
+
+    let mut scroll_offset: usize = 0;
+    let mut selected: usize = 0; // 0 = Yes, 1 = No
+    let total_lines = diff_lines.len();
+
+    loop {
+        let (term_w, term_h) = terminal::size().unwrap_or((80, 24));
+        let term_h = term_h as usize;
+        let term_w = term_w as usize;
+
+        // Layout: header (2 lines) + viewport + footer (4 lines)
+        let header_rows = 2;
+        let footer_rows = 4;
+        let viewport_h = term_h.saturating_sub(header_rows + footer_rows);
+        let max_scroll = total_lines.saturating_sub(viewport_h);
+        scroll_offset = cmp::min(scroll_offset, max_scroll);
+
+        let mut out = io::stderr();
+
+        // Move to top-left, clear screen
+        write!(out, "\x1b[H\x1b[2J")?;
+
+        // Header
+        writeln!(out, "{header}\r")?;
+
+        // Scroll indicator
+        let scroll_info = if total_lines > viewport_h {
+            let end_line = cmp::min(scroll_offset + viewport_h, total_lines);
+            format!("[{}-{}/{}]", scroll_offset + 1, end_line, total_lines)
+        } else {
+            format!("[{} lines]", total_lines)
+        };
+        writeln!(out, "  {}\r", ui::dim(&scroll_info))?;
+
+        // Viewport: show diff lines [scroll_offset .. scroll_offset + viewport_h]
+        let visible_end = cmp::min(scroll_offset + viewport_h, total_lines);
+        for i in scroll_offset..visible_end {
+            // Truncate long lines to terminal width to avoid wrapping
+            let line = &diff_lines[i];
+            let display = truncate_to_width(line, term_w);
+            writeln!(out, "{display}\r")?;
+        }
+
+        // Fill remaining viewport lines with empty
+        for _ in (visible_end - scroll_offset)..viewport_h {
+            writeln!(out, "\r")?;
+        }
+
+        // Footer: blank, Approve?, options, hints
+        writeln!(out, "\r")?;
+        writeln!(out, "  {}\r", ui::command("Approve?"))?;
+        if selected == 0 {
+            writeln!(out, "  {}    2. No\r", ui::success("> 1. Yes"))?;
+        } else {
+            writeln!(out, "    1. Yes    {}\r", ui::error("> 2. No"))?;
+        }
+        write!(
+            out,
+            "  {}",
+            ui::dim("PgUp/PgDn: scroll │ ↑/↓: select │ y/n/Enter: confirm")
+        )?;
+
+        out.flush()?;
+
+        // Wait for input
+        if !event::poll(std::time::Duration::from_secs(120))? {
+            return Ok(false);
+        }
+
+        if let Event::Key(key) = event::read()? {
+            if key.kind == KeyEventKind::Release {
+                continue;
+            }
+            match key.code {
+                // Scrolling
+                KeyCode::PageUp => {
+                    scroll_offset = scroll_offset.saturating_sub(viewport_h);
+                }
+                KeyCode::PageDown => {
+                    scroll_offset = cmp::min(scroll_offset + viewport_h, max_scroll);
+                }
+                KeyCode::Home => {
+                    scroll_offset = 0;
+                }
+                KeyCode::End => {
+                    scroll_offset = max_scroll;
+                }
+                // Approval selection
+                KeyCode::Up => selected = 0,
+                KeyCode::Down => selected = 1,
+                KeyCode::Enter => return Ok(selected == 0),
+                KeyCode::Char('1') | KeyCode::Char('y') | KeyCode::Char('Y') => return Ok(true),
+                KeyCode::Char('2') | KeyCode::Char('n') | KeyCode::Char('N') => return Ok(false),
+                KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(false),
+                KeyCode::Esc => return Ok(false),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Truncate a string (stripping ANSI) to fit terminal width.
+/// Simple approach: just cut at byte boundary if too long.
+fn truncate_to_width(line: &str, max_width: usize) -> &str {
+    if max_width == 0 {
+        return "";
+    }
+    // Count visible characters (skip ANSI escape sequences)
+    let mut visible = 0;
+    let mut last_safe_byte = 0;
+    let mut in_escape = false;
+    for (i, ch) in line.char_indices() {
+        if in_escape {
+            if ch.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+            last_safe_byte = i + ch.len_utf8();
+            continue;
+        }
+        if ch == '\x1b' {
+            in_escape = true;
+            last_safe_byte = i + ch.len_utf8();
+            continue;
+        }
+        visible += 1;
+        last_safe_byte = i + ch.len_utf8();
+        if visible >= max_width {
+            break;
+        }
+    }
+    &line[..last_safe_byte]
 }
 
 fn render_approval_menu(selected: usize) -> io::Result<()> {
@@ -262,6 +446,20 @@ fn render_approval_menu(selected: usize) -> io::Result<()> {
         eprint!("  1. Yes    {}", ui::error("> 2. No"));
     }
     io::stderr().flush()
+}
+
+/// Run a closure on a dedicated OS thread (avoids blocking tokio runtime
+/// and isolates terminal state from rustyline).
+fn run_on_thread<F>(f: F) -> io::Result<bool>
+where
+    F: FnOnce() -> io::Result<bool> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
 }
 
 #[cfg(test)]

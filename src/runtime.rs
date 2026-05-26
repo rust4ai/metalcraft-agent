@@ -35,7 +35,9 @@ impl AgentRuntimeContext {
             .unwrap_or_else(|_| Persona::default_personas_dir());
         let skills_dir = std::fs::canonicalize(Persona::default_skills_dir())
             .unwrap_or_else(|_| Persona::default_skills_dir());
-        let api_key = std::env::var("OPENAI_API_KEY")?;
+        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+            "OPENAI_API_KEY environment variable not set. Add it to your .env file or export it."
+        })?;
 
         Ok(Self {
             personas_dir,

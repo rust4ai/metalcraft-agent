@@ -5,7 +5,6 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
-const MAX_PREVIEW_LINES: usize = 80;
 const MAX_LINE_LENGTH: usize = 200;
 const CONTEXT_LINES: usize = 3;
 
@@ -153,13 +152,6 @@ pub fn preview_file_edit(path: &str, old_text: &str, new_text: &str) -> String {
         }
     }
 
-    // Truncation guard
-    if output.len() > MAX_PREVIEW_LINES {
-        let omitted = output.len() - MAX_PREVIEW_LINES;
-        output.truncate(MAX_PREVIEW_LINES);
-        output.push(format!("  {DIM}... {} more lines{RESET}", omitted));
-    }
-
     output.join("\n")
 }
 
@@ -230,12 +222,6 @@ pub fn preview_edit_diff(old_text: &str, new_text: &str) -> String {
     let suffix_end = cmp::min(old_suffix + CONTEXT_LINES, old_lines.len());
     for i in old_suffix..suffix_end {
         output.push(format!("  {}", truncate_line(old_lines[i])));
-    }
-
-    if output.len() > MAX_PREVIEW_LINES {
-        let omitted = output.len() - MAX_PREVIEW_LINES;
-        output.truncate(MAX_PREVIEW_LINES);
-        output.push(format!("  ... diff truncated ({} more lines)", omitted));
     }
 
     output.join("\n")

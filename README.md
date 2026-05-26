@@ -59,11 +59,32 @@ metalcraft-agent --auto-approve --diagnostics coding-agent "fix the login bug"
 
 ## Flow Daemon Usage
 
-The daemon looks for local flow JSON files in `flows/` by default. The directory is gitignored by default, along with `logs/`.
+`metalcraft-flowd` is a companion binary that polls a local flow directory, finds enabled workflow definitions, and runs reachable `prompt` nodes as one-shot agent tasks.
+
+By default it looks for flow JSON files in `flows/`. It first checks `./flows` from the current working directory, then falls back to a `flows/` directory next to the executable. The `flows/` directory is intended for local workflow definitions and is gitignored by default, along with `logs/`.
 
 ```bash
 cargo run --bin metalcraft-flowd -- --persona coding-agent --poll-seconds 30
 ```
+
+You can also run a single scan and exit:
+
+```bash
+cargo run --bin metalcraft-flowd -- --once --auto-approve
+```
+
+### Daemon behavior
+
+On each poll cycle, the daemon:
+
+1. loads flow summaries from the configured flows directory
+2. keeps only flows with `enabled: true`
+3. validates each flow and parses the entry-node schedule
+4. skips flows that are not currently due
+5. traverses the graph from the single `entry` node in BFS order
+6. executes each reachable `prompt` node using the configured persona and model
+
+The daemon tracks in-memory run state so interval-based flows are only re-run once their configured time window has elapsed.
 
 ### Daemon flags
 
@@ -73,27 +94,40 @@ cargo run --bin metalcraft-flowd -- --persona coding-agent --poll-seconds 30
 - **`--poll-seconds <n>`**: Poll interval for checking enabled flows. Defaults to `30`.
 - **`--once`**: Perform one scan/run pass and exit.
 - **`--auto-approve`**: Skip approval prompts for daemon-run tasks.
+- **`--help` / `-h`**: Print daemon usage.
 
-### MVP flow support
+### Supported schedules and nodes
 
-Current daemon behavior intentionally supports a limited subset of the flow spec:
+Current daemon behavior intentionally supports a limited MVP subset of the flow spec.
 
-- only **enabled** flows are considered
-- flow must have exactly one `entry` node
-- supported node types:
-  - `entry`
-  - `prompt`
-- supported schedules:
-  - `manual` (never auto-runs)
-  - `minutes`
-  - `hours`
-- currently not executed:
-  - `cron`
-  - `branch`
-  - `branch_tool`
-  - custom vendor node types
+Supported schedules:
 
-Prompt nodes are executed in reachable BFS order as one-shot agent tasks using the configured persona.
+- `manual` — parsed, but never auto-run by the daemon
+- `minutes`
+- `hours`
+
+Accepted but not yet executed:
+
+- `cron` — recognized, but currently logged and skipped
+
+Supported node types:
+
+- `entry`
+- `prompt`
+
+Not currently executed:
+
+- `branch`
+- `branch_tool`
+- custom vendor node types
+
+Other current constraints:
+
+- the flow must contain exactly one `entry` node
+- prompt nodes must include `data.prompt`
+- only reachable prompt nodes are executed
+- prompts run sequentially in BFS traversal order
+- flow run history is kept in memory only for the current daemon process
 
 ### Example flow file
 
