@@ -89,7 +89,7 @@ impl metalcraft::Tool for SubAgentTool {
             }
         })?;
 
-        let executor = Executor::new(graph).max_steps(15);
+        let executor = Executor::new(graph).max_steps(90);
 
         // Run with timeout to prevent runaway sub-agents
         let result = tokio::time::timeout(

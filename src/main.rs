@@ -7,6 +7,55 @@ use metalcraft_agent::ui;
 use rig::client::CompletionClient;
 use rig::providers::openai;
 use rustyline::DefaultEditor;
+use std::path::{Path, PathBuf};
+
+fn resolve_cd_target(input: &str, current: &Path) -> Result<PathBuf, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("missing path".to_string());
+    }
+
+    let expanded: PathBuf = if trimmed == "~" {
+        PathBuf::from(std::env::var("HOME").map_err(|_| "HOME not set".to_string())?)
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+        PathBuf::from(home).join(rest)
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    let candidate = if expanded.is_absolute() {
+        expanded
+    } else {
+        current.join(expanded)
+    };
+
+    let canonical = std::fs::canonicalize(&candidate)
+        .map_err(|e| format!("{}: {}", candidate.display(), e))?;
+
+    if !canonical.is_dir() {
+        return Err(format!("{} is not a directory", canonical.display()));
+    }
+
+    Ok(canonical)
+}
+
+fn display_cwd(cwd: &str) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if let Some(rest) = cwd.strip_prefix(&home) {
+            return format!("~{}", rest);
+        }
+    }
+    cwd.to_string()
+}
+
+fn build_prompt_str(persona_slug: &str, cwd: &str) -> String {
+    let basename = Path::new(cwd)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(cwd);
+    format!("[{} {}]> ", persona_slug, basename)
+}
 
 fn print_usage(personas_dir: &std::path::Path) {
     eprintln!("{} {}", ui::error("Usage:"), ui::command("metalcraft-agent [--auto-approve] <persona> [task]"));
@@ -30,13 +79,14 @@ fn print_usage(personas_dir: &std::path::Path) {
     }
 }
 
-fn print_persona_banner(persona: &Persona, persona_slug: &str, model_name: &str, auto_approve: bool) {
+fn print_persona_banner(persona: &Persona, persona_slug: &str, model_name: &str, cwd: &str, auto_approve: bool) {
     println!("{}", ui::heading("╭─────────────────────────────────────────────╮"));
     println!("│  {} {:<33}│", ui::label("Persona:"), persona.name);
     println!("│  {} {:<33}│", ui::label("Slug:"), persona_slug);
     println!("│  {} {:<33}│", ui::label("Model:"), model_name);
     println!("{}", ui::heading("╰─────────────────────────────────────────────╯"));
     println!("  {}", persona.description);
+    println!("  {} {}", ui::label("Cwd:"), ui::path(display_cwd(cwd)));
     println!("  {} {}", ui::label("Tools:"), persona.tools.join(", "));
     if !persona.skills.is_empty() {
         println!("  {} {}", ui::label("Skills:"), persona.skills.join(", "));
@@ -54,8 +104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     dotenvy::dotenv().ok();
 
-    let personas_dir = Persona::default_personas_dir();
-    let skills_dir = Persona::default_skills_dir();
+    let personas_dir = std::fs::canonicalize(Persona::default_personas_dir())
+        .unwrap_or_else(|_| Persona::default_personas_dir());
+    let skills_dir = std::fs::canonicalize(Persona::default_skills_dir())
+        .unwrap_or_else(|_| Persona::default_skills_dir());
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let auto_approve = raw_args.iter().any(|a| a == "--auto-approve");
@@ -84,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .unwrap();
 
-    let cwd = std::env::current_dir()
+    let mut cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
 
@@ -121,7 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok::<_, Box<dyn std::error::Error>>((graph, compaction_model))
     };
 
-    print_persona_banner(&persona, persona_slug, &model_name, auto_approve);
+    print_persona_banner(&persona, persona_slug, &model_name, &cwd, auto_approve);
 
     let (mut graph, mut compaction_model) = build_agent(&persona, &cwd, &api_key, &model_name, approval_mode.clone())?;
     let step_guard = guard::build_agent_guard(guard::GuardConfig::default());
@@ -130,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(task) = one_shot_task {
         println!("{} {}\n", ui::label("Task:"), task);
 
-        let executor = Executor::new_from_arc(graph).max_steps(30).with_step_guard(step_guard.clone());
+        let executor = Executor::new_from_arc(graph).max_steps(90).with_step_guard(step_guard.clone());
         let outcome = executor.run(AgentState::new(&task), "agent").await?;
 
         match outcome {
@@ -148,11 +200,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{} {}\n",
         ui::heading("Interactive mode."),
-        ui::dim("Commands: /quit, /clear, /tokens, /persona [list|set <name>], /model [list|use <name>]")
+        ui::dim("Commands: /quit, /clear, /tokens, /cd [path], /persona [list|set <name>], /model [list|use <name>]")
     );
 
     let mut rl = DefaultEditor::new()?;
-    let mut prompt_str = format!("[{}]> ", current_persona_slug);
+    let mut prompt_str = build_prompt_str(&current_persona_slug, &cwd);
     let mut state: Option<AgentState> = None;
 
     loop {
@@ -188,6 +240,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             continue;
         }
+        if input == "/cd" {
+            println!("{} {}\n", ui::label("Working directory:"), ui::path(display_cwd(&cwd)));
+            continue;
+        }
+        if let Some(target) = input.strip_prefix("/cd ") {
+            let current_path = PathBuf::from(&cwd);
+            match resolve_cd_target(target, &current_path) {
+                Ok(new_path) => {
+                    if let Err(e) = std::env::set_current_dir(&new_path) {
+                        eprintln!("{} {}\n", ui::error("/cd: failed to change directory:"), e);
+                        continue;
+                    }
+                    cwd = new_path.display().to_string();
+                    let current_persona = Persona::load(&current_persona_slug, &personas_dir).unwrap();
+                    match build_agent(&current_persona, &cwd, &api_key, &model_name, approval_mode.clone()) {
+                        Ok((new_graph, new_compaction_model)) => {
+                            graph = new_graph;
+                            compaction_model = new_compaction_model;
+                            prompt_str = build_prompt_str(&current_persona_slug, &cwd);
+                            println!("{} {}\n", ui::success("Working directory:"), ui::path(display_cwd(&cwd)));
+                        }
+                        Err(e) => {
+                            eprintln!("{} {}\n", ui::error("/cd: failed to rebuild agent:"), e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{} {}\n", ui::error("/cd:"), e);
+                }
+            }
+            continue;
+        }
         if input == "/persona" || input == "/persona list" {
             println!("{} {}\n", ui::label("Current persona:"), ui::accent(&current_persona_slug));
             println!("{}", ui::heading("Available personas:"));
@@ -213,10 +297,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             graph = new_graph;
                             compaction_model = new_compaction_model;
                             current_persona_slug = new_slug.to_string();
-                            prompt_str = format!("[{}]> ", current_persona_slug);
+                            prompt_str = build_prompt_str(&current_persona_slug, &cwd);
                             state = None;
                             println!();
-                            print_persona_banner(&new_persona, new_slug, &model_name, auto_approve);
+                            print_persona_banner(&new_persona, new_slug, &model_name, &cwd, auto_approve);
                             println!("{}\n", ui::dim("Conversation cleared (new persona context)."));
                         }
                         Err(e) => {
@@ -256,7 +340,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     compaction_model = new_compaction_model;
                     state = None;
                     println!();
-                    print_persona_banner(&current_persona, &current_persona_slug, &model_name, auto_approve);
+                    print_persona_banner(&current_persona, &current_persona_slug, &model_name, &cwd, auto_approve);
                     println!("{}\n", ui::dim("Conversation cleared (new model context)."));
                 }
                 Err(e) => {
@@ -283,7 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let executor = Executor::new_from_arc(graph.clone()).max_steps(30).with_step_guard(step_guard.clone());
+        let executor = Executor::new_from_arc(graph.clone()).max_steps(90).with_step_guard(step_guard.clone());
         let outcome = executor.run(turn_state, "agent").await;
 
         match outcome {
