@@ -5,7 +5,7 @@ edition = "2021"
 default-run = "metalcraft-agent"
 
 [dependencies]
-metalcraft = { path = "../metalcraft", features = ["rig"] }
+metalcraft = { version = "0.3.3", features = ["rig"] }
 metalcraft-flows = { path = "../metalcraft-flows" }
 rig = "0.36"
 async-trait = "0.1"
