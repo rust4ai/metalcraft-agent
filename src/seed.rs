@@ -27,6 +27,14 @@ const SEED_SKILLS: &[(&str, &str)] = &[
     ("discord-formatting.md", include_str!("../seed/skills/discord-formatting.md")),
 ];
 
+const SEED_API_TOOLS: &[(&str, &str)] = &[
+    ("discord_send_message.json", include_str!("../seed/api_tools/discord_send_message.json")),
+    ("discord_edit_message.json", include_str!("../seed/api_tools/discord_edit_message.json")),
+    ("discord_add_reaction.json", include_str!("../seed/api_tools/discord_add_reaction.json")),
+    ("discord_get_messages.json", include_str!("../seed/api_tools/discord_get_messages.json")),
+    ("discord_get_channel_info.json", include_str!("../seed/api_tools/discord_get_channel_info.json")),
+];
+
 const SEED_FLOWS: &[(&str, &str)] = &[
     ("daily-commit-summary.json", include_str!("../seed/flows/daily-commit-summary.json")),
 ];
@@ -51,6 +59,7 @@ pub fn ensure_defaults() {
     write_seeds(&paths::personas_dir(), SEED_PERSONAS);
     write_seeds(&paths::skills_dir(), SEED_SKILLS);
     write_seeds(&paths::flows_dir(), SEED_FLOWS);
+    write_seeds(&paths::api_tools_dir(), SEED_API_TOOLS);
 }
 
 fn write_seeds(dir: &Path, seeds: &[(&str, &str)]) {

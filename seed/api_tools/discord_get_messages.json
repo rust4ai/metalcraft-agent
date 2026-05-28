@@ -1,0 +1,24 @@
+{
+  "name": "discord_get_messages",
+  "description": "Get recent messages from a Discord channel for context. Returns up to `limit` messages (default 10, max 50).",
+  "method": "GET",
+  "url": "$AGENT_GATEWAY_URL/api/v1/channels/{channel_id}/messages?limit={limit}&platform=discord",
+  "headers": {
+    "Authorization": "Bearer $AGENT_GATEWAY_API_KEY"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "channel_id": {
+        "type": "string",
+        "description": "The Discord channel ID"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Number of messages to fetch (default 10, max 50)"
+      }
+    },
+    "required": ["channel_id"]
+  },
+  "body_mapping": "none"
+}

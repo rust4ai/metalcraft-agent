@@ -28,6 +28,8 @@ pub struct HttpApiToolConfig {
     pub body_mapping: String,
     #[serde(default)]
     pub body_template: Option<String>,
+    #[serde(default)]
+    pub body_defaults: HashMap<String, serde_json::Value>,
 }
 
 fn default_body_mapping() -> String {
@@ -99,14 +101,47 @@ impl HttpApiTool {
                 }
             }
         }
-        Self::expand_env(&url)
+        Self::expand_env(&Self::clean_unexpanded_placeholders(&url))
+    }
+
+    /// Remove unexpanded `{param}` placeholders from the URL query string.
+    /// Handles optional parameters that the caller didn't provide.
+    fn clean_unexpanded_placeholders(url: &str) -> String {
+        let Some(qmark) = url.find('?') else {
+            return url.to_string();
+        };
+        let (base, query) = url.split_at(qmark + 1);
+        let cleaned: Vec<&str> = query
+            .split('&')
+            .filter(|segment| !segment.contains('{'))
+            .collect();
+        if cleaned.is_empty() {
+            base.trim_end_matches('?').to_string()
+        } else {
+            format!("{}{}", base, cleaned.join("&"))
+        }
     }
 
     /// Build the request body based on body_mapping config.
     fn build_body(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         match self.config.body_mapping.as_str() {
             "none" => None,
-            "params" => Some(args.clone()),
+            "params" => {
+                if self.config.body_defaults.is_empty() {
+                    Some(args.clone())
+                } else {
+                    let mut merged = serde_json::Map::new();
+                    for (k, v) in &self.config.body_defaults {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                    if let Some(obj) = args.as_object() {
+                        for (k, v) in obj {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                    }
+                    Some(serde_json::Value::Object(merged))
+                }
+            }
             "template" => {
                 // Simple template: just use the template string with {param} replacements
                 if let Some(template) = &self.config.body_template {
