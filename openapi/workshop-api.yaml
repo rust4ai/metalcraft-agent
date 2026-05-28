@@ -1,0 +1,601 @@
+openapi: 3.0.3
+info:
+  title: Metalcraft Workshop API
+  description: REST API for remote management of metalcraft-agent projects
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:3002
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  schemas:
+    PersonaSummary:
+      type: object
+      required: [slug, name, description]
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+
+    Persona:
+      type: object
+      required: [name, description, tools, system_prompt]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        tools:
+          type: array
+          items:
+            type: string
+        skills:
+          type: array
+          items:
+            type: string
+        system_prompt:
+          type: string
+
+    SkillSummary:
+      type: object
+      required: [slug, description]
+      properties:
+        slug:
+          type: string
+        description:
+          type: string
+
+    Skill:
+      type: object
+      required: [slug, description, body]
+      properties:
+        slug:
+          type: string
+        description:
+          type: string
+        body:
+          type: string
+
+    FlowSummary:
+      type: object
+      required: [id, name, node_count, created_at, updated_at, enabled]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        node_count:
+          type: integer
+        created_at:
+          type: string
+        updated_at:
+          type: string
+        enabled:
+          type: boolean
+
+    SavedFlow:
+      type: object
+      required: [id, name, created_at, updated_at, flow]
+      properties:
+        spec_version:
+          type: string
+        id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+        updated_at:
+          type: string
+        enabled:
+          type: boolean
+        flow:
+          type: object
+
+    DiagnosticsSessionSummary:
+      type: object
+      required: [id, timestamp]
+      properties:
+        id:
+          type: string
+        timestamp:
+          type: string
+        persona_slug:
+          type: string
+        model_name:
+          type: string
+
+    SessionInfo:
+      type: object
+      properties:
+        timestamp:
+          type: string
+        persona_name:
+          type: string
+        persona_slug:
+          type: string
+        model_name:
+          type: string
+        cwd:
+          type: string
+        system_prompt:
+          type: string
+        tools:
+          type: array
+          items:
+            type: string
+        skills:
+          type: array
+          items:
+            type: string
+        auto_approve:
+          type: boolean
+
+    DiagnosticsSession:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+        session_info:
+          $ref: '#/components/schemas/SessionInfo'
+        timeline:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimelineEvent'
+
+    TimelineEvent:
+      type: object
+      required: [kind, file]
+      properties:
+        kind:
+          type: string
+          enum: [turn, llm_request, config_change, compaction]
+        file:
+          type: string
+        data:
+          type: object
+
+    ApiToolConfig:
+      type: object
+      required: [name, description, method, url, parameters]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        method:
+          type: string
+        url:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        parameters:
+          type: object
+        body_mapping:
+          type: string
+        body_template:
+          type: string
+        body_defaults:
+          type: object
+
+    ApiToolSummary:
+      type: object
+      required: [name, description]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+
+    ProjectLayout:
+      type: object
+      required: [data_dir, personas_dir, skills_dir, flows_dir, logs_dir, api_tools_dir]
+      properties:
+        data_dir:
+          type: string
+        personas_dir:
+          type: string
+        skills_dir:
+          type: string
+        flows_dir:
+          type: string
+        logs_dir:
+          type: string
+        api_tools_dir:
+          type: string
+
+    ProjectSnapshot:
+      type: object
+      required: [personas, skills, flows, sessions, api_tools, layout]
+      properties:
+        personas:
+          type: array
+          items:
+            $ref: '#/components/schemas/PersonaSummary'
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkillSummary'
+        flows:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlowSummary'
+        sessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiagnosticsSessionSummary'
+        api_tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiToolSummary'
+        layout:
+          $ref: '#/components/schemas/ProjectLayout'
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+paths:
+  /api/v1/snapshot:
+    get:
+      summary: Full project snapshot
+      operationId: getSnapshot
+      responses:
+        '200':
+          description: Project snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectSnapshot'
+        '401':
+          description: Unauthorized
+
+  /api/v1/personas/{slug}:
+    get:
+      summary: Load one persona
+      operationId: getPersona
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Persona data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Persona'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      summary: Create or update a persona
+      operationId: putPersona
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Persona'
+      responses:
+        '200':
+          description: Persona saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Persona'
+        '400':
+          description: Invalid persona data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      summary: Delete a persona
+      operationId: deletePersona
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/skills/{slug}:
+    get:
+      summary: Load one skill
+      operationId: getSkill
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Skill data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Skill'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      summary: Create or update a skill
+      operationId: putSkill
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Skill'
+      responses:
+        '200':
+          description: Skill saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Skill'
+        '400':
+          description: Invalid skill data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      summary: Delete a skill
+      operationId: deleteSkill
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/flows/{id}:
+    get:
+      summary: Load one flow
+      operationId: getFlow
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Flow data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedFlow'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      summary: Create or update a flow
+      operationId: putFlow
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SavedFlow'
+      responses:
+        '200':
+          description: Flow saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavedFlow'
+        '400':
+          description: Invalid flow data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      summary: Delete a flow
+      operationId: deleteFlow
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/diagnostics:
+    get:
+      summary: List diagnostics sessions
+      operationId: listDiagnostics
+      responses:
+        '200':
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DiagnosticsSessionSummary'
+
+  /api/v1/diagnostics/{id}:
+    get:
+      summary: Load one diagnostics session
+      operationId: getDiagnosticsSession
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosticsSession'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/api-tools:
+    get:
+      summary: List API tool configs
+      operationId: listApiTools
+      responses:
+        '200':
+          description: List of API tools
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiToolSummary'
+
+  /api/v1/api-tools/{name}:
+    get:
+      summary: Load one API tool config
+      operationId: getApiTool
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: API tool config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiToolConfig'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      summary: Create or update an API tool config
+      operationId: putApiTool
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiToolConfig'
+      responses:
+        '200':
+          description: API tool saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiToolConfig'
+        '400':
+          description: Invalid config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      summary: Delete an API tool config
+      operationId: deleteApiTool
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'

@@ -1,7 +1,7 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Persona {
     pub name: String,
     pub description: String,
@@ -9,6 +9,13 @@ pub struct Persona {
     #[serde(default)]
     pub skills: Vec<String>,
     pub system_prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonaSummary {
+    pub slug: String,
+    pub name: String,
+    pub description: String,
 }
 
 impl Persona {
@@ -52,6 +59,39 @@ impl Persona {
 
         slugs.sort();
         slugs
+    }
+
+    /// Save this persona to disk under the given slug.
+    pub fn save(&self, slug: &str, personas_dir: &Path) -> Result<(), String> {
+        let file = personas_dir.join(format!("{}.json", slug));
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize persona: {e}"))?;
+        std::fs::write(&file, content)
+            .map_err(|e| format!("Failed to write {}: {e}", file.display()))
+    }
+
+    /// Delete a persona by slug.
+    pub fn delete(slug: &str, personas_dir: &Path) -> Result<(), String> {
+        let file = personas_dir.join(format!("{}.json", slug));
+        if !file.exists() {
+            return Err(format!("Persona '{}' not found", slug));
+        }
+        std::fs::remove_file(&file)
+            .map_err(|e| format!("Failed to delete {}: {e}", file.display()))
+    }
+
+    /// List persona summaries (slug + name + description) from the personas directory.
+    pub fn list_summaries(personas_dir: &Path) -> Vec<PersonaSummary> {
+        Self::list_available(personas_dir)
+            .into_iter()
+            .filter_map(|slug| {
+                Self::load(&slug, personas_dir).ok().map(|p| PersonaSummary {
+                    slug,
+                    name: p.name,
+                    description: p.description,
+                })
+            })
+            .collect()
     }
 
     /// Build the system prompt. Lists available skills by name — use `load_skill` tool to load on demand.

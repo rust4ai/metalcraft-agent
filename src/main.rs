@@ -6,6 +6,7 @@ use metalcraft_agent::guard;
 use metalcraft_agent::persona::Persona;
 use metalcraft_agent::runtime::{self, AgentRuntimeContext, AVAILABLE_MODELS, DEFAULT_MODEL};
 use metalcraft_agent::ui;
+use metalcraft_agent::workshop_api::{self, WorkshopApiConfig};
 use rig::client::CompletionClient;
 use rustyline::DefaultEditor;
 use std::path::{Path, PathBuf};
@@ -111,6 +112,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_context = AgentRuntimeContext::from_environment()?;
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Check for --api mode (workshop API server)
+    let api_key = raw_args
+        .windows(2)
+        .find(|w| w[0] == "--api")
+        .map(|w| w[1].clone())
+        .or_else(|| std::env::var("WORKSHOP_API_KEY").ok());
+
+    if api_key.is_some() || raw_args.iter().any(|a| a == "--api") {
+        let key = match api_key {
+            Some(k) => k,
+            None => {
+                eprintln!("{} --api requires an API key: --api <KEY> or set WORKSHOP_API_KEY", ui::error("Error:"));
+                std::process::exit(1);
+            }
+        };
+
+        let api_port: u16 = raw_args
+            .windows(2)
+            .find(|w| w[0] == "--api-port")
+            .map(|w| w[1].parse::<u16>().expect("invalid --api-port value"))
+            .or_else(|| std::env::var("WORKSHOP_API_PORT").ok().and_then(|p| p.parse().ok()))
+            .unwrap_or(3002);
+
+        workshop_api::start(WorkshopApiConfig {
+            port: api_port,
+            api_key: key,
+        })
+        .await;
+        return Ok(());
+    }
+
     let auto_approve = raw_args.iter().any(|a| a == "--auto-approve");
     let diagnostics_enabled = raw_args.iter().any(|a| a == "--diagnostics");
     let args: Vec<String> = raw_args

@@ -12,3 +12,4 @@ pub mod runtime;
 pub mod seed;
 pub mod tools;
 pub mod ui;
+pub mod workshop_api;
