@@ -3,6 +3,9 @@ name = "metalcraft-agent"
 version = "0.2.0"
 edition = "2021"
 default-run = "metalcraft-agent"
+description = "Interactive AI coding agent with personas, skills, and tool approval"
+license = "MIT"
+repository = "https://github.com/rust4ai/metalcraft-agent"
 
 [dependencies]
 metalcraft = { version = "0.3.3", features = ["rig"] }
