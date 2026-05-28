@@ -20,13 +20,16 @@ env_logger = "0.11"
 dotenvy = "0.15"
 rustyline = "15"
 crossterm = "0.29"
-reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
 htmd = "0.1"
 chalk-plus = "0.1.0"
 syntect = "5.3.0"
 cron = "0.15"
 dirs = "6"
+atty = "0.2"
 chrono = "0.4"
+axum = "0.8"
+uuid = { version = "1", features = ["v4"] }
 
 [[bin]]
 name = "metalcraft-agent"

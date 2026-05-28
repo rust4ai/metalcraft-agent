@@ -1,7 +1,9 @@
 pub mod bash;
+pub mod discord;
 pub mod edit_file;
 pub mod find_files;
 pub mod grep;
+pub mod http_api;
 pub mod list_files;
 pub mod load_skill;
 pub mod read_file;
@@ -53,6 +55,11 @@ pub fn create_registry_for_with_config(
                 }
             }
             "web_fetch" => registry.register(web_fetch::WebFetchTool),
+                        "discord_send_message" => registry.register(discord::DiscordSendMessageTool),
+            "discord_edit_message" => registry.register(discord::DiscordEditMessageTool),
+            "discord_add_reaction" => registry.register(discord::DiscordAddReactionTool),
+            "discord_get_messages" => registry.register(discord::DiscordGetMessagesTool),
+            "discord_get_channel_info" => registry.register(discord::DiscordGetChannelInfoTool),
             "sub_agent" => {
                 if let Some(cfg) = config {
                     registry.register(sub_agent::SubAgentTool::new(
@@ -66,8 +73,13 @@ pub fn create_registry_for_with_config(
                 }
             }
             unknown => {
-                log::warn!("Unknown tool '{}' in persona, skipping", unknown);
-                registry
+                // Try loading as a user-defined HTTP API tool
+                if let Some(api_tool) = http_api::HttpApiTool::try_load(unknown) {
+                    registry.register(api_tool)
+                } else {
+                    log::warn!("Unknown tool '{}' in persona, skipping", unknown);
+                    registry
+                }
             }
         };
     }

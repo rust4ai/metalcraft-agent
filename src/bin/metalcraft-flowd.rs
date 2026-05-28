@@ -1,4 +1,5 @@
 use metalcraft_agent::approval::ApprovalMode;
+use metalcraft_agent::event_listener::{self, EventListenerConfig};
 use metalcraft_agent::flows::{self, FlowSchedule};
 use metalcraft_agent::paths;
 use metalcraft_agent::runtime::{self, AgentRuntimeContext, RunOneShotRequest, DEFAULT_MODEL};
@@ -28,6 +29,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut once = false;
     let mut auto_approve = false;
 
+    // Event listener options
+    let mut event_port: u16 = std::env::var("EVENTD_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3001);
+    let mut event_host = std::env::var("EVENTD_HOST")
+        .unwrap_or_else(|_| "localhost".into());
+    let mut event_persona: Option<String> = None;
+    let mut event_types: Vec<String> = vec!["message_create".into()];
+    let mut event_platforms: Option<Vec<String>> = None;
+
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -50,6 +62,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--auto-approve" => {
                 auto_approve = true;
+            }
+            "--event-port" => {
+                let value = args.next().ok_or("--event-port requires a value")?;
+                event_port = value.parse()?;
+            }
+            "--event-host" => {
+                event_host = args.next().ok_or("--event-host requires a value")?;
+            }
+            "--event-persona" => {
+                event_persona = Some(args.next().ok_or("--event-persona requires a value")?);
+            }
+            "--events" => {
+                let value = args.next().ok_or("--events requires a value")?;
+                event_types = value.split(',').map(|s| s.trim().to_string()).collect();
+            }
+            "--platforms" => {
+                let value = args.next().ok_or("--platforms requires a value")?;
+                event_platforms = Some(value.split(',').map(|s| s.trim().to_string()).collect());
             }
             "--help" | "-h" => {
                 print_usage();
@@ -78,6 +108,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         once
     );
 
+    // Spawn event listener if gateway is configured
+    if std::env::var("AGENT_GATEWAY_URL").is_ok() {
+        let listener_config = EventListenerConfig {
+            port: event_port,
+            host: event_host,
+            persona_slug: event_persona.unwrap_or_else(|| persona_slug.clone()),
+            model_name: model_name.clone(),
+            events: event_types,
+            platforms: event_platforms,
+            webhook_secret: std::env::var("EVENTD_WEBHOOK_SECRET").ok(),
+            approval_mode: approval_mode.clone(),
+            cwd: cwd.clone(),
+        };
+
+        let listener_context = AgentRuntimeContext::from_environment()?;
+        tokio::spawn(async move {
+            event_listener::start(listener_config, listener_context).await;
+        });
+        log::info!("Event listener spawned on port {event_port}");
+    }
+
+    // Flow polling loop
     let mut state_by_flow: HashMap<String, FlowRunState> = HashMap::new();
 
     loop {
@@ -205,5 +257,20 @@ fn elapsed_due(state: Option<&FlowRunState>, interval: Duration) -> bool {
 }
 
 fn print_usage() {
-    println!("metalcraft-flowd [--flows-dir <path>] [--persona <slug>] [--model <name>] [--poll-seconds <n>] [--once] [--auto-approve]");
+    println!(
+        "metalcraft-flowd [OPTIONS]\n\n\
+         Flow options:\n  \
+           --flows-dir <path>       Flows directory\n  \
+           --persona <slug>         Persona for flow tasks (default: coding-agent)\n  \
+           --model <name>           LLM model name\n  \
+           --poll-seconds <n>       Poll interval (default: 30)\n  \
+           --once                   Run once and exit\n  \
+           --auto-approve           Skip tool approval prompts\n\n\
+         Event listener options (requires AGENT_GATEWAY_URL):\n  \
+           --event-port <n>         Webhook listener port (default: 3001)\n  \
+           --event-host <host>      Host for gateway callback URL (default: localhost)\n  \
+           --event-persona <slug>   Persona for event tasks (default: same as --persona)\n  \
+           --events <list>          Comma-separated event types (default: message_create)\n  \
+           --platforms <list>       Comma-separated platforms (default: all)"
+    );
 }

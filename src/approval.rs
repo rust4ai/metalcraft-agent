@@ -30,6 +30,7 @@ pub enum OperationKind {
     NetworkFetch,  // web_fetch
     SubAgent,      // sub_agent
     LoadSkill,     // load_skill
+    DiscordAction, // discord_send_message, discord_edit_message, discord_add_reaction
 }
 
 impl OperationKind {
@@ -55,6 +56,8 @@ impl OperationKind {
             "web_fetch" => Self::NetworkFetch,
             "sub_agent" => Self::SubAgent,
             "load_skill" => Self::LoadSkill,
+            "discord_send_message" | "discord_edit_message" | "discord_add_reaction" => Self::DiscordAction,
+            "discord_get_messages" | "discord_get_channel_info" => Self::ReadFile,
             // Default unknown tools to Execute (requires approval)
             _ => Self::Execute,
         }
@@ -70,6 +73,7 @@ impl OperationKind {
             Self::Execute => PermissionLevel::RequiresApproval,
             Self::NetworkFetch => PermissionLevel::RequiresApproval,
             Self::SubAgent => PermissionLevel::RequiresApproval,
+            Self::DiscordAction => PermissionLevel::RequiresApproval,
         }
     }
 
@@ -86,6 +90,7 @@ impl OperationKind {
             Self::NetworkFetch => "NetworkFetch",
             Self::SubAgent => "SubAgent",
             Self::LoadSkill => "LoadSkill",
+            Self::DiscordAction => "DiscordAction",
         }
     }
 }

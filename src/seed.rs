@@ -5,6 +5,7 @@ use std::path::Path;
 const SEED_PERSONAS: &[(&str, &str)] = &[
     ("coding-agent.json", include_str!("../seed/personas/coding-agent.json")),
     ("devops-agent.json", include_str!("../seed/personas/devops-agent.json")),
+    ("discord-agent.json", include_str!("../seed/personas/discord-agent.json")),
     ("research-agent.json", include_str!("../seed/personas/research-agent.json")),
     ("video-script-agent.json", include_str!("../seed/personas/video-script-agent.json")),
 ];
@@ -21,6 +22,8 @@ const SEED_SKILLS: &[(&str, &str)] = &[
     ("research-methodology.md", include_str!("../seed/skills/research-methodology.md")),
     ("summarize.md", include_str!("../seed/skills/summarize.md")),
     ("video-scripting.md", include_str!("../seed/skills/video-scripting.md")),
+    ("discord-etiquette.md", include_str!("../seed/skills/discord-etiquette.md")),
+    ("discord-formatting.md", include_str!("../seed/skills/discord-formatting.md")),
 ];
 
 /// Ensure default personas and skills exist in the app data directory.
@@ -31,6 +34,7 @@ pub fn ensure_defaults() {
         paths::skills_dir(),
         paths::flows_dir(),
         paths::logs_dir(),
+        paths::api_tools_dir(),
     ];
 
     for dir in &dirs {

@@ -145,7 +145,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut model_name = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let available_models = AVAILABLE_MODELS.to_vec();
 
-    let approval_mode = if auto_approve {
+    let is_headless = !atty::is(atty::Stream::Stdin);
+    let approval_mode = if auto_approve || is_headless {
+        if is_headless && !auto_approve {
+            eprintln!("{} {}", ui::warning("Notice:"), "no TTY detected, auto-approving all tools");
+        }
         ApprovalMode::AutoApprove
     } else {
         ApprovalMode::default_interactive()
@@ -228,6 +232,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         return Ok(());
+    }
+
+    if is_headless {
+        eprintln!("{} no TTY and no task provided. Use: metalcraft-agent <persona> \"<task>\"", ui::error("Error:"));
+        std::process::exit(1);
     }
 
     println!(

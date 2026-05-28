@@ -2,6 +2,8 @@ pub mod approval;
 pub mod context;
 pub mod diagnostics;
 pub mod diff_preview;
+pub mod event_listener;
+pub mod events;
 pub mod flows;
 pub mod guard;
 pub mod paths;
