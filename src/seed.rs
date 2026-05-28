@@ -6,6 +6,7 @@ const SEED_PERSONAS: &[(&str, &str)] = &[
     ("coding-agent.json", include_str!("../seed/personas/coding-agent.json")),
     ("devops-agent.json", include_str!("../seed/personas/devops-agent.json")),
     ("discord-agent.json", include_str!("../seed/personas/discord-agent.json")),
+    ("discord-reporter-agent.json", include_str!("../seed/personas/discord-reporter-agent.json")),
     ("research-agent.json", include_str!("../seed/personas/research-agent.json")),
     ("video-script-agent.json", include_str!("../seed/personas/video-script-agent.json")),
 ];
@@ -24,6 +25,10 @@ const SEED_SKILLS: &[(&str, &str)] = &[
     ("video-scripting.md", include_str!("../seed/skills/video-scripting.md")),
     ("discord-etiquette.md", include_str!("../seed/skills/discord-etiquette.md")),
     ("discord-formatting.md", include_str!("../seed/skills/discord-formatting.md")),
+];
+
+const SEED_FLOWS: &[(&str, &str)] = &[
+    ("daily-commit-summary.json", include_str!("../seed/flows/daily-commit-summary.json")),
 ];
 
 /// Ensure default personas and skills exist in the app data directory.
@@ -45,6 +50,7 @@ pub fn ensure_defaults() {
 
     write_seeds(&paths::personas_dir(), SEED_PERSONAS);
     write_seeds(&paths::skills_dir(), SEED_SKILLS);
+    write_seeds(&paths::flows_dir(), SEED_FLOWS);
 }
 
 fn write_seeds(dir: &Path, seeds: &[(&str, &str)]) {
