@@ -7,7 +7,6 @@ services:
       - "3000:3000"
     environment:
       PORT: "3000"
-      PLATFORM: discord
       AGENT_GATEWAY_API_KEY: ${AGENT_GATEWAY_API_KEY}
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN}
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}

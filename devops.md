@@ -41,7 +41,6 @@ Internet
 | Variable | Value | Required |
 |----------|-------|----------|
 | `PORT` | `3000` | Yes |
-| `PLATFORM` | `discord` | Yes |
 | `AGENT_GATEWAY_API_KEY` | (generate a strong random string) | Yes |
 | `DISCORD_BOT_TOKEN` | (from Discord Developer Portal) | Yes (for Discord) |
 | `GATEWAY_DB_PATH` | `/data/gateway.db` | Yes |
@@ -135,8 +134,7 @@ Railway → Service → **Logs** tab. Look for:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | HTTP server port | `3000` |
-| `PLATFORM` | Default platform when omitted from requests | — |
-| `AGENT_GATEWAY_API_KEY` | Bearer token for API auth | — (open if unset) |
+| `AGENT_GATEWAY_API_KEY` | Bearer token for API auth (required) | — |
 | `DISCORD_BOT_TOKEN` | Discord bot token (enables Discord) | — |
 | `SLACK_BOT_TOKEN` | Slack bot token (enables Slack) | — |
 | `SLACK_SIGNING_SECRET` | HMAC secret for Slack webhook verification | — |

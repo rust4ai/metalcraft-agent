@@ -128,7 +128,8 @@ impl metalcraft::Tool for DiscordSendMessageTool {
 
         let mut body = serde_json::json!({
             "channel_id": channel_id,
-            "content": content
+            "content": content,
+            "platform": "discord"
         });
         if let Some(ref_id) = args["message_reference_id"].as_str() {
             body["message_reference_id"] = serde_json::json!(ref_id);
@@ -197,7 +198,8 @@ impl metalcraft::Tool for DiscordEditMessageTool {
             &format!("/messages/{message_id}"),
             Some(serde_json::json!({
                 "channel_id": channel_id,
-                "content": content
+                "content": content,
+                "platform": "discord"
             })),
         )
         .await
@@ -256,7 +258,8 @@ impl metalcraft::Tool for DiscordAddReactionTool {
             &format!("/messages/{message_id}/reactions"),
             Some(serde_json::json!({
                 "channel_id": channel_id,
-                "emoji": emoji
+                "emoji": emoji,
+                "platform": "discord"
             })),
         )
         .await
@@ -303,7 +306,7 @@ impl metalcraft::Tool for DiscordGetMessagesTool {
         gateway_request(
             &client,
             reqwest::Method::GET,
-            &format!("/channels/{channel_id}/messages?limit={limit}"),
+            &format!("/channels/{channel_id}/messages?limit={limit}&platform=discord"),
             None,
         )
         .await
@@ -345,7 +348,7 @@ impl metalcraft::Tool for DiscordGetChannelInfoTool {
         gateway_request(
             &client,
             reqwest::Method::GET,
-            &format!("/channels/{channel_id}"),
+            &format!("/channels/{channel_id}?platform=discord"),
             None,
         )
         .await
