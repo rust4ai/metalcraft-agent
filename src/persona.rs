@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 pub struct Persona {
@@ -73,45 +73,6 @@ impl Persona {
         prompt
     }
 
-    /// Resolve the default personas directory relative to the executable or repo.
-    pub fn default_personas_dir() -> PathBuf {
-        // Check relative to cwd first (repo layout)
-        let cwd_based = PathBuf::from("personas");
-        if cwd_based.is_dir() {
-            return cwd_based;
-        }
-
-        // Fallback: next to executable
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                let exe_based = parent.join("personas");
-                if exe_based.is_dir() {
-                    return exe_based;
-                }
-            }
-        }
-
-        cwd_based
-    }
-
-    /// Resolve the default skills directory.
-    pub fn default_skills_dir() -> PathBuf {
-        let cwd_based = PathBuf::from("skills");
-        if cwd_based.is_dir() {
-            return cwd_based;
-        }
-
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                let exe_based = parent.join("skills");
-                if exe_based.is_dir() {
-                    return exe_based;
-                }
-            }
-        }
-
-        cwd_based
-    }
 }
 
 /// Parse YAML frontmatter description from a skill file.

@@ -1,10 +1,12 @@
 pub mod approval;
 pub mod context;
 pub mod diagnostics;
+pub mod diff_preview;
 pub mod flows;
 pub mod guard;
+pub mod paths;
 pub mod persona;
 pub mod runtime;
+pub mod seed;
 pub mod tools;
 pub mod ui;
-pub mod diff_preview;

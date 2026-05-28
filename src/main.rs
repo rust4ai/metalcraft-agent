@@ -106,6 +106,8 @@ fn print_persona_banner(persona: &Persona, persona_slug: &str, model_name: &str,
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
+    metalcraft_agent::seed::ensure_defaults();
+
     let runtime_context = AgentRuntimeContext::from_environment()?;
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();

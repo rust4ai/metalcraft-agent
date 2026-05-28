@@ -20,7 +20,7 @@ impl DiagnosticsLogger {
     /// Create a new diagnostics logger. Creates the session directory immediately.
     pub fn new() -> std::io::Result<Self> {
         let timestamp = chrono_timestamp();
-        let session_dir = PathBuf::from("logs").join(&timestamp);
+        let session_dir = crate::paths::logs_dir().join(&timestamp);
         std::fs::create_dir_all(&session_dir)?;
         Ok(Self {
             session_dir,

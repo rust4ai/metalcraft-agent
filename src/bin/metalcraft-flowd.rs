@@ -1,5 +1,6 @@
 use metalcraft_agent::approval::ApprovalMode;
 use metalcraft_agent::flows::{self, FlowSchedule};
+use metalcraft_agent::paths;
 use metalcraft_agent::runtime::{self, AgentRuntimeContext, RunOneShotRequest, DEFAULT_MODEL};
 
 use std::collections::HashMap;
@@ -18,7 +19,9 @@ struct FlowRunState {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
-    let mut flows_dir = flows::default_flows_dir();
+    metalcraft_agent::seed::ensure_defaults();
+
+    let mut flows_dir = paths::flows_dir();
     let mut persona_slug = "coding-agent".to_string();
     let mut model_name = DEFAULT_MODEL.to_string();
     let mut poll_seconds: u64 = 30;

@@ -1,6 +1,6 @@
 use metalcraft_flows::{validate, CoreNodeType, FlowNodeType, SavedFlow};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 
 #[derive(Debug, Clone)]
@@ -15,24 +15,6 @@ pub enum FlowSchedule {
 pub struct RunnableFlow {
     pub saved: SavedFlow,
     pub schedule: FlowSchedule,
-}
-
-pub fn default_flows_dir() -> PathBuf {
-    let cwd_based = PathBuf::from("flows");
-    if cwd_based.is_dir() {
-        return cwd_based;
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let exe_based = parent.join("flows");
-            if exe_based.is_dir() {
-                return exe_based;
-            }
-        }
-    }
-
-    cwd_based
 }
 
 pub fn load_enabled_flows(dir: &Path) -> Vec<RunnableFlow> {

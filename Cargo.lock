@@ -4976,13 +4976,14 @@ dependencies = [
 
 [[package]]
 name = "metalcraft-agent"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chalk-plus",
  "chrono",
  "cron",
  "crossterm",
+ "dirs",
  "dotenvy",
  "env_logger",
  "htmd",
@@ -5002,6 +5003,8 @@ dependencies = [
 [[package]]
 name = "metalcraft-flows"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e517e894102173fb2588a9bb33eee790dc7fba4ffa77ac6f17be5cbfe7a17b1d"
 dependencies = [
  "serde",
  "serde_json",
