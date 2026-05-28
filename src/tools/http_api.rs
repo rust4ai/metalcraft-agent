@@ -225,3 +225,158 @@ impl metalcraft::Tool for HttpApiTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_tool(config: HttpApiToolConfig) -> HttpApiTool {
+        HttpApiTool { config }
+    }
+
+    fn base_config() -> HttpApiToolConfig {
+        HttpApiToolConfig {
+            name: "test".into(),
+            description: "test tool".into(),
+            method: "GET".into(),
+            url: "http://localhost/api".into(),
+            headers: HashMap::new(),
+            parameters: json!({"type": "object", "properties": {}}),
+            body_mapping: "params".into(),
+            body_template: None,
+            body_defaults: HashMap::new(),
+        }
+    }
+
+    // -- clean_unexpanded_placeholders --
+
+    #[test]
+    fn clean_placeholders_no_query_string() {
+        let result = HttpApiTool::clean_unexpanded_placeholders("http://example.com/api/v1/channels/123");
+        assert_eq!(result, "http://example.com/api/v1/channels/123");
+    }
+
+    #[test]
+    fn clean_placeholders_all_expanded() {
+        let result = HttpApiTool::clean_unexpanded_placeholders("http://example.com/api?limit=10&platform=discord");
+        assert_eq!(result, "http://example.com/api?limit=10&platform=discord");
+    }
+
+    #[test]
+    fn clean_placeholders_removes_unexpanded() {
+        let result = HttpApiTool::clean_unexpanded_placeholders("http://example.com/api?limit={limit}&platform=discord");
+        assert_eq!(result, "http://example.com/api?platform=discord");
+    }
+
+    #[test]
+    fn clean_placeholders_all_unexpanded() {
+        let result = HttpApiTool::clean_unexpanded_placeholders("http://example.com/api?limit={limit}&offset={offset}");
+        assert_eq!(result, "http://example.com/api");
+    }
+
+    #[test]
+    fn clean_placeholders_mixed() {
+        let result = HttpApiTool::clean_unexpanded_placeholders(
+            "http://example.com/api?a=1&b={b}&c=3&d={d}",
+        );
+        assert_eq!(result, "http://example.com/api?a=1&c=3");
+    }
+
+    // -- build_body with body_defaults --
+
+    #[test]
+    fn build_body_params_no_defaults() {
+        let tool = make_tool(base_config());
+        let args = json!({"channel_id": "123", "content": "hello"});
+        let body = tool.build_body(&args).unwrap();
+        assert_eq!(body, args);
+    }
+
+    #[test]
+    fn build_body_params_with_defaults() {
+        let mut cfg = base_config();
+        cfg.body_defaults.insert("platform".into(), json!("discord"));
+        let tool = make_tool(cfg);
+        let args = json!({"channel_id": "123", "content": "hello"});
+        let body = tool.build_body(&args).unwrap();
+        assert_eq!(body["platform"], "discord");
+        assert_eq!(body["channel_id"], "123");
+        assert_eq!(body["content"], "hello");
+    }
+
+    #[test]
+    fn build_body_args_override_defaults() {
+        let mut cfg = base_config();
+        cfg.body_defaults.insert("platform".into(), json!("discord"));
+        let tool = make_tool(cfg);
+        let args = json!({"platform": "slack", "content": "hello"});
+        let body = tool.build_body(&args).unwrap();
+        assert_eq!(body["platform"], "slack");
+    }
+
+    #[test]
+    fn build_body_none_mapping() {
+        let mut cfg = base_config();
+        cfg.body_mapping = "none".into();
+        let tool = make_tool(cfg);
+        assert!(tool.build_body(&json!({"a": 1})).is_none());
+    }
+
+    // -- expand_url with placeholder cleaning --
+
+    #[test]
+    fn expand_url_replaces_provided_params() {
+        let mut cfg = base_config();
+        cfg.url = "http://localhost/channels/{channel_id}/messages?limit={limit}&platform=discord".into();
+        let tool = make_tool(cfg);
+        let args = json!({"channel_id": "456", "limit": 20});
+        let url = tool.expand_url(&args);
+        assert!(url.contains("/channels/456/messages"));
+        assert!(url.contains("limit=20"));
+        assert!(url.contains("platform=discord"));
+    }
+
+    #[test]
+    fn expand_url_cleans_missing_optional_params() {
+        let mut cfg = base_config();
+        cfg.url = "http://localhost/channels/{channel_id}/messages?limit={limit}&platform=discord".into();
+        let tool = make_tool(cfg);
+        let args = json!({"channel_id": "456"});
+        let url = tool.expand_url(&args);
+        assert!(url.contains("/channels/456/messages"));
+        assert!(!url.contains("limit"));
+        assert!(url.contains("platform=discord"));
+    }
+
+    // -- JSON config deserialization --
+
+    #[test]
+    fn deserialize_config_with_body_defaults() {
+        let json_str = r#"{
+            "name": "test_tool",
+            "description": "A test",
+            "method": "POST",
+            "url": "http://example.com/api",
+            "parameters": {"type": "object", "properties": {}},
+            "body_mapping": "params",
+            "body_defaults": {"platform": "discord"}
+        }"#;
+        let config: HttpApiToolConfig = serde_json::from_str(json_str).unwrap();
+        assert_eq!(config.body_defaults.get("platform").unwrap(), "discord");
+    }
+
+    #[test]
+    fn deserialize_config_without_body_defaults() {
+        let json_str = r#"{
+            "name": "test_tool",
+            "description": "A test",
+            "method": "GET",
+            "url": "http://example.com/api",
+            "parameters": {"type": "object", "properties": {}}
+        }"#;
+        let config: HttpApiToolConfig = serde_json::from_str(json_str).unwrap();
+        assert!(config.body_defaults.is_empty());
+        assert_eq!(config.body_mapping, "params");
+    }
+}
