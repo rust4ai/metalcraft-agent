@@ -25,7 +25,8 @@ pub struct EventListenerConfig {
     pub model_name: String,
     pub events: Vec<String>,
     pub platforms: Option<Vec<String>>,
-    pub webhook_secret: Option<String>,
+    pub webhook_secret: String,
+    pub admin_user_ids: Vec<String>,
     pub approval_mode: ApprovalMode,
     pub cwd: String,
 }
@@ -39,6 +40,11 @@ struct ListenerState {
 ///
 /// This function blocks until the server shuts down — call via `tokio::spawn`.
 pub async fn start(config: EventListenerConfig, _context: AgentRuntimeContext) {
+    if config.admin_user_ids.is_empty() {
+        log::error!("Event listener requires at least one admin user ID (--admin-user-ids or EVENTD_ADMIN_USER_IDS). Refusing to start.");
+        return;
+    }
+
     let port = config.port;
 
     let state = Arc::new(ListenerState {
@@ -80,18 +86,16 @@ async fn handle_event(
     headers: HeaderMap,
     Json(event): Json<GatewayEvent>,
 ) -> StatusCode {
-    // Verify webhook secret if configured
-    if let Some(ref expected) = state.config.webhook_secret {
-        let provided = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or_default();
+    // Verify webhook secret (required)
+    let provided = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
 
-        if provided != expected {
-            log::warn!("Rejected event with invalid webhook secret");
-            return StatusCode::UNAUTHORIZED;
-        }
+    if provided != state.config.webhook_secret {
+        log::warn!("Rejected event with invalid webhook secret");
+        return StatusCode::UNAUTHORIZED;
     }
 
     // Skip bot messages to prevent self-reply loops
@@ -102,6 +106,17 @@ async fn handle_event(
         .unwrap_or(false)
     {
         log::debug!("Skipping bot event from {}", event.author.as_ref().unwrap().username);
+        return StatusCode::OK;
+    }
+
+    // Only allow messages from configured admin user IDs
+    let author_id = event.author.as_ref().map(|a| a.id.as_str()).unwrap_or("");
+    if !state.config.admin_user_ids.iter().any(|id| id == author_id) {
+        log::debug!(
+            "Ignoring event from non-admin user {} ({})",
+            event.author.as_ref().map(|a| a.username.as_str()).unwrap_or("unknown"),
+            author_id,
+        );
         return StatusCode::OK;
     }
 
@@ -199,9 +214,7 @@ async fn register_subscriber(config: &EventListenerConfig) -> Option<String> {
         body["platforms"] = serde_json::json!(platforms);
     }
 
-    if let Some(ref secret) = config.webhook_secret {
-        body["secret"] = serde_json::json!(secret);
-    }
+    body["secret"] = serde_json::json!(config.webhook_secret);
 
     let client = reqwest::Client::new();
     match client

@@ -39,6 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut event_persona: Option<String> = None;
     let mut event_types: Vec<String> = vec!["message_create".into()];
     let mut event_platforms: Option<Vec<String>> = None;
+    let mut admin_user_ids: Vec<String> = std::env::var("EVENTD_ADMIN_USER_IDS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -81,6 +87,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let value = args.next().ok_or("--platforms requires a value")?;
                 event_platforms = Some(value.split(',').map(|s| s.trim().to_string()).collect());
             }
+            "--admin-user-ids" => {
+                let value = args.next().ok_or("--admin-user-ids requires a value")?;
+                admin_user_ids = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            }
             "--help" | "-h" => {
                 print_usage();
                 return Ok(());
@@ -110,6 +120,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn event listener if gateway is configured
     if std::env::var("AGENT_GATEWAY_URL").is_ok() {
+        let webhook_secret = match std::env::var("EVENTD_WEBHOOK_SECRET") {
+            Ok(s) if !s.is_empty() => s,
+            _ => {
+                log::error!("EVENTD_WEBHOOK_SECRET is required when AGENT_GATEWAY_URL is set. The event listener will not accept unauthenticated webhooks.");
+                return Err("Missing required env var: EVENTD_WEBHOOK_SECRET".into());
+            }
+        };
+
+        if admin_user_ids.is_empty() {
+            log::error!("EVENTD_ADMIN_USER_IDS (or --admin-user-ids) is required when AGENT_GATEWAY_URL is set. Set it to a comma-separated list of Discord/platform user IDs allowed to trigger the agent.");
+            return Err("Missing required config: admin user IDs".into());
+        }
+
+        if std::env::var("AGENT_GATEWAY_API_KEY").unwrap_or_default().is_empty() {
+            log::error!("AGENT_GATEWAY_API_KEY is required when AGENT_GATEWAY_URL is set.");
+            return Err("Missing required env var: AGENT_GATEWAY_API_KEY".into());
+        }
+
+        log::info!(
+            "Event listener: {} admin user(s) configured, listening for {:?}",
+            admin_user_ids.len(),
+            event_types,
+        );
+
         let listener_config = EventListenerConfig {
             port: event_port,
             host: event_host,
@@ -117,7 +151,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             model_name: model_name.clone(),
             events: event_types,
             platforms: event_platforms,
-            webhook_secret: std::env::var("EVENTD_WEBHOOK_SECRET").ok(),
+            webhook_secret,
+            admin_user_ids,
             approval_mode: approval_mode.clone(),
             cwd: cwd.clone(),
         };
@@ -271,6 +306,12 @@ fn print_usage() {
            --event-host <host>      Host for gateway callback URL (default: localhost)\n  \
            --event-persona <slug>   Persona for event tasks (default: same as --persona)\n  \
            --events <list>          Comma-separated event types (default: message_create)\n  \
-           --platforms <list>       Comma-separated platforms (default: all)"
+           --platforms <list>       Comma-separated platforms (default: all)\n  \
+           --admin-user-ids <list>  Comma-separated platform user IDs allowed to trigger the agent (required)\n\n\
+         Required env vars for event listener:\n  \
+           AGENT_GATEWAY_URL        Gateway base URL\n  \
+           AGENT_GATEWAY_API_KEY    Gateway auth token\n  \
+           EVENTD_WEBHOOK_SECRET    Secret for authenticating inbound webhooks\n  \
+           EVENTD_ADMIN_USER_IDS    Comma-separated admin user IDs (alternative to --admin-user-ids)"
     );
 }
