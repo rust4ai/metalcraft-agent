@@ -3,10 +3,10 @@ use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode};
 use metalcraft::BeforeToolCallAction;
 use crate::{diff_preview, ui};
 use std::cmp;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// How sensitive/destructive an operation is
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -120,6 +120,9 @@ pub fn build_hook(mode: ApprovalMode) -> Option<metalcraft::BeforeToolCallHook> 
     match mode {
         ApprovalMode::AutoApprove => None,
         ApprovalMode::Interactive { overrides } => {
+            // Files the user has already approved modifying this session. Once a
+            // path is approved, further overwrites/edits to it skip the prompt.
+            let approved_paths: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
             Some(Arc::new(move |name: &str, args: &serde_json::Value| {
                 let op = OperationKind::classify(name, args);
                 let level = overrides
@@ -128,10 +131,47 @@ pub fn build_hook(mode: ApprovalMode) -> Option<metalcraft::BeforeToolCallHook> 
                     .unwrap_or_else(|| op.default_permission());
                 match level {
                     PermissionLevel::AutoApprove => BeforeToolCallAction::Proceed,
-                    PermissionLevel::RequiresApproval => prompt_user(&op, name, args),
+                    PermissionLevel::RequiresApproval => {
+                        let path = rememberable_path(&op, args);
+
+                        // Already approved this file this session — don't re-prompt.
+                        if let Some(p) = &path {
+                            if approved_paths.lock().unwrap().contains(p) {
+                                eprintln!(
+                                    "  {}",
+                                    ui::dim(format!("↳ auto-approved {p} (remembered this session)"))
+                                );
+                                return BeforeToolCallAction::Proceed;
+                            }
+                        }
+
+                        let action = prompt_user(&op, name, args);
+
+                        // Remember a file approval so we stop asking for it.
+                        if matches!(action, BeforeToolCallAction::Proceed) {
+                            if let Some(p) = path {
+                                approved_paths.lock().unwrap().insert(p);
+                            }
+                        }
+                        action
+                    }
                 }
             }))
         }
+    }
+}
+
+/// The file path a per-file modification targets, if approving it should be
+/// remembered for the rest of the session. Only file-modifying operations
+/// qualify — execution, network, sub-agent and Discord actions are re-prompted
+/// every time since their effects differ across calls.
+fn rememberable_path(op: &OperationKind, args: &serde_json::Value) -> Option<String> {
+    match op {
+        OperationKind::OverwriteFile | OperationKind::EditFile => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        _ => None,
     }
 }
 
@@ -235,6 +275,18 @@ fn collect_diff_lines(tool_name: &str, args: &serde_json::Value) -> Vec<String> 
     }
 }
 
+/// Discard any keystrokes buffered before the prompt appeared (type-ahead).
+///
+/// While the agent is working, rustyline is not reading, so anything the user
+/// types sits in the terminal's input buffer. Without draining it, that stale
+/// input gets consumed by the approval prompt's `event::read()` and can
+/// silently answer (often deny) the prompt. Must be called in raw mode.
+fn drain_pending_input() {
+    while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
+        let _ = event::read();
+    }
+}
+
 /// Simple inline approval prompt (no scrolling needed).
 fn simple_approval_prompt() -> io::Result<bool> {
     eprintln!("  {}", ui::command("Approve?"));
@@ -256,15 +308,14 @@ fn simple_approval_inner() -> io::Result<bool> {
     let mut selected = 0usize;
     enable_raw_mode()?;
     let _guard = RawModeGuard;
+    drain_pending_input();
 
     loop {
         render_approval_menu(selected)?;
 
-        if !event::poll(std::time::Duration::from_secs(60))? {
-            eprintln!("\r\x1b[2K  {}", ui::dim("(timed out, denying)"));
-            return Ok(false);
-        }
-
+        // Block until the user presses a key. No timeout: we wait indefinitely
+        // rather than auto-denying, since the agent has nothing to do until the
+        // user responds anyway.
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Release {
                 continue;
@@ -310,6 +361,7 @@ fn interactive_diff_inner(header: &str, diff_lines: &[String]) -> io::Result<boo
     )?;
     enable_raw_mode()?;
     let _guard = RawModeGuard;
+    drain_pending_input();
 
     let mut scroll_offset: usize = 0;
     let mut selected: usize = 0; // 0 = Yes, 1 = No
@@ -374,11 +426,8 @@ fn interactive_diff_inner(header: &str, diff_lines: &[String]) -> io::Result<boo
 
         out.flush()?;
 
-        // Wait for input
-        if !event::poll(std::time::Duration::from_secs(120))? {
-            return Ok(false);
-        }
-
+        // Block until the user presses a key. No timeout: we wait indefinitely
+        // rather than auto-denying.
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Release {
                 continue;
