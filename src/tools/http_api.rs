@@ -52,21 +52,20 @@ impl HttpApiTool {
         Ok(Self { config })
     }
 
-    /// Try to load a tool by name from the api_tools directory.
-    /// Returns None if no matching config file exists.
+    /// Try to load a tool by name, resolving the local api_tools directory
+    /// first and falling back to any enabled integration pack (e.g. the
+    /// discord pack ships `discord_send_message` and friends).
+    /// Returns None if no matching config file exists anywhere.
     pub fn try_load(name: &str) -> Option<Self> {
         let dir = crate::paths::api_tools_dir();
-        let path = dir.join(format!("{name}.json"));
-        if path.exists() {
-            match Self::from_config_file(&path) {
-                Ok(tool) => Some(tool),
-                Err(e) => {
-                    log::warn!("Failed to load api tool config '{}': {}", name, e);
-                    None
-                }
+        let (path, _origin) =
+            crate::integration_packs::resolve_file(&dir, "api_tools", &format!("{name}.json"))?;
+        match Self::from_config_file(&path) {
+            Ok(tool) => Some(tool),
+            Err(e) => {
+                log::warn!("Failed to load api tool config '{}': {}", name, e);
+                None
             }
-        } else {
-            None
         }
     }
 

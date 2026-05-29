@@ -215,6 +215,53 @@ pub fn resolve_file(
     None
 }
 
+/// Diagnostic for a resolution miss: is `filename` provided by an installed
+/// pack that is currently *disabled*? Returns that pack's id so callers can
+/// tell the user to enable it instead of reporting a bare "not found".
+pub fn disabled_provider(pack_subdir: &str, filename: &str) -> Option<String> {
+    let state = load_state();
+    list_installed().into_iter().find_map(|pack| {
+        let enabled = state.get(&pack.manifest.id).map(|s| s.enabled).unwrap_or(false);
+        if enabled {
+            return None; // an enabled provider would already have resolved
+        }
+        pack.root
+            .join(pack_subdir)
+            .join(filename)
+            .exists()
+            .then_some(pack.manifest.id)
+    })
+}
+
+/// Resolve a file like [`resolve_file`], but on a miss return an actionable
+/// error string instead of `None`. This is the single resolution entry point
+/// for runtime loaders (personas, skills, api-tools) — keep the lookup and the
+/// error wording in one place.
+///
+/// `kind` is a human label ("Persona", "Skill", …) and `slug` is the bare name
+/// (no extension) used in the message.
+pub fn resolve_or_explain(
+    local_dir: &Path,
+    pack_subdir: &str,
+    filename: &str,
+    kind: &str,
+    slug: &str,
+) -> Result<(PathBuf, PackOrigin), String> {
+    if let Some(hit) = resolve_file(local_dir, pack_subdir, filename) {
+        return Ok(hit);
+    }
+    if let Some(pack_id) = disabled_provider(pack_subdir, filename) {
+        return Err(format!(
+            "{kind} '{slug}' is provided by integration pack '{pack_id}', which is disabled. \
+             Enable it in the workshop (Integration Packs) to use it."
+        ));
+    }
+    Err(format!(
+        "{kind} '{slug}' not found in {} or any enabled integration pack",
+        local_dir.display()
+    ))
+}
+
 /// Walk a user-local dir and every enabled pack's matching subdir, returning
 /// each file paired with where it came from. User-local entries always come
 /// first; pack entries with a slug that already appeared (i.e. shadowed by

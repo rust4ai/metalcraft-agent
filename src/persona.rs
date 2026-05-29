@@ -26,13 +26,17 @@ pub struct PersonaSummary {
 }
 
 impl Persona {
-    /// Load a persona by slug name from the personas directory.
-    /// Looks for `<personas_dir>/<slug>.json`.
+    /// Load a persona by slug, resolving the user-local `personas/` dir first
+    /// and falling back to any enabled integration pack. Pack personas (e.g.
+    /// the discord bundle) load here exactly like local ones.
     pub fn load(slug: &str, personas_dir: &Path) -> Result<Self, String> {
-        let file = personas_dir.join(format!("{}.json", slug));
-        if !file.exists() {
-            return Err(format!("Persona '{}' not found at {}", slug, file.display()));
-        }
+        let (file, _origin) = crate::integration_packs::resolve_or_explain(
+            personas_dir,
+            "personas",
+            &format!("{}.json", slug),
+            "Persona",
+            slug,
+        )?;
 
         let content = std::fs::read_to_string(&file)
             .map_err(|e| format!("Failed to read {}: {}", file.display(), e))?;
@@ -43,26 +47,16 @@ impl Persona {
         Ok(persona)
     }
 
-    /// List available persona slugs from the personas directory.
+    /// List available persona slugs from the local dir and every enabled pack
+    /// (user-local shadows pack on slug collision).
     pub fn list_available(personas_dir: &Path) -> Vec<String> {
-        let entries = match std::fs::read_dir(personas_dir) {
-            Ok(rd) => rd,
-            Err(_) => return vec![],
-        };
-
-        let mut slugs: Vec<String> = entries
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let path = e.path();
-                if path.extension().and_then(|x| x.to_str()) == Some("json") {
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut slugs: Vec<String> =
+            crate::integration_packs::list_files_layered(personas_dir, "personas", "json")
+                .into_iter()
+                .filter_map(|(path, _origin)| {
+                    path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
+                })
+                .collect();
 
         slugs.sort();
         slugs
@@ -87,17 +81,22 @@ impl Persona {
             .map_err(|e| format!("Failed to delete {}: {e}", file.display()))
     }
 
-    /// List persona summaries (slug + name + description) from the personas directory.
+    /// List persona summaries (slug + name + description) from the local dir
+    /// and every enabled pack, tagging each with its origin so the workshop can
+    /// mark pack-provided personas read-only.
     pub fn list_summaries(personas_dir: &Path) -> Vec<PersonaSummary> {
-        Self::list_available(personas_dir)
+        crate::integration_packs::list_files_layered(personas_dir, "personas", "json")
             .into_iter()
-            .filter_map(|slug| {
-                Self::load(&slug, personas_dir).ok().map(|p| PersonaSummary {
+            .filter_map(|(path, origin)| {
+                let slug = path.file_stem().and_then(|s| s.to_str())?.to_string();
+                let content = std::fs::read_to_string(&path).ok()?;
+                let p: Persona = serde_json::from_str(&content).ok()?;
+                Some(PersonaSummary {
                     slug,
                     name: p.name,
                     description: p.description,
-                    pack_id: None,
-                    read_only: false,
+                    pack_id: origin.pack_id().map(|s| s.to_string()),
+                    read_only: origin.is_read_only(),
                 })
             })
             .collect()
@@ -124,9 +123,14 @@ impl Persona {
 
 }
 
-/// Parse YAML frontmatter description from a skill file.
+/// Parse YAML frontmatter description from a skill file, resolving the local
+/// `skills/` dir first and falling back to any enabled integration pack.
 fn load_skill_description(name: &str, skills_dir: &Path) -> String {
-    let file = skills_dir.join(format!("{}.md", name));
+    let Some((file, _origin)) =
+        crate::integration_packs::resolve_file(skills_dir, "skills", &format!("{}.md", name))
+    else {
+        return "Specialized guidance".to_string();
+    };
     let content = match std::fs::read_to_string(&file) {
         Ok(c) => c,
         Err(_) => return "Specialized guidance".to_string(),

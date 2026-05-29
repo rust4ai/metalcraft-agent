@@ -44,7 +44,17 @@ impl metalcraft::Tool for LoadSkillTool {
             }));
         }
 
-        let file = self.skills_dir.join(format!("{}.md", skill_name));
+        // Resolve the local skills dir first, then any enabled integration
+        // pack (e.g. discord ships its own skills).
+        let (file, _origin) = crate::integration_packs::resolve_file(
+            &self.skills_dir,
+            "skills",
+            &format!("{}.md", skill_name),
+        )
+        .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+            tool: "load_skill".into(),
+            message: format!("Skill '{}' not found in skills dir or any enabled pack", skill_name),
+        })?;
         let content = std::fs::read_to_string(&file).map_err(|e| metalcraft::GraphError::ToolCallFailed {
             tool: "load_skill".into(),
             message: format!("Failed to read skill '{}': {}", skill_name, e),

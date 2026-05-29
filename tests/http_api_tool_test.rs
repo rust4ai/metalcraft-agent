@@ -1,7 +1,8 @@
 use metalcraft_agent::tools::http_api::HttpApiToolConfig;
 use std::path::Path;
 
-const SEED_DIR: &str = "seed/api_tools";
+// Discord api-tools moved into the discord integration pack (commit 063c07d).
+const SEED_DIR: &str = "seed/integration_packs/discord/api_tools";
 
 const DISCORD_TOOLS: &[&str] = &[
     "discord_send_message",
