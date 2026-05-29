@@ -36,8 +36,8 @@ name = "metalcraft-agent"
 path = "src/main.rs"
 
 [[bin]]
-name = "metalcraft-flowd"
-path = "src/bin/metalcraft-flowd.rs"
+name = "metalcraft-daemon"
+path = "src/bin/metalcraft-daemon.rs"
 
 [dev-dependencies]
 spice-framework = "0.1"

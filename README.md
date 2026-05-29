@@ -16,7 +16,7 @@ Metalcraft Agent is a Rust application leveraging the Metalcraft framework to cr
 
 - **Cargo.toml**: Configuration and dependencies for the Rust project.
 - **src/main.rs**: Entry point for the interactive/one-shot agent CLI.
-- **src/bin/metalcraft-flowd.rs**: Scheduler daemon binary for enabled local flows.
+- **src/bin/metalcraft-daemon.rs**: Scheduler daemon binary for enabled local flows.
 - **src/runtime.rs**: Shared one-shot agent runtime setup used by both binaries.
 - **src/flows.rs**: Flow loading, schedule parsing, and MVP flow execution helpers.
 - **src/lib.rs**: Core module declarations.
@@ -59,18 +59,18 @@ metalcraft-agent --auto-approve --diagnostics coding-agent "fix the login bug"
 
 ## Flow Daemon Usage
 
-`metalcraft-flowd` is a companion binary that polls a local flow directory, finds enabled workflow definitions, and runs reachable `prompt` nodes as one-shot agent tasks.
+`metalcraft-daemon` is a companion binary that polls a local flow directory, finds enabled workflow definitions, and runs reachable `prompt` nodes as one-shot agent tasks.
 
 By default it looks for flow JSON files in `flows/`. It first checks `./flows` from the current working directory, then falls back to a `flows/` directory next to the executable. The `flows/` directory is intended for local workflow definitions and is gitignored by default, along with `logs/`.
 
 ```bash
-cargo run --bin metalcraft-flowd -- --persona coding-agent --poll-seconds 30
+cargo run --bin metalcraft-daemon -- --persona coding-agent --poll-seconds 30
 ```
 
 You can also run a single scan and exit:
 
 ```bash
-cargo run --bin metalcraft-flowd -- --once --auto-approve
+cargo run --bin metalcraft-daemon -- --once --auto-approve
 ```
 
 ### Daemon behavior

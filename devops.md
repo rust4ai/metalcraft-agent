@@ -1,6 +1,6 @@
 # Railway Deployment Guide
 
-This guide covers deploying **metalcraft-agent-gateway** and **metalcraft-agent** (flowd) as two Railway services that communicate over Railway's private network.
+This guide covers deploying **metalcraft-agent-gateway** and **metalcraft-agent** (daemon) as two Railway services that communicate over Railway's private network.
 
 ## Architecture
 
@@ -12,7 +12,7 @@ Internet
 │  Railway Project                     │
 │                                      │
 │  ┌──────────────┐   private net    ┌────────────────┐
-│  │   gateway     │◄───────────────►│     flowd       │
+│  │   gateway     │◄───────────────►│     daemon      │
 │  │   (public)    │                 │   (private)     │
 │  │   port 3000   │   events ──────►│   port 3001     │
 │  └──────┬───────┘                 └────────────────┘
@@ -24,7 +24,7 @@ Internet
 ```
 
 - **gateway** is the only public-facing service. It receives Discord events via websocket, Slack/GitHub webhooks via HTTP, and serves the outbound messaging API.
-- **flowd** is private. It receives normalized events from the gateway over the internal network, runs LLM-powered agent tasks, and calls back to the gateway to send messages.
+- **daemon** is private. It receives normalized events from the gateway over the internal network, runs LLM-powered agent tasks, and calls back to the gateway to send messages.
 
 ## Step 1: Create a Railway Project
 
@@ -50,10 +50,10 @@ Internet
 | `GITHUB_WEBHOOK_SECRET` | (your chosen secret) | No |
 
 5. In Settings → Networking, **generate a public domain** (e.g. `gateway-xxx.up.railway.app`). This is needed for Slack/GitHub webhooks.
-6. Note the **internal hostname** shown in the Networking tab (e.g. `gateway.railway.internal`). You'll need this for the flowd service.
+6. Note the **internal hostname** shown in the Networking tab (e.g. `gateway.railway.internal`). You'll need this for the daemon service.
 7. Deploy.
 
-## Step 3: Deploy the Agent (flowd)
+## Step 3: Deploy the Agent (daemon)
 
 1. Click **"New Service"** → **"GitHub Repo"** → select `metalcraft-agent`.
 2. Railway will detect the `Dockerfile` and `railway.toml`.
@@ -66,14 +66,14 @@ Internet
 | `AGENT_GATEWAY_API_KEY` | (same value as gateway) | Yes |
 | `EVENTD_WEBHOOK_SECRET` | (generate a strong random string) | Yes |
 | `EVENTD_ADMIN_USER_IDS` | (your Discord user ID) | Yes |
-| `EVENTD_HOST` | (flowd's internal hostname, e.g. `flowd.railway.internal`) | Yes |
+| `EVENTD_HOST` | (daemon's internal hostname, e.g. `daemon.railway.internal`) | Yes |
 | `EVENTD_PORT` | `3001` | Yes |
 | `METALCRAFT_DATA_DIR` | `/data` | Recommended |
 | `RUST_LOG` | `info` | No |
 
 4. Override the **start command** in Settings → Deploy:
    ```
-   metalcraft-flowd --persona discord-agent --auto-approve --event-port 3001 --events message_create --platforms discord
+   metalcraft-daemon --persona discord-agent --auto-approve --event-port 3001 --events message_create --platforms discord
    ```
 5. In Settings → Networking, do **NOT** generate a public domain. This service should only be reachable via Railway's private network. Just ensure the internal port `3001` is set.
 6. Optionally add a **volume** at `/data` for persistent personas/skills/flows.
@@ -115,8 +115,8 @@ curl https://gateway-xxx.up.railway.app/api/v1/subscribers \
 ```
 Should return `[]` (empty list) or a list of subscribers.
 
-### Check flowd registered itself
-After flowd starts, repeat the above — you should see a subscriber entry with `url` pointing to flowd's internal address.
+### Check daemon registered itself
+After daemon starts, repeat the above — you should see a subscriber entry with `url` pointing to daemon's internal address.
 
 ### Test Discord
 Send a message in a Discord channel where the bot is present. If you are an admin user, the agent should respond.
@@ -124,8 +124,8 @@ Send a message in a Discord channel where the bot is present. If you are an admi
 ### Check logs
 Railway → Service → **Logs** tab. Look for:
 - Gateway: `Discord listener connected as BotName`
-- flowd: `Registered as gateway subscriber (id: ..., url: http://flowd.railway.internal:3001/webhook/events)`
-- flowd: `Processing message_create event from username in channel 123456`
+- daemon: `Registered as gateway subscriber (id: ..., url: http://daemon.railway.internal:3001/webhook/events)`
+- daemon: `Processing message_create event from username in channel 123456`
 
 ## Environment Variables Reference
 
@@ -142,7 +142,7 @@ Railway → Service → **Logs** tab. Look for:
 | `GATEWAY_DB_PATH` | SQLite database file path | `./gateway.db` |
 | `RUST_LOG` | Log level | `info` |
 
-### Agent/flowd (`metalcraft-agent`)
+### Agent/daemon (`metalcraft-agent`)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -158,9 +158,9 @@ Railway → Service → **Logs** tab. Look for:
 
 ## Scheduled Flows (e.g. Daily Commit Summary)
 
-Flows run alongside the event listener in the same flowd process. To set up the daily commit summary flow:
+Flows run alongside the event listener in the same daemon process. To set up the daily commit summary flow:
 
-1. SSH into the flowd service or use a Railway volume.
+1. SSH into the daemon service or use a Railway volume.
 2. Copy and edit the flow template:
    ```
    /data/flows/daily-commit-summary.json
@@ -168,23 +168,23 @@ Flows run alongside the event listener in the same flowd process. To set up the 
 3. Replace `OWNER/REPO` with the actual GitHub repo (e.g. `rust4ai/metalcraft-agent`).
 4. Replace `CHANNEL_ID` with the Discord channel ID to post in.
 5. Set `"enabled": true`.
-6. Restart flowd (or wait for the next poll cycle).
+6. Restart daemon (or wait for the next poll cycle).
 
 The flow uses the `discord-reporter-agent` persona. To use it, set the start command to:
 ```
-metalcraft-flowd --persona discord-reporter-agent --auto-approve --event-port 3001 --events message_create --platforms discord
+metalcraft-daemon --persona discord-reporter-agent --auto-approve --event-port 3001 --events message_create --platforms discord
 ```
 
 Or use `--event-persona discord-reporter-agent` to use a different persona for events vs flows.
 
 ## Troubleshooting
 
-**flowd can't reach gateway**: Check that `AGENT_GATEWAY_URL` uses the Railway internal hostname (e.g. `http://gateway.railway.internal:3000`), not the public URL.
+**daemon can't reach gateway**: Check that `AGENT_GATEWAY_URL` uses the Railway internal hostname (e.g. `http://gateway.railway.internal:3000`), not the public URL.
 
-**Gateway can't reach flowd**: Check that `EVENTD_HOST` matches flowd's Railway internal hostname and that port 3001 is exposed internally.
+**Gateway can't reach daemon**: Check that `EVENTD_HOST` matches daemon's Railway internal hostname and that port 3001 is exposed internally.
 
-**Agent doesn't respond to messages**: Check `EVENTD_ADMIN_USER_IDS` — only messages from listed user IDs are processed. Check the flowd logs for "Ignoring event from non-admin user".
+**Agent doesn't respond to messages**: Check `EVENTD_ADMIN_USER_IDS` — only messages from listed user IDs are processed. Check the daemon logs for "Ignoring event from non-admin user".
 
-**"Missing required env var" on startup**: flowd validates `EVENTD_WEBHOOK_SECRET`, `EVENTD_ADMIN_USER_IDS`, and `AGENT_GATEWAY_API_KEY` at boot. All three are required when `AGENT_GATEWAY_URL` is set.
+**"Missing required env var" on startup**: daemon validates `EVENTD_WEBHOOK_SECRET`, `EVENTD_ADMIN_USER_IDS`, and `AGENT_GATEWAY_API_KEY` at boot. All three are required when `AGENT_GATEWAY_URL` is set.
 
 **SQLite errors on gateway**: Ensure a Railway volume is mounted at `/data` and `GATEWAY_DB_PATH` is set to `/data/gateway.db`. Without a volume, the database resets on every deploy.

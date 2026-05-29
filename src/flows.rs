@@ -69,8 +69,25 @@ pub fn parse_schedule(flow: &SavedFlow) -> Result<FlowSchedule, String> {
     }
 }
 
-pub fn collect_reachable_prompt_texts(flow: &SavedFlow) -> Result<Vec<String>, String> {
+/// A reachable prompt node plus the persona it should run as.
+#[derive(Debug, Clone)]
+pub struct FlowPrompt {
+    pub prompt: String,
+    /// Resolved persona slug: the prompt node's `data.persona`, falling back to
+    /// the flow-level (entry node) `data.persona`. `None` means the daemon
+    /// should use its default (`--persona`).
+    pub persona: Option<String>,
+}
+
+pub fn collect_reachable_prompts(flow: &SavedFlow) -> Result<Vec<FlowPrompt>, String> {
     let entry = entry_node(flow)?;
+
+    // Flow-level default persona, optionally set on the entry node.
+    let flow_persona = entry
+        .data
+        .get("persona")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let node_map: HashMap<&str, &metalcraft_flows::FlowNode> = flow
         .flow
@@ -108,7 +125,16 @@ pub fn collect_reachable_prompt_texts(flow: &SavedFlow) -> Result<Vec<String>, S
                     .get("prompt")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| format!("flow '{}' prompt node '{}' is missing data.prompt", flow.id, node.id))?;
-                prompts.push(prompt.to_string());
+                let persona = node
+                    .data
+                    .get("persona")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| flow_persona.clone());
+                prompts.push(FlowPrompt {
+                    prompt: prompt.to_string(),
+                    persona,
+                });
             }
             FlowNodeType::Core(CoreNodeType::Branch) => {
                 return Err(format!("flow '{}' uses unsupported node type 'branch' at '{}'", flow.id, node.id));
@@ -155,5 +181,60 @@ fn read_positive_interval(value: Option<&serde_json::Value>, flow: &SavedFlow) -
         Err(format!("flow '{}' has interval 0; expected > 0", flow.id))
     } else {
         Ok(interval)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flow_with_personas(flow_persona: Option<&str>, prompt_persona: Option<&str>) -> SavedFlow {
+        let entry_persona = flow_persona
+            .map(|p| format!(", \"persona\": \"{p}\""))
+            .unwrap_or_default();
+        let prompt_persona = prompt_persona
+            .map(|p| format!(", \"persona\": \"{p}\""))
+            .unwrap_or_default();
+        let json = format!(
+            r#"{{
+                "spec_version": "1",
+                "id": "t",
+                "name": "T",
+                "created_at": "2026-05-28T00:00:00Z",
+                "updated_at": "2026-05-28T00:00:00Z",
+                "enabled": true,
+                "flow": {{
+                    "nodes": [
+                        {{ "id": "entry", "node_type": "entry", "data": {{ "schedule_type": "manual"{entry_persona} }}, "position": [0, 0] }},
+                        {{ "id": "p", "node_type": "prompt", "data": {{ "prompt": "do it"{prompt_persona} }}, "position": [1, 0] }}
+                    ],
+                    "edges": [ {{ "id": "e", "source": "entry", "target": "p" }} ]
+                }}
+            }}"#
+        );
+        serde_json::from_str(&json).expect("valid flow json")
+    }
+
+    #[test]
+    fn prompt_persona_defaults_to_none() {
+        let flow = flow_with_personas(None, None);
+        let prompts = collect_reachable_prompts(&flow).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].prompt, "do it");
+        assert_eq!(prompts[0].persona, None);
+    }
+
+    #[test]
+    fn prompt_inherits_flow_level_persona() {
+        let flow = flow_with_personas(Some("discord-reporter-agent"), None);
+        let prompts = collect_reachable_prompts(&flow).unwrap();
+        assert_eq!(prompts[0].persona.as_deref(), Some("discord-reporter-agent"));
+    }
+
+    #[test]
+    fn node_persona_overrides_flow_persona() {
+        let flow = flow_with_personas(Some("discord-reporter-agent"), Some("coding-agent"));
+        let prompts = collect_reachable_prompts(&flow).unwrap();
+        assert_eq!(prompts[0].persona.as_deref(), Some("coding-agent"));
     }
 }

@@ -127,7 +127,7 @@ async fn auth_middleware(
 
 /// Build the workshop API router. Callable from any binary that wants to
 /// host the admin API — `metalcraft-agent --api` runs it stand-alone while
-/// `metalcraft-flowd --api` mounts it alongside the event listener and the
+/// `metalcraft-daemon --api` mounts it alongside the event listener and the
 /// flow scheduler.
 pub fn build_router(api_key: String) -> Router {
     let state = Arc::new(ApiState { api_key });

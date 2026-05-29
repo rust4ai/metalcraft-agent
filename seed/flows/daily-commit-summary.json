@@ -12,7 +12,8 @@
         "node_type": "entry",
         "data": {
           "schedule_type": "hours",
-          "interval": 24
+          "interval": 24,
+          "persona": "discord-reporter-agent"
         },
         "position": [0.0, 0.0]
       },

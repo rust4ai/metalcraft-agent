@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?.display().to_string();
 
     log::info!(
-        "Starting metalcraft-flowd with flows_dir={}, persona={}, model={}, poll_seconds={}, once={}",
+        "Starting metalcraft-daemon with flows_dir={}, persona={}, model={}, poll_seconds={}, once={}",
         flows_dir.display(),
         persona_slug,
         model_name,
@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Spawn the workshop admin API if a key was supplied. Runs alongside
-    // the flow scheduler so a single flowd process can both run flows and
+    // the flow scheduler so a single daemon process can both run flows and
     // serve project edits from the workshop desktop app.
     if let Some(key) = workshop_api_key.clone() {
         let port = workshop_api_port;
@@ -220,26 +220,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             log::info!("Running flow '{}' ({})", flow.saved.id, flow.saved.name);
 
-            match flows::collect_reachable_prompt_texts(&flow.saved) {
+            match flows::collect_reachable_prompts(&flow.saved) {
                 Ok(prompts) => {
                     if prompts.is_empty() {
                         log::warn!("Flow '{}' has no reachable prompt nodes", flow.saved.id);
                     }
                     for (index, prompt) in prompts.iter().enumerate() {
+                        // Per-prompt/flow persona wins; otherwise fall back to --persona.
+                        let effective_persona = prompt.persona.as_deref().unwrap_or(&persona_slug);
                         log::info!(
-                            "Flow '{}' prompt {}/{}",
+                            "Flow '{}' prompt {}/{} (persona: {})",
                             flow.saved.id,
                             index + 1,
-                            prompts.len()
+                            prompts.len(),
+                            effective_persona
                         );
 
                         let outcome = runtime::run_one_shot_task(
                             &context,
                             RunOneShotRequest {
-                                persona_slug: &persona_slug,
+                                persona_slug: effective_persona,
                                 cwd: &cwd,
                                 model_name: &model_name,
-                                task: prompt,
+                                task: &prompt.prompt,
                                 approval_mode: approval_mode.clone(),
                                 diagnostics: None,
                             },
@@ -322,7 +325,7 @@ fn elapsed_due(state: Option<&FlowRunState>, interval: Duration) -> bool {
 
 fn print_usage() {
     println!(
-        "metalcraft-flowd [OPTIONS]\n\n\
+        "metalcraft-daemon [OPTIONS]\n\n\
          Flow options:\n  \
            --flows-dir <path>       Flows directory\n  \
            --persona <slug>         Persona for flow tasks (default: coding-agent)\n  \

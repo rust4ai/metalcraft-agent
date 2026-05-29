@@ -18,7 +18,7 @@ services:
       - gateway-data:/data
     restart: unless-stopped
 
-  flowd:
+  daemon:
     build:
       context: .
       dockerfile: Dockerfile
@@ -28,14 +28,14 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       AGENT_GATEWAY_URL: http://gateway:3000
       AGENT_GATEWAY_API_KEY: ${AGENT_GATEWAY_API_KEY}
-      EVENTD_HOST: flowd
+      EVENTD_HOST: daemon
       EVENTD_PORT: "3001"
       EVENTD_WEBHOOK_SECRET: ${EVENTD_WEBHOOK_SECRET}
       EVENTD_ADMIN_USER_IDS: ${EVENTD_ADMIN_USER_IDS}
       METALCRAFT_DATA_DIR: /data
       RUST_LOG: info
     command:
-      - metalcraft-flowd
+      - metalcraft-daemon
       - --persona
       - discord-agent
       - --auto-approve
@@ -46,11 +46,11 @@ services:
       - --platforms
       - discord
     volumes:
-      - flowd-data:/data
+      - daemon-data:/data
     depends_on:
       - gateway
     restart: unless-stopped
 
 volumes:
   gateway-data:
-  flowd-data:
+  daemon-data:
