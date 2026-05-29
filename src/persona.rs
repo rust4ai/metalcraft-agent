@@ -16,6 +16,13 @@ pub struct PersonaSummary {
     pub slug: String,
     pub name: String,
     pub description: String,
+    /// Set when this persona is provided by an enabled integration pack.
+    /// Local (user-owned) personas omit this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_id: Option<String>,
+    /// True for pack-provided personas — the workshop disables Save/Delete.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub read_only: bool,
 }
 
 impl Persona {
@@ -89,6 +96,8 @@ impl Persona {
                     slug,
                     name: p.name,
                     description: p.description,
+                    pack_id: None,
+                    read_only: false,
                 })
             })
             .collect()

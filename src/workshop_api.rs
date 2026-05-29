@@ -94,6 +94,10 @@ struct ProjectLayout {
 struct SkillSummary {
     slug: String,
     description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pack_id: Option<String>,
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    read_only: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -101,6 +105,10 @@ struct Skill {
     slug: String,
     description: String,
     body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pack_id: Option<String>,
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    read_only: bool,
 }
 
 #[derive(Serialize)]
@@ -132,6 +140,10 @@ struct TimelineEvent {
 struct ApiToolSummary {
     name: String,
     description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pack_id: Option<String>,
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    read_only: bool,
 }
 
 // ── Auth middleware ─────────────────────────────────────────────────────
@@ -199,6 +211,9 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/chats", get(list_chats).post(post_create_chat))
         .route("/api/v1/chats/{id}", get(get_chat).delete(delete_chat))
         .route("/api/v1/chats/{id}/turn", post(post_chat_turn))
+        .route("/api/v1/integration-packs", get(list_integration_packs))
+        .route("/api/v1/integration-packs/{id}", get(get_integration_pack))
+        .route("/api/v1/integration-packs/{id}/enabled", put(put_pack_enabled))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state)
 }
@@ -231,7 +246,7 @@ pub async fn start(config: WorkshopApiConfig) {
 // ── Snapshot handler ────────────────────────────────────────────────────
 
 async fn get_snapshot() -> Json<ProjectSnapshot> {
-    let personas = Persona::list_summaries(&paths::personas_dir());
+    let personas = list_persona_summaries();
     let skills = list_skill_summaries();
     let flows = metalcraft_flows::list_flows(&paths::flows_dir());
     let sessions = list_diagnostics_sessions();
@@ -256,14 +271,77 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
 
 // ── Persona handlers ────────────────────────────────────────────────────
 
+/// User-local personas plus enabled-pack personas, with locals shadowing
+/// packs on slug collision.
+fn list_persona_summaries() -> Vec<PersonaSummary> {
+    let layered = crate::integration_packs::list_files_layered(
+        &paths::personas_dir(),
+        "personas",
+        "json",
+    );
+    let mut out = Vec::with_capacity(layered.len());
+    for (path, origin) in layered {
+        let Some(slug) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(persona) = serde_json::from_str::<Persona>(&content) else {
+            continue;
+        };
+        out.push(PersonaSummary {
+            slug,
+            name: persona.name,
+            description: persona.description,
+            pack_id: origin.pack_id().map(String::from),
+            read_only: origin.is_read_only(),
+        });
+    }
+    out
+}
+
 async fn get_persona(Path(slug): Path<String>) -> Response {
-    match Persona::load(&slug, &paths::personas_dir()) {
+    let filename = format!("{slug}.json");
+    let Some((path, _origin)) = crate::integration_packs::resolve_file(
+        &paths::personas_dir(),
+        "personas",
+        &filename,
+    ) else {
+        return err_json(StatusCode::NOT_FOUND, format!("persona '{slug}' not found"));
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return err_json(StatusCode::NOT_FOUND, format!("persona '{slug}' not found"));
+    };
+    match serde_json::from_str::<Persona>(&content) {
         Ok(persona) => Json(persona).into_response(),
-        Err(_) => err_json(StatusCode::NOT_FOUND, format!("persona '{slug}' not found")),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to parse: {e}")),
     }
 }
 
 async fn put_persona(Path(slug): Path<String>, Json(persona): Json<Persona>) -> Response {
+    // Reject if this slug is currently owned by a pack — the user must pick
+    // a different slug instead of trying to shadow a read-only entry through
+    // this endpoint. (Genuine local shadows happen when the user creates a
+    // local file with the same slug via the filesystem.)
+    let filename = format!("{slug}.json");
+    let local_exists = paths::personas_dir().join(&filename).exists();
+    if !local_exists {
+        if let Some((_, origin)) = crate::integration_packs::resolve_file(
+            &paths::personas_dir(),
+            "personas",
+            &filename,
+        ) {
+            if let Some(pack_id) = origin.pack_id() {
+                return err_json(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "persona '{slug}' is provided by the '{pack_id}' integration pack and is read-only. Choose a different slug."
+                    ),
+                );
+            }
+        }
+    }
     match persona.save(&slug, &paths::personas_dir()) {
         Ok(()) => Json(persona).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
@@ -271,6 +349,15 @@ async fn put_persona(Path(slug): Path<String>, Json(persona): Json<Persona>) -> 
 }
 
 async fn delete_persona(Path(slug): Path<String>) -> Response {
+    let local = paths::personas_dir().join(format!("{slug}.json"));
+    if !local.exists() {
+        // Either the slug doesn't exist at all, or it's pack-owned. Either
+        // way the user can't delete it through this endpoint.
+        return err_json(
+            StatusCode::NOT_FOUND,
+            format!("persona '{slug}' is not a user-local persona"),
+        );
+    }
     match Persona::delete(&slug, &paths::personas_dir()) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => err_json(StatusCode::NOT_FOUND, format!("persona '{slug}' not found")),
@@ -280,39 +367,48 @@ async fn delete_persona(Path(slug): Path<String>) -> Response {
 // ── Skill handlers ──────────────────────────────────────────────────────
 
 fn list_skill_summaries() -> Vec<SkillSummary> {
-    let dir = paths::skills_dir();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(_) => return vec![],
-    };
-
-    let mut summaries: Vec<SkillSummary> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let path = e.path();
-            if path.extension().and_then(|x| x.to_str()) == Some("md") {
-                let slug = path.file_stem()?.to_str()?.to_string();
-                let content = std::fs::read_to_string(&path).ok()?;
-                let description = crate::persona::parse_frontmatter_description(&content)
-                    .unwrap_or_else(|| "No description".to_string());
-                Some(SkillSummary { slug, description })
-            } else {
-                None
-            }
+    let layered = crate::integration_packs::list_files_layered(
+        &paths::skills_dir(),
+        "skills",
+        "md",
+    );
+    let mut summaries: Vec<SkillSummary> = layered
+        .into_iter()
+        .filter_map(|(path, origin)| {
+            let slug = path.file_stem()?.to_str()?.to_string();
+            let content = std::fs::read_to_string(&path).ok()?;
+            let description = crate::persona::parse_frontmatter_description(&content)
+                .unwrap_or_else(|| "No description".to_string());
+            Some(SkillSummary {
+                slug,
+                description,
+                pack_id: origin.pack_id().map(String::from),
+                read_only: origin.is_read_only(),
+            })
         })
         .collect();
-
     summaries.sort_by(|a, b| a.slug.cmp(&b.slug));
     summaries
 }
 
 fn load_skill(slug: &str) -> Option<Skill> {
-    let path = paths::skills_dir().join(format!("{slug}.md"));
+    let filename = format!("{slug}.md");
+    let (path, origin) = crate::integration_packs::resolve_file(
+        &paths::skills_dir(),
+        "skills",
+        &filename,
+    )?;
     let content = std::fs::read_to_string(&path).ok()?;
     let description = crate::persona::parse_frontmatter_description(&content)
         .unwrap_or_default();
     let body = crate::persona::strip_frontmatter(&content).to_string();
-    Some(Skill { slug: slug.to_string(), description, body })
+    Some(Skill {
+        slug: slug.to_string(),
+        description,
+        body,
+        pack_id: origin.pack_id().map(String::from),
+        read_only: origin.is_read_only(),
+    })
 }
 
 fn save_skill(slug: &str, skill: &Skill) -> Result<(), String> {
@@ -330,8 +426,35 @@ async fn get_skill(Path(slug): Path<String>) -> Response {
 }
 
 async fn put_skill(Path(slug): Path<String>, Json(skill): Json<Skill>) -> Response {
+    // Block writing to a slug that's currently provided by a pack (the user
+    // would otherwise be shadowing read-only content silently).
+    let filename = format!("{slug}.md");
+    let local_exists = paths::skills_dir().join(&filename).exists();
+    if !local_exists {
+        if let Some((_, origin)) = crate::integration_packs::resolve_file(
+            &paths::skills_dir(),
+            "skills",
+            &filename,
+        ) {
+            if let Some(pack_id) = origin.pack_id() {
+                return err_json(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "skill '{slug}' is provided by the '{pack_id}' integration pack and is read-only. Choose a different slug."
+                    ),
+                );
+            }
+        }
+    }
     match save_skill(&slug, &skill) {
-        Ok(()) => Json(Skill { slug, ..skill }).into_response(),
+        Ok(()) => Json(Skill {
+            slug,
+            description: skill.description,
+            body: skill.body,
+            pack_id: None,
+            read_only: false,
+        })
+        .into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -339,7 +462,10 @@ async fn put_skill(Path(slug): Path<String>, Json(skill): Json<Skill>) -> Respon
 async fn delete_skill(Path(slug): Path<String>) -> Response {
     let path = paths::skills_dir().join(format!("{slug}.md"));
     if !path.exists() {
-        return err_json(StatusCode::NOT_FOUND, format!("skill '{slug}' not found"));
+        return err_json(
+            StatusCode::NOT_FOUND,
+            format!("skill '{slug}' is not a user-local skill"),
+        );
     }
     match std::fs::remove_file(&path) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -479,29 +605,24 @@ async fn get_diagnostics_session(Path(id): Path<String>) -> Response {
 // ── API Tool handlers ───────────────────────────────────────────────────
 
 fn list_api_tool_summaries() -> Vec<ApiToolSummary> {
-    let dir = paths::api_tools_dir();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(_) => return vec![],
-    };
-
-    let mut summaries: Vec<ApiToolSummary> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let path = e.path();
-            if path.extension().and_then(|x| x.to_str()) == Some("json") {
-                let content = std::fs::read_to_string(&path).ok()?;
-                let config: HttpApiToolConfig = serde_json::from_str(&content).ok()?;
-                Some(ApiToolSummary {
-                    name: config.name,
-                    description: config.description,
-                })
-            } else {
-                None
-            }
+    let layered = crate::integration_packs::list_files_layered(
+        &paths::api_tools_dir(),
+        "api_tools",
+        "json",
+    );
+    let mut summaries: Vec<ApiToolSummary> = layered
+        .into_iter()
+        .filter_map(|(path, origin)| {
+            let content = std::fs::read_to_string(&path).ok()?;
+            let config: HttpApiToolConfig = serde_json::from_str(&content).ok()?;
+            Some(ApiToolSummary {
+                name: config.name,
+                description: config.description,
+                pack_id: origin.pack_id().map(String::from),
+                read_only: origin.is_read_only(),
+            })
         })
         .collect();
-
     summaries.sort_by(|a, b| a.name.cmp(&b.name));
     summaries
 }
@@ -511,7 +632,14 @@ async fn list_api_tools() -> Json<Vec<ApiToolSummary>> {
 }
 
 async fn get_api_tool(Path(name): Path<String>) -> Response {
-    let path = paths::api_tools_dir().join(format!("{name}.json"));
+    let filename = format!("{name}.json");
+    let Some((path, _)) = crate::integration_packs::resolve_file(
+        &paths::api_tools_dir(),
+        "api_tools",
+        &filename,
+    ) else {
+        return err_json(StatusCode::NOT_FOUND, format!("api-tool '{name}' not found"));
+    };
     match std::fs::read_to_string(&path) {
         Ok(content) => match serde_json::from_str::<HttpApiToolConfig>(&content) {
             Ok(config) => Json(config).into_response(),
@@ -523,7 +651,25 @@ async fn get_api_tool(Path(name): Path<String>) -> Response {
 
 async fn put_api_tool(Path(name): Path<String>, Json(mut config): Json<HttpApiToolConfig>) -> Response {
     config.name = name.clone();
-    let path = paths::api_tools_dir().join(format!("{name}.json"));
+    let filename = format!("{name}.json");
+    let local_exists = paths::api_tools_dir().join(&filename).exists();
+    if !local_exists {
+        if let Some((_, origin)) = crate::integration_packs::resolve_file(
+            &paths::api_tools_dir(),
+            "api_tools",
+            &filename,
+        ) {
+            if let Some(pack_id) = origin.pack_id() {
+                return err_json(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "api-tool '{name}' is provided by the '{pack_id}' integration pack and is read-only. Choose a different name."
+                    ),
+                );
+            }
+        }
+    }
+    let path = paths::api_tools_dir().join(&filename);
     match serde_json::to_string_pretty(&config) {
         Ok(content) => match std::fs::write(&path, content) {
             Ok(()) => Json(config).into_response(),
@@ -536,7 +682,10 @@ async fn put_api_tool(Path(name): Path<String>, Json(mut config): Json<HttpApiTo
 async fn delete_api_tool(Path(name): Path<String>) -> Response {
     let path = paths::api_tools_dir().join(format!("{name}.json"));
     if !path.exists() {
-        return err_json(StatusCode::NOT_FOUND, format!("api-tool '{name}' not found"));
+        return err_json(
+            StatusCode::NOT_FOUND,
+            format!("api-tool '{name}' is not a user-local api-tool"),
+        );
     }
     match std::fs::remove_file(&path) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -550,29 +699,29 @@ async fn delete_api_tool(Path(name): Path<String>) -> Response {
 struct FlowTemplateSummary {
     slug: String,
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pack_id: Option<String>,
 }
 
 #[derive(Serialize)]
 struct FlowTemplate {
     slug: String,
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pack_id: Option<String>,
     /// The raw template flow JSON, ready to be cloned and edited as a new flow.
     flow: serde_json::Value,
 }
 
 fn list_flow_template_summaries() -> Vec<FlowTemplateSummary> {
-    let dir = paths::flow_templates_dir();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(_) => return vec![],
-    };
-    let mut summaries: Vec<FlowTemplateSummary> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let path = e.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("json") {
-                return None;
-            }
+    let layered = crate::integration_packs::list_files_layered(
+        &paths::flow_templates_dir(),
+        "flow_templates",
+        "json",
+    );
+    let mut summaries: Vec<FlowTemplateSummary> = layered
+        .into_iter()
+        .filter_map(|(path, origin)| {
             let slug = path.file_stem()?.to_str()?.to_string();
             let content = std::fs::read_to_string(&path).ok()?;
             let value: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -581,7 +730,11 @@ fn list_flow_template_summaries() -> Vec<FlowTemplateSummary> {
                 .and_then(|v| v.as_str())
                 .unwrap_or(&slug)
                 .to_string();
-            Some(FlowTemplateSummary { slug, name })
+            Some(FlowTemplateSummary {
+                slug,
+                name,
+                pack_id: origin.pack_id().map(String::from),
+            })
         })
         .collect();
     summaries.sort_by(|a, b| a.slug.cmp(&b.slug));
@@ -593,7 +746,14 @@ async fn list_flow_templates() -> Json<Vec<FlowTemplateSummary>> {
 }
 
 async fn get_flow_template(Path(slug): Path<String>) -> Response {
-    let path = paths::flow_templates_dir().join(format!("{slug}.json"));
+    let filename = format!("{slug}.json");
+    let Some((path, origin)) = crate::integration_packs::resolve_file(
+        &paths::flow_templates_dir(),
+        "flow_templates",
+        &filename,
+    ) else {
+        return err_json(StatusCode::NOT_FOUND, format!("template '{slug}' not found"));
+    };
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return err_json(StatusCode::NOT_FOUND, format!("template '{slug}' not found")),
@@ -609,7 +769,13 @@ async fn get_flow_template(Path(slug): Path<String>) -> Response {
         .and_then(|v| v.as_str())
         .unwrap_or(&slug)
         .to_string();
-    Json(FlowTemplate { slug, name, flow: value }).into_response()
+    Json(FlowTemplate {
+        slug,
+        name,
+        pack_id: origin.pack_id().map(String::from),
+        flow: value,
+    })
+    .into_response()
 }
 
 // ── Run flow handler ────────────────────────────────────────────────────
@@ -1349,3 +1515,127 @@ async fn run_chat_turn(
 use futures_util::StreamExt;
 #[allow(dead_code)]
 fn _stream_trait_in_scope<T: Stream<Item = ()>>(_: T) {}
+
+// ── Integration pack handlers ───────────────────────────────────────────
+
+#[derive(Serialize)]
+struct IntegrationPackSummary {
+    id: String,
+    name: String,
+    description: String,
+    version: String,
+    enabled: bool,
+    /// Number of personas/skills/api_tools/flow_templates the pack provides.
+    personas: usize,
+    skills: usize,
+    api_tools: usize,
+    flow_templates: usize,
+    #[serde(default)]
+    requires_env: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct IntegrationPackDetail {
+    id: String,
+    name: String,
+    description: String,
+    version: String,
+    enabled: bool,
+    #[serde(default)]
+    requires_env: Vec<String>,
+    personas: Vec<String>,
+    skills: Vec<String>,
+    api_tools: Vec<String>,
+    flow_templates: Vec<String>,
+}
+
+fn count_files(dir: &std::path::Path, ext: &str) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some(ext))
+        .count()
+}
+
+fn list_file_stems(dir: &std::path::Path, ext: &str) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = rd
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some(ext) {
+                return None;
+            }
+            Some(p.file_stem()?.to_str()?.to_string())
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+async fn list_integration_packs() -> Json<Vec<IntegrationPackSummary>> {
+    let state = crate::integration_packs::load_state();
+    let packs = crate::integration_packs::list_installed();
+    let summaries = packs
+        .into_iter()
+        .map(|p| IntegrationPackSummary {
+            enabled: state.get(&p.manifest.id).map(|s| s.enabled).unwrap_or(false),
+            personas: count_files(&p.personas_dir(), "json"),
+            skills: count_files(&p.skills_dir(), "md"),
+            api_tools: count_files(&p.api_tools_dir(), "json"),
+            flow_templates: count_files(&p.flow_templates_dir(), "json"),
+            id: p.manifest.id,
+            name: p.manifest.name,
+            description: p.manifest.description,
+            version: p.manifest.version,
+            requires_env: p.manifest.requires_env,
+        })
+        .collect();
+    Json(summaries)
+}
+
+async fn get_integration_pack(Path(id): Path<String>) -> Response {
+    let Some(pack) = crate::integration_packs::list_installed()
+        .into_iter()
+        .find(|p| p.manifest.id == id)
+    else {
+        return err_json(StatusCode::NOT_FOUND, format!("pack '{id}' not found"));
+    };
+    let enabled = crate::integration_packs::is_enabled(&id);
+    // Read file lists before moving the manifest fields out of `pack`.
+    let personas = list_file_stems(&pack.personas_dir(), "json");
+    let skills = list_file_stems(&pack.skills_dir(), "md");
+    let api_tools = list_file_stems(&pack.api_tools_dir(), "json");
+    let flow_templates = list_file_stems(&pack.flow_templates_dir(), "json");
+    Json(IntegrationPackDetail {
+        id: pack.manifest.id,
+        name: pack.manifest.name,
+        description: pack.manifest.description,
+        version: pack.manifest.version,
+        enabled,
+        requires_env: pack.manifest.requires_env,
+        personas,
+        skills,
+        api_tools,
+        flow_templates,
+    })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct SetEnabledRequest {
+    enabled: bool,
+}
+
+async fn put_pack_enabled(
+    Path(id): Path<String>,
+    Json(req): Json<SetEnabledRequest>,
+) -> Response {
+    match crate::integration_packs::set_enabled(&id, req.enabled) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}

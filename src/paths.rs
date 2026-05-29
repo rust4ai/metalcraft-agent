@@ -43,3 +43,11 @@ pub fn flow_templates_dir() -> PathBuf {
 pub fn chats_dir() -> PathBuf {
     data_dir().join("chats")
 }
+
+pub fn integration_packs_dir() -> PathBuf {
+    data_dir().join("integration_packs")
+}
+
+pub fn integration_packs_state_file() -> PathBuf {
+    data_dir().join("integration_packs.json")
+}
