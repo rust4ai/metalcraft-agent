@@ -19,6 +19,10 @@ struct FlowRunState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load .env FIRST so a file-provided METALCRAFT_DATA_DIR is honored by
+    // seeding (which resolves the data dir) and by RUST_LOG below. Otherwise
+    // seeding lands in the fallback dir while the runtime reads the override.
+    dotenvy::dotenv().ok();
     env_logger::init();
 
     metalcraft_agent::seed::ensure_defaults();
