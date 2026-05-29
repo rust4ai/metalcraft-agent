@@ -208,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &persona.tools,
                     &persona.skills,
                     auto_approve,
+                    None,
                 );
                 println!("  {} {}\n", ui::label("Diagnostics:"), ui::path(logger.session_dir().display().to_string()));
                 Some(Arc::new(logger))

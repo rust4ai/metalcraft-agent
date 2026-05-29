@@ -20,6 +20,7 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::approval::ApprovalMode;
+use crate::diagnostics::DiagnosticsLogger;
 use crate::flows;
 use crate::paths;
 use crate::persona::{Persona, PersonaSummary};
@@ -119,6 +120,12 @@ struct DiagnosticsSessionSummary {
     persona_slug: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_name: Option<String>,
+    /// "session" for a normal one-shot/diagnostics run, "flow" for a flow run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    /// Present (and `kind == "flow"`) when this session was produced by a flow run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flow_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -518,21 +525,26 @@ fn list_diagnostics_sessions() -> Vec<DiagnosticsSessionSummary> {
 
             // Try to read session_info.json for metadata
             let info_path = path.join("session_info.json");
-            let (persona_slug, model_name) = if let Ok(content) = std::fs::read_to_string(&info_path) {
-                let info: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
-                (
-                    info.get("persona_slug").and_then(|v| v.as_str()).map(String::from),
-                    info.get("model_name").and_then(|v| v.as_str()).map(String::from),
-                )
-            } else {
-                (None, None)
-            };
+            let (persona_slug, model_name, kind, flow_id) =
+                if let Ok(content) = std::fs::read_to_string(&info_path) {
+                    let info: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+                    (
+                        info.get("persona_slug").and_then(|v| v.as_str()).map(String::from),
+                        info.get("model_name").and_then(|v| v.as_str()).map(String::from),
+                        info.get("kind").and_then(|v| v.as_str()).map(String::from),
+                        info.get("flow_id").and_then(|v| v.as_str()).map(String::from),
+                    )
+                } else {
+                    (None, None, None, None)
+                };
 
             Some(DiagnosticsSessionSummary {
                 id: dir_name.clone(),
                 timestamp: dir_name,
                 persona_slug,
                 model_name,
+                kind,
+                flow_id,
             })
         })
         .collect();
@@ -835,11 +847,49 @@ async fn post_run_flow(
         .unwrap_or_else(|| "coding-agent".to_string());
     let model_name = req.model_name.unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
+    // Create a single diagnostics session for the whole flow run so it shows
+    // up in the Sessions list. All prompts log their turns into this one
+    // session directory; prompt boundaries are recorded as config-change
+    // events. The session is tagged with the flow id (kind == "flow").
+    let logger = match DiagnosticsLogger::new() {
+        Ok(l) => {
+            if let Ok(persona) = Persona::load(&persona_slug, &context.personas_dir) {
+                let system_prompt = persona.build_system_prompt(&context.skills_dir, &state.cwd);
+                l.log_session_info(
+                    &persona.name,
+                    &persona_slug,
+                    &model_name,
+                    &state.cwd,
+                    &system_prompt,
+                    &persona.tools,
+                    &persona.skills,
+                    true,
+                    Some(&id),
+                );
+            }
+            Some(Arc::new(l))
+        }
+        Err(e) => {
+            eprintln!("flow run: failed to create diagnostics logger: {e}");
+            None
+        }
+    };
+
     let mut results = Vec::with_capacity(prompts.len());
     for (i, fp) in prompts.iter().enumerate() {
         // Each prompt node can override the persona; fall back to the
         // request-level persona if it doesn't.
         let effective_persona = fp.persona.as_deref().unwrap_or(&persona_slug);
+        if let Some(l) = &logger {
+            l.log_config_change(
+                "flow_prompt",
+                serde_json::json!({
+                    "index": i,
+                    "persona": effective_persona,
+                    "prompt": fp.prompt,
+                }),
+            );
+        }
         let outcome = runtime::run_one_shot_task(
             &context,
             RunOneShotRequest {
@@ -848,7 +898,7 @@ async fn post_run_flow(
                 model_name: &model_name,
                 task: &fp.prompt,
                 approval_mode: ApprovalMode::AutoApprove,
-                diagnostics: None,
+                diagnostics: logger.clone(),
             },
         )
         .await;

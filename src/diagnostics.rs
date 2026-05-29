@@ -44,6 +44,7 @@ impl DiagnosticsLogger {
         tools: &[String],
         skills: &[String],
         auto_approve: bool,
+        flow_id: Option<&str>,
     ) {
         let info = json!({
             "timestamp": chrono_timestamp(),
@@ -55,6 +56,8 @@ impl DiagnosticsLogger {
             "tools": tools,
             "skills": skills,
             "auto_approve": auto_approve,
+            "kind": if flow_id.is_some() { "flow" } else { "session" },
+            "flow_id": flow_id,
         });
         let path = self.session_dir.join("session_info.json");
         if let Err(e) = write_json(&path, &info) {
