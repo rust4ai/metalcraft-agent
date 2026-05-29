@@ -152,6 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Spawn event listener if gateway is configured
+    let mut event_listener_enabled = false;
     if std::env::var("AGENT_GATEWAY_URL").is_ok() {
         let webhook_secret = match std::env::var("EVENTD_WEBHOOK_SECRET") {
             Ok(s) if !s.is_empty() => s,
@@ -195,7 +196,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             event_listener::start(listener_config, listener_context).await;
         });
         log::info!("Event listener spawned on port {event_port}");
+        event_listener_enabled = true;
     }
+
+    // Always-visible startup banner. Unlike the log::info! lines above, this
+    // prints regardless of RUST_LOG (env_logger defaults to `error`), so a bare
+    // `./metalcraft-daemon` isn't silent.
+    println!("──────────────────────────────────────────────");
+    println!("  metalcraft-daemon running");
+    println!("  persona:        {persona_slug}");
+    println!("  model:          {model_name}");
+    println!("  flows dir:      {}", flows_dir.display());
+    if once {
+        println!("  mode:           run once, then exit");
+    } else {
+        println!("  mode:           polling every {poll_seconds}s");
+    }
+    match &workshop_api_key {
+        Some(_) => println!("  workshop API:   enabled on port {workshop_api_port}"),
+        None => println!("  workshop API:   disabled (pass --api <KEY> to enable)"),
+    }
+    if event_listener_enabled {
+        println!("  event listener: enabled on port {event_port}");
+    } else {
+        println!("  event listener: disabled (set AGENT_GATEWAY_URL to enable)");
+    }
+    println!("──────────────────────────────────────────────");
 
     // Flow polling loop
     let mut state_by_flow: HashMap<String, FlowRunState> = HashMap::new();

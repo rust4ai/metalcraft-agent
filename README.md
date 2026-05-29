@@ -96,6 +96,26 @@ The daemon tracks in-memory run state so interval-based flows are only re-run on
 - **`--auto-approve`**: Skip approval prompts for daemon-run tasks.
 - **`--help` / `-h`**: Print daemon usage.
 
+#### Workshop API flags
+
+The daemon can also serve the workshop admin API (used by the workshop desktop app to edit projects) alongside the flow scheduler in a single process.
+
+- **`--api <KEY>`**: Enable the workshop admin API, authenticated with Bearer `<KEY>`. Can also be set via the `WORKSHOP_API_KEY` env var (so Railway/Docker can enable it without flag wiring).
+- **`--api-port <n>`**: Port for the workshop API. Defaults to `3002`. Can also be set via `WORKSHOP_API_PORT`, or `PORT`.
+
+#### Event listener flags
+
+Active only when `AGENT_GATEWAY_URL` is set; the daemon then listens for inbound webhooks (e.g. Discord `message_create`) and runs them as agent tasks.
+
+- **`--event-port <n>`**: Webhook listener port. Defaults to `3001` (env: `EVENTD_PORT`).
+- **`--event-host <host>`**: Host for the gateway callback URL. Defaults to `localhost` (env: `EVENTD_HOST`).
+- **`--event-persona <slug>`**: Persona for event-triggered tasks. Defaults to the same value as `--persona`.
+- **`--events <list>`**: Comma-separated event types to handle. Defaults to `message_create`.
+- **`--platforms <list>`**: Comma-separated platforms to accept. Defaults to all.
+- **`--admin-user-ids <list>`**: Comma-separated platform user IDs allowed to trigger the agent (env: `EVENTD_ADMIN_USER_IDS`). Required when `AGENT_GATEWAY_URL` is set.
+
+When the event listener is enabled, `AGENT_GATEWAY_API_KEY` and `EVENTD_WEBHOOK_SECRET` are also required.
+
 ### Supported schedules and nodes
 
 Current daemon behavior intentionally supports a limited MVP subset of the flow spec.
