@@ -123,16 +123,16 @@ async fn auth_middleware(
     next.run(request).await
 }
 
-// ── Server startup ─────────────────────────────────────────────────────
+// ── Router + server ────────────────────────────────────────────────────
 
-pub async fn start(config: WorkshopApiConfig) {
-    let port = config.port;
+/// Build the workshop API router. Callable from any binary that wants to
+/// host the admin API — `metalcraft-agent --api` runs it stand-alone while
+/// `metalcraft-flowd --api` mounts it alongside the event listener and the
+/// flow scheduler.
+pub fn build_router(api_key: String) -> Router {
+    let state = Arc::new(ApiState { api_key });
 
-    let state = Arc::new(ApiState {
-        api_key: config.api_key,
-    });
-
-    let app = Router::new()
+    Router::new()
         .route("/api/v1/snapshot", get(get_snapshot))
         .route("/api/v1/personas/{slug}", get(get_persona))
         .route("/api/v1/personas/{slug}", put(put_persona))
@@ -150,8 +150,11 @@ pub async fn start(config: WorkshopApiConfig) {
         .route("/api/v1/api-tools/{name}", put(put_api_tool))
         .route("/api/v1/api-tools/{name}", delete(delete_api_tool))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
-        .with_state(state);
+        .with_state(state)
+}
 
+/// Bind and serve the router on the given port. Blocks until ctrl-c.
+pub async fn serve(port: u16, router: Router) {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .expect("Failed to bind workshop API listener");
@@ -163,10 +166,16 @@ pub async fn start(config: WorkshopApiConfig) {
         tokio::signal::ctrl_c().await.ok();
     };
 
-    axum::serve(listener, app)
+    axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal)
         .await
         .expect("Workshop API server error");
+}
+
+/// Foreground entrypoint used by `metalcraft-agent --api`. Equivalent to
+/// `serve(config.port, build_router(config.api_key))`.
+pub async fn start(config: WorkshopApiConfig) {
+    serve(config.port, build_router(config.api_key)).await;
 }
 
 // ── Snapshot handler ────────────────────────────────────────────────────

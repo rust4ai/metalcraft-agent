@@ -3,6 +3,7 @@ use metalcraft_agent::event_listener::{self, EventListenerConfig};
 use metalcraft_agent::flows::{self, FlowSchedule};
 use metalcraft_agent::paths;
 use metalcraft_agent::runtime::{self, AgentRuntimeContext, RunOneShotRequest, DEFAULT_MODEL};
+use metalcraft_agent::workshop_api;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -45,6 +46,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+
+    // Workshop API options. `--api <KEY>` enables it; `WORKSHOP_API_KEY` env
+    // var works too so Railway / Docker can drive it without flag wiring.
+    let mut workshop_api_key: Option<String> = std::env::var("WORKSHOP_API_KEY").ok();
+    let mut workshop_api_port: u16 = std::env::var("WORKSHOP_API_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .or_else(|| std::env::var("PORT").ok().and_then(|p| p.parse().ok()))
+        .unwrap_or(3002);
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -91,6 +101,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let value = args.next().ok_or("--admin-user-ids requires a value")?;
                 admin_user_ids = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             }
+            "--api" => {
+                workshop_api_key = Some(args.next().ok_or("--api requires a key")?);
+            }
+            "--api-port" => {
+                let value = args.next().ok_or("--api-port requires a value")?;
+                workshop_api_port = value.parse()?;
+            }
             "--help" | "-h" => {
                 print_usage();
                 return Ok(());
@@ -117,6 +134,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         poll_seconds,
         once
     );
+
+    // Spawn the workshop admin API if a key was supplied. Runs alongside
+    // the flow scheduler so a single flowd process can both run flows and
+    // serve project edits from the workshop desktop app.
+    if let Some(key) = workshop_api_key.clone() {
+        let port = workshop_api_port;
+        let router = workshop_api::build_router(key);
+        tokio::spawn(async move {
+            workshop_api::serve(port, router).await;
+        });
+        log::info!("Workshop API spawned on port {port}");
+    }
 
     // Spawn event listener if gateway is configured
     if std::env::var("AGENT_GATEWAY_URL").is_ok() {
@@ -308,6 +337,9 @@ fn print_usage() {
            --events <list>          Comma-separated event types (default: message_create)\n  \
            --platforms <list>       Comma-separated platforms (default: all)\n  \
            --admin-user-ids <list>  Comma-separated platform user IDs allowed to trigger the agent (required)\n\n\
+         Workshop API options:\n  \
+           --api <KEY>              Enable workshop admin API with Bearer KEY (env: WORKSHOP_API_KEY)\n  \
+           --api-port <n>           Workshop API port (default: 3002, env: WORKSHOP_API_PORT or PORT)\n\n\
          Required env vars for event listener:\n  \
            AGENT_GATEWAY_URL        Gateway base URL\n  \
            AGENT_GATEWAY_API_KEY    Gateway auth token\n  \
