@@ -234,6 +234,14 @@ fn prompt_user(
         }
     };
 
+    // Echo the decision so the user gets immediate confirmation that their
+    // keypress registered. Raw mode is already torn down by this point.
+    match &result {
+        Ok(true) => eprintln!("  {}", ui::success("✓ Approved")),
+        Ok(false) => eprintln!("  {}", ui::error("✗ Denied")),
+        Err(_) => {}
+    }
+
     match result {
         Ok(true) => BeforeToolCallAction::Proceed,
         Ok(false) => BeforeToolCallAction::Deny(format!("User denied tool '{tool_name}'")),
