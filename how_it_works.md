@@ -371,14 +371,19 @@ the single `entry` node's `data.schedule_type`:
 
 - `manual` — parsed but **never auto-run** by the daemon.
 - `minutes` / `hours` — require a positive numeric `interval`.
-- `cron` — the expression is validated with the `cron` crate (so a bad expression is
-  rejected at load time).
+- `cron` — a `data.cron` expression, validated with the `cron` crate at load time (a bad
+  expression causes the flow to be skipped). The crate uses a **6/7-field** format
+  (`sec min hour dom month dow [year]`, seconds required) plus `@daily`/`@hourly`/etc.
+  shorthands. **It runs** — see the poll loop below — and is evaluated in the daemon's
+  **local timezone** (`chrono::Local`); use `TZ=UTC` for UTC scheduling.
 
-`collect_reachable_prompt_texts` does a **BFS from the single entry node** over the edges and
-collects `data.prompt` from each reachable `prompt` node, in traversal order. It explicitly
-**errors** on `branch`, `branch_tool`, or custom node types — these are recognized but not
-yet executed. Constraints: exactly one entry node, prompts must have `data.prompt`, only
-reachable prompts run, and they run sequentially.
+`collect_reachable_prompts` does a **BFS from the single entry node** over the edges and
+collects each reachable `prompt` node (its `data.prompt`) in traversal order, along with the
+persona it should run as. **Persona resolution** per prompt: the prompt node's `data.persona`,
+else the entry node's `data.persona` (flow-wide default), else `None` (meaning the daemon's
+`--persona` flag is used). It explicitly **errors** on `branch`, `branch_tool`, or custom node
+types — these are recognized but not yet executed. Constraints: exactly one entry node, prompts
+must have `data.prompt`, only reachable prompts run, and they run sequentially.
 
 ### The poll loop (`src/bin/metalcraft-daemon.rs`)
 
@@ -396,8 +401,9 @@ Each cycle:
      since `last_started_at`.
    - `Cron` → due if the next scheduled time after the last start is ≤ now.
 3. If due and not already marked running, mark it running, set `last_started_at`, collect
-   the reachable prompts, and run each one via `runtime::run_one_shot_task` with the daemon's
-   persona/model/approval settings. Results are logged.
+   the reachable prompts, and run each one via `runtime::run_one_shot_task`. Each prompt uses
+   its resolved persona (flow/node `data.persona`, falling back to `--persona`); model and
+   approval settings come from the daemon. Results are logged.
 4. Run state is kept **in-memory only** (a `HashMap<flow_id, FlowRunState>`) — restarting the
    daemon forgets history, so interval flows run again on next start.
 5. With `--once`, exit after one pass; otherwise sleep `poll-seconds` and repeat.

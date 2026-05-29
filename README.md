@@ -89,7 +89,7 @@ The daemon tracks in-memory run state so interval-based flows are only re-run on
 ### Daemon flags
 
 - **`--flows-dir <path>`**: Override the default `flows/` directory.
-- **`--persona <slug>`**: Persona used to execute prompt nodes. Defaults to `coding-agent`.
+- **`--persona <slug>`**: Default persona for prompt nodes. Defaults to `coding-agent`. A flow can override this per-flow (entry node `data.persona`) or per-node (prompt node `data.persona`); see [Per-flow persona](#per-flow-persona).
 - **`--model <name>`**: Model name to use. Defaults to `gpt-5.4`.
 - **`--poll-seconds <n>`**: Poll interval for checking enabled flows. Defaults to `30`.
 - **`--once`**: Perform one scan/run pass and exit.
@@ -105,10 +105,7 @@ Supported schedules:
 - `manual` — parsed, but never auto-run by the daemon
 - `minutes`
 - `hours`
-
-Accepted but not yet executed:
-
-- `cron` — recognized, but currently logged and skipped
+- `cron` — run on a cron schedule (see [Cron schedules](#cron-schedules))
 
 Supported node types:
 
@@ -128,6 +125,40 @@ Other current constraints:
 - only reachable prompt nodes are executed
 - prompts run sequentially in BFS traversal order
 - flow run history is kept in memory only for the current daemon process
+
+### Cron schedules
+
+Set `schedule_type` to `cron` and provide a `cron` expression in the entry node's `data`:
+
+```json
+{ "id": "entry", "node_type": "entry",
+  "data": { "schedule_type": "cron", "cron": "0 0 0 * * *" }, "position": [0, 0] }
+```
+
+Notes:
+
+- The expression uses the `cron` crate's **6- or 7-field** format
+  (`sec min hour day-of-month month day-of-week [year]`) — seconds are **required**,
+  so a standard 5-field crontab line will not parse. Shorthands like `@daily`,
+  `@hourly`, and `@weekly` are also accepted.
+- Examples: `0 0 0 * * *` = every day at 00:00; `0 30 9 * * Mon-Fri` = 09:30 on weekdays;
+  `0 0 */6 * * *` = every 6 hours on the hour.
+- Times are evaluated in the **daemon process's local timezone**, not UTC. To schedule
+  in UTC, run the daemon with `TZ=UTC` (e.g. `TZ=UTC metalcraft-daemon ...` or set `TZ`
+  in the container/Railway env).
+- The expression is validated when the flow is loaded; an invalid expression causes the
+  flow to be skipped with a logged warning.
+
+### Per-flow persona
+
+By default every prompt node runs as the daemon's `--persona`. A flow can override this:
+
+- **Per-flow**: set `data.persona` on the `entry` node — applies to all prompt nodes.
+- **Per-node**: set `data.persona` on an individual `prompt` node — overrides the
+  flow-level value for just that prompt.
+
+Resolution order for each prompt: prompt node `data.persona` → entry node `data.persona`
+→ `--persona` flag (default `coding-agent`).
 
 ### Example flow file
 

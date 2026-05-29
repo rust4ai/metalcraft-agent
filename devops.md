@@ -170,12 +170,13 @@ Flows run alongside the event listener in the same daemon process. To set up the
 5. Set `"enabled": true`.
 6. Restart daemon (or wait for the next poll cycle).
 
-The flow uses the `discord-reporter-agent` persona. To use it, set the start command to:
-```
-metalcraft-daemon --persona discord-reporter-agent --auto-approve --event-port 3001 --events message_create --platforms discord
-```
-
-Or use `--event-persona discord-reporter-agent` to use a different persona for events vs flows.
+The flow runs as the `discord-reporter-agent` persona because its entry node sets
+`"data": { ..., "persona": "discord-reporter-agent" }`. Per-flow persona is resolved
+independently of the daemon's `--persona` flag, so a single daemon can run flows under
+different personas while still serving events under whatever `--persona`/`--event-persona`
+you choose. To run a flow on a fixed wall-clock time instead of an interval, use a cron
+schedule on the entry node, e.g. `"schedule_type": "cron", "cron": "0 0 0 * * *"` (daily
+at 00:00). Cron times use the process's local timezone — set `TZ=UTC` for UTC scheduling.
 
 ## Troubleshooting
 
