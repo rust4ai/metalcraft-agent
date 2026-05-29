@@ -56,6 +56,7 @@ pub fn ensure_defaults() {
         paths::logs_dir(),
         paths::api_tools_dir(),
         paths::flow_templates_dir(),
+        paths::chats_dir(),
     ];
 
     for dir in &dirs {

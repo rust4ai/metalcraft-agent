@@ -165,9 +165,14 @@ pub fn build_router(api_key: String) -> Router {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".into());
+    // Rehydrate chats from disk so they survive restarts.
+    let persisted = load_persisted_chats();
+    if !persisted.is_empty() {
+        log::info!("Loaded {} persisted chat(s) from disk", persisted.len());
+    }
     let state = Arc::new(ApiState {
         api_key,
-        chats: Arc::new(Mutex::new(HashMap::new())),
+        chats: Arc::new(Mutex::new(persisted)),
         cwd,
     });
 
@@ -731,20 +736,23 @@ struct ChatDetail {
 }
 
 /// Wire form for `metalcraft::AgentMessage` — the in-memory enum isn't
-/// `Serialize`, so we convert before responding.
-#[derive(Serialize, Clone)]
+/// `Serialize`, so we convert before responding. Also used as the on-disk
+/// format for persisted chats, so it derives `Deserialize` too.
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "role", rename_all = "snake_case")]
 enum ChatMessageWire {
     User { content: String },
     Assistant { content: String },
     ToolCall {
         id: String,
+        #[serde(default)]
         call_id: Option<String>,
         name: String,
         args: serde_json::Value,
     },
     ToolResult {
         id: String,
+        #[serde(default)]
         call_id: Option<String>,
         name: String,
         result: String,
@@ -770,6 +778,154 @@ impl From<&AgentMessage> for ChatMessageWire {
             },
         }
     }
+}
+
+impl From<ChatMessageWire> for AgentMessage {
+    fn from(w: ChatMessageWire) -> Self {
+        match w {
+            ChatMessageWire::User { content } => AgentMessage::User(content),
+            ChatMessageWire::Assistant { content } => AgentMessage::Assistant(content),
+            ChatMessageWire::ToolCall { id, call_id, name, args } => {
+                AgentMessage::ToolCall { id, call_id, name, args }
+            }
+            ChatMessageWire::ToolResult { id, call_id, name, result } => {
+                AgentMessage::ToolResult { id, call_id, name, result }
+            }
+        }
+    }
+}
+
+/// On-disk shape for a persisted chat. Mirrors [`ChatSession`] but flattens
+/// the optional `AgentState` to a plain message vec so the file is human-
+/// readable and tolerant of metalcraft API changes.
+#[derive(Serialize, Deserialize)]
+struct PersistedChat {
+    id: String,
+    persona_slug: String,
+    model_name: String,
+    cwd: String,
+    created_at: String,
+    #[serde(default)]
+    messages: Vec<ChatMessageWire>,
+}
+
+fn chat_file_path(id: &str) -> std::path::PathBuf {
+    paths::chats_dir().join(format!("{id}.json"))
+}
+
+/// Snapshot the session and write it to disk. Holds the mutex briefly to
+/// collect data, drops it before the (synchronous) write.
+async fn persist_chat(session: &Arc<Mutex<ChatSession>>) {
+    let snapshot = {
+        let s = session.lock().await;
+        PersistedChat {
+            id: s.id.clone(),
+            persona_slug: s.persona_slug.clone(),
+            model_name: s.model_name.clone(),
+            cwd: s.cwd.clone(),
+            created_at: s.created_at.clone(),
+            messages: s
+                .state
+                .as_ref()
+                .map(|st| st.messages.iter().map(ChatMessageWire::from).collect())
+                .unwrap_or_default(),
+        }
+    };
+    let path = chat_file_path(&snapshot.id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(&snapshot) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                log::warn!("failed to persist chat {}: {e}", snapshot.id);
+            }
+        }
+        Err(e) => log::warn!("failed to serialize chat {}: {e}", snapshot.id),
+    }
+}
+
+fn remove_chat_file(id: &str) {
+    let path = chat_file_path(id);
+    if path.exists() {
+        if let Err(e) = std::fs::remove_file(&path) {
+            log::warn!("failed to delete chat file {}: {e}", path.display());
+        }
+    }
+}
+
+/// Load all chats from `<data>/chats/` into the in-memory store. Called once
+/// at startup. Any chat whose file is malformed is logged and skipped.
+fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
+    let dir = paths::chats_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(_) => return HashMap::new(),
+    };
+    let mut out = HashMap::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("failed to read chat file {}: {e}", path.display());
+                continue;
+            }
+        };
+        let pc: PersistedChat = match serde_json::from_str(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("failed to parse chat file {}: {e}", path.display());
+                continue;
+            }
+        };
+        let state = if pc.messages.is_empty() {
+            None
+        } else {
+            // Reconstruct an AgentState from the persisted messages. Rebuild
+            // it from scratch using `new` + push so we don't have to mark
+            // every field of AgentState public.
+            let mut iter = pc.messages.into_iter();
+            let first = match iter.next() {
+                Some(m) => m,
+                None => {
+                    log::warn!("empty messages on chat {} after non-empty check", pc.id);
+                    continue;
+                }
+            };
+            // First message should be a User in normal flow; if not, seed with
+            // an empty user message so AgentState::new is satisfied.
+            let mut st = match first {
+                ChatMessageWire::User { ref content } => AgentState::new(content.clone()),
+                _ => {
+                    let mut s = AgentState::new("");
+                    s.messages.clear();
+                    s.messages.push(first.into());
+                    s
+                }
+            };
+            for m in iter {
+                st.messages.push(m.into());
+            }
+            st.is_done = true; // turns are completed when persisted
+            Some(st)
+        };
+        let session = ChatSession {
+            id: pc.id.clone(),
+            persona_slug: pc.persona_slug,
+            model_name: pc.model_name,
+            cwd: pc.cwd,
+            state,
+            created_at: pc.created_at,
+            busy: false, // anything that was busy at shutdown couldn't have
+                          // finished cleanly; reset so the user can retry.
+        };
+        out.insert(pc.id.clone(), Arc::new(Mutex::new(session)));
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -825,6 +981,7 @@ async fn post_create_chat(
     };
     let session_arc = Arc::new(Mutex::new(session));
     state.chats.lock().await.insert(id.clone(), session_arc.clone());
+    persist_chat(&session_arc).await;
     let s = session_arc.lock().await;
     Json(ChatSummary {
         id: s.id.clone(),
@@ -861,6 +1018,8 @@ async fn get_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) ->
 async fn delete_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
     let mut chats = state.chats.lock().await;
     if chats.remove(&id).is_some() {
+        drop(chats);
+        remove_chat_file(&id);
         StatusCode::NO_CONTENT.into_response()
     } else {
         err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"))
@@ -873,13 +1032,43 @@ struct ChatTurnRequest {
 }
 
 /// SSE event wire format. One JSON object per event. The `kind` field
-/// discriminates; payloads vary by kind.
+/// discriminates; payloads vary by kind. Events form a lifecycle:
+///   `turn_started` → (`llm_started` → `llm_completed`
+///                   → `tool_started`* → `tool_completed`*)+
+///                   → `done`
+/// (`tool_started` and `tool_completed` can repeat per LLM step.)
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ChatEvent {
-    /// One or more new messages appended this step (typically a single
-    /// assistant message and any tool calls/results from that step).
-    Messages { messages: Vec<ChatMessageWire> },
+    /// Marks the start of a turn — emitted once at the top of `post_chat_turn`
+    /// so the workshop can open a new group in the transcript.
+    TurnStarted {
+        turn_index: usize,
+        user_message: String,
+    },
+    /// LLM call has started. Paired with a later `LlmCompleted`.
+    LlmStarted,
+    /// LLM call finished. `messages` is any new assistant message(s); tool
+    /// calls produced by this LLM step are emitted as separate `ToolStarted`
+    /// events immediately after.
+    LlmCompleted {
+        messages: Vec<ChatMessageWire>,
+        duration_ms: u64,
+    },
+    /// A tool the LLM requested is about to run.
+    ToolStarted {
+        tool_call_id: String,
+        name: String,
+        args: serde_json::Value,
+    },
+    /// The tool finished. `result` is the `ToolResult` message that was
+    /// appended to state.
+    ToolCompleted {
+        tool_call_id: String,
+        name: String,
+        duration_ms: u64,
+        result: ChatMessageWire,
+    },
     /// Terminal event. `status` is "completed" | "interrupted" | "failed".
     Done {
         status: String,
@@ -905,12 +1094,17 @@ async fn post_chat_turn(
     // Lock the session up-front: stamp it busy, snapshot what we need to run
     // the executor, and seed/continue the AgentState. If anything fails we
     // release `busy` before returning.
-    let (persona_slug, model_name, cwd, agent_state) = {
+    let (persona_slug, model_name, cwd, agent_state, turn_index) = {
         let mut s = session.lock().await;
         if s.busy {
             return err_json(StatusCode::CONFLICT, "chat is already mid-turn");
         }
         s.busy = true;
+        let prior_turns = s
+            .state
+            .as_ref()
+            .map(|st| st.messages.iter().filter(|m| matches!(m, AgentMessage::User(_))).count())
+            .unwrap_or(0);
         let next_state = match s.state.take() {
             Some(prev) => prev.continue_with(req.message.clone()),
             None => AgentState::new(req.message.clone()),
@@ -920,6 +1114,7 @@ async fn post_chat_turn(
             s.model_name.clone(),
             s.cwd.clone(),
             next_state,
+            prior_turns, // new turn's index = prior count (0-based)
         )
     };
 
@@ -937,27 +1132,121 @@ async fn post_chat_turn(
         }
     };
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<ChatEvent>(32);
+    let (tx, rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
     let session_for_task = session.clone();
 
+    // TurnStarted goes out immediately so the workshop can open a fresh
+    // group in the transcript before any agent activity.
+    let _ = tx
+        .send(ChatEvent::TurnStarted {
+            turn_index: turn_index,
+            user_message: req.message.clone(),
+        })
+        .await;
+
     tokio::spawn(async move {
-        let tx_for_guard = tx.clone();
+        // Per-turn timing state, shared between the LlmCallHook (start) and
+        // the step_guard (finish).
+        let llm_started_at: Arc<std::sync::Mutex<Option<std::time::Instant>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let tools_in_flight: Arc<std::sync::Mutex<HashMap<String, std::time::Instant>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        // LlmCallHook fires before each LLM call. Open the stopwatch and
+        // notify the client.
+        let llm_call_hook: metalcraft::LlmCallHook = {
+            let tx = tx.clone();
+            let started = llm_started_at.clone();
+            Arc::new(move |_snapshot: &metalcraft::LlmCallSnapshot| {
+                *started.lock().unwrap() = Some(std::time::Instant::now());
+                let _ = tx.try_send(ChatEvent::LlmStarted);
+            })
+        };
+
+        // step_guard fires after every node step. Diff against `seen` to
+        // pick up newly-appended messages and translate them into the
+        // appropriate fine-grained events.
         let seen_up_to = Arc::new(std::sync::Mutex::new(agent_state.messages.len()));
         let step_guard: StepGuard<AgentState> = {
-            let tx = tx_for_guard.clone();
+            let tx = tx.clone();
             let seen = seen_up_to.clone();
+            let llm_started_at = llm_started_at.clone();
+            let tools_in_flight = tools_in_flight.clone();
             Arc::new(move |state: &AgentState, _ev| {
                 let mut guard = seen.lock().unwrap();
-                if *guard < state.messages.len() {
-                    let new_msgs: Vec<ChatMessageWire> = state.messages[*guard..]
-                        .iter()
-                        .map(ChatMessageWire::from)
-                        .collect();
-                    *guard = state.messages.len();
-                    // try_send: if the receiver is gone (client disconnected)
-                    // we silently drop events; the executor still finishes.
-                    let _ = tx.try_send(ChatEvent::Messages { messages: new_msgs });
+                if *guard >= state.messages.len() {
+                    return GuardAction::Continue;
                 }
+                let new = &state.messages[*guard..];
+                *guard = state.messages.len();
+
+                // Bucket the new messages so we can emit:
+                //   LlmCompleted (with assistant text + duration) FIRST,
+                //   then ToolStarted per ToolCall,
+                //   then ToolCompleted per ToolResult.
+                let mut assistant_msgs: Vec<ChatMessageWire> = Vec::new();
+                let mut new_tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
+                let mut new_tool_results: Vec<(String, String, ChatMessageWire)> = Vec::new();
+
+                for m in new {
+                    match m {
+                        AgentMessage::Assistant(_) => assistant_msgs.push(ChatMessageWire::from(m)),
+                        AgentMessage::ToolCall { id, name, args, .. } => {
+                            new_tool_calls.push((id.clone(), name.clone(), args.clone()));
+                        }
+                        AgentMessage::ToolResult { id, name, .. } => {
+                            new_tool_results.push((id.clone(), name.clone(), ChatMessageWire::from(m)));
+                        }
+                        AgentMessage::User(_) => {
+                            // User messages mid-turn shouldn't happen, but
+                            // include them in the assistant batch so they
+                            // aren't silently dropped.
+                            assistant_msgs.push(ChatMessageWire::from(m));
+                        }
+                    }
+                }
+
+                // If this step had any LLM-produced messages, close the
+                // LLM stopwatch. (Pure tool steps leave the stopwatch alone.)
+                if !assistant_msgs.is_empty() || !new_tool_calls.is_empty() {
+                    let duration_ms = llm_started_at
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .map(|t| t.elapsed().as_millis() as u64)
+                        .unwrap_or(0);
+                    let _ = tx.try_send(ChatEvent::LlmCompleted {
+                        messages: assistant_msgs,
+                        duration_ms,
+                    });
+                    for (tool_call_id, name, args) in new_tool_calls {
+                        tools_in_flight
+                            .lock()
+                            .unwrap()
+                            .insert(tool_call_id.clone(), std::time::Instant::now());
+                        let _ = tx.try_send(ChatEvent::ToolStarted {
+                            tool_call_id,
+                            name,
+                            args,
+                        });
+                    }
+                }
+
+                for (tool_call_id, name, result) in new_tool_results {
+                    let duration_ms = tools_in_flight
+                        .lock()
+                        .unwrap()
+                        .remove(&tool_call_id)
+                        .map(|t| t.elapsed().as_millis() as u64)
+                        .unwrap_or(0);
+                    let _ = tx.try_send(ChatEvent::ToolCompleted {
+                        tool_call_id,
+                        name,
+                        duration_ms,
+                        result,
+                    });
+                }
+
                 GuardAction::Continue
             })
         };
@@ -969,38 +1258,47 @@ async fn post_chat_turn(
             &model_name,
             agent_state,
             step_guard,
+            Some(llm_call_hook),
         )
         .await;
 
         // Write the final state back to the session (so the next turn can
         // continue from it) and emit the terminal event.
-        let mut s = session_for_task.lock().await;
-        s.busy = false;
-        match outcome {
-            Ok(RunOutcome::Completed(state)) => {
-                s.state = Some(state);
-                let _ = tx.send(ChatEvent::Done {
-                    status: "completed".into(),
-                    reason: None,
-                })
-                .await;
+        let mut updated_state = false;
+        {
+            let mut s = session_for_task.lock().await;
+            s.busy = false;
+            match outcome {
+                Ok(RunOutcome::Completed(state)) => {
+                    s.state = Some(state);
+                    updated_state = true;
+                    let _ = tx.send(ChatEvent::Done {
+                        status: "completed".into(),
+                        reason: None,
+                    })
+                    .await;
+                }
+                Ok(RunOutcome::Interrupted { state, reason, .. }) => {
+                    s.state = Some(state);
+                    updated_state = true;
+                    let _ = tx.send(ChatEvent::Done {
+                        status: "interrupted".into(),
+                        reason: Some(reason),
+                    })
+                    .await;
+                }
+                Err(e) => {
+                    // Don't keep partial state on hard failure — caller can retry.
+                    let _ = tx.send(ChatEvent::Done {
+                        status: "failed".into(),
+                        reason: Some(e.to_string()),
+                    })
+                    .await;
+                }
             }
-            Ok(RunOutcome::Interrupted { state, reason, .. }) => {
-                s.state = Some(state);
-                let _ = tx.send(ChatEvent::Done {
-                    status: "interrupted".into(),
-                    reason: Some(reason),
-                })
-                .await;
-            }
-            Err(e) => {
-                // Don't keep partial state on hard failure — caller can retry.
-                let _ = tx.send(ChatEvent::Done {
-                    status: "failed".into(),
-                    reason: Some(e.to_string()),
-                })
-                .await;
-            }
+        }
+        if updated_state {
+            persist_chat(&session_for_task).await;
         }
     });
 
@@ -1022,6 +1320,7 @@ async fn run_chat_turn(
     model_name: &str,
     initial_state: AgentState,
     step_guard: StepGuard<AgentState>,
+    llm_call_hook: Option<metalcraft::LlmCallHook>,
 ) -> Result<RunOutcome<AgentState>, Box<dyn std::error::Error + Send + Sync>> {
     use crate::runtime::build_agent_runtime;
     use rig::client::CompletionClient;
@@ -1033,7 +1332,7 @@ async fn run_chat_turn(
         cwd,
         model_name,
         ApprovalMode::AutoApprove,
-        None,
+        llm_call_hook,
         |client, name| client.completion_model(name),
     )
     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
