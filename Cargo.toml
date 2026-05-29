@@ -28,8 +28,10 @@ cron = "0.15"
 dirs = "6"
 atty = "0.2"
 chrono = "0.4"
-axum = "0.8"
+axum = { version = "0.8", features = ["macros"] }
 uuid = { version = "1", features = ["v4"] }
+futures-util = "0.3"
+tokio-stream = "0.1"
 
 [[bin]]
 name = "metalcraft-agent"

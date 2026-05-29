@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::{
@@ -5,15 +7,25 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::{delete, get, put},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
+    routing::{delete, get, post, put},
     Json,
 };
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
+use tokio_stream::wrappers::ReceiverStream;
 
+use crate::approval::ApprovalMode;
+use crate::flows;
 use crate::paths;
 use crate::persona::{Persona, PersonaSummary};
+use crate::runtime::{self, AgentRuntimeContext, RunOneShotRequest, DEFAULT_MODEL};
 use crate::tools::http_api::HttpApiToolConfig;
+use metalcraft::{AgentMessage, AgentState, Executor, GuardAction, RunOutcome, StepGuard};
 
 /// Configuration for the workshop API server.
 pub struct WorkshopApiConfig {
@@ -21,8 +33,28 @@ pub struct WorkshopApiConfig {
     pub api_key: String,
 }
 
+/// Active chat sessions, keyed by chat id. Lost on restart — chats live for
+/// the lifetime of the daemon process.
+type ChatStore = Arc<Mutex<HashMap<String, Arc<Mutex<ChatSession>>>>>;
+
+struct ChatSession {
+    id: String,
+    persona_slug: String,
+    model_name: String,
+    cwd: String,
+    state: Option<AgentState>,
+    created_at: String,
+    /// True while a turn is mid-flight. Prevents two concurrent turns from
+    /// stomping on the same state.
+    busy: bool,
+}
+
 struct ApiState {
     api_key: String,
+    chats: ChatStore,
+    /// `cwd` to run chats and flow-runs from. Captured at startup so chats
+    /// don't pick up the daemon's later cwd changes.
+    cwd: String,
 }
 
 // ── Response types ──────────────────────────────────────────────────────
@@ -130,7 +162,14 @@ async fn auth_middleware(
 /// `metalcraft-daemon --api` mounts it alongside the event listener and the
 /// flow scheduler.
 pub fn build_router(api_key: String) -> Router {
-    let state = Arc::new(ApiState { api_key });
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".into());
+    let state = Arc::new(ApiState {
+        api_key,
+        chats: Arc::new(Mutex::new(HashMap::new())),
+        cwd,
+    });
 
     Router::new()
         .route("/api/v1/snapshot", get(get_snapshot))
@@ -143,12 +182,18 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/flows/{id}", get(get_flow))
         .route("/api/v1/flows/{id}", put(put_flow))
         .route("/api/v1/flows/{id}", delete(delete_flow))
+        .route("/api/v1/flows/{id}/run", post(post_run_flow))
+        .route("/api/v1/flow-templates", get(list_flow_templates))
+        .route("/api/v1/flow-templates/{slug}", get(get_flow_template))
         .route("/api/v1/diagnostics", get(list_diagnostics))
         .route("/api/v1/diagnostics/{id}", get(get_diagnostics_session))
         .route("/api/v1/api-tools", get(list_api_tools))
         .route("/api/v1/api-tools/{name}", get(get_api_tool))
         .route("/api/v1/api-tools/{name}", put(put_api_tool))
         .route("/api/v1/api-tools/{name}", delete(delete_api_tool))
+        .route("/api/v1/chats", get(list_chats).post(post_create_chat))
+        .route("/api/v1/chats/{id}", get(get_chat).delete(delete_chat))
+        .route("/api/v1/chats/{id}/turn", post(post_chat_turn))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state)
 }
@@ -493,3 +538,515 @@ async fn delete_api_tool(Path(name): Path<String>) -> Response {
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete: {e}")),
     }
 }
+
+// ── Flow template handlers ──────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct FlowTemplateSummary {
+    slug: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct FlowTemplate {
+    slug: String,
+    name: String,
+    /// The raw template flow JSON, ready to be cloned and edited as a new flow.
+    flow: serde_json::Value,
+}
+
+fn list_flow_template_summaries() -> Vec<FlowTemplateSummary> {
+    let dir = paths::flow_templates_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(_) => return vec![],
+    };
+    let mut summaries: Vec<FlowTemplateSummary> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                return None;
+            }
+            let slug = path.file_stem()?.to_str()?.to_string();
+            let content = std::fs::read_to_string(&path).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+            let name = value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&slug)
+                .to_string();
+            Some(FlowTemplateSummary { slug, name })
+        })
+        .collect();
+    summaries.sort_by(|a, b| a.slug.cmp(&b.slug));
+    summaries
+}
+
+async fn list_flow_templates() -> Json<Vec<FlowTemplateSummary>> {
+    Json(list_flow_template_summaries())
+}
+
+async fn get_flow_template(Path(slug): Path<String>) -> Response {
+    let path = paths::flow_templates_dir().join(format!("{slug}.json"));
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return err_json(StatusCode::NOT_FOUND, format!("template '{slug}' not found")),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("parse error: {e}"));
+        }
+    };
+    let name = value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&slug)
+        .to_string();
+    Json(FlowTemplate { slug, name, flow: value }).into_response()
+}
+
+// ── Run flow handler ────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+struct RunFlowRequest {
+    /// Persona to run the flow's prompts as. Defaults to `coding-agent` if
+    /// the caller doesn't specify one.
+    #[serde(default)]
+    persona_slug: Option<String>,
+    #[serde(default)]
+    model_name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RunFlowPromptResult {
+    prompt_index: usize,
+    status: String, // "completed" | "interrupted" | "failed"
+    answer: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RunFlowResponse {
+    flow_id: String,
+    prompts: Vec<RunFlowPromptResult>,
+}
+
+async fn post_run_flow(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+    body: Option<Json<RunFlowRequest>>,
+) -> Response {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+
+    let flow = match metalcraft_flows::load_flow(&paths::flows_dir(), &id) {
+        Some(f) => f,
+        None => return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found")),
+    };
+
+    let prompts = match flows::collect_reachable_prompts(&flow) {
+        Ok(p) => p,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("unrunnable flow: {e}")),
+    };
+
+    let context = match AgentRuntimeContext::from_environment().map_err(|e| e.to_string()) {
+        Ok(c) => c,
+        Err(msg) => {
+            return err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("runtime not available: {msg}"),
+            );
+        }
+    };
+    let persona_slug = req
+        .persona_slug
+        .unwrap_or_else(|| "coding-agent".to_string());
+    let model_name = req.model_name.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+
+    let mut results = Vec::with_capacity(prompts.len());
+    for (i, fp) in prompts.iter().enumerate() {
+        // Each prompt node can override the persona; fall back to the
+        // request-level persona if it doesn't.
+        let effective_persona = fp.persona.as_deref().unwrap_or(&persona_slug);
+        let outcome = runtime::run_one_shot_task(
+            &context,
+            RunOneShotRequest {
+                persona_slug: effective_persona,
+                cwd: &state.cwd,
+                model_name: &model_name,
+                task: &fp.prompt,
+                approval_mode: ApprovalMode::AutoApprove,
+                diagnostics: None,
+            },
+        )
+        .await;
+        results.push(match outcome {
+            Ok(RunOutcome::Completed(s)) => RunFlowPromptResult {
+                prompt_index: i,
+                status: "completed".into(),
+                answer: s.final_answer().map(String::from),
+                error: None,
+            },
+            Ok(RunOutcome::Interrupted { reason, .. }) => RunFlowPromptResult {
+                prompt_index: i,
+                status: "interrupted".into(),
+                answer: None,
+                error: Some(reason),
+            },
+            Err(e) => RunFlowPromptResult {
+                prompt_index: i,
+                status: "failed".into(),
+                answer: None,
+                error: Some(e.to_string()),
+            },
+        });
+    }
+
+    Json(RunFlowResponse {
+        flow_id: id,
+        prompts: results,
+    })
+    .into_response()
+}
+
+// ── Chat handlers ───────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct ChatSummary {
+    id: String,
+    persona_slug: String,
+    model_name: String,
+    created_at: String,
+    turn_count: usize,
+}
+
+#[derive(Serialize)]
+struct ChatDetail {
+    id: String,
+    persona_slug: String,
+    model_name: String,
+    created_at: String,
+    messages: Vec<ChatMessageWire>,
+}
+
+/// Wire form for `metalcraft::AgentMessage` — the in-memory enum isn't
+/// `Serialize`, so we convert before responding.
+#[derive(Serialize, Clone)]
+#[serde(tag = "role", rename_all = "snake_case")]
+enum ChatMessageWire {
+    User { content: String },
+    Assistant { content: String },
+    ToolCall {
+        id: String,
+        call_id: Option<String>,
+        name: String,
+        args: serde_json::Value,
+    },
+    ToolResult {
+        id: String,
+        call_id: Option<String>,
+        name: String,
+        result: String,
+    },
+}
+
+impl From<&AgentMessage> for ChatMessageWire {
+    fn from(m: &AgentMessage) -> Self {
+        match m {
+            AgentMessage::User(s) => Self::User { content: s.clone() },
+            AgentMessage::Assistant(s) => Self::Assistant { content: s.clone() },
+            AgentMessage::ToolCall { id, call_id, name, args } => Self::ToolCall {
+                id: id.clone(),
+                call_id: call_id.clone(),
+                name: name.clone(),
+                args: args.clone(),
+            },
+            AgentMessage::ToolResult { id, call_id, name, result } => Self::ToolResult {
+                id: id.clone(),
+                call_id: call_id.clone(),
+                name: name.clone(),
+                result: result.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateChatRequest {
+    persona_slug: String,
+    #[serde(default)]
+    model_name: Option<String>,
+}
+
+async fn list_chats(State(state): State<Arc<ApiState>>) -> Response {
+    let chats = state.chats.lock().await;
+    let mut out = Vec::with_capacity(chats.len());
+    for session in chats.values() {
+        let s = session.lock().await;
+        out.push(ChatSummary {
+            id: s.id.clone(),
+            persona_slug: s.persona_slug.clone(),
+            model_name: s.model_name.clone(),
+            created_at: s.created_at.clone(),
+            turn_count: s
+                .state
+                .as_ref()
+                .map(|st| st.messages.iter().filter(|m| matches!(m, AgentMessage::User(_))).count())
+                .unwrap_or(0),
+        });
+    }
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Json(out).into_response()
+}
+
+async fn post_create_chat(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<CreateChatRequest>,
+) -> Response {
+    // Validate persona exists before creating a chat — fail fast instead of
+    // surfacing the error mid-stream.
+    if Persona::load(&req.persona_slug, &paths::personas_dir()).is_err() {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            format!("persona '{}' not found", req.persona_slug),
+        );
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let model_name = req.model_name.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let session = ChatSession {
+        id: id.clone(),
+        persona_slug: req.persona_slug,
+        model_name: model_name.clone(),
+        cwd: state.cwd.clone(),
+        state: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        busy: false,
+    };
+    let session_arc = Arc::new(Mutex::new(session));
+    state.chats.lock().await.insert(id.clone(), session_arc.clone());
+    let s = session_arc.lock().await;
+    Json(ChatSummary {
+        id: s.id.clone(),
+        persona_slug: s.persona_slug.clone(),
+        model_name: s.model_name.clone(),
+        created_at: s.created_at.clone(),
+        turn_count: 0,
+    })
+    .into_response()
+}
+
+async fn get_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    let chats = state.chats.lock().await;
+    let Some(session) = chats.get(&id).cloned() else {
+        return err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"));
+    };
+    drop(chats);
+    let s = session.lock().await;
+    let messages = s
+        .state
+        .as_ref()
+        .map(|st| st.messages.iter().map(ChatMessageWire::from).collect())
+        .unwrap_or_default();
+    Json(ChatDetail {
+        id: s.id.clone(),
+        persona_slug: s.persona_slug.clone(),
+        model_name: s.model_name.clone(),
+        created_at: s.created_at.clone(),
+        messages,
+    })
+    .into_response()
+}
+
+async fn delete_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    let mut chats = state.chats.lock().await;
+    if chats.remove(&id).is_some() {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"))
+    }
+}
+
+#[derive(Deserialize)]
+struct ChatTurnRequest {
+    message: String,
+}
+
+/// SSE event wire format. One JSON object per event. The `kind` field
+/// discriminates; payloads vary by kind.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ChatEvent {
+    /// One or more new messages appended this step (typically a single
+    /// assistant message and any tool calls/results from that step).
+    Messages { messages: Vec<ChatMessageWire> },
+    /// Terminal event. `status` is "completed" | "interrupted" | "failed".
+    Done {
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+/// Run one turn against the chat session. Streams new messages as Server-Sent
+/// Events as the agent steps; closes the connection when the executor returns.
+#[axum::debug_handler]
+async fn post_chat_turn(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+    Json(req): Json<ChatTurnRequest>,
+) -> axum::response::Response {
+    let chats = state.chats.lock().await;
+    let Some(session) = chats.get(&id).cloned() else {
+        return err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"));
+    };
+    drop(chats);
+
+    // Lock the session up-front: stamp it busy, snapshot what we need to run
+    // the executor, and seed/continue the AgentState. If anything fails we
+    // release `busy` before returning.
+    let (persona_slug, model_name, cwd, agent_state) = {
+        let mut s = session.lock().await;
+        if s.busy {
+            return err_json(StatusCode::CONFLICT, "chat is already mid-turn");
+        }
+        s.busy = true;
+        let next_state = match s.state.take() {
+            Some(prev) => prev.continue_with(req.message.clone()),
+            None => AgentState::new(req.message.clone()),
+        };
+        (
+            s.persona_slug.clone(),
+            s.model_name.clone(),
+            s.cwd.clone(),
+            next_state,
+        )
+    };
+
+    // Build the error message string before any await so the non-Send
+    // `Box<dyn Error>` from from_environment doesn't get held across a yield.
+    let context_result = AgentRuntimeContext::from_environment().map_err(|e| e.to_string());
+    let context = match context_result {
+        Ok(c) => c,
+        Err(msg) => {
+            session.lock().await.busy = false;
+            return err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("runtime not available: {msg}"),
+            );
+        }
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<ChatEvent>(32);
+    let session_for_task = session.clone();
+
+    tokio::spawn(async move {
+        let tx_for_guard = tx.clone();
+        let seen_up_to = Arc::new(std::sync::Mutex::new(agent_state.messages.len()));
+        let step_guard: StepGuard<AgentState> = {
+            let tx = tx_for_guard.clone();
+            let seen = seen_up_to.clone();
+            Arc::new(move |state: &AgentState, _ev| {
+                let mut guard = seen.lock().unwrap();
+                if *guard < state.messages.len() {
+                    let new_msgs: Vec<ChatMessageWire> = state.messages[*guard..]
+                        .iter()
+                        .map(ChatMessageWire::from)
+                        .collect();
+                    *guard = state.messages.len();
+                    // try_send: if the receiver is gone (client disconnected)
+                    // we silently drop events; the executor still finishes.
+                    let _ = tx.try_send(ChatEvent::Messages { messages: new_msgs });
+                }
+                GuardAction::Continue
+            })
+        };
+
+        let outcome = run_chat_turn(
+            &context,
+            &persona_slug,
+            &cwd,
+            &model_name,
+            agent_state,
+            step_guard,
+        )
+        .await;
+
+        // Write the final state back to the session (so the next turn can
+        // continue from it) and emit the terminal event.
+        let mut s = session_for_task.lock().await;
+        s.busy = false;
+        match outcome {
+            Ok(RunOutcome::Completed(state)) => {
+                s.state = Some(state);
+                let _ = tx.send(ChatEvent::Done {
+                    status: "completed".into(),
+                    reason: None,
+                })
+                .await;
+            }
+            Ok(RunOutcome::Interrupted { state, reason, .. }) => {
+                s.state = Some(state);
+                let _ = tx.send(ChatEvent::Done {
+                    status: "interrupted".into(),
+                    reason: Some(reason),
+                })
+                .await;
+            }
+            Err(e) => {
+                // Don't keep partial state on hard failure — caller can retry.
+                let _ = tx.send(ChatEvent::Done {
+                    status: "failed".into(),
+                    reason: Some(e.to_string()),
+                })
+                .await;
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(|ev| -> Result<Event, Infallible> {
+        Ok(Event::default().json_data(&ev).unwrap_or_else(|_| {
+            Event::default().data("{\"kind\":\"done\",\"status\":\"failed\",\"reason\":\"serialize\"}")
+        }))
+    });
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new())
+        .into_response()
+}
+
+async fn run_chat_turn(
+    context: &AgentRuntimeContext,
+    persona_slug: &str,
+    cwd: &str,
+    model_name: &str,
+    initial_state: AgentState,
+    step_guard: StepGuard<AgentState>,
+) -> Result<RunOutcome<AgentState>, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::runtime::build_agent_runtime;
+    use rig::client::CompletionClient;
+    let persona = Persona::load(persona_slug, &context.personas_dir)
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+    let runtime = build_agent_runtime(
+        context,
+        &persona,
+        cwd,
+        model_name,
+        ApprovalMode::AutoApprove,
+        None,
+        |client, name| client.completion_model(name),
+    )
+    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+    let executor = Executor::new_from_arc(runtime.graph)
+        .max_steps(90)
+        .with_step_guard(step_guard);
+    executor
+        .run(initial_state, "agent")
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
+}
+
+// `Stream` is brought into scope via `futures_util::stream::StreamExt` for `.map`.
+use futures_util::StreamExt;
+#[allow(dead_code)]
+fn _stream_trait_in_scope<T: Stream<Item = ()>>(_: T) {}

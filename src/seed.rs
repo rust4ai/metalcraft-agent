@@ -35,8 +35,15 @@ const SEED_API_TOOLS: &[(&str, &str)] = &[
     ("discord_get_channel_info.json", include_str!("../seed/api_tools/discord_get_channel_info.json")),
 ];
 
-const SEED_FLOWS: &[(&str, &str)] = &[
-    ("daily-commit-summary.json", include_str!("../seed/flows/daily-commit-summary.json")),
+/// Flows live in the user's project — we no longer seed any by default so
+/// the workshop's "+ New Flow" picker (template vs blank) is the canonical
+/// entry point.
+const SEED_FLOWS: &[(&str, &str)] = &[];
+
+/// Templates the workshop offers via "+ New Flow → from template". Copied
+/// into `<data>/flow_templates/` on first run so they're editable per-deploy.
+const SEED_FLOW_TEMPLATES: &[(&str, &str)] = &[
+    ("daily-commit-summary.json", include_str!("../seed/flow_templates/daily-commit-summary.json")),
 ];
 
 /// Ensure default personas and skills exist in the app data directory.
@@ -48,6 +55,7 @@ pub fn ensure_defaults() {
         paths::flows_dir(),
         paths::logs_dir(),
         paths::api_tools_dir(),
+        paths::flow_templates_dir(),
     ];
 
     for dir in &dirs {
@@ -60,6 +68,7 @@ pub fn ensure_defaults() {
     write_seeds(&paths::skills_dir(), SEED_SKILLS);
     write_seeds(&paths::flows_dir(), SEED_FLOWS);
     write_seeds(&paths::api_tools_dir(), SEED_API_TOOLS);
+    write_seeds(&paths::flow_templates_dir(), SEED_FLOW_TEMPLATES);
 }
 
 fn write_seeds(dir: &Path, seeds: &[(&str, &str)]) {

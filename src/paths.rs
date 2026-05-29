@@ -35,3 +35,7 @@ pub fn logs_dir() -> PathBuf {
 pub fn api_tools_dir() -> PathBuf {
     data_dir().join("api_tools")
 }
+
+pub fn flow_templates_dir() -> PathBuf {
+    data_dir().join("flow_templates")
+}
