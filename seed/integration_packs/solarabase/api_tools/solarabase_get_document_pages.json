@@ -1,0 +1,20 @@
+{
+  "name": "solarabase_get_document_pages",
+  "description": "Fetch the indexed pages of a single document from the Solarabase knowledge base, including each page's full text and the document's root index (summary, key themes, entity index). Use this to read a specific document in depth after finding its id via solarabase_list_documents or solarabase_retrieve.",
+  "method": "GET",
+  "url": "$SOLARABASE_URL/api/kb/$SOLARABASE_KB_ID/documents/{document_id}/pages",
+  "headers": {
+    "Authorization": "Bearer $SOLARABASE_API_KEY"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "document_id": {
+        "type": "string",
+        "description": "The UUID of the document to fetch pages for"
+      }
+    },
+    "required": ["document_id"]
+  },
+  "body_mapping": "none"
+}

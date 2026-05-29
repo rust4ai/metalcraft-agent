@@ -78,6 +78,7 @@ struct ProjectSnapshot {
     flows: Vec<metalcraft_flows::FlowSummary>,
     sessions: Vec<DiagnosticsSessionSummary>,
     api_tools: Vec<ApiToolSummary>,
+    keys: Vec<KeySummary>,
     layout: ProjectLayout,
 }
 
@@ -153,6 +154,14 @@ struct ApiToolSummary {
     read_only: bool,
 }
 
+/// A stored API key, exposed to the workshop with its value masked — the
+/// raw secret is never sent over the wire.
+#[derive(Serialize)]
+struct KeySummary {
+    name: String,
+    masked: String,
+}
+
 // ── Auth middleware ─────────────────────────────────────────────────────
 
 async fn auth_middleware(
@@ -215,6 +224,9 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/api-tools/{name}", get(get_api_tool))
         .route("/api/v1/api-tools/{name}", put(put_api_tool))
         .route("/api/v1/api-tools/{name}", delete(delete_api_tool))
+        .route("/api/v1/keys", get(list_keys))
+        .route("/api/v1/keys/{name}", put(put_key))
+        .route("/api/v1/keys/{name}", delete(delete_key))
         .route("/api/v1/chats", get(list_chats).post(post_create_chat))
         .route("/api/v1/chats/{id}", get(get_chat).delete(delete_chat))
         .route("/api/v1/chats/{id}/turn", post(post_chat_turn))
@@ -258,6 +270,7 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
     let flows = metalcraft_flows::list_flows(&paths::flows_dir());
     let sessions = list_diagnostics_sessions();
     let api_tools = list_api_tool_summaries();
+    let keys = list_key_summaries();
 
     Json(ProjectSnapshot {
         personas,
@@ -265,6 +278,7 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
         flows,
         sessions,
         api_tools,
+        keys,
         layout: ProjectLayout {
             data_dir: paths::data_dir().display().to_string(),
             personas_dir: paths::personas_dir().display().to_string(),
@@ -702,6 +716,62 @@ async fn delete_api_tool(Path(name): Path<String>) -> Response {
     match std::fs::remove_file(&path) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete: {e}")),
+    }
+}
+
+// ── API key store handlers ──────────────────────────────────────────────
+//
+// The key store (`<data>/keys.json`) holds the secrets that HTTP-API tools
+// reference via `$NAME`. The workshop manages them here; raw values only ever
+// flow inward (on PUT) — list/get responses are always masked.
+
+#[derive(Deserialize)]
+struct KeyValueBody {
+    value: String,
+}
+
+fn list_key_summaries() -> Vec<KeySummary> {
+    crate::key_store::KeyStore::load(&paths::keys_file())
+        .list_masked()
+        .into_iter()
+        .map(|(name, masked)| KeySummary { name, masked })
+        .collect()
+}
+
+async fn list_keys() -> Json<Vec<KeySummary>> {
+    Json(list_key_summaries())
+}
+
+/// Upsert a key. The name comes from the path; the raw value from the body.
+async fn put_key(Path(name): Path<String>, Json(body): Json<KeyValueBody>) -> Response {
+    if name.trim().is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "key name must not be empty");
+    }
+    if body.value.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "key value must not be empty");
+    }
+    let path = paths::keys_file();
+    let mut store = crate::key_store::KeyStore::load(&path);
+    store.upsert(&name, &body.value);
+    match store.save(&path) {
+        Ok(()) => Json(KeySummary {
+            masked: crate::key_store::mask(&body.value),
+            name,
+        })
+        .into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write: {e}")),
+    }
+}
+
+async fn delete_key(Path(name): Path<String>) -> Response {
+    let path = paths::keys_file();
+    let mut store = crate::key_store::KeyStore::load(&path);
+    if !store.delete(&name) {
+        return err_json(StatusCode::NOT_FOUND, format!("key '{name}' not found"));
+    }
+    match store.save(&path) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write: {e}")),
     }
 }
 

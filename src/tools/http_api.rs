@@ -69,7 +69,10 @@ impl HttpApiTool {
         }
     }
 
-    /// Expand `$ENV_VAR` references in a string using environment variables.
+    /// Expand `$NAME` references in a string. Each name is resolved via the
+    /// key store first, then the process environment (see
+    /// [`crate::key_store::lookup`]), so managed keys and `.env` values both
+    /// work. Unknown names expand to an empty string.
     fn expand_env(s: &str) -> String {
         let mut result = s.to_string();
         // Find all $WORD patterns (not inside braces for simplicity)
@@ -82,7 +85,7 @@ impl HttpApiTool {
                 break;
             }
             let var_name = &rest[..end];
-            let replacement = std::env::var(var_name).unwrap_or_default();
+            let replacement = crate::key_store::lookup(var_name).unwrap_or_default();
             result = format!("{}{}{}", &result[..start], replacement, &rest[end..]);
         }
         result

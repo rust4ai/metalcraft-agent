@@ -7,6 +7,7 @@ pub mod events;
 pub mod flows;
 pub mod guard;
 pub mod integration_packs;
+pub mod key_store;
 pub mod paths;
 pub mod persona;
 pub mod runtime;

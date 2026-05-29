@@ -1,0 +1,25 @@
+{
+  "name": "solarabase_retrieve",
+  "description": "Retrieve the most relevant document passages from the Solarabase knowledge base for a query. Returns raw text chunks — each with the source document title, page number, and a relevance score — and does NOT run an LLM over them. This is your primary RAG tool: retrieve first, then read the passages and ground your own answer in them, citing the document and page.",
+  "method": "POST",
+  "url": "$SOLARABASE_URL/api/kb/$SOLARABASE_KB_ID/retrieve",
+  "headers": {
+    "Authorization": "Bearer $SOLARABASE_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The search query / question to find relevant passages for (1-32000 characters)"
+      },
+      "max_pages": {
+        "type": "integer",
+        "description": "Maximum number of passages to return (default 10, max 100)"
+      }
+    },
+    "required": ["query"]
+  },
+  "body_mapping": "params"
+}

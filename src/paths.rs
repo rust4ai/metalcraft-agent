@@ -67,3 +67,8 @@ pub fn integration_packs_dir() -> PathBuf {
 pub fn integration_packs_state_file() -> PathBuf {
     data_dir().join("integration_packs.json")
 }
+
+/// Plaintext API-key / secret store (see [`crate::key_store`]).
+pub fn keys_file() -> PathBuf {
+    data_dir().join("keys.json")
+}

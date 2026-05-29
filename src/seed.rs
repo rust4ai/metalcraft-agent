@@ -84,7 +84,43 @@ const DISCORD_PACK: &[(&str, &str)] = &[
     ),
 ];
 
-const SEED_INTEGRATION_PACKS: &[(&str, &[(&str, &str)])] = &[("discord", DISCORD_PACK)];
+/// Solarabase RAG integration pack — a persona, skill, and HTTP-API tools
+/// for using a Solarabase knowledge base for retrieval-augmented generation.
+/// Disabled by default; enabled from the workshop's Packs section. Reads its
+/// `SOLARABASE_*` config from the key store (see [`crate::key_store`]).
+const SOLARABASE_PACK: &[(&str, &str)] = &[
+    (
+        "pack.json",
+        include_str!("../seed/integration_packs/solarabase/pack.json"),
+    ),
+    (
+        "personas/knowledge-base-agent.json",
+        include_str!("../seed/integration_packs/solarabase/personas/knowledge-base-agent.json"),
+    ),
+    (
+        "skills/solarabase-rag.md",
+        include_str!("../seed/integration_packs/solarabase/skills/solarabase-rag.md"),
+    ),
+    (
+        "api_tools/solarabase_retrieve.json",
+        include_str!("../seed/integration_packs/solarabase/api_tools/solarabase_retrieve.json"),
+    ),
+    (
+        "api_tools/solarabase_query.json",
+        include_str!("../seed/integration_packs/solarabase/api_tools/solarabase_query.json"),
+    ),
+    (
+        "api_tools/solarabase_list_documents.json",
+        include_str!("../seed/integration_packs/solarabase/api_tools/solarabase_list_documents.json"),
+    ),
+    (
+        "api_tools/solarabase_get_document_pages.json",
+        include_str!("../seed/integration_packs/solarabase/api_tools/solarabase_get_document_pages.json"),
+    ),
+];
+
+const SEED_INTEGRATION_PACKS: &[(&str, &[(&str, &str)])] =
+    &[("discord", DISCORD_PACK), ("solarabase", SOLARABASE_PACK)];
 
 /// Ensure default personas and skills exist in the app data directory.
 /// Creates directories and writes seed files only if they don't already exist.
