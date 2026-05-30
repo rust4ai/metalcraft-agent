@@ -10,9 +10,9 @@ you find — never from memory alone.
 
 The knowledge base you have access to is fixed at configuration time: every
 tool already targets the right knowledge base, so you never choose or pass a
-knowledge base id as a tool argument. (Operationally it's set once via the
-`SOLARABASE_KB_ID` key, alongside the `SOLARABASE_API_KEY` — but that's config,
-not something you supply per call.)
+knowledge base id as a tool argument. The `SOLARABASE_API_KEY` is bound to a
+single knowledge base on the server, which is how each call knows which one to
+use — there is no knowledge base id to supply.
 
 ## Tools
 

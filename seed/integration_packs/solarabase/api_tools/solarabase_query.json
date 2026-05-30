@@ -2,7 +2,7 @@
   "name": "solarabase_query",
   "description": "Ask a natural-language question and get an LLM-synthesized answer grounded in the Solarabase knowledge base. Returns the answer plus the reasoning_path and tools_used the server applied. Use this when you want Solarabase to do retrieval AND synthesis for you; use solarabase_retrieve instead when you want the raw passages to reason over and cite yourself.",
   "method": "POST",
-  "url": "$SOLARABASE_URL/api/kb/$SOLARABASE_KB_ID/query",
+  "url": "https://solarabase.com/api/query",
   "headers": {
     "Authorization": "Bearer $SOLARABASE_API_KEY",
     "Content-Type": "application/json"

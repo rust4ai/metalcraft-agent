@@ -246,6 +246,125 @@ components:
         layout:
           $ref: '#/components/schemas/ProjectLayout'
 
+    KeySummary:
+      type: object
+      required: [name, masked]
+      properties:
+        name:
+          type: string
+        masked:
+          description: >-
+            The stored secret with its middle redacted (e.g. `sb_l…a9b2`); short
+            values are fully masked as `••••`. The raw value is never returned.
+          type: string
+
+    KeyValueBody:
+      type: object
+      required: [value]
+      properties:
+        value:
+          description: The raw secret to store. Must be non-empty.
+          type: string
+
+    RecommendedKey:
+      description: >-
+        An env key declared in the `requires_env` of one or more *enabled*
+        integration packs. `configured: false` means the key resolves from
+        neither the key store nor the process environment — i.e. the packs that
+        need it won't work until it's added.
+      type: object
+      required: [name, configured, packs]
+      properties:
+        name:
+          type: string
+        configured:
+          description: Whether the key currently resolves (key store first, then env var).
+          type: boolean
+        packs:
+          description: Sorted ids of the enabled packs that declare this key.
+          type: array
+          items:
+            type: string
+
+    IntegrationPackSummary:
+      type: object
+      required: [id, name, description, version, enabled, personas, skills, api_tools, flow_templates]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        version:
+          type: string
+        enabled:
+          type: boolean
+        personas:
+          description: Count of personas the pack provides.
+          type: integer
+        skills:
+          description: Count of skills the pack provides.
+          type: integer
+        api_tools:
+          description: Count of HTTP-API tools the pack provides.
+          type: integer
+        flow_templates:
+          description: Count of flow templates the pack provides.
+          type: integer
+        requires_env:
+          description: Env keys the pack's tools reference (declarative; not enforced on enable).
+          type: array
+          items:
+            type: string
+
+    IntegrationPackDetail:
+      type: object
+      required: [id, name, description, version, enabled, personas, skills, api_tools, flow_templates]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        version:
+          type: string
+        enabled:
+          type: boolean
+        requires_env:
+          description: Env keys the pack's tools reference (declarative; not enforced on enable).
+          type: array
+          items:
+            type: string
+        personas:
+          description: Slugs of personas the pack provides.
+          type: array
+          items:
+            type: string
+        skills:
+          description: Slugs of skills the pack provides.
+          type: array
+          items:
+            type: string
+        api_tools:
+          description: Names of HTTP-API tools the pack provides.
+          type: array
+          items:
+            type: string
+        flow_templates:
+          description: Slugs of flow templates the pack provides.
+          type: array
+          items:
+            type: string
+
+    SetEnabledRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+
     Error:
       type: object
       required: [error]
@@ -595,6 +714,167 @@ paths:
           description: Deleted
         '404':
           description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/keys:
+    get:
+      summary: List stored API keys (values masked)
+      operationId: listKeys
+      responses:
+        '200':
+          description: Keys with masked values
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/KeySummary'
+
+  /api/v1/keys/recommended:
+    get:
+      summary: Keys recommended by enabled integration packs
+      description: >-
+        Aggregates `requires_env` across all enabled packs and flags each key as
+        configured or missing. Drives the "keys these packs still need" hint in
+        the key store UI — enabling a pack does not block on missing keys.
+      operationId: listRecommendedKeys
+      responses:
+        '200':
+          description: Recommended keys with configured/missing flags
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RecommendedKey'
+
+  /api/v1/keys/{name}:
+    put:
+      summary: Create or update an API key
+      description: The key name comes from the path; the raw secret from the body.
+      operationId: putKey
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KeyValueBody'
+      responses:
+        '200':
+          description: Key saved (value returned masked)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeySummary'
+        '400':
+          description: Empty key name or value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Failed to persist the key store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      summary: Delete an API key
+      operationId: deleteKey
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Failed to persist the key store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/integration-packs:
+    get:
+      summary: List installed integration packs
+      operationId: listIntegrationPacks
+      responses:
+        '200':
+          description: Installed packs with enable state and content counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/IntegrationPackSummary'
+
+  /api/v1/integration-packs/{id}:
+    get:
+      summary: Load one integration pack
+      operationId: getIntegrationPack
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pack detail with the slugs/names of items it provides
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntegrationPackDetail'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/integration-packs/{id}/enabled:
+    put:
+      summary: Enable or disable an integration pack
+      description: >-
+        Non-blocking — a pack can be enabled with required keys still missing.
+        Use `GET /api/v1/keys/recommended` to see which keys the now-enabled
+        packs still need.
+      operationId: putPackEnabled
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetEnabledRequest'
+      responses:
+        '204':
+          description: Enable state updated
+        '400':
+          description: Pack not installed
           content:
             application/json:
               schema:
