@@ -365,6 +365,263 @@ components:
         enabled:
           type: boolean
 
+    RunFlowRequest:
+      description: Optional overrides for a flow run. An empty body is valid.
+      type: object
+      properties:
+        persona_slug:
+          description: Persona to run the flow's prompts as. Defaults to `coding-agent`.
+          type: string
+        model_name:
+          description: Model override. Defaults to the server's default model.
+          type: string
+
+    RunFlowPromptResult:
+      type: object
+      required: [prompt_index, status]
+      properties:
+        prompt_index:
+          type: integer
+        status:
+          type: string
+          enum: [completed, interrupted, failed]
+        answer:
+          description: Present when status is `completed`.
+          type: string
+        error:
+          description: Present when status is `interrupted` or `failed`.
+          type: string
+
+    RunFlowResponse:
+      type: object
+      required: [flow_id, prompts]
+      properties:
+        flow_id:
+          type: string
+        prompts:
+          type: array
+          items:
+            $ref: '#/components/schemas/RunFlowPromptResult'
+
+    FlowTemplateSummary:
+      type: object
+      required: [slug, name]
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+        pack_id:
+          description: Id of the integration pack providing this template, if any.
+          type: string
+
+    FlowTemplate:
+      type: object
+      required: [slug, name, flow]
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+        pack_id:
+          description: Id of the integration pack providing this template, if any.
+          type: string
+        flow:
+          description: Raw template flow JSON, ready to clone and edit as a new flow.
+          type: object
+
+    ChatSummary:
+      type: object
+      required: [id, persona_slug, model_name, created_at, turn_count]
+      properties:
+        id:
+          type: string
+        persona_slug:
+          type: string
+        model_name:
+          type: string
+        created_at:
+          description: RFC3339 timestamp.
+          type: string
+        turn_count:
+          description: Number of user messages in the chat.
+          type: integer
+
+    ChatMessage:
+      description: >-
+        One message in a chat. The `role` field discriminates the variant; the
+        remaining fields vary by role.
+      type: object
+      required: [role]
+      oneOf:
+        - title: User
+          type: object
+          required: [role, content]
+          properties:
+            role:
+              type: string
+              enum: [user]
+            content:
+              type: string
+        - title: Assistant
+          type: object
+          required: [role, content]
+          properties:
+            role:
+              type: string
+              enum: [assistant]
+            content:
+              type: string
+        - title: ToolCall
+          type: object
+          required: [role, id, name, args]
+          properties:
+            role:
+              type: string
+              enum: [tool_call]
+            id:
+              type: string
+            call_id:
+              type: string
+            name:
+              type: string
+            args:
+              type: object
+        - title: ToolResult
+          type: object
+          required: [role, id, name, result]
+          properties:
+            role:
+              type: string
+              enum: [tool_result]
+            id:
+              type: string
+            call_id:
+              type: string
+            name:
+              type: string
+            result:
+              type: string
+      discriminator:
+        propertyName: role
+
+    ChatDetail:
+      type: object
+      required: [id, persona_slug, model_name, created_at, messages]
+      properties:
+        id:
+          type: string
+        persona_slug:
+          type: string
+        model_name:
+          type: string
+        created_at:
+          type: string
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+
+    CreateChatRequest:
+      type: object
+      required: [persona_slug]
+      properties:
+        persona_slug:
+          type: string
+        model_name:
+          description: Model override. Defaults to the server's default model.
+          type: string
+
+    ChatTurnRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          description: The user's input for this turn.
+          type: string
+
+    ChatEvent:
+      description: >-
+        One event in the SSE stream from a chat turn. The `kind` field
+        discriminates the variant. A turn emits `turn_started`, then zero or
+        more LLM/tool cycles, then a terminal `done`.
+      type: object
+      required: [kind]
+      oneOf:
+        - title: TurnStarted
+          type: object
+          required: [kind, turn_index, user_message]
+          properties:
+            kind:
+              type: string
+              enum: [turn_started]
+            turn_index:
+              type: integer
+            user_message:
+              type: string
+        - title: LlmStarted
+          type: object
+          required: [kind]
+          properties:
+            kind:
+              type: string
+              enum: [llm_started]
+        - title: LlmCompleted
+          type: object
+          required: [kind, messages, duration_ms]
+          properties:
+            kind:
+              type: string
+              enum: [llm_completed]
+            messages:
+              type: array
+              items:
+                $ref: '#/components/schemas/ChatMessage'
+            duration_ms:
+              type: integer
+        - title: ToolStarted
+          type: object
+          required: [kind, tool_call_id, name, args]
+          properties:
+            kind:
+              type: string
+              enum: [tool_started]
+            tool_call_id:
+              type: string
+            name:
+              type: string
+            args:
+              type: object
+        - title: ToolCompleted
+          type: object
+          required: [kind, tool_call_id, name, duration_ms, result]
+          properties:
+            kind:
+              type: string
+              enum: [tool_completed]
+            tool_call_id:
+              type: string
+            name:
+              type: string
+            duration_ms:
+              type: integer
+            result:
+              $ref: '#/components/schemas/ChatMessage'
+        - title: Done
+          type: object
+          required: [kind, status]
+          properties:
+            kind:
+              type: string
+              enum: [done]
+            status:
+              type: string
+              enum: [completed, interrupted, failed]
+            reason:
+              type: string
+      discriminator:
+        propertyName: kind
+
     Error:
       type: object
       required: [error]
