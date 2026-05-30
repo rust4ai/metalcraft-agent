@@ -1,7 +1,7 @@
 //! Diagnostics logger for full LLM call logging.
 //!
-//! When `--diagnostics` is passed, creates a timestamped session directory under
-//! `logs/` and writes:
+//! Creates a timestamped session directory under
+//! `sessions/` and writes:
 //! - `session_info.json` — persona, model, tools, skills, system prompt, cwd
 //! - `turn_NNN.json` — full message array after each agent step
 
@@ -20,7 +20,7 @@ impl DiagnosticsLogger {
     /// Create a new diagnostics logger. Creates the session directory immediately.
     pub fn new() -> std::io::Result<Self> {
         let timestamp = chrono_timestamp();
-        let session_dir = crate::paths::logs_dir().join(&timestamp);
+        let session_dir = crate::paths::sessions_dir().join(&timestamp);
         std::fs::create_dir_all(&session_dir)?;
         Ok(Self {
             session_dir,

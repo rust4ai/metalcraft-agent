@@ -172,16 +172,16 @@ answer or `max_steps` (90) is hit.
 ## 5. The CLI: interactive and one-shot modes (`src/main.rs`)
 
 ```
-metalcraft-agent [--auto-approve] [--diagnostics] <persona> [task]
+metalcraft-agent [--auto-approve] <persona> [task]
 ```
 
 Arg handling:
 
 - `--api <KEY>` (or `WORKSHOP_API_KEY` env) short-circuits everything and starts the
   workshop REST server instead of an agent (see §11).
-- `--auto-approve` and `--diagnostics` are extracted as flags; the first remaining arg is
-  the persona slug (default `coding-agent`), and any further args joined together are the
-  one-shot task.
+- `--auto-approve` is extracted as a flag; the first remaining arg is the persona slug
+  (default `coding-agent`), and any further args joined together are the one-shot task.
+- The CLI always creates a diagnostics session directory for runs.
 - If **stdin is not a TTY** (`atty`), approval is forced to auto-approve and a one-shot task
   is required (headless usage).
 
@@ -451,7 +451,7 @@ the agent run "reactively" — replying in Discord — combined with the Discord
 
 ## 13. Diagnostics (`src/diagnostics.rs`)
 
-With `--diagnostics`, a timestamped session directory is created under `logs/` containing:
+With each CLI run (and for flow runs), a timestamped session directory is created under `logs/` containing:
 
 - `session_info.json` — startup config (persona, model, tools, skills, system prompt, cwd, mode).
 - `turn_NNN.json` — the full message array after each step (logged by the step guard).

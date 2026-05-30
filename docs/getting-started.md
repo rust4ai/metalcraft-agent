@@ -42,13 +42,13 @@ Workshop endpoint `GET /api/v1/keys/recommended` lists the keys that enabled pac
 ## Running the agent CLI
 
 ```bash
-metalcraft-agent [--auto-approve] [--diagnostics] <persona> [task]
+metalcraft-agent [--auto-approve] <persona> [task]
 ```
 
 - `<persona>` — persona to use (defaults to `coding-agent`).
 - `[task]` — a single request; omit it to enter the interactive REPL.
 - `--auto-approve` — skip all approval prompts (required for non-interactive use).
-- `--diagnostics` — log full LLM call details to `logs/<timestamp>/`.
+- Sessions are always logged to `logs/<timestamp>/`.
 
 Examples:
 
@@ -59,8 +59,8 @@ metalcraft-agent coding-agent
 # One-shot task
 metalcraft-agent coding-agent "refactor the auth module"
 
-# Headless, no prompts, with logging
-metalcraft-agent --auto-approve --diagnostics coding-agent "run the test suite and fix failures"
+# Headless, no prompts, with session logging
+metalcraft-agent --auto-approve coding-agent "run the test suite and fix failures"
 
 # From source
 cargo run -- coding-agent
@@ -140,8 +140,7 @@ See `devops.md` at the repo root for the full operations guide.
 
 ## Diagnostics
 
-Run with `--diagnostics` (CLI) or via flow runs to capture a session under
-`logs/<timestamp>/`:
+The CLI always creates a timestamped session directory under `logs/<timestamp>/`, and flow runs do the same:
 
 - `session_info.json` — session metadata
 - `turn_NNN.json` — each LLM turn (request + response)

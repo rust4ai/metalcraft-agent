@@ -45,6 +45,7 @@ struct ChatSession {
     cwd: String,
     state: Option<AgentState>,
     created_at: String,
+    diagnostics: Option<Arc<DiagnosticsLogger>>,
     /// True while a turn is mid-flight. Prevents two concurrent turns from
     /// stomping on the same state.
     busy: bool,
@@ -88,7 +89,7 @@ struct ProjectLayout {
     personas_dir: String,
     skills_dir: String,
     flows_dir: String,
-    logs_dir: String,
+    sessions_dir: String,
     api_tools_dir: String,
 }
 
@@ -296,7 +297,7 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
             personas_dir: paths::personas_dir().display().to_string(),
             skills_dir: paths::skills_dir().display().to_string(),
             flows_dir: paths::flows_dir().display().to_string(),
-            logs_dir: paths::logs_dir().display().to_string(),
+            sessions_dir: paths::sessions_dir().display().to_string(),
             api_tools_dir: paths::api_tools_dir().display().to_string(),
         },
     })
@@ -534,7 +535,7 @@ async fn delete_flow(Path(id): Path<String>) -> Response {
 // ── Diagnostics handlers ────────────────────────────────────────────────
 
 fn list_diagnostics_sessions() -> Vec<DiagnosticsSessionSummary> {
-    let dir = paths::logs_dir();
+    let dir = paths::sessions_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(rd) => rd,
         Err(_) => return vec![],
@@ -584,7 +585,7 @@ async fn list_diagnostics() -> Json<Vec<DiagnosticsSessionSummary>> {
 }
 
 async fn get_diagnostics_session(Path(id): Path<String>) -> Response {
-    let session_dir = paths::logs_dir().join(&id);
+    let session_dir = paths::sessions_dir().join(&id);
     if !session_dir.is_dir() {
         return err_json(StatusCode::NOT_FOUND, format!("diagnostics session '{id}' not found"));
     }
@@ -944,7 +945,7 @@ async fn post_run_flow(
         .unwrap_or_else(|| "coding-agent".to_string());
     let model_name = req.model_name.unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
-    // Create a single diagnostics session for the whole flow run so it shows
+    // Create a single session for the whole flow run so it shows
     // up in the Sessions list. All prompts log their turns into this one
     // session directory; prompt boundaries are recorded as config-change
     // events. The session is tagged with the flow id (kind == "flow").
@@ -967,7 +968,7 @@ async fn post_run_flow(
             Some(Arc::new(l))
         }
         Err(e) => {
-            eprintln!("flow run: failed to create diagnostics logger: {e}");
+            eprintln!("flow run: failed to create session logger: {e}");
             None
         }
     };
@@ -1233,6 +1234,7 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
             cwd: pc.cwd,
             state,
             created_at: pc.created_at,
+            diagnostics: None,
             busy: false, // anything that was busy at shutdown couldn't have
                           // finished cleanly; reset so the user can retry.
         };
@@ -1290,9 +1292,29 @@ async fn post_create_chat(
         cwd: state.cwd.clone(),
         state: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        diagnostics: DiagnosticsLogger::new().ok().map(Arc::new),
         busy: false,
     };
     let session_arc = Arc::new(Mutex::new(session));
+    {
+        let s = session_arc.lock().await;
+        if let Some(logger) = &s.diagnostics {
+            if let Ok(persona) = Persona::load(&s.persona_slug, &paths::personas_dir()) {
+                let system_prompt = persona.build_system_prompt(&paths::skills_dir(), &s.cwd);
+                logger.log_session_info(
+                    &persona.name,
+                    &s.persona_slug,
+                    &s.model_name,
+                    &s.cwd,
+                    &system_prompt,
+                    &persona.tools,
+                    &persona.skills,
+                    true,
+                    None,
+                );
+            }
+        }
+    }
     state.chats.lock().await.insert(id.clone(), session_arc.clone());
     persist_chat(&session_arc).await;
     let s = session_arc.lock().await;
@@ -1407,7 +1429,7 @@ async fn post_chat_turn(
     // Lock the session up-front: stamp it busy, snapshot what we need to run
     // the executor, and seed/continue the AgentState. If anything fails we
     // release `busy` before returning.
-    let (persona_slug, model_name, cwd, agent_state, turn_index) = {
+    let (persona_slug, model_name, cwd, agent_state, turn_index, diagnostics) = {
         let mut s = session.lock().await;
         if s.busy {
             return err_json(StatusCode::CONFLICT, "chat is already mid-turn");
@@ -1428,6 +1450,7 @@ async fn post_chat_turn(
             s.cwd.clone(),
             next_state,
             prior_turns, // new turn's index = prior count (0-based)
+            s.diagnostics.clone(),
         )
     };
 
@@ -1470,7 +1493,11 @@ async fn post_chat_turn(
         let llm_call_hook: metalcraft::LlmCallHook = {
             let tx = tx.clone();
             let started = llm_started_at.clone();
-            Arc::new(move |_snapshot: &metalcraft::LlmCallSnapshot| {
+            let diagnostics = diagnostics.clone();
+            Arc::new(move |snapshot: &metalcraft::LlmCallSnapshot| {
+                if let Some(logger) = &diagnostics {
+                    logger.log_llm_request(snapshot);
+                }
                 *started.lock().unwrap() = Some(std::time::Instant::now());
                 let _ = tx.try_send(ChatEvent::LlmStarted);
             })
@@ -1485,7 +1512,11 @@ async fn post_chat_turn(
             let seen = seen_up_to.clone();
             let llm_started_at = llm_started_at.clone();
             let tools_in_flight = tools_in_flight.clone();
+            let diagnostics = diagnostics.clone();
             Arc::new(move |state: &AgentState, _ev| {
+                if let Some(logger) = &diagnostics {
+                    logger.log_turn(state);
+                }
                 let mut guard = seen.lock().unwrap();
                 if *guard >= state.messages.len() {
                     return GuardAction::Continue;

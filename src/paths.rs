@@ -44,8 +44,8 @@ pub fn flows_dir() -> PathBuf {
     data_dir().join("flows")
 }
 
-pub fn logs_dir() -> PathBuf {
-    data_dir().join("logs")
+pub fn sessions_dir() -> PathBuf {
+    data_dir().join("sessions")
 }
 
 pub fn api_tools_dir() -> PathBuf {

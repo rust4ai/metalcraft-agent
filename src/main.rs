@@ -61,12 +61,11 @@ fn build_prompt_str(persona_slug: &str, cwd: &str) -> String {
 }
 
 fn print_usage(personas_dir: &std::path::Path) {
-    eprintln!("{} {}", ui::error("Usage:"), ui::command("metalcraft-agent [--auto-approve] [--diagnostics] <persona> [task]"));
+    eprintln!("{} {}", ui::error("Usage:"), ui::command("metalcraft-agent [--auto-approve] <persona> [task]"));
     eprintln!();
     eprintln!("  If [task] is given, run once and exit.");
     eprintln!("  If [task] is omitted, enter interactive mode.");
     eprintln!("  --auto-approve  Skip approval prompts for all tools.");
-    eprintln!("  --diagnostics   Log full LLM call details to logs/.");
     eprintln!();
     let available = Persona::list_available(personas_dir);
     if available.is_empty() {
@@ -148,10 +147,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let auto_approve = raw_args.iter().any(|a| a == "--auto-approve");
-    let diagnostics_enabled = raw_args.iter().any(|a| a == "--diagnostics");
     let args: Vec<String> = raw_args
         .into_iter()
-        .filter(|a| a != "--auto-approve" && a != "--diagnostics")
+        .filter(|a| a != "--auto-approve")
         .collect();
 
     let default_persona = "coding-agent".to_string();
@@ -195,39 +193,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     print_persona_banner(&persona, persona_slug, &model_name, &cwd, auto_approve);
 
-    let diagnostics: Option<Arc<DiagnosticsLogger>> = if diagnostics_enabled {
-        match DiagnosticsLogger::new() {
-            Ok(logger) => {
-                let system_prompt = persona.build_system_prompt(&runtime_context.skills_dir, &cwd);
-                logger.log_session_info(
-                    &persona.name,
-                    persona_slug,
-                    &model_name,
-                    &cwd,
-                    &system_prompt,
-                    &persona.tools,
-                    &persona.skills,
-                    auto_approve,
-                    None,
-                );
-                println!("  {} {}\n", ui::label("Diagnostics:"), ui::path(logger.session_dir().display().to_string()));
-                Some(Arc::new(logger))
-            }
-            Err(e) => {
-                eprintln!("{} failed to create diagnostics logger: {e}", ui::warning("Warning:"));
-                None
-            }
+    let diagnostics: Arc<DiagnosticsLogger> = match DiagnosticsLogger::new() {
+        Ok(logger) => {
+            let system_prompt = persona.build_system_prompt(&runtime_context.skills_dir, &cwd);
+            logger.log_session_info(
+                &persona.name,
+                persona_slug,
+                &model_name,
+                &cwd,
+                &system_prompt,
+                &persona.tools,
+                &persona.skills,
+                auto_approve,
+                None,
+            );
+            println!("  {} {}\n", ui::label("Session:"), ui::path(logger.session_dir().display().to_string()));
+            Arc::new(logger)
         }
-    } else {
-        None
+        Err(e) => {
+            return Err(format!("failed to create session logger: {e}").into());
+        }
     };
 
-    let llm_call_hook: Option<LlmCallHook> = diagnostics.as_ref().map(|d| {
-        let logger = d.clone();
+    let llm_call_hook: LlmCallHook = {
+        let logger = diagnostics.clone();
         Arc::new(move |snapshot: &metalcraft::LlmCallSnapshot| {
             logger.log_llm_request(snapshot);
         }) as LlmCallHook
-    });
+    };
 
     let runtime::BuiltAgentRuntime {
         mut graph,
@@ -238,10 +231,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cwd,
         &model_name,
         approval_mode.clone(),
-        llm_call_hook.clone(),
+        Some(llm_call_hook.clone()),
         |client, model_name| client.completion_model(model_name),
     )?;
-    let step_guard = guard::build_agent_guard(guard::GuardConfig::default(), diagnostics.clone());
+    let step_guard = guard::build_agent_guard(guard::GuardConfig::default(), Some(diagnostics.clone()));
     let mut current_persona_slug = persona_slug.to_string();
 
     if let Some(task) = one_shot_task {
@@ -255,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 model_name: &model_name,
                 task: &task,
                 approval_mode: approval_mode.clone(),
-                diagnostics: diagnostics.clone(),
+                diagnostics: Some(diagnostics.clone()),
             },
         )
         .await?
@@ -339,7 +332,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &cwd,
                         &model_name,
                         approval_mode.clone(),
-                        llm_call_hook.clone(),
+                        Some(llm_call_hook.clone()),
                         |client, model_name| client.completion_model(model_name),
                     ) {
                         Ok(runtime::BuiltAgentRuntime {
@@ -388,7 +381,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &cwd,
                         &model_name,
                         approval_mode.clone(),
-                        llm_call_hook.clone(),
+                        Some(llm_call_hook.clone()),
                         |client, model_name| client.completion_model(model_name),
                     ) {
                         Ok(runtime::BuiltAgentRuntime {
@@ -402,12 +395,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state = None;
                             println!();
                             print_persona_banner(&new_persona, new_slug, &model_name, &cwd, auto_approve);
-                            if let Some(ref d) = diagnostics {
-                                d.log_config_change("persona_switch", serde_json::json!({
-                                    "new_persona": new_slug,
-                                    "model": &model_name,
-                                }));
-                            }
+                            diagnostics.log_config_change("persona_switch", serde_json::json!({
+                                "new_persona": new_slug,
+                                "model": &model_name,
+                            }));
                             println!("{}\n", ui::dim("Conversation cleared (new persona context)."));
                         }
                         Err(e) => {
@@ -446,7 +437,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &cwd,
                 new_model,
                 approval_mode.clone(),
-                llm_call_hook.clone(),
+                Some(llm_call_hook.clone()),
                 |client, model_name| client.completion_model(model_name),
             ) {
                 Ok(runtime::BuiltAgentRuntime {
@@ -459,12 +450,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state = None;
                     println!();
                     print_persona_banner(&current_persona, &current_persona_slug, &model_name, &cwd, auto_approve);
-                    if let Some(ref d) = diagnostics {
-                        d.log_config_change("model_switch", serde_json::json!({
-                            "new_model": new_model,
-                            "persona": &current_persona_slug,
-                        }));
-                    }
+                    diagnostics.log_config_change("model_switch", serde_json::json!({
+                        "new_model": new_model,
+                        "persona": &current_persona_slug,
+                    }));
                     println!("{}\n", ui::dim("Conversation cleared (new model context)."));
                 }
                 Err(e) => {

@@ -28,13 +28,13 @@ Metalcraft Agent is a Rust application leveraging the Metalcraft framework to cr
 ## Agent Usage
 
 ```bash
-metalcraft-agent [--auto-approve] [--diagnostics] <persona> [task]
+metalcraft-agent [--auto-approve] <persona> [task]
 ```
 
 - **`<persona>`**: The persona to be used by the agent.
 - **`[task]`**: Specific task to be executed. If omitted, the agent enters interactive mode.
 - **`--auto-approve`**: Automatically approve prompts for all tools.
-- **`--diagnostics`**: Log full LLM call details to a timestamped session directory under `logs/`.
+- Sessions are always logged to a timestamped session directory under `logs/`.
 
 Flags can be combined and placed in any order before the persona argument.
 
@@ -50,11 +50,11 @@ metalcraft-agent coding-agent "refactor the auth module"
 # Skip all approval prompts
 metalcraft-agent --auto-approve coding-agent
 
-# Enable diagnostics logging
-metalcraft-agent --diagnostics coding-agent
+# Sessions are always logged
+metalcraft-agent coding-agent
 
-# Both flags together
-metalcraft-agent --auto-approve --diagnostics coding-agent "fix the login bug"
+# Auto-approve with session logging
+metalcraft-agent --auto-approve coding-agent "fix the login bug"
 ```
 
 ## Flow Daemon Usage

@@ -133,7 +133,7 @@ pub fn ensure_defaults() {
         paths::personas_dir(),
         paths::skills_dir(),
         paths::flows_dir(),
-        paths::logs_dir(),
+        paths::sessions_dir(),
         paths::api_tools_dir(),
         paths::flow_templates_dir(),
         paths::chats_dir(),

@@ -1,13 +1,16 @@
 use metalcraft_agent::approval::ApprovalMode;
+use metalcraft_agent::diagnostics::DiagnosticsLogger;
 use metalcraft_agent::event_listener::{self, EventListenerConfig};
 use metalcraft_agent::flows::{self, FlowSchedule};
 use metalcraft_agent::paths;
+use metalcraft_agent::persona::Persona;
 use metalcraft_agent::runtime::{self, AgentRuntimeContext, RunOneShotRequest, DEFAULT_MODEL};
 use metalcraft_agent::workshop_api;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Local;
@@ -272,6 +275,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             effective_persona
                         );
 
+                        let logger = DiagnosticsLogger::new().ok().map(Arc::new);
+                        if let Some(ref diagnostics) = logger {
+                            if let Ok(persona) = Persona::load(effective_persona, &context.personas_dir) {
+                                let system_prompt = persona.build_system_prompt(&context.skills_dir, &cwd);
+                                diagnostics.log_session_info(
+                                    &persona.name,
+                                    effective_persona,
+                                    &model_name,
+                                    &cwd,
+                                    &system_prompt,
+                                    &persona.tools,
+                                    &persona.skills,
+                                    matches!(approval_mode, ApprovalMode::AutoApprove),
+                                    Some(&flow.saved.id),
+                                );
+                            }
+                        }
+
                         let outcome = runtime::run_one_shot_task(
                             &context,
                             RunOneShotRequest {
@@ -280,7 +301,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 model_name: &model_name,
                                 task: &prompt.prompt,
                                 approval_mode: approval_mode.clone(),
-                                diagnostics: None,
+                                diagnostics: logger,
                             },
                         )
                         .await;
