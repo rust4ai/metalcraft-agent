@@ -1136,3 +1136,217 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /api/v1/flows/{id}/run:
+    post:
+      summary: Run a saved flow now
+      description: >-
+        Executes the flow's prompts in order and returns a per-prompt result.
+        The request body is optional — omit it to run as `coding-agent` on the
+        default model.
+      operationId: runFlow
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunFlowRequest'
+      responses:
+        '200':
+          description: Flow run results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunFlowResponse'
+        '400':
+          description: Flow is not runnable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Flow not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Agent runtime not available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/flow-templates:
+    get:
+      summary: List flow templates
+      operationId: listFlowTemplates
+      responses:
+        '200':
+          description: Available flow templates (local and from enabled packs)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FlowTemplateSummary'
+
+  /api/v1/flow-templates/{slug}:
+    get:
+      summary: Load one flow template
+      operationId: getFlowTemplate
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Flow template with its raw flow JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlowTemplate'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Template failed to parse
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/chats:
+    get:
+      summary: List chats
+      operationId: listChats
+      responses:
+        '200':
+          description: Chats, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ChatSummary'
+    post:
+      summary: Create a chat
+      operationId: createChat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChatRequest'
+      responses:
+        '201':
+          description: Chat created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatSummary'
+        '400':
+          description: Persona not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/chats/{id}:
+    get:
+      summary: Load one chat with its full message history
+      operationId: getChat
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Chat detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatDetail'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      summary: Delete a chat
+      operationId: deleteChat
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/chats/{id}/turn:
+    post:
+      summary: Send a message and stream the agent's turn
+      description: >-
+        Streams the turn as Server-Sent Events (`text/event-stream`). Each event
+        is a JSON `ChatEvent`: a `turn_started`, then zero or more LLM/tool
+        cycles, then a terminal `done`.
+      operationId: chatTurn
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatTurnRequest'
+      responses:
+        '200':
+          description: SSE stream of chat events
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatEvent'
+        '404':
+          description: Chat not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Chat is already mid-turn
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Agent runtime not available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
