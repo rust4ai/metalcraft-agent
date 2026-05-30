@@ -318,6 +318,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 log::warn!("Flow '{}' prompt interrupted: {}", flow.saved.id, reason);
                                 break;
                             }
+                            Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
+                                log::error!("Flow '{}' prompt failed at {node}: {error}", flow.saved.id);
+                                break;
+                            }
                             Err(err) => {
                                 log::error!("Flow '{}' prompt failed: {}", flow.saved.id, err);
                                 break;

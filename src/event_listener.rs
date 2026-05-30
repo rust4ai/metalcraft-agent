@@ -183,6 +183,9 @@ async fn handle_event(
             Ok(metalcraft::RunOutcome::Interrupted { reason, .. }) => {
                 log::warn!("Event {} interrupted: {reason}", event.id);
             }
+            Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
+                log::error!("Event {} failed at {node}: {error}", event.id);
+            }
             Err(e) => {
                 log::error!("Event {} failed: {e}", event.id);
             }

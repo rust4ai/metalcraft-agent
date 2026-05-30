@@ -115,6 +115,12 @@ impl metalcraft::Tool for SubAgentTool {
                     "error": true,
                 }))
             }
+            Ok(Ok(RunOutcome::Failed { node, error, .. })) => {
+                Ok(serde_json::json!({
+                    "result": format!("Sub-agent failed at {node}: {error}"),
+                    "error": true,
+                }))
+            }
             Ok(Err(e)) => {
                 Ok(serde_json::json!({
                     "result": format!("Sub-agent error: {e}"),

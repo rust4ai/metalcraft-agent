@@ -1034,6 +1034,12 @@ async fn post_run_flow(
                 answer: None,
                 error: Some(reason),
             },
+            Ok(RunOutcome::Failed { node, error, .. }) => RunFlowPromptResult {
+                prompt_index: i,
+                status: "failed".into(),
+                answer: None,
+                error: Some(format!("{node}: {error}")),
+            },
             Err(e) => RunFlowPromptResult {
                 prompt_index: i,
                 status: "failed".into(),
@@ -1683,21 +1689,31 @@ async fn post_chat_turn(
                     })
                     .await;
                 }
-                Err(e) => {
-                    // Walk the source chain so the reason carries the real cause
-                    // (e.g. a reqwest decode error's serde detail), not just the
-                    // top-level summary.
-                    let reason = error_chain(e.as_ref());
-                    // Record the failure on disk so it's visible in the session
-                    // timeline later — the SSE event below is the only other
-                    // trace and it vanishes once the stream closes.
+                Ok(RunOutcome::Failed { state, node, error }) => {
+                    // metalcraft >=0.6.0 hands back the partial state on a node
+                    // failure. Keep it (rather than rolling back) so the failed
+                    // turn's completed assistant/tool steps survive in the chat
+                    // transcript, not just in the diagnostics turn files.
+                    let reason = format!("{node}: {error}");
                     if let Some(logger) = &diagnostics {
                         logger.log_error(&reason);
                     }
-                    // Roll the conversation back to before this turn so the
-                    // chat keeps its history (the partial turn's steps are
-                    // captured in the diagnostics turn files regardless) and
-                    // persist it.
+                    s.state = Some(state);
+                    let _ = tx.send(ChatEvent::Done {
+                        status: "failed".into(),
+                        reason: Some(reason),
+                    })
+                    .await;
+                }
+                Err(e) => {
+                    // A framework-level error (step-limit, checkpoint) with no
+                    // recoverable state. Walk the source chain so the reason
+                    // carries the real cause, roll back to the pre-turn state so
+                    // the chat keeps its history, and record the failure on disk.
+                    let reason = error_chain(e.as_ref());
+                    if let Some(logger) = &diagnostics {
+                        logger.log_error(&reason);
+                    }
                     s.state = Some(state_before_turn);
                     let _ = tx.send(ChatEvent::Done {
                         status: "failed".into(),

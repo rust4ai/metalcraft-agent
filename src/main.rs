@@ -260,6 +260,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             RunOutcome::Interrupted { reason, .. } => {
                 println!("\n{} {reason}", ui::warning("Interrupted:"));
             }
+            RunOutcome::Failed { node, error, .. } => {
+                println!("\n{} {node}: {error}", ui::warning("Failed:"));
+            }
         }
         return Ok(());
     }
@@ -490,6 +493,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(RunOutcome::Interrupted { state: s, reason, .. }) => {
                 println!("\n{} {reason}", ui::warning("Interrupted:"));
+                state = Some(s);
+            }
+            Ok(RunOutcome::Failed { state: s, node, error }) => {
+                eprintln!("\n{} {node}: {error}", ui::error("Failed:"));
+                // Keep the partial state so the next REPL turn can continue.
                 state = Some(s);
             }
             Err(e) => {
