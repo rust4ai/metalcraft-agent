@@ -72,3 +72,14 @@ pub fn integration_packs_state_file() -> PathBuf {
 pub fn keys_file() -> PathBuf {
     data_dir().join("keys.json")
 }
+
+/// Root directory that document-upload tools (multipart HTTP-API tools) may
+/// read local files from. The multipart body builder refuses any path that
+/// resolves outside this tree, so a tool-calling model can't be steered into
+/// uploading arbitrary local files (SSH keys, `.env`, …). Override with
+/// `METALCRAFT_UPLOAD_ROOT`; defaults to `<data>/uploads`.
+pub fn upload_root() -> PathBuf {
+    std::env::var("METALCRAFT_UPLOAD_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| data_dir().join("uploads"))
+}

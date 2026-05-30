@@ -1,0 +1,28 @@
+{
+  "name": "solarabase_upload_document",
+  "description": "Upload a local file into the Solarabase knowledge base so it gets indexed and becomes retrievable. The document's name in the knowledge base is taken from the uploaded file's name. The Solarabase indexer reads files as UTF-8 text (splitting on form-feeds or headings into pages), so upload plain-text formats (.txt, .md, extracted text) — binary formats like PDF/DOCX are stored but will not index meaningfully. The file must live under the agent's upload root; uploads outside that directory are refused. Indexing runs server-side and asynchronously, so call solarabase_list_documents afterward to confirm the document reached 'indexed' status before relying on it in retrieval.",
+  "method": "POST",
+  "url": "$SOLARABASE_URL/api/kb/$SOLARABASE_KB_ID/documents",
+  "headers": {
+    "Authorization": "Bearer $SOLARABASE_API_KEY"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "Path to the local file to upload. Must resolve inside the configured upload root (METALCRAFT_UPLOAD_ROOT, default <data>/uploads)."
+      },
+      "folder_id": {
+        "type": "string",
+        "description": "Optional UUID of a folder in this knowledge base to file the document under. Omit to upload to the knowledge base root."
+      }
+    },
+    "required": ["file_path"]
+  },
+  "body_mapping": "multipart",
+  "multipart": {
+    "file_param": "file_path",
+    "file_field": "file"
+  }
+}

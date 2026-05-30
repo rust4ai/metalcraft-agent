@@ -117,6 +117,10 @@ const SOLARABASE_PACK: &[(&str, &str)] = &[
         "api_tools/solarabase_get_document_pages.json",
         include_str!("../seed/integration_packs/solarabase/api_tools/solarabase_get_document_pages.json"),
     ),
+    (
+        "api_tools/solarabase_upload_document.json",
+        include_str!("../seed/integration_packs/solarabase/api_tools/solarabase_upload_document.json"),
+    ),
 ];
 
 const SEED_INTEGRATION_PACKS: &[(&str, &[(&str, &str)])] =
@@ -134,6 +138,7 @@ pub fn ensure_defaults() {
         paths::flow_templates_dir(),
         paths::chats_dir(),
         paths::integration_packs_dir(),
+        paths::upload_root(),
     ];
 
     for dir in &dirs {

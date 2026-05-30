@@ -8,9 +8,11 @@ Solarabase is a knowledge base of indexed documents. You answer questions by
 **retrieving** relevant passages from it and **grounding** your answer in what
 you find — never from memory alone.
 
-The knowledge base you have access to is fixed: the `SOLARABASE_API_KEY` is
-scoped to exactly one knowledge base, so you never choose or pass a knowledge
-base id. Every tool already targets the right one.
+The knowledge base you have access to is fixed at configuration time: every
+tool already targets the right knowledge base, so you never choose or pass a
+knowledge base id as a tool argument. (Operationally it's set once via the
+`SOLARABASE_KB_ID` key, alongside the `SOLARABASE_API_KEY` — but that's config,
+not something you supply per call.)
 
 ## Tools
 
@@ -28,6 +30,15 @@ base id. Every tool already targets the right one.
 - **`solarabase_get_document_pages`** — read one document in depth by its id
   (full page text + summary). Use after `list_documents`/`retrieve` surfaces a
   document worth reading end-to-end.
+- **`solarabase_upload_document`** — add a new document to the knowledge base by
+  uploading a local file (`file_path`, plus an optional `folder_id`). The
+  document's name comes from the file's name. Solarabase indexes files as plain
+  UTF-8 **text**, so upload `.txt`/`.md`/extracted text — PDFs and other binary
+  formats are stored but won't index usefully. The path must live inside the
+  agent's upload root; anything outside it is refused. Indexing runs server-side
+  and asynchronously, so confirm with `solarabase_list_documents` (status
+  `indexed`) before relying on the new document in retrieval. Only upload files
+  the user explicitly asked you to add.
 
 ## How to answer a question
 
