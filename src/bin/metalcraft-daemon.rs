@@ -227,6 +227,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state_by_flow: HashMap<String, FlowRunState> = HashMap::new();
 
     loop {
+        // Run one polling iteration, but let Ctrl+C cancel it. The workshop API
+        // and event listener install tokio's SIGINT handler via
+        // `with_graceful_shutdown`, which replaces the OS default of killing the
+        // process. Without selecting on ctrl_c here too, the main loop would keep
+        // polling forever and Ctrl+C would only stop the spawned servers.
+        let iteration = async {
         let runnable = flows::load_enabled_flows(&flows_dir);
         for flow in runnable {
             let flow_id = flow.saved.id.clone();
@@ -307,12 +313,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.is_running = false;
             }
         }
+        };
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                log::info!("Received Ctrl+C — shutting down metalcraft-daemon");
+                break;
+            }
+            _ = iteration => {}
+        }
 
         if once {
             break;
         }
 
-        tokio::time::sleep(Duration::from_secs(poll_seconds)).await;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                log::info!("Received Ctrl+C — shutting down metalcraft-daemon");
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(poll_seconds)) => {}
+        }
     }
 
     Ok(())

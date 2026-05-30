@@ -2,7 +2,7 @@
   "id": "solarabase",
   "name": "Solarabase RAG",
   "description": "Persona, skill, and HTTP API tools that let an agent use a Solarabase knowledge base for retrieval-augmented generation (RAG) — retrieving relevant passages, asking grounded questions, and uploading new documents via a Solarabase API key.",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "requires_env": [
     "SOLARABASE_API_KEY"
   ]

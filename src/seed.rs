@@ -166,13 +166,41 @@ fn write_seeds(dir: &Path, seeds: &[(&str, &str)]) {
     }
 }
 
+/// Parse a pack manifest's `version` into a comparable (major, minor, patch)
+/// tuple. Returns `None` when the JSON is unparseable or the version is
+/// missing/malformed — callers treat that as "don't force an upgrade".
+fn manifest_version(pack_json: &str) -> Option<(u64, u64, u64)> {
+    let v: serde_json::Value = serde_json::from_str(pack_json).ok()?;
+    let s = v.get("version")?.as_str()?;
+    let mut parts = s.split('.').map(|p| p.parse::<u64>().ok());
+    let major = parts.next()??;
+    let minor = parts.next().flatten().unwrap_or(0);
+    let patch = parts.next().flatten().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
 fn write_integration_packs() {
     let root = paths::integration_packs_dir();
     for (pack_id, files) in SEED_INTEGRATION_PACKS {
         let pack_dir = root.join(pack_id);
+
+        // If the bundled pack.json is a newer version than what's installed,
+        // force-refresh every file in the pack. Pack files are read-only in the
+        // UI, so users never hand-edit them — overwriting is safe and is the
+        // only way a manifest change (e.g. a shrunk `requires_env`) reaches
+        // existing installs, which otherwise keep the first-seeded copy forever.
+        let bundled_ver = files
+            .iter()
+            .find(|(rel, _)| *rel == "pack.json")
+            .and_then(|(_, content)| manifest_version(content));
+        let installed_ver = fs::read_to_string(pack_dir.join("pack.json"))
+            .ok()
+            .and_then(|content| manifest_version(&content));
+        let force_upgrade = matches!((bundled_ver, installed_ver), (Some(b), Some(i)) if b > i);
+
         for (rel_path, content) in *files {
             let target = pack_dir.join(rel_path);
-            if !target.exists() {
+            if force_upgrade || !target.exists() {
                 if let Some(parent) = target.parent() {
                     if let Err(e) = fs::create_dir_all(parent) {
                         eprintln!("Warning: could not create {}: {e}", parent.display());
