@@ -1,0 +1,14 @@
+{
+  "name": "starflask_list_models",
+  "description": "List the AI models available on Starflask. Returns an array of {key, name, description, capabilities, credits_cost, input_schema}. Use this to discover valid model_key values and the exact params each model accepts (input_schema) before creating a job, and to see how many credits a model costs per run.",
+  "method": "GET",
+  "url": "https://starflask.com/api/v1/models",
+  "headers": {
+    "Authorization": "Bearer $STARFLASK_API_KEY"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "none"
+}

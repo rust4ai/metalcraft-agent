@@ -1,0 +1,24 @@
+{
+  "name": "starflask_generate_3d",
+  "description": "Create a Starflask 3D mesh generation job (text-to-3D or image-to-3D). Returns a job id immediately — poll with starflask_get_job until status is 'completed', then read result.model_url (the generated 3D model) and result.thumbnail_url. Pass the request as the `payload` object using the structured form: {\"structured_data\": {\"model_key\": \"<key>\", \"params\": {...}}}. Text-to-3D params: {\"prompt\": \"a low-poly treasure chest\", \"topology\": \"triangle\", \"target_polycount\": 30000, \"enable_pbr\": true}. Image-to-3D: pass {\"image_url\": \"<url from starflask_upload_media>\"} instead of (or with) prompt. NOTE: the job type is \"mesh\" — this tool sends it for you. Use starflask_list_models to see available mesh model keys (e.g. meshy-v6) and their input_schema.",
+  "method": "POST",
+  "url": "https://starflask.com/api/v1/jobs",
+  "headers": {
+    "Authorization": "Bearer $STARFLASK_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "payload": {
+        "type": "object",
+        "description": "The 3D generation request, e.g. {\"structured_data\": {\"model_key\": \"meshy-v6\", \"params\": {\"prompt\": \"...\", \"topology\": \"triangle\", \"target_polycount\": 30000, \"enable_pbr\": true}}}. For image-to-3D, use params {\"image_url\": \"...\"}."
+      }
+    },
+    "required": ["payload"]
+  },
+  "body_mapping": "params",
+  "body_defaults": {
+    "type": "mesh"
+  }
+}

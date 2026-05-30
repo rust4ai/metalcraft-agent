@@ -1,0 +1,24 @@
+{
+  "name": "starflask_generate_video",
+  "description": "Create a Starflask video generation job. Returns a job id immediately — poll with starflask_get_job until status is 'completed', then read result.video_url. Pass the request as the `payload` object using the structured form: {\"structured_data\": {\"model_key\": \"<key>\", \"params\": {...}}}. Text-to-video: model_key \"kling-text2video\" with params {\"prompt\": \"...\", \"duration\": 5}. Image-to-video (animate a still): model_key \"kling-img2video\" with params {\"image_url\": \"<url from starflask_upload_media or a prior image job>\", \"prompt\": \"...\", \"duration\": 5}. Use starflask_list_models to see available video models and their input_schema.",
+  "method": "POST",
+  "url": "https://starflask.com/api/v1/jobs",
+  "headers": {
+    "Authorization": "Bearer $STARFLASK_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "payload": {
+        "type": "object",
+        "description": "The video generation request, e.g. {\"structured_data\": {\"model_key\": \"kling-text2video\", \"params\": {\"prompt\": \"...\", \"duration\": 5}}} for text-to-video, or model_key \"kling-img2video\" with params {\"image_url\": \"...\", \"prompt\": \"...\"} to animate an uploaded image."
+      }
+    },
+    "required": ["payload"]
+  },
+  "body_mapping": "params",
+  "body_defaults": {
+    "type": "video"
+  }
+}

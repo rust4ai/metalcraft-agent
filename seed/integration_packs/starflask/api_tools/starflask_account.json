@@ -1,0 +1,14 @@
+{
+  "name": "starflask_account",
+  "description": "Get the Starflask account tied to the API key: {id, email, name, plan, credits}. Use it to confirm the key works and to check the remaining credit balance before kicking off expensive media jobs (each model's cost is shown by starflask_list_models).",
+  "method": "GET",
+  "url": "https://starflask.com/api/v1/me",
+  "headers": {
+    "Authorization": "Bearer $STARFLASK_API_KEY"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "none"
+}

@@ -123,8 +123,75 @@ const SOLARABASE_PACK: &[(&str, &str)] = &[
     ),
 ];
 
-const SEED_INTEGRATION_PACKS: &[(&str, &[(&str, &str)])] =
-    &[("discord", DISCORD_PACK), ("solarabase", SOLARABASE_PACK)];
+/// Starflask Media Studio integration pack — a persona, skill, and HTTP-API
+/// tools for generating media (images, video, 3D, speech) with Starflask
+/// (starflask.com). Disabled by default; enabled from the workshop's Packs
+/// section. Reads its `STARFLASK_API_KEY` from the key store (see
+/// [`crate::key_store`]).
+const STARFLASK_PACK: &[(&str, &str)] = &[
+    (
+        "pack.json",
+        include_str!("../seed/integration_packs/starflask/pack.json"),
+    ),
+    (
+        "personas/media-studio-agent.json",
+        include_str!("../seed/integration_packs/starflask/personas/media-studio-agent.json"),
+    ),
+    (
+        "skills/starflask-media.md",
+        include_str!("../seed/integration_packs/starflask/skills/starflask-media.md"),
+    ),
+    (
+        "api_tools/starflask_generate_image.json",
+        include_str!("../seed/integration_packs/starflask/api_tools/starflask_generate_image.json"),
+    ),
+    (
+        "api_tools/starflask_generate_video.json",
+        include_str!("../seed/integration_packs/starflask/api_tools/starflask_generate_video.json"),
+    ),
+    (
+        "api_tools/starflask_generate_3d.json",
+        include_str!("../seed/integration_packs/starflask/api_tools/starflask_generate_3d.json"),
+    ),
+    (
+        "api_tools/starflask_generate_speech.json",
+        include_str!("../seed/integration_packs/starflask/api_tools/starflask_generate_speech.json"),
+    ),
+    (
+        "api_tools/starflask_create_job.json",
+        include_str!("../seed/integration_packs/starflask/api_tools/starflask_create_job.json"),
+    ),
+    (
+        "api_tools/starflask_get_job.json",
+        include_str!("../seed/integration_packs/starflask/api_tools/starflask_get_job.json"),
+    ),
+    (
+        "api_tools/starflask_list_models.json",
+        include_str!("../seed/integration_packs/starflask/api_tools/starflask_list_models.json"),
+    ),
+    (
+        "api_tools/starflask_list_styles.json",
+        include_str!("../seed/integration_packs/starflask/api_tools/starflask_list_styles.json"),
+    ),
+    (
+        "api_tools/starflask_upload_media.json",
+        include_str!("../seed/integration_packs/starflask/api_tools/starflask_upload_media.json"),
+    ),
+    (
+        "api_tools/starflask_get_media.json",
+        include_str!("../seed/integration_packs/starflask/api_tools/starflask_get_media.json"),
+    ),
+    (
+        "api_tools/starflask_account.json",
+        include_str!("../seed/integration_packs/starflask/api_tools/starflask_account.json"),
+    ),
+];
+
+const SEED_INTEGRATION_PACKS: &[(&str, &[(&str, &str)])] = &[
+    ("discord", DISCORD_PACK),
+    ("solarabase", SOLARABASE_PACK),
+    ("starflask", STARFLASK_PACK),
+];
 
 /// Ensure default personas and skills exist in the app data directory.
 /// Creates directories and writes seed files only if they don't already exist.

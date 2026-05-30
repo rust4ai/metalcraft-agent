@@ -1,0 +1,25 @@
+{
+  "name": "starflask_create_job",
+  "description": "Create an arbitrary Starflask job by type — the general-purpose equivalent of `npx starflask jobs create <type> --payload <json>`. Use this for job types that don't have a dedicated tool: \"upscale\", \"remove_bg\", \"vectorize\", \"vector\", \"cartoonify\", \"clip\" (media conversion), and subtypes like \"image:resize\", \"image:crop\", \"image:animate\", \"audio:transcribe\". Returns a job id immediately — poll with starflask_get_job until 'completed', then read the relevant URL from result. Most payloads follow {\"structured_data\": {\"model_key\": \"<key>\", \"params\": {...}}}; many transform jobs take an \"image_url\" param pointing at media you uploaded via starflask_upload_media. Prefer starflask_generate_image / _video / _3d / _speech for those four common cases.",
+  "method": "POST",
+  "url": "https://starflask.com/api/v1/jobs",
+  "headers": {
+    "Authorization": "Bearer $STARFLASK_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "type": {
+        "type": "string",
+        "description": "The job type, e.g. \"upscale\", \"remove_bg\", \"vectorize\", \"cartoonify\", \"clip\", \"image:resize\", \"audio:transcribe\"."
+      },
+      "payload": {
+        "type": "object",
+        "description": "The job payload, typically {\"structured_data\": {\"model_key\": \"<key>\", \"params\": {...}}}."
+      }
+    },
+    "required": ["type", "payload"]
+  },
+  "body_mapping": "params"
+}

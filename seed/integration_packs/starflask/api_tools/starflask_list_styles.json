@@ -1,0 +1,14 @@
+{
+  "name": "starflask_list_styles",
+  "description": "List the image styles available on Starflask. Returns an array of {key, name, config}. Pass a chosen key as \"image_style_key\" in a starflask_generate_image payload to apply that look (e.g. Photorealistic, Illustration, Watercolor, Cinematic). If no style is given, image jobs use the default style.",
+  "method": "GET",
+  "url": "https://starflask.com/api/v1/styles",
+  "headers": {
+    "Authorization": "Bearer $STARFLASK_API_KEY"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "none"
+}

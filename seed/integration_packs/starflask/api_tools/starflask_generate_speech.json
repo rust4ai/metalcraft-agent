@@ -1,0 +1,24 @@
+{
+  "name": "starflask_generate_speech",
+  "description": "Create a Starflask text-to-speech (audio) generation job. Returns a job id immediately — poll with starflask_get_job until status is 'completed', then read the audio URL from the result. Pass the request as the `payload` object using the structured form: {\"structured_data\": {\"model_key\": \"chatterbox-tts\", \"params\": {\"text\": \"Hello there\", \"voice\": \"<voice-id>\"}}}. The job type is \"audio\" — this tool sends it for you. Use starflask_list_models to see available audio model keys and their input_schema (including supported voices).",
+  "method": "POST",
+  "url": "https://starflask.com/api/v1/jobs",
+  "headers": {
+    "Authorization": "Bearer $STARFLASK_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "payload": {
+        "type": "object",
+        "description": "The speech generation request, e.g. {\"structured_data\": {\"model_key\": \"chatterbox-tts\", \"params\": {\"text\": \"...\", \"voice\": \"...\"}}}."
+      }
+    },
+    "required": ["payload"]
+  },
+  "body_mapping": "params",
+  "body_defaults": {
+    "type": "audio"
+  }
+}
