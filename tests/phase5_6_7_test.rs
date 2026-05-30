@@ -126,7 +126,8 @@ fn dummy_event() -> StepEvent {
 fn guard_detects_error_spiral() {
     let guard = build_agent_guard(GuardConfig {
         verbose: false, max_consecutive_errors: 2,
-        loop_window: 0,
+        max_identical_repeats: 0, max_poll_repeats: 0,
+        ..GuardConfig::default()
     }, None);
 
     let mut state = AgentState::new("test");
@@ -158,7 +159,8 @@ fn guard_detects_error_spiral() {
 fn guard_resets_on_success() {
     let guard = build_agent_guard(GuardConfig {
         verbose: false, max_consecutive_errors: 2,
-        loop_window: 0,
+        max_identical_repeats: 0, max_poll_repeats: 0,
+        ..GuardConfig::default()
     }, None);
 
     let mut state = AgentState::new("test");
@@ -205,7 +207,8 @@ fn guard_resets_on_success() {
 fn guard_detects_repeated_tool_call() {
     let guard = build_agent_guard(GuardConfig {
         verbose: false, max_consecutive_errors: 0,
-        loop_window: 5,
+        max_identical_repeats: 1,
+        ..GuardConfig::default()
     }, None);
 
     let mut state = AgentState::new("test");
@@ -235,7 +238,8 @@ fn guard_detects_repeated_tool_call() {
 fn guard_allows_different_args() {
     let guard = build_agent_guard(GuardConfig {
         verbose: false, max_consecutive_errors: 0,
-        loop_window: 5,
+        max_identical_repeats: 1,
+        ..GuardConfig::default()
     }, None);
 
     let mut state = AgentState::new("test");

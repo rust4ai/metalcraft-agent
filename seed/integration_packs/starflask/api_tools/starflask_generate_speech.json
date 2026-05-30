@@ -1,6 +1,6 @@
 {
   "name": "starflask_generate_speech",
-  "description": "Create a Starflask text-to-speech (audio) generation job. Returns a job id immediately — poll with starflask_get_job until status is 'completed', then read the audio URL from the result. Pass the request as the `payload` object using the structured form: {\"structured_data\": {\"model_key\": \"chatterbox-tts\", \"params\": {\"text\": \"Hello there\", \"voice\": \"<voice-id>\"}}}. The job type is \"audio\" — this tool sends it for you. Use starflask_list_models to see available audio model keys and their input_schema (including supported voices).",
+  "description": "Create a Starflask text-to-speech (audio) generation job. Returns a job id immediately — poll with starflask_get_job until status is 'completed', then read the audio URL from the result. Provide the `text` to speak; optionally a `voice` id and a `model_key` (default chatterbox-tts). The job type is sent as \"audio\" for you. Use starflask_list_models to see available audio models and supported voices.",
   "method": "POST",
   "url": "https://starflask.com/api/v1/jobs",
   "headers": {
@@ -10,15 +10,33 @@
   "parameters": {
     "type": "object",
     "properties": {
-      "payload": {
-        "type": "object",
-        "description": "The speech generation request, e.g. {\"structured_data\": {\"model_key\": \"chatterbox-tts\", \"params\": {\"text\": \"...\", \"voice\": \"...\"}}}."
+      "text": {
+        "type": "string",
+        "description": "The text to synthesize into speech."
+      },
+      "voice": {
+        "type": "string",
+        "description": "Optional voice id (see starflask_list_models for the chosen model's supported voices)."
+      },
+      "model_key": {
+        "type": "string",
+        "description": "Optional audio model key. Defaults to chatterbox-tts."
       }
     },
-    "required": ["payload"]
+    "required": ["text"]
   },
-  "body_mapping": "params",
+  "body_mapping": "params_nested",
   "body_defaults": {
-    "type": "audio"
+    "type": "audio",
+    "payload": {
+      "structured_data": {
+        "model_key": "chatterbox-tts"
+      }
+    }
+  },
+  "param_paths": {
+    "text": "payload.structured_data.params.text",
+    "voice": "payload.structured_data.params.voice",
+    "model_key": "payload.structured_data.model_key"
   }
 }

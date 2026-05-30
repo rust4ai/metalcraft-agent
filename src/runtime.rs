@@ -111,7 +111,13 @@ pub async fn run_one_shot_task(
         llm_call_hook,
         |client, model_name| client.completion_model(model_name),
     )?;
-    let step_guard = guard::build_agent_guard(guard::GuardConfig::default(), request.diagnostics.clone());
+    // Let the guard know which of this persona's tools are status polls, so
+    // repeatedly checking an async job isn't mistaken for a runaway loop.
+    let guard_config = guard::GuardConfig {
+        poll_tools: crate::tools::http_api::HttpApiTool::poll_tool_names(&persona.tools),
+        ..guard::GuardConfig::default()
+    };
+    let step_guard = guard::build_agent_guard(guard_config, request.diagnostics.clone());
     let executor = Executor::new_from_arc(runtime.graph).max_steps(90).with_step_guard(step_guard);
 
     executor.run(AgentState::new(request.task), "agent").await.map_err(Into::into)

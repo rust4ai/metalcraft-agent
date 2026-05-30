@@ -10,6 +10,7 @@
 use metalcraft::{AgentMessage, AgentState, GuardAction, StepEvent, StepGuard};
 use crate::diagnostics::DiagnosticsLogger;
 use crate::ui;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 /// Configuration for the agent step guard.
@@ -17,9 +18,20 @@ use std::sync::{Arc, Mutex};
 pub struct GuardConfig {
     /// Stop after this many consecutive all-error tool turns. 0 = disabled.
     pub max_consecutive_errors: usize,
-    /// Detect repeated identical tool calls within this window of recent calls.
-    /// 0 = disabled.
-    pub loop_window: usize,
+    /// Stop once an ordinary tool has been called identically (same name + args)
+    /// this many times in a row. 0 = disabled. Kept generous so the guard isn't
+    /// paranoid — a tool legitimately repeating a few times (e.g. `cargo check`
+    /// between edits) is fine; only a tool stuck firing the *same* call with
+    /// nothing changing trips it.
+    pub max_identical_repeats: usize,
+    /// Same idea, but for tools flagged as status **polls** (see
+    /// [`crate::tools::http_api`]). Polling an async job means repeating the
+    /// identical call on purpose, so this is much higher. 0 = unlimited (only
+    /// the executor's max-steps backstop bounds it).
+    pub max_poll_repeats: usize,
+    /// Names of tools that are status polls — exempt from `max_identical_repeats`
+    /// and governed by `max_poll_repeats` instead.
+    pub poll_tools: HashSet<String>,
     /// Print tool calls and results as they happen.
     pub verbose: bool,
 }
@@ -28,7 +40,9 @@ impl Default for GuardConfig {
     fn default() -> Self {
         Self {
             max_consecutive_errors: 3,
-            loop_window: 5,
+            max_identical_repeats: 4,
+            max_poll_repeats: 60,
+            poll_tools: HashSet::new(),
             verbose: true,
         }
     }
@@ -82,7 +96,8 @@ impl GuardTracker {
 
         // Collect new tool results and tool calls from this batch
         let mut batch_results: Vec<bool> = Vec::new(); // true = error
-        let mut new_tool_calls: Vec<(String, u64)> = Vec::new();
+        // (call id, hash, tool name)
+        let mut new_tool_calls: Vec<(String, u64, String)> = Vec::new();
         // Ids of calls that were denied / interrupted (never executed).
         let mut denied_ids: Vec<String> = Vec::new();
 
@@ -94,7 +109,7 @@ impl GuardTracker {
                         eprintln!("  {}({args_brief})", ui::tool(format!("▶ {name}")));
                     }
                     let hash = call_hash(name, args);
-                    new_tool_calls.push((id.clone(), hash));
+                    new_tool_calls.push((id.clone(), hash, name.clone()));
                 }
                 AgentMessage::ToolResult { id, name, result, .. } => {
                     let is_error = result.starts_with("ERROR:");
@@ -146,7 +161,7 @@ impl GuardTracker {
         // response — not a loop. Drop those calls from this batch and retract any
         // hash already recorded for them in a previous batch.
         if !denied_ids.is_empty() {
-            new_tool_calls.retain(|(id, _)| !denied_ids.contains(id));
+            new_tool_calls.retain(|(id, _, _)| !denied_ids.contains(id));
             self.recent_calls.retain(|(id, _)| !denied_ids.contains(id));
         }
 
@@ -168,24 +183,47 @@ impl GuardTracker {
         }
 
         // --- Loop detection ---
-        // Detect true loops: the same tool call appearing consecutively (back-to-back)
-        // or the same sequence repeating. A tool like `cargo check` legitimately runs
-        // multiple times between edits, so we only flag it when the *most recent* call
-        // is identical to the new one (i.e. nothing different happened in between).
-        if self.config.loop_window > 0 && !new_tool_calls.is_empty() {
-            if let Some((_, last)) = self.recent_calls.last() {
-                if new_tool_calls[0].1 == *last {
-                    return GuardAction::Stop(
-                        "Loop detected: repeated identical tool call".into(),
-                    );
+        // Detect true loops: the same tool call (name + args) firing over and
+        // over with nothing changing in between. We count how many identical
+        // calls immediately precede this one and only stop once that streak
+        // exceeds the allowed budget — generous for ordinary tools (a tool like
+        // `cargo check` legitimately repeats between edits) and far more so for
+        // status polls, which are *designed* to repeat while awaiting async work.
+        if !new_tool_calls.is_empty() {
+            let (_, new_hash, new_name) = &new_tool_calls[0];
+            let is_poll = self.config.poll_tools.contains(new_name);
+            let limit = if is_poll {
+                self.config.max_poll_repeats
+            } else {
+                self.config.max_identical_repeats
+            };
+
+            if limit > 0 {
+                // How many of the most recent calls were identical to this one.
+                let streak = self
+                    .recent_calls
+                    .iter()
+                    .rev()
+                    .take_while(|(_, h)| h == new_hash)
+                    .count();
+                if streak >= limit {
+                    return GuardAction::Stop(format!(
+                        "Loop detected: {new_name} called identically {} times in a row",
+                        streak + 1
+                    ));
                 }
             }
 
-            self.recent_calls.extend(new_tool_calls);
-            // Trim to window size
-            let window = self.config.loop_window;
-            if self.recent_calls.len() > window {
-                let drain = self.recent_calls.len() - window;
+            self.recent_calls
+                .extend(new_tool_calls.iter().map(|(id, h, _)| (id.clone(), *h)));
+            // Keep enough history to measure the largest streak we care about.
+            let keep = self
+                .config
+                .max_identical_repeats
+                .max(self.config.max_poll_repeats)
+                .max(1);
+            if self.recent_calls.len() > keep {
+                let drain = self.recent_calls.len() - keep;
                 self.recent_calls.drain(..drain);
             }
         }
@@ -251,7 +289,19 @@ mod tests {
     fn tracker() -> GuardTracker {
         GuardTracker::new(GuardConfig {
             max_consecutive_errors: 3,
-            loop_window: 5,
+            max_identical_repeats: 4,
+            max_poll_repeats: 60,
+            poll_tools: HashSet::new(),
+            verbose: false,
+        })
+    }
+
+    fn tracker_with_polls(polls: &[&str]) -> GuardTracker {
+        GuardTracker::new(GuardConfig {
+            max_consecutive_errors: 3,
+            max_identical_repeats: 4,
+            max_poll_repeats: 60,
+            poll_tools: polls.iter().map(|s| s.to_string()).collect(),
             verbose: false,
         })
     }
@@ -266,6 +316,25 @@ mod tests {
             call_id: None,
             name: "write_file".to_string(),
             args: serde_json::json!({"path": "App.tsx", "content": "x"}),
+        }
+    }
+
+    /// A named tool call with stable args (so repeats hash identically).
+    fn named_call(id: &str, name: &str) -> AgentMessage {
+        AgentMessage::ToolCall {
+            id: id.to_string(),
+            call_id: None,
+            name: name.to_string(),
+            args: serde_json::json!({"job_id": "abc"}),
+        }
+    }
+
+    fn named_result(id: &str, name: &str, result: &str) -> AgentMessage {
+        AgentMessage::ToolResult {
+            id: id.to_string(),
+            call_id: None,
+            name: name.to_string(),
+            result: result.to_string(),
         }
     }
 
@@ -301,21 +370,69 @@ mod tests {
     }
 
     #[test]
-    fn genuinely_repeated_executed_call_is_a_loop() {
-        let mut t = tracker();
+    fn a_few_identical_calls_are_allowed_but_a_stuck_loop_stops() {
+        let mut t = tracker(); // max_identical_repeats = 4
         let mut state = AgentState::new("go");
 
-        // A call that actually ran (successful result)...
-        state.messages.push(tool_call("1"));
-        assert!(!is_stop(&t.check(&state)));
-        state.messages.push(tool_result("1", "wrote App.tsx"));
-        assert!(!is_stop(&t.check(&state)));
+        // The same executed call a handful of times is tolerated (not paranoid):
+        // calls 1..=4 should all be allowed.
+        for i in 1..=4 {
+            state.messages.push(tool_call(&i.to_string()));
+            assert!(
+                !is_stop(&t.check(&state)),
+                "identical call #{i} within budget should be allowed"
+            );
+            state
+                .messages
+                .push(tool_result(&i.to_string(), "wrote App.tsx"));
+            assert!(!is_stop(&t.check(&state)));
+        }
 
-        // ...then the identical call again, back-to-back, is a real loop.
-        state.messages.push(tool_call("2"));
+        // The 5th identical call in a row exceeds the budget — a real stuck loop.
+        state.messages.push(tool_call("5"));
         assert!(
             is_stop(&t.check(&state)),
-            "an identical executed call repeated back-to-back is a loop"
+            "an ordinary tool stuck repeating identically should eventually stop"
+        );
+    }
+
+    #[test]
+    fn poll_tool_may_repeat_well_past_the_ordinary_budget() {
+        let mut t = tracker_with_polls(&["starflask_get_job"]);
+        let mut state = AgentState::new("go");
+
+        // Poll the same job id many times in a row — far more than
+        // max_identical_repeats — without tripping the loop guard.
+        for i in 0..20 {
+            state.messages.push(named_call(&i.to_string(), "starflask_get_job"));
+            assert!(
+                !is_stop(&t.check(&state)),
+                "poll #{i} should be allowed for a poll tool"
+            );
+            state.messages.push(named_result(
+                &i.to_string(),
+                "starflask_get_job",
+                r#"{"status":200,"data":{"status":"processing"}}"#,
+            ));
+            assert!(!is_stop(&t.check(&state)));
+        }
+    }
+
+    #[test]
+    fn non_poll_tool_is_not_exempt_even_when_polls_configured() {
+        // A tool NOT in the poll set still uses the ordinary (relaxed) budget.
+        let mut t = tracker_with_polls(&["starflask_get_job"]);
+        let mut state = AgentState::new("go");
+        for i in 1..=4 {
+            state.messages.push(tool_call(&i.to_string()));
+            assert!(!is_stop(&t.check(&state)));
+            state.messages.push(tool_result(&i.to_string(), "ok"));
+            assert!(!is_stop(&t.check(&state)));
+        }
+        state.messages.push(tool_call("5"));
+        assert!(
+            is_stop(&t.check(&state)),
+            "an ordinary tool should still trip the loop guard past its budget"
         );
     }
 

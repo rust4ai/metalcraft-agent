@@ -30,6 +30,24 @@ pub struct HttpApiToolConfig {
     pub body_template: Option<String>,
     #[serde(default)]
     pub body_defaults: HashMap<String, serde_json::Value>,
+    /// Present only when `body_mapping == "params_nested"`: maps each flat
+    /// argument name to a dotted JSON path in the request body (e.g.
+    /// `"prompt": "payload.structured_data.params.prompt"`). Lets a tool expose
+    /// simple scalar parameters (which OpenAI's function-schema validation
+    /// accepts) while still producing a deeply nested JSON body — without the
+    /// string-substitution hazards of `body_mapping == "template"`. Arguments
+    /// with no entry here are inserted at the top level under their own name.
+    /// Absent (optional) arguments are simply skipped, and `body_defaults`
+    /// provides the nested base the paths are written onto.
+    #[serde(default)]
+    pub param_paths: HashMap<String, String>,
+    /// Marks this tool as a status **poll** (e.g. checking an async job until it
+    /// finishes). Polling means calling the same tool with the same arguments
+    /// repeatedly on purpose, which would otherwise look like a runaway loop, so
+    /// the step guard exempts poll tools from tight loop detection. See
+    /// [`crate::guard`].
+    #[serde(default)]
+    pub poll: bool,
     /// Present only when `body_mapping == "multipart"`: describes which argument
     /// carries the local file path and what form-field name to send it under.
     #[serde(default)]
@@ -66,6 +84,17 @@ impl HttpApiTool {
         let config: HttpApiToolConfig = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
         Ok(Self { config })
+    }
+
+    /// From a list of tool names, return those that are HTTP-API tools flagged
+    /// as status polls (`"poll": true`). Used to tell the step guard which tools
+    /// are allowed to repeat while waiting on async work.
+    pub fn poll_tool_names(names: &[String]) -> std::collections::HashSet<String> {
+        names
+            .iter()
+            .filter(|n| Self::try_load(n).is_some_and(|t| t.config.poll))
+            .cloned()
+            .collect()
     }
 
     /// Try to load a tool by name, resolving the local api_tools directory
@@ -160,6 +189,35 @@ impl HttpApiTool {
                     Some(serde_json::Value::Object(merged))
                 }
             }
+            "params_nested" => {
+                // Start from the (possibly nested) defaults as the base tree,
+                // then write each provided argument at its dotted path. Uses
+                // real serde_json values throughout, so string arguments
+                // containing quotes/newlines are encoded safely.
+                let mut root = serde_json::Map::new();
+                for (k, v) in &self.config.body_defaults {
+                    root.insert(k.clone(), v.clone());
+                }
+                if let Some(obj) = args.as_object() {
+                    for (key, value) in obj {
+                        // Skip absent optionals. Models routinely emit `null` or
+                        // `""` for omitted optional params; writing those would
+                        // clobber the nested defaults (e.g. blank out model_key)
+                        // and get rejected by the API.
+                        if value.is_null() || value.as_str() == Some("") {
+                            continue;
+                        }
+                        let path = self
+                            .config
+                            .param_paths
+                            .get(key)
+                            .map(String::as_str)
+                            .unwrap_or(key.as_str());
+                        Self::insert_at_path(&mut root, path, value.clone());
+                    }
+                }
+                Some(serde_json::Value::Object(root))
+            }
             "template" => {
                 // Simple template: just use the template string with {param} replacements
                 if let Some(template) = &self.config.body_template {
@@ -177,6 +235,47 @@ impl HttpApiTool {
                 }
             }
             _ => Some(args.clone()),
+        }
+    }
+
+    /// Insert `value` into `root` at a dotted `path` (e.g.
+    /// `"payload.structured_data.params.prompt"`), creating intermediate JSON
+    /// objects as needed. If an intermediate segment exists but is not an
+    /// object, it is overwritten with one. An empty path is a no-op.
+    fn insert_at_path(root: &mut serde_json::Map<String, serde_json::Value>, path: &str, value: serde_json::Value) {
+        let mut segments = path.split('.').filter(|s| !s.is_empty()).peekable();
+        let Some(first) = segments.next() else {
+            return;
+        };
+        if segments.peek().is_none() {
+            root.insert(first.to_string(), value);
+            return;
+        }
+        let mut current = root
+            .entry(first.to_string())
+            .and_modify(|v| {
+                if !v.is_object() {
+                    *v = serde_json::Value::Object(serde_json::Map::new());
+                }
+            })
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .expect("just ensured object");
+        while let Some(seg) = segments.next() {
+            if segments.peek().is_none() {
+                current.insert(seg.to_string(), value);
+                return;
+            }
+            current = current
+                .entry(seg.to_string())
+                .and_modify(|v| {
+                    if !v.is_object() {
+                        *v = serde_json::Value::Object(serde_json::Map::new());
+                    }
+                })
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+                .as_object_mut()
+                .expect("just ensured object");
         }
     }
 
@@ -338,6 +437,8 @@ mod tests {
             body_mapping: "params".into(),
             body_template: None,
             body_defaults: HashMap::new(),
+            param_paths: HashMap::new(),
+            poll: false,
             multipart: None,
         }
     }
@@ -406,6 +507,85 @@ mod tests {
         let args = json!({"platform": "slack", "content": "hello"});
         let body = tool.build_body(&args).unwrap();
         assert_eq!(body["platform"], "slack");
+    }
+
+    // -- build_body params_nested + insert_at_path --
+
+    #[test]
+    fn build_body_params_nested_builds_deep_structure() {
+        let mut cfg = base_config();
+        cfg.body_mapping = "params_nested".into();
+        cfg.body_defaults.insert("type".into(), json!("image"));
+        cfg.body_defaults.insert(
+            "payload".into(),
+            json!({ "structured_data": { "model_key": "ideogram-v3" } }),
+        );
+        cfg.param_paths.insert("prompt".into(), "payload.structured_data.params.prompt".into());
+        cfg.param_paths.insert("model_key".into(), "payload.structured_data.model_key".into());
+        cfg.param_paths.insert("aspect_ratio".into(), "payload.structured_data.params.aspect_ratio".into());
+        let tool = make_tool(cfg);
+
+        // Only prompt provided: default model_key survives, params nested.
+        let body = tool.build_body(&json!({"prompt": "a red fox"})).unwrap();
+        assert_eq!(body["type"], "image");
+        assert_eq!(body["payload"]["structured_data"]["model_key"], "ideogram-v3");
+        assert_eq!(body["payload"]["structured_data"]["params"]["prompt"], "a red fox");
+
+        // Provided model_key overrides the default.
+        let body = tool
+            .build_body(&json!({"prompt": "x", "model_key": "gpt-image-2", "aspect_ratio": "16:9"}))
+            .unwrap();
+        assert_eq!(body["payload"]["structured_data"]["model_key"], "gpt-image-2");
+        assert_eq!(body["payload"]["structured_data"]["params"]["aspect_ratio"], "16:9");
+    }
+
+    #[test]
+    fn build_body_params_nested_skips_empty_and_null_so_defaults_survive() {
+        let mut cfg = base_config();
+        cfg.body_mapping = "params_nested".into();
+        cfg.body_defaults.insert(
+            "payload".into(),
+            json!({ "structured_data": { "model_key": "ideogram-v3" } }),
+        );
+        cfg.param_paths.insert("model_key".into(), "payload.structured_data.model_key".into());
+        cfg.param_paths.insert("prompt".into(), "payload.structured_data.params.prompt".into());
+        let tool = make_tool(cfg);
+
+        // A model that fills omitted optionals with "" / null must NOT clobber
+        // the default model_key.
+        let body = tool
+            .build_body(&json!({"prompt": "a fox", "model_key": "", "aspect_ratio": null}))
+            .unwrap();
+        assert_eq!(body["payload"]["structured_data"]["model_key"], "ideogram-v3");
+        assert_eq!(body["payload"]["structured_data"]["params"]["prompt"], "a fox");
+        assert!(body["payload"]["structured_data"]["params"].get("aspect_ratio").is_none());
+    }
+
+    #[test]
+    fn build_body_params_nested_encodes_special_chars_safely() {
+        let mut cfg = base_config();
+        cfg.body_mapping = "params_nested".into();
+        cfg.param_paths.insert("prompt".into(), "payload.prompt".into());
+        let tool = make_tool(cfg);
+        // A prompt with quotes and a newline would break template substitution;
+        // here it round-trips as a real JSON string value.
+        let tricky = "a \"fancy\" fox\nwith a hat";
+        let body = tool.build_body(&json!({"prompt": tricky})).unwrap();
+        assert_eq!(body["payload"]["prompt"], tricky);
+    }
+
+    #[test]
+    fn insert_at_path_creates_and_overwrites() {
+        let mut root = serde_json::Map::new();
+        HttpApiTool::insert_at_path(&mut root, "a.b.c", json!(1));
+        assert_eq!(json!(root)["a"]["b"]["c"], 1);
+        // Writing a sibling reuses the existing intermediate objects.
+        HttpApiTool::insert_at_path(&mut root, "a.b.d", json!(2));
+        assert_eq!(json!(root)["a"]["b"]["c"], 1);
+        assert_eq!(json!(root)["a"]["b"]["d"], 2);
+        // A single segment writes at the top level.
+        HttpApiTool::insert_at_path(&mut root, "top", json!("v"));
+        assert_eq!(json!(root)["top"], "v");
     }
 
     #[test]

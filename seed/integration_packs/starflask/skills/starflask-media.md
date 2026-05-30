@@ -51,41 +51,30 @@ metadata with `starflask_get_media`.
 - **`starflask_get_media`** — fresh metadata + presigned URL for a media id.
 - **`starflask_account`** — `{plan, credits, ...}`. Check credits before big jobs.
 
-## Payload shapes
+## Tool parameters
 
-Generation requests use a `payload` object. Two forms for images:
+The generator tools take **flat** parameters — you don't build a nested JSON
+payload yourself; each tool assembles the Starflask job body for you. Every tool
+has a sensible default `model_key`, so the only required field is the content.
 
-- Quick: `{"prompt": "a tiny red fox sitting on a mushroom"}` — default model + style.
-- Structured (to choose a model / params / style):
-  ```json
-  {
-    "structured_data": {
-      "model_key": "gpt-image-2",
-      "params": { "prompt": "...", "aspect_ratio": "16:9" }
-    },
-    "image_style_key": "cinematic"
-  }
-  ```
+- **`starflask_generate_image`**: `prompt` (required); optional `model_key`
+  (default `ideogram-v3`), `aspect_ratio` (e.g. `"16:9"`, `"1:1"`, `"9:16"`),
+  `image_style_key` (from `starflask_list_styles`), and `image_url` (to edit an
+  existing image — pair with an editing model like `nano-banana-edit`).
+- **`starflask_generate_video`**: `prompt` (required); optional `model_key`
+  (default `kling-text2video`), `duration` (seconds), and `image_url` to animate a
+  still (set `model_key` to `kling-img2video`).
+- **`starflask_generate_3d`**: `prompt` *or* `image_url`; optional `model_key`
+  (default `meshy-v6`), `topology`, `target_polycount`, `enable_pbr`.
+- **`starflask_generate_speech`**: `text` (required); optional `voice`, `model_key`
+  (default `chatterbox-tts`).
+- **`starflask_create_job`**: `type` + `model_key` (required); optional `prompt`,
+  `image_url`. The escape hatch for `upscale`, `remove_bg`, `vectorize`,
+  `cartoonify`, `image:resize`, etc.
 
-Video (`starflask_generate_video`):
-```json
-{ "structured_data": { "model_key": "kling-text2video", "params": { "prompt": "...", "duration": 5 } } }
-```
-Image-to-video: `model_key` `"kling-img2video"`, params `{ "image_url": "<uploaded url>", "prompt": "...", "duration": 5 }`.
-
-3D (`starflask_generate_3d`, sent as type `mesh`):
-```json
-{ "structured_data": { "model_key": "meshy-v6", "params": { "prompt": "a low-poly treasure chest", "topology": "triangle", "target_polycount": 30000, "enable_pbr": true } } }
-```
-Image-to-3D: use params `{ "image_url": "<uploaded url>" }`.
-
-Speech (`starflask_generate_speech`, type `audio`):
-```json
-{ "structured_data": { "model_key": "chatterbox-tts", "params": { "text": "Hello there", "voice": "<voice-id>" } } }
-```
-
-These are starting points — always defer to a model's real `input_schema` from
-`starflask_list_models` when a request is non-trivial.
+Always defer to a model's real `input_schema` from `starflask_list_models` when a
+request is non-trivial — that's the source of truth for which params a model
+accepts and the allowed values (aspect ratios, voices, topology, …).
 
 ## Common model keys (verify with starflask_list_models)
 

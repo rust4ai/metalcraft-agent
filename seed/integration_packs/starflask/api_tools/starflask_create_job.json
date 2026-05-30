@@ -1,6 +1,6 @@
 {
   "name": "starflask_create_job",
-  "description": "Create an arbitrary Starflask job by type — the general-purpose equivalent of `npx starflask jobs create <type> --payload <json>`. Use this for job types that don't have a dedicated tool: \"upscale\", \"remove_bg\", \"vectorize\", \"vector\", \"cartoonify\", \"clip\" (media conversion), and subtypes like \"image:resize\", \"image:crop\", \"image:animate\", \"audio:transcribe\". Returns a job id immediately — poll with starflask_get_job until 'completed', then read the relevant URL from result. Most payloads follow {\"structured_data\": {\"model_key\": \"<key>\", \"params\": {...}}}; many transform jobs take an \"image_url\" param pointing at media you uploaded via starflask_upload_media. Prefer starflask_generate_image / _video / _3d / _speech for those four common cases.",
+  "description": "Create an arbitrary Starflask job by type — the general-purpose equivalent of `npx starflask jobs create <type>`. Use this for job types without a dedicated tool: \"upscale\", \"remove_bg\", \"vectorize\", \"vector\", \"cartoonify\", and subtypes like \"image:resize\", \"image:crop\". Returns a job id immediately — poll with starflask_get_job until 'completed', then read the relevant URL from result. Set `type`, a `model_key` (see starflask_list_models), and whichever of `prompt` / `image_url` the job needs (most transform jobs take an image_url pointing at media you uploaded via starflask_upload_media). Prefer starflask_generate_image / _video / _3d / _speech for those four common cases.",
   "method": "POST",
   "url": "https://starflask.com/api/v1/jobs",
   "headers": {
@@ -12,14 +12,28 @@
     "properties": {
       "type": {
         "type": "string",
-        "description": "The job type, e.g. \"upscale\", \"remove_bg\", \"vectorize\", \"cartoonify\", \"clip\", \"image:resize\", \"audio:transcribe\"."
+        "description": "The job type, e.g. \"upscale\", \"remove_bg\", \"vectorize\", \"cartoonify\", \"image:resize\", \"image:crop\"."
       },
-      "payload": {
-        "type": "object",
-        "description": "The job payload, typically {\"structured_data\": {\"model_key\": \"<key>\", \"params\": {...}}}."
+      "model_key": {
+        "type": "string",
+        "description": "The model key to use (from starflask_list_models)."
+      },
+      "image_url": {
+        "type": "string",
+        "description": "Optional input image/media URL the job operates on (from starflask_upload_media or a prior job result)."
+      },
+      "prompt": {
+        "type": "string",
+        "description": "Optional text prompt, for job types that take one."
       }
     },
-    "required": ["type", "payload"]
+    "required": ["type", "model_key"]
   },
-  "body_mapping": "params"
+  "body_mapping": "params_nested",
+  "param_paths": {
+    "type": "type",
+    "model_key": "payload.structured_data.model_key",
+    "image_url": "payload.structured_data.params.image_url",
+    "prompt": "payload.structured_data.params.prompt"
+  }
 }

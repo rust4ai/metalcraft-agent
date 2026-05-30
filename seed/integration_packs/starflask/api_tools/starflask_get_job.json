@@ -16,5 +16,6 @@
     },
     "required": ["job_id"]
   },
-  "body_mapping": "none"
+  "body_mapping": "none",
+  "poll": true
 }
