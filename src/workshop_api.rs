@@ -128,6 +128,9 @@ struct DiagnosticsSessionSummary {
     /// Present (and `kind == "flow"`) when this session was produced by a flow run.
     #[serde(skip_serializing_if = "Option::is_none")]
     flow_id: Option<String>,
+    /// Number of `turn_NNN.json` files in the session directory. Counted fresh
+    /// from disk on each list so it's correct after the agent appends turns.
+    turn_count: usize,
 }
 
 #[derive(Serialize)]
@@ -565,6 +568,21 @@ fn list_diagnostics_sessions() -> Vec<DiagnosticsSessionSummary> {
                     (None, None, None, None)
                 };
 
+            // Count turn_NNN.json files so the summary reports how far the
+            // session actually got.
+            let turn_count = std::fs::read_dir(&path)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter(|e| {
+                            e.file_name()
+                                .to_str()
+                                .map(|n| n.starts_with("turn_") && n.ends_with(".json"))
+                                .unwrap_or(false)
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+
             Some(DiagnosticsSessionSummary {
                 id: dir_name.clone(),
                 timestamp: dir_name,
@@ -572,6 +590,7 @@ fn list_diagnostics_sessions() -> Vec<DiagnosticsSessionSummary> {
                 model_name,
                 kind,
                 flow_id,
+                turn_count,
             })
         })
         .collect();
@@ -616,6 +635,8 @@ async fn get_diagnostics_session(Path(id): Path<String>) -> Response {
                 "llm_request"
             } else if name.contains("compaction") {
                 "compaction"
+            } else if name.starts_with("error_") {
+                "error"
             } else {
                 "config_change"
             };
@@ -1250,25 +1271,51 @@ struct CreateChatRequest {
     model_name: Option<String>,
 }
 
-async fn list_chats(State(state): State<Arc<ApiState>>) -> Response {
-    let chats = state.chats.lock().await;
-    let mut out = Vec::with_capacity(chats.len());
-    for session in chats.values() {
-        let s = session.lock().await;
-        out.push(ChatSummary {
-            id: s.id.clone(),
-            persona_slug: s.persona_slug.clone(),
-            model_name: s.model_name.clone(),
-            created_at: s.created_at.clone(),
-            turn_count: s
-                .state
-                .as_ref()
-                .map(|st| st.messages.iter().filter(|m| matches!(m, AgentMessage::User(_))).count())
-                .unwrap_or(0),
-        });
-    }
+async fn list_chats(State(_state): State<Arc<ApiState>>) -> Response {
+    // Read the chat list straight from `<data>/chats/*.json` rather than the
+    // in-memory store. The two are kept in sync (every create/turn/delete
+    // persists), but reading disk means the list is correct across restarts
+    // and reflects any out-of-band edits — the in-memory map is only the
+    // authority for *live* per-turn state, not the catalog.
+    let mut out: Vec<ChatSummary> = read_persisted_chats()
+        .into_iter()
+        .map(|pc| ChatSummary {
+            id: pc.id,
+            persona_slug: pc.persona_slug,
+            model_name: pc.model_name,
+            created_at: pc.created_at,
+            turn_count: pc
+                .messages
+                .iter()
+                .filter(|m| matches!(m, ChatMessageWire::User { .. }))
+                .count(),
+        })
+        .collect();
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Json(out).into_response()
+}
+
+/// Read and parse every `<data>/chats/*.json` into [`PersistedChat`]s.
+/// Malformed files are logged and skipped. Shared by the list endpoint and
+/// startup load.
+fn read_persisted_chats() -> Vec<PersistedChat> {
+    let dir = paths::chats_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        match std::fs::read_to_string(&path).map(|c| serde_json::from_str::<PersistedChat>(&c)) {
+            Ok(Ok(pc)) => out.push(pc),
+            Ok(Err(e)) => log::warn!("failed to parse chat file {}: {e}", path.display()),
+            Err(e) => log::warn!("failed to read chat file {}: {e}", path.display()),
+        }
+    }
+    out
 }
 
 async fn post_create_chat(
@@ -1595,6 +1642,12 @@ async fn post_chat_turn(
             })
         };
 
+        // Keep the pre-turn state so a hard failure can be rolled back. The
+        // session's state was `take()`n before this task started, so without
+        // this restore a failed turn would silently wipe the entire chat
+        // history (the next turn would start from scratch).
+        let state_before_turn = agent_state.clone();
+
         let outcome = run_chat_turn(
             &context,
             &persona_slug,
@@ -1607,15 +1660,15 @@ async fn post_chat_turn(
         .await;
 
         // Write the final state back to the session (so the next turn can
-        // continue from it) and emit the terminal event.
-        let mut updated_state = false;
+        // continue from it) and emit the terminal event. Every arm leaves a
+        // state behind — even a failure rolls back to the pre-turn state — so
+        // we always persist afterward.
         {
             let mut s = session_for_task.lock().await;
             s.busy = false;
             match outcome {
                 Ok(RunOutcome::Completed(state)) => {
                     s.state = Some(state);
-                    updated_state = true;
                     let _ = tx.send(ChatEvent::Done {
                         status: "completed".into(),
                         reason: None,
@@ -1624,7 +1677,6 @@ async fn post_chat_turn(
                 }
                 Ok(RunOutcome::Interrupted { state, reason, .. }) => {
                     s.state = Some(state);
-                    updated_state = true;
                     let _ = tx.send(ChatEvent::Done {
                         status: "interrupted".into(),
                         reason: Some(reason),
@@ -1632,21 +1684,30 @@ async fn post_chat_turn(
                     .await;
                 }
                 Err(e) => {
-                    // Don't keep partial state on hard failure — caller can retry.
                     // Walk the source chain so the reason carries the real cause
                     // (e.g. a reqwest decode error's serde detail), not just the
                     // top-level summary.
+                    let reason = error_chain(e.as_ref());
+                    // Record the failure on disk so it's visible in the session
+                    // timeline later — the SSE event below is the only other
+                    // trace and it vanishes once the stream closes.
+                    if let Some(logger) = &diagnostics {
+                        logger.log_error(&reason);
+                    }
+                    // Roll the conversation back to before this turn so the
+                    // chat keeps its history (the partial turn's steps are
+                    // captured in the diagnostics turn files regardless) and
+                    // persist it.
+                    s.state = Some(state_before_turn);
                     let _ = tx.send(ChatEvent::Done {
                         status: "failed".into(),
-                        reason: Some(error_chain(e.as_ref())),
+                        reason: Some(reason),
                     })
                     .await;
                 }
             }
         }
-        if updated_state {
-            persist_chat(&session_for_task).await;
-        }
+        persist_chat(&session_for_task).await;
     });
 
     let stream = ReceiverStream::new(rx).map(|ev| -> Result<Event, Infallible> {

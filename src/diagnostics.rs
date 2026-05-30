@@ -113,6 +113,24 @@ impl DiagnosticsLogger {
         }
     }
 
+    /// Log a turn failure. Written to disk so the error is visible in the
+    /// session timeline afterward — the SSE `done{status:"failed"}` event the
+    /// client receives is ephemeral and was previously the *only* record of
+    /// why a turn died.
+    pub fn log_error(&self, message: &str) {
+        let after_turn = self.turn_counter.load(Ordering::Relaxed);
+        let data = json!({
+            "event": "error",
+            "after_turn": after_turn,
+            "message": message,
+        });
+        let filename = format!("error_after_turn_{:03}.json", after_turn);
+        let path = self.session_dir.join(&filename);
+        if let Err(e) = write_json(&path, &data) {
+            eprintln!("diagnostics: failed to write {filename}: {e}");
+        }
+    }
+
     /// Log a context compaction event.
     pub fn log_compaction(&self, before_tokens: usize, after_tokens: usize) {
         let turn = self.turn_counter.load(Ordering::Relaxed);
