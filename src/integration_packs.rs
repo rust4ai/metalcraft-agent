@@ -167,6 +167,24 @@ pub fn enabled_packs() -> Vec<Pack> {
         .collect()
 }
 
+/// Env keys recommended by the currently-enabled packs, each mapped to the
+/// sorted list of enabled pack ids that declare it in `requires_env`.
+///
+/// This is the "you still need these" signal: enabling a pack doesn't block on
+/// missing keys, but its `requires_env` flows through here so the workshop can
+/// list the recommended keys (and which pack wants each) in the key store UI.
+/// The caller decides which are actually missing by resolving each name via
+/// [`crate::key_store::lookup`]. Returned in sorted key order.
+pub fn recommended_env() -> Vec<(String, Vec<String>)> {
+    let mut map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for pack in enabled_packs() {
+        for key in &pack.manifest.requires_env {
+            map.entry(key.clone()).or_default().push(pack.manifest.id.clone());
+        }
+    }
+    map.into_iter().collect()
+}
+
 // ── Resolvers ───────────────────────────────────────────────────────────
 //
 // Each accepts a user-local path and walks enabled packs as fallback. The

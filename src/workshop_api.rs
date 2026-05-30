@@ -162,6 +162,17 @@ struct KeySummary {
     masked: String,
 }
 
+/// A key recommended by one or more *enabled* integration packs (from their
+/// `requires_env`), with whether it currently resolves (key store or env) and
+/// which packs declare it. Drives the "keys these packs still need" list in
+/// the key store UI — `configured: false` is the hint to add it.
+#[derive(Serialize)]
+struct RecommendedKey {
+    name: String,
+    configured: bool,
+    packs: Vec<String>,
+}
+
 // ── Auth middleware ─────────────────────────────────────────────────────
 
 async fn auth_middleware(
@@ -225,6 +236,7 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/api-tools/{name}", put(put_api_tool))
         .route("/api/v1/api-tools/{name}", delete(delete_api_tool))
         .route("/api/v1/keys", get(list_keys))
+        .route("/api/v1/keys/recommended", get(list_recommended_keys))
         .route("/api/v1/keys/{name}", put(put_key))
         .route("/api/v1/keys/{name}", delete(delete_key))
         .route("/api/v1/chats", get(list_chats).post(post_create_chat))
@@ -740,6 +752,21 @@ fn list_key_summaries() -> Vec<KeySummary> {
 
 async fn list_keys() -> Json<Vec<KeySummary>> {
     Json(list_key_summaries())
+}
+
+/// Keys recommended by enabled packs, each flagged configured/missing. Lets the
+/// key store UI surface "these enabled packs need these keys" without the user
+/// having to read each pack's manifest.
+async fn list_recommended_keys() -> Json<Vec<RecommendedKey>> {
+    let out = crate::integration_packs::recommended_env()
+        .into_iter()
+        .map(|(name, packs)| RecommendedKey {
+            configured: crate::key_store::lookup(&name).is_some(),
+            name,
+            packs,
+        })
+        .collect();
+    Json(out)
 }
 
 /// Upsert a key. The name comes from the path; the raw value from the body.
