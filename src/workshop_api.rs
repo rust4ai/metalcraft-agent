@@ -1433,6 +1433,11 @@ enum ChatEvent {
     TurnStarted {
         turn_index: usize,
         user_message: String,
+        /// Diagnostics session directory name for this chat, so the workshop can
+        /// deep-link a turn (or a turn error) to its session logs. `None` for a
+        /// chat with no active logger — e.g. one reloaded after an agent restart.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     /// LLM call has started. Paired with a later `LlmCompleted`.
     LlmStarted,
@@ -1524,12 +1529,22 @@ async fn post_chat_turn(
     let (tx, rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
     let session_for_task = session.clone();
 
+    // The diagnostics session directory name doubles as the session id the
+    // workshop uses to open this chat's logs (see `get_diagnostics_session`).
+    let session_id = diagnostics.as_ref().and_then(|d| {
+        d.session_dir()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+    });
+
     // TurnStarted goes out immediately so the workshop can open a fresh
     // group in the transcript before any agent activity.
     let _ = tx
         .send(ChatEvent::TurnStarted {
             turn_index: turn_index,
             user_message: req.message.clone(),
+            session_id,
         })
         .await;
 
