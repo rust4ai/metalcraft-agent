@@ -1633,9 +1633,12 @@ async fn post_chat_turn(
                 }
                 Err(e) => {
                     // Don't keep partial state on hard failure — caller can retry.
+                    // Walk the source chain so the reason carries the real cause
+                    // (e.g. a reqwest decode error's serde detail), not just the
+                    // top-level summary.
                     let _ = tx.send(ChatEvent::Done {
                         status: "failed".into(),
-                        reason: Some(e.to_string()),
+                        reason: Some(error_chain(e.as_ref())),
                     })
                     .await;
                 }
@@ -1683,10 +1686,30 @@ async fn run_chat_turn(
     let executor = Executor::new_from_arc(runtime.graph)
         .max_steps(90)
         .with_step_guard(step_guard);
+    // Box the real error rather than stringifying it, so its `source()` chain
+    // survives for `error_chain` to walk when building the failed-turn reason.
     executor
         .run(initial_state, "agent")
         .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+}
+
+/// Render an error with its full `source()` chain (see the same helper in
+/// `metalcraft::prebuilt`). Lower-level causes — a reqwest decode error's
+/// serde detail, a provider's error payload — live in `source()`, not the
+/// top-level `Display`, so `to_string()` alone would discard them.
+fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let s = cause.to_string();
+        if !out.contains(&s) {
+            out.push_str(": ");
+            out.push_str(&s);
+        }
+        source = cause.source();
+    }
+    out
 }
 
 // `Stream` is brought into scope via `futures_util::stream::StreamExt` for `.map`.
