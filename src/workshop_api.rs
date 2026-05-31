@@ -1502,6 +1502,32 @@ async fn post_chat_turn(
             Some(prev) => prev.continue_with(req.message.clone()),
             None => AgentState::new(req.message.clone()),
         };
+
+        // A chat reloaded after an agent restart comes back from disk with no
+        // diagnostics logger — `PersistedChat` doesn't round-trip it. Recreate
+        // one on the first turn so observability resumes; it opens a fresh
+        // session dir for this process's run of the chat. Best-effort, exactly
+        // like `create_chat`: a logger failure must never block the turn.
+        if s.diagnostics.is_none() {
+            if let Some(logger) = DiagnosticsLogger::new().ok().map(Arc::new) {
+                if let Ok(persona) = Persona::load(&s.persona_slug, &paths::personas_dir()) {
+                    let system_prompt = persona.build_system_prompt(&paths::skills_dir(), &s.cwd);
+                    logger.log_session_info(
+                        &persona.name,
+                        &s.persona_slug,
+                        &s.model_name,
+                        &s.cwd,
+                        &system_prompt,
+                        &persona.tools,
+                        &persona.skills,
+                        true,
+                        None,
+                    );
+                }
+                s.diagnostics = Some(logger);
+            }
+        }
+
         (
             s.persona_slug.clone(),
             s.model_name.clone(),
