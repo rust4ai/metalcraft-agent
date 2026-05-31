@@ -1,0 +1,30 @@
+{
+  "name": "github_list_repos",
+  "description": "List repositories the authenticated user can access, INCLUDING private repos (the token's scope decides what is visible). Returns an array of {full_name, private, default_branch, description, pushed_at, ...}. Use this to discover repos before reading or writing them. Optional `visibility` ('all' default, 'public', or 'private'), `affiliation` (default 'owner,collaborator,organization_member'), and `per_page` (default 30, max 100); results are sorted by most recently updated.",
+  "method": "GET",
+  "url": "https://api.github.com/user/repos?sort=updated&visibility={visibility}&affiliation={affiliation}&per_page={per_page}",
+  "headers": {
+    "Authorization": "Bearer $GITHUB_TOKEN",
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "visibility": {
+        "type": "string",
+        "enum": ["all", "public", "private"],
+        "description": "Which repos to return by visibility. Defaults to 'all'."
+      },
+      "affiliation": {
+        "type": "string",
+        "description": "Comma-separated affiliations, e.g. 'owner', 'collaborator', 'organization_member'. Defaults to all three."
+      },
+      "per_page": {
+        "type": "integer",
+        "description": "Results per page (max 100, default 30)."
+      }
+    }
+  },
+  "body_mapping": "none"
+}

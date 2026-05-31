@@ -1,27 +1,25 @@
-//! Spice test harness for the **starflask** integration pack.
+//! Spice test harness for the **linear** integration pack.
 //!
 //! Two tiers, both run from one test binary (one process) so the
 //! process-global `METALCRAFT_DATA_DIR` / `paths::data_dir()` `OnceLock` is set
 //! exactly once and never raced:
 //!
-//!   1. `starflask_pack_wires_up` — always runs, no network. Seeds the bundled
-//!      packs into an isolated data dir, enables `starflask`, loads the
-//!      `media-studio-agent` persona, and asserts every tool it references
-//!      resolves to a parseable api-tool config. This proves the pack is
-//!      internally consistent without spending a cent.
+//!   1. `linear_pack_wires_up` — always runs, no network. Seeds the bundled
+//!      packs into an isolated data dir, enables `linear`, loads the
+//!      `linear-agent` persona, and asserts every tool it references resolves
+//!      to a parseable api-tool config that POSTs to the Linear GraphQL API
+//!      and authenticates with `$LINEAR_API_KEY`.
 //!
-//!   2. `live_chat_uses_starflask_persona` — a real, gated [Spice] suite that
-//!      drives an actual agentic loop (OpenAI LLM -> starflask HTTP tools ->
-//!      live starflask.com API) through the `media-studio-agent` persona and
-//!      asserts which tools the agent calls. It is **skipped** unless both
-//!      `OPENAI_API_KEY` and `STARFLASK_API_KEY` are present — drop them in a
-//!      `.env` at the crate root (the harness loads it via dotenvy) and run:
+//!   2. `live_chat_uses_linear_persona` — a real, gated [Spice] suite that
+//!      drives an actual agentic loop (OpenAI LLM -> linear HTTP tools -> live
+//!      Linear GraphQL API) through the `linear-agent` persona. Skipped unless
+//!      both `OPENAI_API_KEY` and `LINEAR_API_KEY` are present (drop them in a
+//!      crate-root `.env`). Run:
 //!
-//!          cargo test --test starflask_spice_test -- --nocapture
+//!          cargo test --test linear_spice_test -- --nocapture
 //!
-//!      The default live assertions only exercise cheap, credit-free GET
-//!      endpoints (account / list-models). The credit-spending
-//!      image-generation case additionally requires `STARFLASK_SPICE_GENERATE=1`.
+//!      The default assertions only read (viewer + list teams). The mutating
+//!      case (create a task) additionally requires `LINEAR_SPICE_WRITE=1`.
 //!
 //! [Spice]: https://crates.io/crates/spice-framework
 
@@ -41,53 +39,44 @@ use metalcraft_agent::persona::Persona;
 use metalcraft_agent::runtime::{run_one_shot_task, AgentRuntimeContext, RunOneShotRequest};
 use metalcraft_agent::{integration_packs, paths, seed};
 
-const PACK_ID: &str = "starflask";
-const PERSONA_SLUG: &str = "media-studio-agent";
+const PACK_ID: &str = "linear";
+const PERSONA_SLUG: &str = "linear-agent";
 
 /// The tools the persona declares — kept in lockstep with
-/// `seed/integration_packs/starflask/personas/media-studio-agent.json`.
+/// `seed/integration_packs/linear/personas/linear-agent.json`.
 const EXPECTED_TOOLS: &[&str] = &[
-    "starflask_generate_image",
-    "starflask_generate_video",
-    "starflask_generate_3d",
-    "starflask_generate_speech",
-    "starflask_create_job",
-    "starflask_get_job",
-    "starflask_list_models",
-    "starflask_list_styles",
-    "starflask_upload_media",
-    "starflask_get_media",
-    "starflask_account",
+    "linear_viewer",
+    "linear_list_teams",
+    "linear_list_projects",
+    "linear_list_issues",
+    "linear_get_issue",
+    "linear_list_workflow_states",
+    "linear_create_issue",
+    "linear_update_issue",
+    "linear_create_comment",
 ];
 
 static INIT: Once = Once::new();
 
-/// Point the app at an isolated temp data dir, load `.env`, seed the bundled
-/// integration packs into it, and enable the starflask pack. Runs once per
-/// process (the `paths::data_dir()` `OnceLock` memoizes the dir on first use,
-/// so `METALCRAFT_DATA_DIR` must be set before anything calls it).
 fn init() {
     INIT.call_once(|| {
         let data_dir =
-            std::env::temp_dir().join(format!("mc-starflask-spice-{}", std::process::id()));
+            std::env::temp_dir().join(format!("mc-linear-spice-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data_dir);
         // SAFETY: set before any other thread touches the environment or
         // paths::data_dir(); guarded by `Once` so it happens exactly once.
         unsafe {
             std::env::set_var("METALCRAFT_DATA_DIR", &data_dir);
         }
-        // Load OPENAI_API_KEY / STARFLASK_API_KEY from a crate-root .env if present.
-        // (Does not override vars already exported in the environment.)
         dotenvy::dotenv().ok();
 
         seed::ensure_defaults();
-        integration_packs::set_enabled(PACK_ID, true).expect("enable starflask pack");
+        integration_packs::set_enabled(PACK_ID, true).expect("enable linear pack");
     });
 }
 
-/// True only when the keys needed for a real agentic loop are available.
 fn live_keys_present() -> bool {
-    std::env::var("OPENAI_API_KEY").is_ok() && std::env::var("STARFLASK_API_KEY").is_ok()
+    std::env::var("OPENAI_API_KEY").is_ok() && std::env::var("LINEAR_API_KEY").is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -104,8 +93,6 @@ struct MetalcraftPersonaAgent {
 }
 
 impl MetalcraftPersonaAgent {
-    /// Build an agent bound to `slug`. Requires `OPENAI_API_KEY` (via
-    /// `AgentRuntimeContext::from_environment`) — only call when keys are present.
     fn for_persona(slug: &str) -> Result<Self, String> {
         let context = AgentRuntimeContext::from_environment().map_err(|e| e.to_string())?;
         let persona = Persona::load(slug, &context.personas_dir)?;
@@ -134,8 +121,8 @@ impl AgentUnderTest for MetalcraftPersonaAgent {
             cwd: &self.cwd,
             model_name: &self.model_name,
             task: user_message,
-            // Non-interactive: there is no TTY to approve tool calls, and the
-            // starflask_* tools classify as `Execute` (would otherwise block).
+            // Non-interactive: no TTY to approve tool calls, and the linear_*
+            // tools classify as `Execute` (would otherwise block).
             approval_mode: ApprovalMode::AutoApprove,
             diagnostics: None,
         };
@@ -202,27 +189,24 @@ impl AgentUnderTest for MetalcraftPersonaAgent {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn starflask_pack_wires_up() {
+fn linear_pack_wires_up() {
     init();
 
-    // The pack is installed and enabled.
     assert!(
         integration_packs::is_enabled(PACK_ID),
-        "starflask pack should be enabled after init()"
+        "linear pack should be enabled after init()"
     );
 
-    // The persona resolves from the (enabled) pack and declares exactly the
-    // tools we expect, plus the native load_skill, plus its skill.
     let persona = Persona::load(PERSONA_SLUG, &paths::personas_dir())
-        .expect("media-studio-agent persona should resolve from the enabled pack");
+        .expect("linear-agent persona should resolve from the enabled pack");
 
-    // The persona is scoped to the starflask pack rather than listing each tool.
+    // The persona is scoped to the linear pack rather than listing each tool.
     assert!(
         persona.packs.iter().any(|p| p == PACK_ID),
-        "persona should be scoped to the starflask pack via `packs`"
+        "persona should be scoped to the linear pack via `packs`"
     );
     // Its resolved tool set (explicit tools + pack-scoped tools) exposes every
-    // starflask tool plus the native load_skill.
+    // linear tool plus the native load_skill.
     let resolved = persona.resolved_tool_names();
     for tool in EXPECTED_TOOLS {
         assert!(
@@ -235,44 +219,51 @@ fn starflask_pack_wires_up() {
         "persona should include the native load_skill tool"
     );
     assert!(
-        persona.skills.iter().any(|s| s == "starflask-media"),
-        "persona should reference the starflask-media skill"
+        persona.skills.iter().any(|s| s == "linear-tasks"),
+        "persona should reference the linear-tasks skill"
     );
 
-    // Every starflask tool the persona names resolves to a parseable api-tool
-    // config in the pack — i.e. the agent will actually be able to load them.
+    // Every linear tool the persona names resolves to a parseable api-tool
+    // config that POSTs to the Linear GraphQL API and authenticates with the key.
     let api_tools_dir = paths::api_tools_dir();
     for tool in EXPECTED_TOOLS {
         let (path, _origin) =
             integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .unwrap_or_else(|| panic!("api tool `{tool}` should resolve from the pack"));
         let raw = std::fs::read_to_string(&path).expect("read api tool config");
-        let cfg: serde_json::Value =
-            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("api tool `{tool}` is not valid JSON: {e}"));
+        let cfg: serde_json::Value = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("api tool `{tool}` is not valid JSON: {e}"));
         assert_eq!(
             cfg["name"], *tool,
             "api tool `{tool}` config `name` should match its filename"
         );
+        assert_eq!(
+            cfg["method"], "POST",
+            "linear tool `{tool}` should be a GraphQL POST"
+        );
         assert!(
-            cfg["url"].as_str().is_some_and(|u| u.contains("starflask.com")),
-            "api tool `{tool}` should target starflask.com"
+            cfg["url"].as_str().is_some_and(|u| u == "https://api.linear.app/graphql"),
+            "api tool `{tool}` should target the Linear GraphQL endpoint"
         );
         assert!(
             cfg["headers"]["Authorization"]
                 .as_str()
-                .is_some_and(|h| h.contains("$STARFLASK_API_KEY")),
-            "api tool `{tool}` should authenticate with $STARFLASK_API_KEY"
+                .is_some_and(|h| h.contains("$LINEAR_API_KEY")),
+            "api tool `{tool}` should authenticate with $LINEAR_API_KEY"
+        );
+        // Each tool carries its fixed GraphQL query in body_defaults.
+        assert!(
+            cfg["body_defaults"]["query"].as_str().is_some_and(|q| !q.is_empty()),
+            "api tool `{tool}` should embed a GraphQL query in body_defaults"
         );
     }
 
-    // The pack declares the API key it needs. recommended_env() is keyed by
-    // env-var name, with the value listing the packs that recommend it.
     let recommended = integration_packs::recommended_env();
     assert!(
         recommended
             .iter()
-            .any(|(var, packs)| var == "STARFLASK_API_KEY" && packs.iter().any(|p| p == PACK_ID)),
-        "starflask pack should recommend STARFLASK_API_KEY"
+            .any(|(var, packs)| var == "LINEAR_API_KEY" && packs.iter().any(|p| p == PACK_ID)),
+        "linear pack should recommend LINEAR_API_KEY"
     );
 }
 
@@ -281,40 +272,34 @@ fn starflask_pack_wires_up() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn live_chat_uses_starflask_persona() {
+async fn live_chat_uses_linear_persona() {
     init();
 
     if !live_keys_present() {
         eprintln!(
-            "SKIP live_chat_uses_starflask_persona: set OPENAI_API_KEY and \
-             STARFLASK_API_KEY (e.g. in a crate-root .env) to run the live suite."
+            "SKIP live_chat_uses_linear_persona: set OPENAI_API_KEY and LINEAR_API_KEY \
+             (e.g. in a crate-root .env) to run the live suite."
         );
         return;
     }
 
-    let agent = MetalcraftPersonaAgent::for_persona(PERSONA_SLUG)
-        .expect("build media-studio-agent under test");
+    let agent =
+        MetalcraftPersonaAgent::for_persona(PERSONA_SLUG).expect("build linear-agent under test");
 
-    // Cheap, credit-free assertions: these hit only GET endpoints on starflask.
+    // Read-only, non-destructive assertions.
     let mut tests = vec![
-        test(
-            "account-balance",
-            "How many Starflask credits do I have left on my account?",
-        )
-        .name("Checks the account via starflask_account")
-        .expect_tools(&["starflask_account"])
-        .expect_tools_within_allowlist()
-        .expect_no_error()
-        .build(),
-        test(
-            "list-image-models",
-            "Which image generation models can I use? List the available models.",
-        )
-        .name("Lists models via starflask_list_models")
-        .expect_tools(&["starflask_list_models"])
-        .expect_tools_within_allowlist()
-        .expect_no_error()
-        .build(),
+        test("whoami", "Who am I in Linear? Give me my name.")
+            .name("Identifies the user via linear_viewer")
+            .expect_tools(&["linear_viewer"])
+            .expect_tools_within_allowlist()
+            .expect_no_error()
+            .build(),
+        test("list-teams", "List the teams in my Linear workspace.")
+            .name("Lists teams via linear_list_teams")
+            .expect_tools(&["linear_list_teams"])
+            .expect_tools_within_allowlist()
+            .expect_no_error()
+            .build(),
         test("greeting-no-tools", "Hi there! Just saying hello.")
             .name("A plain greeting calls no tools")
             .expect_no_tools()
@@ -322,44 +307,30 @@ async fn live_chat_uses_starflask_persona() {
             .build(),
     ];
 
-    // Credit-spending image generation — opt in explicitly. We assert the agent
-    // successfully *creates* a generation job (the core capability); whether the
-    // async job has finished rendering by the end of the turn depends on
-    // generation latency, so we don't require completion here.
-    if std::env::var("STARFLASK_SPICE_GENERATE").is_ok() {
+    // Mutating case — creates a real task. Opt in explicitly.
+    if std::env::var("LINEAR_SPICE_WRITE").is_ok() {
         tests.push(
             test(
-                "generate-image",
-                "Generate an image of a tiny red fox sitting on a mushroom.",
+                "create-task",
+                "Create a Linear task titled \"metalcraft spice test\" on any available \
+                 team, with a one-line description noting it was created by an automated test.",
             )
-            .name("Creates an image generation job via starflask_generate_image")
-            .expect_tools(&["starflask_generate_image"])
+            .name("Creates a task via linear_create_issue")
+            .expect_tools(&["linear_create_issue"])
             .expect_tools_within_allowlist()
-            .expect(|out| {
-                // The agent can only poll a job it successfully created (the
-                // job_id comes from a 200 create response), so a follow-up
-                // starflask_get_job call is escaping-independent proof that
-                // image-job creation succeeded.
-                if out.tools_called.iter().any(|t| t == "starflask_get_job") {
-                    Ok(())
-                } else {
-                    Err("agent never polled a job id — image job creation did not succeed".into())
-                }
-            })
+            .expect_no_error()
             .build(),
         );
     } else {
         eprintln!(
-            "NOTE: set STARFLASK_SPICE_GENERATE=1 to also run the credit-spending \
-             image-generation case."
+            "NOTE: set LINEAR_SPICE_WRITE=1 to also run the write (create-task) case."
         );
     }
 
-    let suite = suite("Starflask Media Studio persona", tests);
+    let suite = suite("Linear persona", tests);
 
     let runner = Runner::new(RunnerConfig {
         concurrency: 2,
-        // Live LLM + media-API round trips: be generous vs. the 60s default.
         default_timeout: Duration::from_secs(180),
         console_output: true,
         ..Default::default()
@@ -369,7 +340,7 @@ async fn live_chat_uses_starflask_persona() {
 
     assert_eq!(
         report.failed, 0,
-        "{}/{} starflask persona spice tests failed",
+        "{}/{} linear persona spice tests failed",
         report.failed, report.total
     );
 }

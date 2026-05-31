@@ -75,7 +75,10 @@ where
         available_skills: persona.skills.clone(),
     };
 
-    let registry = crate::tools::create_registry_for_with_config(&persona.tools, Some(&tool_config));
+    // Resolve the persona's full tool set (explicit tools + any pack-scoped
+    // integration tools) — this is what the registry and step guard see.
+    let resolved_tools = persona.resolved_tool_names();
+    let registry = crate::tools::create_registry_for_with_config(&resolved_tools, Some(&tool_config));
     let client = openai::Client::new(&context.api_key)?;
     let model = client.completion_model(model_name);
     let compaction_model = make_compaction_model(&client, model_name);
@@ -114,7 +117,7 @@ pub async fn run_one_shot_task(
     // Let the guard know which of this persona's tools are status polls, so
     // repeatedly checking an async job isn't mistaken for a runaway loop.
     let guard_config = guard::GuardConfig {
-        poll_tools: crate::tools::http_api::HttpApiTool::poll_tool_names(&persona.tools),
+        poll_tools: crate::tools::http_api::HttpApiTool::poll_tool_names(&persona.resolved_tool_names()),
         ..guard::GuardConfig::default()
     };
     let step_guard = guard::build_agent_guard(guard_config, request.diagnostics.clone());

@@ -1,0 +1,18 @@
+{
+  "name": "linear_list_teams",
+  "description": "List the teams in the Linear workspace: { id, name, key }. You need a team's `id` (the teamId) to create an issue, and a team's workflow states to move issues. Takes no parameters.",
+  "method": "POST",
+  "url": "https://api.linear.app/graphql",
+  "headers": {
+    "Authorization": "$LINEAR_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "params",
+  "body_defaults": {
+    "query": "query { teams { nodes { id name key } } }"
+  }
+}

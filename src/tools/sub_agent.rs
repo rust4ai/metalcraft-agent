@@ -37,10 +37,18 @@ impl metalcraft::Tool for SubAgentTool {
                     "type": "string",
                     "description": "The task for the sub-agent to perform"
                 },
+                "persona": {
+                    "type": "string",
+                    "description": "Run the sub-agent AS a named persona (e.g. 'linear-agent', 'github-agent', 'media-studio-agent'). The sub-agent inherits that persona's tools — including any integration tools the persona is scoped to via its packs — plus its system prompt and skills. This is the preferred way to delegate an integration task: pick the persona built for that service rather than assembling raw tools. When set, `tool_set`/`pack` are ignored."
+                },
                 "tool_set": {
                     "type": "string",
-                    "enum": ["read_only", "full"],
-                    "description": "Tool set for the sub-agent. 'read_only' (default) = read_file, list_files, grep, find_files. 'full' = all tools."
+                    "enum": ["read_only", "full", "all"],
+                    "description": "Tool set for the sub-agent. 'read_only' (default) = read_file, list_files, grep, find_files. 'full' = adds write_file, edit_file, bash. 'all' = 'full' plus integration tools (e.g. the starflask_* media tools) — use this to delegate tasks that call an external service or integration."
+                },
+                "pack": {
+                    "type": "string",
+                    "description": "Only meaningful with tool_set='all'. Scope the integration tools to a single installed pack by id (e.g. 'github', 'linear', 'starflask') so the sub-agent gets just that one integration's tools instead of every installed integration. Omit to grant all installed integration tools."
                 }
             },
             "required": ["task"]
@@ -53,20 +61,79 @@ impl metalcraft::Tool for SubAgentTool {
             message: "Missing required parameter: task".into(),
         })?;
 
-        let tool_set = args["tool_set"].as_str().unwrap_or("read_only");
+        // Two ways to scope the sub-agent:
+        //   1. `persona` — run AS a named persona: its resolved tools (incl.
+        //      pack-scoped integration tools), its system prompt, its skills.
+        //      Preferred for integration work (e.g. persona "linear-agent").
+        //   2. otherwise `tool_set` (read_only/full/all) [+ `pack`], using the
+        //      parent's system prompt.
+        let persona_slug = args["persona"].as_str().filter(|s| !s.is_empty());
 
-        let tool_names: Vec<String> = match tool_set {
-            "full" => vec![
-                "read_file", "write_file", "edit_file", "bash",
-                "list_files", "grep", "find_files",
-            ],
-            _ => vec!["read_file", "list_files", "grep", "find_files"],
-        }
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let (registry, sub_prompt) = if let Some(slug) = persona_slug {
+            let persona = crate::persona::Persona::load(slug, &crate::paths::personas_dir())
+                .map_err(|e| metalcraft::GraphError::ToolCallFailed {
+                    tool: "sub_agent".into(),
+                    message: format!("Failed to load persona '{slug}': {e}"),
+                })?;
+            let base_prompt = persona.build_system_prompt(&crate::paths::skills_dir(), ".");
+            let config = crate::tools::ToolConfig {
+                api_key: self.api_key.clone(),
+                model_name: self.model_name.clone(),
+                system_prompt: base_prompt.clone(),
+                skills_dir: crate::paths::skills_dir(),
+                available_skills: persona.skills.clone(),
+            };
+            let registry = crate::tools::create_registry_for_with_config(
+                &persona.resolved_tool_names(),
+                Some(&config),
+            );
+            let sub_prompt = format!(
+                "{base_prompt}\n\nYou are a sub-agent. Complete the given task efficiently and \
+                 report your findings. Be concise in your final answer."
+            );
+            (registry, sub_prompt)
+        } else {
+            let tool_set = args["tool_set"].as_str().unwrap_or("read_only");
 
-        let registry = crate::tools::create_registry_for(&tool_names);
+            let mut tool_names: Vec<String> = match tool_set {
+                "full" | "all" => vec![
+                    "read_file", "write_file", "edit_file", "bash",
+                    "list_files", "grep", "find_files",
+                ],
+                _ => vec!["read_file", "list_files", "grep", "find_files"],
+            }
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+            // "all" additionally grants integration (HTTP-API) tools — e.g. the
+            // starflask_* media tools — so an orchestrator can delegate "use
+            // starflask to generate an image" without naming the exact tool. An
+            // optional `pack` scopes this to a single integration (e.g. only the
+            // github_* tools) instead of every installed one.
+            if tool_set == "all" {
+                use crate::tools::http_api::HttpApiTool;
+                let integration_tools = match args["pack"].as_str() {
+                    Some(pack) if !pack.is_empty() => {
+                        HttpApiTool::installed_tool_names_for_pack(pack)
+                    }
+                    _ => HttpApiTool::installed_tool_names(),
+                };
+                for name in integration_tools {
+                    if !tool_names.contains(&name) {
+                        tool_names.push(name);
+                    }
+                }
+            }
+
+            let registry = crate::tools::create_registry_for(&tool_names);
+            let sub_prompt = format!(
+                "{}\n\nYou are a sub-agent. Complete the given task efficiently and report your \
+                 findings. Be concise in your final answer.",
+                self.system_prompt
+            );
+            (registry, sub_prompt)
+        };
 
         let client = openai::Client::new(&self.api_key).map_err(|e| {
             metalcraft::GraphError::ToolCallFailed {
@@ -75,12 +142,6 @@ impl metalcraft::Tool for SubAgentTool {
             }
         })?;
         let model = client.completion_model(&self.model_name);
-
-        let sub_prompt = format!(
-            "{}\n\nYou are a sub-agent. Complete the given task efficiently and report your findings. \
-             Be concise in your final answer.",
-            self.system_prompt
-        );
 
         let graph = create_react_agent(model, registry, &sub_prompt).map_err(|e| {
             metalcraft::GraphError::ToolCallFailed {

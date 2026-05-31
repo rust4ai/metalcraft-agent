@@ -1,0 +1,16 @@
+{
+  "name": "github_get_authenticated_user",
+  "description": "Return the GitHub account the $GITHUB_TOKEN belongs to — login, name, id, plan, and counts. The cheapest way to confirm the token is valid and see who you are acting as. Takes no parameters.",
+  "method": "GET",
+  "url": "https://api.github.com/user",
+  "headers": {
+    "Authorization": "Bearer $GITHUB_TOKEN",
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "none"
+}

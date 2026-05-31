@@ -4,6 +4,7 @@ use std::path::Path;
 
 const SEED_PERSONAS: &[(&str, &str)] = &[
     ("coding-agent.json", include_str!("../seed/personas/coding-agent.json")),
+    ("orchestrator-agent.json", include_str!("../seed/personas/orchestrator-agent.json")),
     ("devops-agent.json", include_str!("../seed/personas/devops-agent.json")),
     ("research-agent.json", include_str!("../seed/personas/research-agent.json")),
     ("video-script-agent.json", include_str!("../seed/personas/video-script-agent.json")),
@@ -187,10 +188,140 @@ const STARFLASK_PACK: &[(&str, &str)] = &[
     ),
 ];
 
+/// GitHub integration pack — a persona, skill, and HTTP-API tools for working
+/// with GitHub over its REST API: read public/private repos, push commits,
+/// manage branches, PRs, issues, and comments. Disabled by default; enabled
+/// from the workshop's Packs section. Reads its `GITHUB_TOKEN` (a personal
+/// access token) from the key store (see [`crate::key_store`]).
+const GITHUB_PACK: &[(&str, &str)] = &[
+    (
+        "pack.json",
+        include_str!("../seed/integration_packs/github/pack.json"),
+    ),
+    (
+        "personas/github-agent.json",
+        include_str!("../seed/integration_packs/github/personas/github-agent.json"),
+    ),
+    (
+        "skills/github-ops.md",
+        include_str!("../seed/integration_packs/github/skills/github-ops.md"),
+    ),
+    (
+        "api_tools/github_get_authenticated_user.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_get_authenticated_user.json"),
+    ),
+    (
+        "api_tools/github_list_repos.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_list_repos.json"),
+    ),
+    (
+        "api_tools/github_get_repo.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_get_repo.json"),
+    ),
+    (
+        "api_tools/github_get_file_contents.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_get_file_contents.json"),
+    ),
+    (
+        "api_tools/github_list_branches.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_list_branches.json"),
+    ),
+    (
+        "api_tools/github_get_ref.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_get_ref.json"),
+    ),
+    (
+        "api_tools/github_create_branch.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_create_branch.json"),
+    ),
+    (
+        "api_tools/github_create_or_update_file.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_create_or_update_file.json"),
+    ),
+    (
+        "api_tools/github_list_pull_requests.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_list_pull_requests.json"),
+    ),
+    (
+        "api_tools/github_create_pull_request.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_create_pull_request.json"),
+    ),
+    (
+        "api_tools/github_list_issues.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_list_issues.json"),
+    ),
+    (
+        "api_tools/github_create_issue.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_create_issue.json"),
+    ),
+    (
+        "api_tools/github_create_issue_comment.json",
+        include_str!("../seed/integration_packs/github/api_tools/github_create_issue_comment.json"),
+    ),
+];
+
+/// Linear integration pack — a persona, skill, and HTTP-API tools for reading
+/// and writing Linear issues (tasks) through the Linear GraphQL API. Disabled
+/// by default; enabled from the workshop's Packs section. Reads its
+/// `LINEAR_API_KEY` (a personal API key) from the key store (see
+/// [`crate::key_store`]).
+const LINEAR_PACK: &[(&str, &str)] = &[
+    (
+        "pack.json",
+        include_str!("../seed/integration_packs/linear/pack.json"),
+    ),
+    (
+        "personas/linear-agent.json",
+        include_str!("../seed/integration_packs/linear/personas/linear-agent.json"),
+    ),
+    (
+        "skills/linear-tasks.md",
+        include_str!("../seed/integration_packs/linear/skills/linear-tasks.md"),
+    ),
+    (
+        "api_tools/linear_viewer.json",
+        include_str!("../seed/integration_packs/linear/api_tools/linear_viewer.json"),
+    ),
+    (
+        "api_tools/linear_list_teams.json",
+        include_str!("../seed/integration_packs/linear/api_tools/linear_list_teams.json"),
+    ),
+    (
+        "api_tools/linear_list_projects.json",
+        include_str!("../seed/integration_packs/linear/api_tools/linear_list_projects.json"),
+    ),
+    (
+        "api_tools/linear_list_issues.json",
+        include_str!("../seed/integration_packs/linear/api_tools/linear_list_issues.json"),
+    ),
+    (
+        "api_tools/linear_get_issue.json",
+        include_str!("../seed/integration_packs/linear/api_tools/linear_get_issue.json"),
+    ),
+    (
+        "api_tools/linear_list_workflow_states.json",
+        include_str!("../seed/integration_packs/linear/api_tools/linear_list_workflow_states.json"),
+    ),
+    (
+        "api_tools/linear_create_issue.json",
+        include_str!("../seed/integration_packs/linear/api_tools/linear_create_issue.json"),
+    ),
+    (
+        "api_tools/linear_update_issue.json",
+        include_str!("../seed/integration_packs/linear/api_tools/linear_update_issue.json"),
+    ),
+    (
+        "api_tools/linear_create_comment.json",
+        include_str!("../seed/integration_packs/linear/api_tools/linear_create_comment.json"),
+    ),
+];
+
 const SEED_INTEGRATION_PACKS: &[(&str, &[(&str, &str)])] = &[
     ("discord", DISCORD_PACK),
     ("solarabase", SOLARABASE_PACK),
     ("starflask", STARFLASK_PACK),
+    ("github", GITHUB_PACK),
+    ("linear", LINEAR_PACK),
 ];
 
 /// Ensure default personas and skills exist in the app data directory.

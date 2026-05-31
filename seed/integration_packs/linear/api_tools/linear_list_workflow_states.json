@@ -1,0 +1,27 @@
+{
+  "name": "linear_list_workflow_states",
+  "description": "List the workflow states (statuses) for a team: { id, name, type }. `type` is one of backlog, unstarted, started, completed, canceled. You need a state's `id` to move an issue with linear_update_issue (pass it as stateId). Provide `teamId` (from linear_list_teams).",
+  "method": "POST",
+  "url": "https://api.linear.app/graphql",
+  "headers": {
+    "Authorization": "$LINEAR_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "teamId": {
+        "type": "string",
+        "description": "The team id (from linear_list_teams) whose states to list."
+      }
+    },
+    "required": ["teamId"]
+  },
+  "body_mapping": "params_nested",
+  "body_defaults": {
+    "query": "query TeamStates($teamId: ID!) { workflowStates(filter: { team: { id: { eq: $teamId } } }) { nodes { id name type } } }"
+  },
+  "param_paths": {
+    "teamId": "variables.teamId"
+  }
+}

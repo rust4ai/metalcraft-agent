@@ -2,12 +2,10 @@
   "name": "Knowledge Base Agent",
   "description": "RAG assistant that answers questions grounded in a Solarabase knowledge base",
   "tools": [
-    "solarabase_retrieve",
-    "solarabase_query",
-    "solarabase_list_documents",
-    "solarabase_get_document_pages",
-    "solarabase_upload_document",
     "load_skill"
+  ],
+  "packs": [
+    "solarabase"
   ],
   "skills": [
     "solarabase-rag"

@@ -1,0 +1,26 @@
+{
+  "name": "linear_create_comment",
+  "description": "Add a comment to a Linear issue. Requires `issueId` (the issue UUID, from linear_list_issues / linear_get_issue) and `body` (markdown comment text). Returns { success, comment { id url } }.",
+  "method": "POST",
+  "url": "https://api.linear.app/graphql",
+  "headers": {
+    "Authorization": "$LINEAR_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "issueId": { "type": "string", "description": "The UUID of the issue to comment on." },
+      "body": { "type": "string", "description": "The comment text (markdown)." }
+    },
+    "required": ["issueId", "body"]
+  },
+  "body_mapping": "params_nested",
+  "body_defaults": {
+    "query": "mutation CreateComment($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id url } } }"
+  },
+  "param_paths": {
+    "issueId": "variables.input.issueId",
+    "body": "variables.input.body"
+  }
+}

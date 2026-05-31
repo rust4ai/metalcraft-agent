@@ -2,13 +2,11 @@
   "name": "Discord Agent",
   "description": "AI assistant for Discord conversations",
   "tools": [
-    "discord_send_message",
-    "discord_edit_message",
-    "discord_add_reaction",
-    "discord_get_messages",
-    "discord_get_channel_info",
     "web_fetch",
     "load_skill"
+  ],
+  "packs": [
+    "discord"
   ],
   "skills": [
     "discord-etiquette",

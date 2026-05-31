@@ -1,0 +1,9 @@
+{
+  "id": "linear",
+  "name": "Linear",
+  "description": "Persona, skill, and HTTP API tools that let an agent read and write Linear issues (tasks) through the Linear GraphQL API — list teams/projects/issues/workflow states, fetch an issue, create and update issues, and comment on them. Authenticated by a single LINEAR_API_KEY (a personal API key from Linear settings).",
+  "version": "1.0.1",
+  "requires_env": [
+    "LINEAR_API_KEY"
+  ]
+}

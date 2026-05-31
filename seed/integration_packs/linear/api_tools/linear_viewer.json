@@ -1,0 +1,18 @@
+{
+  "name": "linear_viewer",
+  "description": "Return the Linear user the LINEAR_API_KEY belongs to: { id, name, email }. The cheapest way to confirm the key is valid and see who you are acting as. Takes no parameters.",
+  "method": "POST",
+  "url": "https://api.linear.app/graphql",
+  "headers": {
+    "Authorization": "$LINEAR_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "params",
+  "body_defaults": {
+    "query": "query { viewer { id name email } }"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "linear_list_projects",
+  "description": "List projects in the Linear workspace: { id, name, state }. Use a project `id` to associate issues with a project. Takes no parameters.",
+  "method": "POST",
+  "url": "https://api.linear.app/graphql",
+  "headers": {
+    "Authorization": "$LINEAR_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "params",
+  "body_defaults": {
+    "query": "query { projects { nodes { id name state } } }"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "github_get_repo",
+  "description": "Fetch metadata for a single repository (works for private repos the token can see): description, default_branch, visibility, open_issues_count, permissions, etc. Provide `owner` and `repo`.",
+  "method": "GET",
+  "url": "https://api.github.com/repos/{owner}/{repo}",
+  "headers": {
+    "Authorization": "Bearer $GITHUB_TOKEN",
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "owner": {
+        "type": "string",
+        "description": "Repository owner (user or org login)."
+      },
+      "repo": {
+        "type": "string",
+        "description": "Repository name."
+      }
+    },
+    "required": ["owner", "repo"]
+  },
+  "body_mapping": "none"
+}

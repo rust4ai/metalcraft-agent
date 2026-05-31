@@ -1,0 +1,27 @@
+{
+  "name": "linear_get_issue",
+  "description": "Fetch one Linear issue by its `id` (the UUID, or the human identifier like 'ENG-123' also resolves). Returns { id, identifier, title, description, priority, state{name}, assignee{name}, team{id name}, url }.",
+  "method": "POST",
+  "url": "https://api.linear.app/graphql",
+  "headers": {
+    "Authorization": "$LINEAR_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "The issue UUID or identifier (e.g. 'ENG-123')."
+      }
+    },
+    "required": ["id"]
+  },
+  "body_mapping": "params_nested",
+  "body_defaults": {
+    "query": "query GetIssue($id: String!) { issue(id: $id) { id identifier title description priority state { name } assignee { name } team { id name } url } }"
+  },
+  "param_paths": {
+    "id": "variables.id"
+  }
+}

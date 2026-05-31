@@ -1,0 +1,22 @@
+{
+  "name": "github_create_issue_comment",
+  "description": "Add a comment to an issue OR a pull request (in GitHub, a PR is an issue, so use the PR's number here to comment on a PR). Provide `owner`, `repo`, `issue_number`, and `body` (markdown comment text). Returns the created comment including its `html_url`.",
+  "method": "POST",
+  "url": "https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments",
+  "headers": {
+    "Authorization": "Bearer $GITHUB_TOKEN",
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "owner": { "type": "string", "description": "Repository owner." },
+      "repo": { "type": "string", "description": "Repository name." },
+      "issue_number": { "type": "integer", "description": "The issue or pull request number to comment on." },
+      "body": { "type": "string", "description": "The comment text (markdown)." }
+    },
+    "required": ["owner", "repo", "issue_number", "body"]
+  },
+  "body_mapping": "params"
+}

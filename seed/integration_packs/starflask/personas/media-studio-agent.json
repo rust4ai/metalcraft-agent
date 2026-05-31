@@ -2,18 +2,10 @@
   "name": "Media Studio Agent",
   "description": "Creative media generator that produces images, video, 3D models, and speech with Starflask",
   "tools": [
-    "starflask_generate_image",
-    "starflask_generate_video",
-    "starflask_generate_3d",
-    "starflask_generate_speech",
-    "starflask_create_job",
-    "starflask_get_job",
-    "starflask_list_models",
-    "starflask_list_styles",
-    "starflask_upload_media",
-    "starflask_get_media",
-    "starflask_account",
     "load_skill"
+  ],
+  "packs": [
+    "starflask"
   ],
   "skills": [
     "starflask-media"

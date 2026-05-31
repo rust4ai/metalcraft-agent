@@ -6,6 +6,13 @@ pub struct Persona {
     pub name: String,
     pub description: String,
     pub tools: Vec<String>,
+    /// Integration packs this persona is scoped to (by pack id, e.g. "linear").
+    /// Every HTTP-API tool provided by an enabled pack listed here is added to
+    /// the persona's tool set, so a persona can adopt a whole integration
+    /// without enumerating each `<pack>_*` tool by name. Combine with `tools`
+    /// for native tools like `load_skill`. See [`Persona::resolved_tool_names`].
+    #[serde(default)]
+    pub packs: Vec<String>,
     #[serde(default)]
     pub skills: Vec<String>,
     pub system_prompt: String,
@@ -100,6 +107,23 @@ impl Persona {
                 })
             })
             .collect()
+    }
+
+    /// The persona's full tool list: the explicitly named `tools` plus every
+    /// HTTP-API tool provided by the enabled packs it declares in `packs`
+    /// (deduplicated, explicit tools first). This is what the registry and the
+    /// step guard should be built from — not the raw `tools` field. A persona
+    /// with no `packs` resolves to exactly its `tools`.
+    pub fn resolved_tool_names(&self) -> Vec<String> {
+        let mut names = self.tools.clone();
+        for pack in &self.packs {
+            for tool in crate::tools::http_api::HttpApiTool::installed_tool_names_for_pack(pack) {
+                if !names.contains(&tool) {
+                    names.push(tool);
+                }
+            }
+        }
+        names
     }
 
     /// Build the system prompt. Lists available skills by name — use `load_skill` tool to load on demand.

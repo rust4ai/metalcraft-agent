@@ -97,6 +97,35 @@ impl HttpApiTool {
             .collect()
     }
 
+    /// Names of every installed HTTP-API tool — the local `api_tools/` dir plus
+    /// every enabled integration pack (user-local shadows a pack on collision).
+    /// Used to grant a "full-access" sub-agent the integration tools (e.g. the
+    /// starflask media tools) without the orchestrator having to know them by name.
+    pub fn installed_tool_names() -> Vec<String> {
+        let dir = crate::paths::api_tools_dir();
+        crate::integration_packs::list_files_layered(&dir, "api_tools", "json")
+            .into_iter()
+            .filter_map(|(path, _origin)| {
+                path.file_stem().and_then(|s| s.to_str()).map(String::from)
+            })
+            .collect()
+    }
+
+    /// Names of the HTTP-API tools provided by a single enabled integration
+    /// pack (e.g. just the `github_*` tools for `"github"`). Lets a delegated
+    /// sub-agent be scoped to exactly one integration instead of every installed
+    /// one. Returns empty if the pack is disabled or unknown.
+    pub fn installed_tool_names_for_pack(pack_id: &str) -> Vec<String> {
+        let dir = crate::paths::api_tools_dir();
+        crate::integration_packs::list_files_layered(&dir, "api_tools", "json")
+            .into_iter()
+            .filter(|(_path, origin)| origin.pack_id() == Some(pack_id))
+            .filter_map(|(path, _origin)| {
+                path.file_stem().and_then(|s| s.to_str()).map(String::from)
+            })
+            .collect()
+    }
+
     /// Try to load a tool by name, resolving the local api_tools directory
     /// first and falling back to any enabled integration pack (e.g. the
     /// discord pack ships `discord_send_message` and friends).

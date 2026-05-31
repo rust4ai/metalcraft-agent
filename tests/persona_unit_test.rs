@@ -73,6 +73,7 @@ fn build_system_prompt_without_skills() {
         name: "Test".into(),
         description: "Test persona".into(),
         tools: vec![],
+        packs: vec![],
         skills: vec![],
         system_prompt: "You are a test.".into(),
     };
