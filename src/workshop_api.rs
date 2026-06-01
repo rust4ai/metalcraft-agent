@@ -1595,7 +1595,11 @@ async fn list_integration_packs() -> Json<Vec<IntegrationPackSummary>> {
             enabled: state.get(&p.manifest.id).map(|s| s.enabled).unwrap_or(false),
             personas: count_files(&p.personas_dir(), "json"),
             skills: count_files(&p.skills_dir(), "md"),
-            api_tools: count_files(&p.api_tools_dir(), "json"),
+            // Declarative HTTP-API tools (api_tools/*.json) plus any native Rust
+            // tools the pack contributes (e.g. digitalocean_spaces' S3 tools,
+            // which ship no api_tools/ files). See `tools::native_pack_tool_names`.
+            api_tools: count_files(&p.api_tools_dir(), "json")
+                + crate::tools::native_pack_tool_names(&p.manifest.id).len(),
             flow_templates: count_files(&p.flow_templates_dir(), "json"),
             id: p.manifest.id,
             name: p.manifest.name,
@@ -1618,7 +1622,11 @@ async fn get_integration_pack(Path(id): Path<String>) -> Response {
     // Read file lists before moving the manifest fields out of `pack`.
     let personas = list_file_stems(&pack.personas_dir(), "json");
     let skills = list_file_stems(&pack.skills_dir(), "md");
-    let api_tools = list_file_stems(&pack.api_tools_dir(), "json");
+    // Declarative HTTP-API tools plus any native Rust tools the pack ships (see
+    // the summary builder above and `tools::native_pack_tool_names`).
+    let mut api_tools = list_file_stems(&pack.api_tools_dir(), "json");
+    api_tools.extend(crate::tools::native_pack_tool_names(&id));
+    api_tools.sort();
     let flow_templates = list_file_stems(&pack.flow_templates_dir(), "json");
     Json(IntegrationPackDetail {
         id: pack.manifest.id,
