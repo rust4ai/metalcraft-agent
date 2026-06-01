@@ -2,7 +2,8 @@
 .env
 /logs
 /flows
-/logs/
-/flows/
-target
-.env
+
+# Runtime-seeded data dirs — re-created by ensure_defaults() when the app's
+# data dir resolves to the repo root. Canonical copies live in seed/.
+/personas
+/skills
