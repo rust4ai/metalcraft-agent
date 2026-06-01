@@ -170,6 +170,15 @@ impl HttpApiTool {
         let mut url = self.config.url.clone();
         if let Some(obj) = args.as_object() {
             for (key, value) in obj {
+                // Treat null / empty-string args as "not provided" so the
+                // placeholder is left for clean_unexpanded_placeholders to strip,
+                // rather than substituting an empty value. Otherwise an optional
+                // filter like `?name={name}` becomes `?name=`, which some APIs
+                // (e.g. Cloudflare zone listing) read as "match the empty string"
+                // and return nothing. Mirrors the params_nested empty/null skip.
+                if value.is_null() || value.as_str() == Some("") {
+                    continue;
+                }
                 let placeholder = format!("{{{key}}}");
                 if url.contains(&placeholder) {
                     let val_str = value.as_str().map(|s| s.to_string()).unwrap_or_else(|| value.to_string());
@@ -649,6 +658,23 @@ mod tests {
         assert!(url.contains("/channels/456/messages"));
         assert!(!url.contains("limit"));
         assert!(url.contains("platform=discord"));
+    }
+
+    #[test]
+    fn expand_url_drops_empty_and_null_optional_params() {
+        // A model that fills omitted optional filters with "" or null must not
+        // produce `?name=&type=` segments; those are dropped so the API doesn't
+        // read them as "match the empty string" (the Cloudflare zone-listing bug).
+        let mut cfg = base_config();
+        cfg.url = "https://api.cloudflare.com/client/v4/zones?name={name}&per_page={per_page}".into();
+        let tool = make_tool(cfg);
+        let url = tool.expand_url(&json!({"name": "", "per_page": 50}));
+        assert!(!url.contains("name="), "empty name should be dropped, got {url}");
+        assert!(url.contains("per_page=50"));
+
+        let url_null = tool.expand_url(&json!({"name": null, "per_page": 50}));
+        assert!(!url_null.contains("name="), "null name should be dropped, got {url_null}");
+        assert!(url_null.contains("per_page=50"));
     }
 
     // -- JSON config deserialization --
