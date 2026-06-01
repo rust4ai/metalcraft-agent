@@ -31,6 +31,8 @@ pub enum OperationKind {
     SubAgent,      // sub_agent
     LoadSkill,     // load_skill
     DiscordAction, // discord_send_message, discord_edit_message, discord_add_reaction
+    MetaRead,      // read-only meta tools (list/read/validate over the project's own files)
+    MetaWrite,     // mutating meta tools (write/delete personas, skills, flows)
 }
 
 impl OperationKind {
@@ -58,6 +60,16 @@ impl OperationKind {
             "load_skill" => Self::LoadSkill,
             "discord_send_message" | "discord_edit_message" | "discord_add_reaction" => Self::DiscordAction,
             "discord_get_messages" | "discord_get_channel_info" => Self::ReadFile,
+            // Meta tools — managing the project's own personas/skills/flows.
+            // Read-only ones auto-approve; mutating ones require approval.
+            "persona_list" | "persona_read" | "skill_list" | "skill_read" | "flow_list"
+            | "flow_read" | "flow_validate" | "flow_templates_list" | "flow_template_read"
+            | "diagnostics_list" | "diagnostics_read" => Self::MetaRead,
+            "persona_write" | "persona_delete" | "skill_write" | "skill_delete" | "flow_write"
+            | "flow_delete" => Self::MetaWrite,
+            // flow_run spawns agent runs that may use any tool — treat it like
+            // a sub-agent (requires approval).
+            "flow_run" => Self::SubAgent,
             // Default unknown tools to Execute (requires approval)
             _ => Self::Execute,
         }
@@ -67,6 +79,8 @@ impl OperationKind {
     pub fn default_permission(&self) -> PermissionLevel {
         match self {
             Self::ReadFile | Self::ListFiles | Self::Search | Self::LoadSkill => PermissionLevel::AutoApprove,
+            Self::MetaRead => PermissionLevel::AutoApprove,
+            Self::MetaWrite => PermissionLevel::RequiresApproval,
             Self::WriteNewFile => PermissionLevel::AutoApprove,
             Self::OverwriteFile => PermissionLevel::RequiresApproval,
             Self::EditFile => PermissionLevel::RequiresApproval,
@@ -91,6 +105,8 @@ impl OperationKind {
             Self::SubAgent => "SubAgent",
             Self::LoadSkill => "LoadSkill",
             Self::DiscordAction => "DiscordAction",
+            Self::MetaRead => "MetaRead",
+            Self::MetaWrite => "MetaWrite",
         }
     }
 }
@@ -551,6 +567,23 @@ mod tests {
         assert_eq!(OperationKind::classify("web_fetch", &args), OperationKind::NetworkFetch);
         assert_eq!(OperationKind::classify("sub_agent", &args), OperationKind::SubAgent);
         assert_eq!(OperationKind::classify("load_skill", &args), OperationKind::LoadSkill);
+    }
+
+    #[test]
+    fn test_classify_meta_tools() {
+        let args = serde_json::json!({});
+        // Read-only meta tools auto-approve.
+        for t in ["persona_list", "persona_read", "skill_read", "flow_list", "flow_validate", "diagnostics_read"] {
+            assert_eq!(OperationKind::classify(t, &args), OperationKind::MetaRead, "{t}");
+            assert_eq!(OperationKind::MetaRead.default_permission(), PermissionLevel::AutoApprove);
+        }
+        // Mutating meta tools require approval.
+        for t in ["persona_write", "persona_delete", "skill_write", "flow_write", "flow_delete"] {
+            assert_eq!(OperationKind::classify(t, &args), OperationKind::MetaWrite, "{t}");
+            assert_eq!(OperationKind::MetaWrite.default_permission(), PermissionLevel::RequiresApproval);
+        }
+        // flow_run spawns agent work — gated like a sub-agent.
+        assert_eq!(OperationKind::classify("flow_run", &args), OperationKind::SubAgent);
     }
 
     #[test]

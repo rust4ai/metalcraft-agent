@@ -1,0 +1,290 @@
+//! Meta tools for authoring and running **flows** by prompt — the workshop's
+//! flow CRUD plus validate/run and flow-template browsing. Flow persistence and
+//! the wire format come from the `metalcraft_flows` crate; execution reuses
+//! `crate::flows::run_flow` so a prompt-driven run behaves exactly like the
+//! workshop's run-flow endpoint.
+
+use async_trait::async_trait;
+
+use crate::paths;
+use crate::runtime::{AgentRuntimeContext, DEFAULT_MODEL};
+use crate::tools::missing_param;
+
+fn id_arg(args: &serde_json::Value, tool: &str) -> metalcraft::Result<String> {
+    args["id"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| missing_param(tool, "id"))
+}
+
+/// Parse the `flow` argument into a `SavedFlow`, returning a model-visible
+/// error JSON on failure. Accepts either a JSON string (what the model sends —
+/// object-typed tool params are rejected by strict function schemas) or an
+/// inline object (convenient for direct/programmatic calls).
+fn parse_flow(args: &serde_json::Value) -> Result<metalcraft_flows::SavedFlow, serde_json::Value> {
+    let raw = args
+        .get("flow")
+        .ok_or_else(|| serde_json::json!({ "error": "Missing required parameter: flow" }))?;
+    let value: serde_json::Value = if let Some(s) = raw.as_str() {
+        serde_json::from_str(s)
+            .map_err(|e| serde_json::json!({ "error": format!("invalid flow JSON: {e}") }))?
+    } else {
+        raw.clone()
+    };
+    serde_json::from_value(value)
+        .map_err(|e| serde_json::json!({ "error": format!("invalid flow document: {e}") }))
+}
+
+fn validation_errors(flow: &metalcraft_flows::SavedFlow) -> Vec<String> {
+    metalcraft_flows::validate(flow)
+        .into_iter()
+        .map(|e| e.to_string())
+        .collect()
+}
+
+pub struct FlowListTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowListTool {
+    fn name(&self) -> &str {
+        "flow_list"
+    }
+    fn description(&self) -> &str {
+        "List all saved flows with id, name, and enabled state."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {}, "required": [] })
+    }
+    async fn call(&self, _args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        Ok(serde_json::json!({ "flows": metalcraft_flows::list_flows(&paths::flows_dir()) }))
+    }
+}
+
+pub struct FlowReadTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowReadTool {
+    fn name(&self) -> &str {
+        "flow_read"
+    }
+    fn description(&self) -> &str {
+        "Read one flow by id, returning its full document (nodes, edges, schedule)."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "id": { "type": "string", "description": "Flow id" } },
+            "required": ["id"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = id_arg(&args, "flow_read")?;
+        match metalcraft_flows::load_flow(&paths::flows_dir(), &id) {
+            Some(f) => Ok(serde_json::to_value(f).unwrap_or(serde_json::Value::Null)),
+            None => Ok(serde_json::json!({ "error": format!("flow '{id}' not found") })),
+        }
+    }
+}
+
+pub struct FlowValidateTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowValidateTool {
+    fn name(&self) -> &str {
+        "flow_validate"
+    }
+    fn description(&self) -> &str {
+        "Validate a flow document against the spec WITHOUT saving it. Returns `valid: true` or a list of errors. Call this before flow_write to catch problems early."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "flow": { "type": "string", "description": "A SavedFlow document as a JSON string" } },
+            "required": ["flow"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let flow = match parse_flow(&args) {
+            Ok(f) => f,
+            Err(e) => return Ok(e),
+        };
+        let errors = validation_errors(&flow);
+        Ok(serde_json::json!({ "valid": errors.is_empty(), "errors": errors }))
+    }
+}
+
+pub struct FlowWriteTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowWriteTool {
+    fn name(&self) -> &str {
+        "flow_write"
+    }
+    fn description(&self) -> &str {
+        "Create or overwrite a flow. Provide a `flow` SavedFlow document; the `id` field on it identifies the flow. The flow is validated first — if it fails, nothing is saved and the errors are returned."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "flow": { "type": "string", "description": "A SavedFlow document as a JSON string (must include `id`)" } },
+            "required": ["flow"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let flow = match parse_flow(&args) {
+            Ok(f) => f,
+            Err(e) => return Ok(e),
+        };
+        let errors = validation_errors(&flow);
+        if !errors.is_empty() {
+            return Ok(serde_json::json!({ "saved": false, "errors": errors }));
+        }
+        match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
+            Ok(()) => Ok(serde_json::json!({ "saved": true, "id": flow.id })),
+            Err(e) => Ok(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+}
+
+pub struct FlowDeleteTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowDeleteTool {
+    fn name(&self) -> &str {
+        "flow_delete"
+    }
+    fn description(&self) -> &str {
+        "Delete a flow by id."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "id": { "type": "string", "description": "Flow id to delete" } },
+            "required": ["id"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = id_arg(&args, "flow_delete")?;
+        if metalcraft_flows::delete_flow(&paths::flows_dir(), &id) {
+            Ok(serde_json::json!({ "deleted": id }))
+        } else {
+            Ok(serde_json::json!({ "error": format!("flow '{id}' not found") }))
+        }
+    }
+}
+
+pub struct FlowRunTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowRunTool {
+    fn name(&self) -> &str {
+        "flow_run"
+    }
+    fn description(&self) -> &str {
+        "Run a saved flow now: every reachable prompt node executes as a one-shot task (tools auto-approved), logged to a single flow-tagged diagnostics session. Optionally set `persona` (default coding-agent) and `model`. Returns per-prompt results."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Flow id to run" },
+                "persona": { "type": "string", "description": "Persona to run prompts as (default: coding-agent). A prompt node may override this." },
+                "model": { "type": "string", "description": "Model to use (default: the runtime default)" }
+            },
+            "required": ["id"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = id_arg(&args, "flow_run")?;
+        let persona = args["persona"].as_str().unwrap_or("coding-agent");
+        let model = args["model"].as_str().unwrap_or(DEFAULT_MODEL);
+
+        let context = match AgentRuntimeContext::from_environment() {
+            Ok(c) => c,
+            Err(e) => return Ok(serde_json::json!({ "error": format!("runtime not available: {e}") })),
+        };
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+
+        match crate::flows::run_flow(&context, &id, &cwd, persona, model).await {
+            Ok(results) => Ok(serde_json::json!({ "flow_id": id, "prompts": results })),
+            Err(e) => Ok(serde_json::json!({ "error": e })),
+        }
+    }
+}
+
+pub struct FlowTemplatesListTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowTemplatesListTool {
+    fn name(&self) -> &str {
+        "flow_templates_list"
+    }
+    fn description(&self) -> &str {
+        "List available flow templates (starting points for new flows), local and from enabled packs, with slug and name."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {}, "required": [] })
+    }
+    async fn call(&self, _args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let layered = crate::integration_packs::list_files_layered(
+            &paths::flow_templates_dir(),
+            "flow_templates",
+            "json",
+        );
+        let templates: Vec<serde_json::Value> = layered
+            .into_iter()
+            .filter_map(|(path, origin)| {
+                let slug = path.file_stem()?.to_str()?.to_string();
+                let content = std::fs::read_to_string(&path).ok()?;
+                let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+                let name = value.get("name").and_then(|v| v.as_str()).unwrap_or(&slug).to_string();
+                Some(serde_json::json!({
+                    "slug": slug,
+                    "name": name,
+                    "pack_id": origin.pack_id(),
+                }))
+            })
+            .collect();
+        Ok(serde_json::json!({ "templates": templates }))
+    }
+}
+
+pub struct FlowTemplateReadTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowTemplateReadTool {
+    fn name(&self) -> &str {
+        "flow_template_read"
+    }
+    fn description(&self) -> &str {
+        "Read a flow template by slug, returning its flow document so it can be customized and saved with flow_write."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "slug": { "type": "string", "description": "Flow template slug" } },
+            "required": ["slug"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let slug = args["slug"]
+            .as_str()
+            .ok_or_else(|| missing_param("flow_template_read", "slug"))?;
+        let Some((path, _origin)) = crate::integration_packs::resolve_file(
+            &paths::flow_templates_dir(),
+            "flow_templates",
+            &format!("{slug}.json"),
+        ) else {
+            return Ok(serde_json::json!({ "error": format!("template '{slug}' not found") }));
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(v) => Ok(serde_json::json!({ "slug": slug, "flow": v })),
+                Err(e) => Ok(serde_json::json!({ "error": format!("parse error: {e}") })),
+            },
+            Err(e) => Ok(serde_json::json!({ "error": format!("read error: {e}") })),
+        }
+    }
+}

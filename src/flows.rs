@@ -2,6 +2,15 @@ use metalcraft_flows::{validate, CoreNodeType, FlowNodeType, SavedFlow};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
+
+use serde::Serialize;
+
+use crate::approval::ApprovalMode;
+use crate::diagnostics::DiagnosticsLogger;
+use crate::persona::Persona;
+use crate::runtime::{self, AgentRuntimeContext, RunOneShotRequest};
+use metalcraft::RunOutcome;
 
 #[derive(Debug, Clone)]
 pub enum FlowSchedule {
@@ -155,6 +164,114 @@ pub fn collect_reachable_prompts(flow: &SavedFlow) -> Result<Vec<FlowPrompt>, St
     }
 
     Ok(prompts)
+}
+
+/// Result of running one prompt node of a flow.
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowPromptResult {
+    pub prompt_index: usize,
+    /// "completed" | "interrupted" | "failed".
+    pub status: String,
+    pub answer: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Execute every reachable prompt of a saved flow as one-shot tasks, logging
+/// all turns into a single flow-tagged diagnostics session. Shared by the
+/// workshop API's run-flow endpoint and the `flow_run` meta tool so both
+/// behave identically. Each prompt node may override the persona; otherwise
+/// the `persona_slug` argument is used. Tools are auto-approved (flow runs are
+/// non-interactive).
+pub async fn run_flow(
+    context: &AgentRuntimeContext,
+    flow_id: &str,
+    cwd: &str,
+    persona_slug: &str,
+    model_name: &str,
+) -> Result<Vec<FlowPromptResult>, String> {
+    let flow = metalcraft_flows::load_flow(&crate::paths::flows_dir(), flow_id)
+        .ok_or_else(|| format!("flow '{flow_id}' not found"))?;
+    let prompts = collect_reachable_prompts(&flow).map_err(|e| format!("unrunnable flow: {e}"))?;
+
+    // One session for the whole run so it shows up in the Sessions list, tagged
+    // with the flow id (kind == "flow"); prompt boundaries are config-change events.
+    let logger = match DiagnosticsLogger::new() {
+        Ok(l) => {
+            if let Ok(persona) = Persona::load(persona_slug, &context.personas_dir) {
+                let system_prompt = persona.build_system_prompt(&context.skills_dir, cwd);
+                l.log_session_info(
+                    &persona.name,
+                    persona_slug,
+                    model_name,
+                    cwd,
+                    &system_prompt,
+                    &persona.resolved_tool_names(),
+                    &persona.skills,
+                    true,
+                    Some(flow_id),
+                );
+            }
+            Some(Arc::new(l))
+        }
+        Err(e) => {
+            eprintln!("flow run: failed to create session logger: {e}");
+            None
+        }
+    };
+
+    let mut results = Vec::with_capacity(prompts.len());
+    for (i, fp) in prompts.iter().enumerate() {
+        let effective_persona = fp.persona.as_deref().unwrap_or(persona_slug);
+        if let Some(l) = &logger {
+            l.log_config_change(
+                "flow_prompt",
+                serde_json::json!({
+                    "index": i,
+                    "persona": effective_persona,
+                    "prompt": fp.prompt,
+                }),
+            );
+        }
+        let outcome = runtime::run_one_shot_task(
+            context,
+            RunOneShotRequest {
+                persona_slug: effective_persona,
+                cwd,
+                model_name,
+                task: &fp.prompt,
+                approval_mode: ApprovalMode::AutoApprove,
+                diagnostics: logger.clone(),
+            },
+        )
+        .await;
+        results.push(match outcome {
+            Ok(RunOutcome::Completed(s)) => FlowPromptResult {
+                prompt_index: i,
+                status: "completed".into(),
+                answer: s.final_answer().map(String::from),
+                error: None,
+            },
+            Ok(RunOutcome::Interrupted { reason, .. }) => FlowPromptResult {
+                prompt_index: i,
+                status: "interrupted".into(),
+                answer: None,
+                error: Some(reason),
+            },
+            Ok(RunOutcome::Failed { node, error, .. }) => FlowPromptResult {
+                prompt_index: i,
+                status: "failed".into(),
+                answer: None,
+                error: Some(format!("{node}: {error}")),
+            },
+            Err(e) => FlowPromptResult {
+                prompt_index: i,
+                status: "failed".into(),
+                answer: None,
+                error: Some(e.to_string()),
+            },
+        });
+    }
+    Ok(results)
 }
 
 fn entry_node(flow: &SavedFlow) -> Result<&metalcraft_flows::FlowNode, String> {

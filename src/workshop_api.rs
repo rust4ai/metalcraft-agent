@@ -24,7 +24,11 @@ use crate::diagnostics::DiagnosticsLogger;
 use crate::flows;
 use crate::paths;
 use crate::persona::{Persona, PersonaSummary};
-use crate::runtime::{self, AgentRuntimeContext, RunOneShotRequest, DEFAULT_MODEL};
+use crate::runtime::{AgentRuntimeContext, DEFAULT_MODEL};
+use crate::diagnostics_browse::{
+    list_diagnostics_sessions, read_diagnostics_session, DiagnosticsSessionSummary,
+};
+use crate::skill::{list_skill_summaries, load_skill, save_skill, Skill, SkillSummary};
 use crate::tools::http_api::HttpApiToolConfig;
 use metalcraft::{AgentMessage, AgentState, Executor, GuardAction, RunOutcome, StepGuard};
 
@@ -91,61 +95,6 @@ struct ProjectLayout {
     flows_dir: String,
     sessions_dir: String,
     api_tools_dir: String,
-}
-
-#[derive(Serialize)]
-struct SkillSummary {
-    slug: String,
-    description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pack_id: Option<String>,
-    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
-    read_only: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-struct Skill {
-    slug: String,
-    description: String,
-    body: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pack_id: Option<String>,
-    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
-    read_only: bool,
-}
-
-#[derive(Serialize)]
-struct DiagnosticsSessionSummary {
-    id: String,
-    timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    persona_slug: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model_name: Option<String>,
-    /// "session" for a normal one-shot/diagnostics run, "flow" for a flow run.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<String>,
-    /// Present (and `kind == "flow"`) when this session was produced by a flow run.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    flow_id: Option<String>,
-    /// Number of `turn_NNN.json` files in the session directory. Counted fresh
-    /// from disk on each list so it's correct after the agent appends turns.
-    turn_count: usize,
-}
-
-#[derive(Serialize)]
-struct DiagnosticsSession {
-    id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_info: Option<serde_json::Value>,
-    timeline: Vec<TimelineEvent>,
-}
-
-#[derive(Serialize)]
-struct TimelineEvent {
-    kind: String,
-    file: String,
-    data: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -402,58 +351,7 @@ async fn delete_persona(Path(slug): Path<String>) -> Response {
 }
 
 // ── Skill handlers ──────────────────────────────────────────────────────
-
-fn list_skill_summaries() -> Vec<SkillSummary> {
-    let layered = crate::integration_packs::list_files_layered(
-        &paths::skills_dir(),
-        "skills",
-        "md",
-    );
-    let mut summaries: Vec<SkillSummary> = layered
-        .into_iter()
-        .filter_map(|(path, origin)| {
-            let slug = path.file_stem()?.to_str()?.to_string();
-            let content = std::fs::read_to_string(&path).ok()?;
-            let description = crate::persona::parse_frontmatter_description(&content)
-                .unwrap_or_else(|| "No description".to_string());
-            Some(SkillSummary {
-                slug,
-                description,
-                pack_id: origin.pack_id().map(String::from),
-                read_only: origin.is_read_only(),
-            })
-        })
-        .collect();
-    summaries.sort_by(|a, b| a.slug.cmp(&b.slug));
-    summaries
-}
-
-fn load_skill(slug: &str) -> Option<Skill> {
-    let filename = format!("{slug}.md");
-    let (path, origin) = crate::integration_packs::resolve_file(
-        &paths::skills_dir(),
-        "skills",
-        &filename,
-    )?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let description = crate::persona::parse_frontmatter_description(&content)
-        .unwrap_or_default();
-    let body = crate::persona::strip_frontmatter(&content).to_string();
-    Some(Skill {
-        slug: slug.to_string(),
-        description,
-        body,
-        pack_id: origin.pack_id().map(String::from),
-        read_only: origin.is_read_only(),
-    })
-}
-
-fn save_skill(slug: &str, skill: &Skill) -> Result<(), String> {
-    let path = paths::skills_dir().join(format!("{slug}.md"));
-    let content = format!("---\ndescription: {}\n---\n\n{}", skill.description, skill.body);
-    std::fs::write(&path, content)
-        .map_err(|e| format!("Failed to write {}: {e}", path.display()))
-}
+// Skill types and CRUD live in `crate::skill` so the meta tools share them.
 
 async fn get_skill(Path(slug): Path<String>) -> Response {
     match load_skill(&slug) {
@@ -537,129 +435,18 @@ async fn delete_flow(Path(id): Path<String>) -> Response {
 
 // ── Diagnostics handlers ────────────────────────────────────────────────
 
-fn list_diagnostics_sessions() -> Vec<DiagnosticsSessionSummary> {
-    let dir = paths::sessions_dir();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(_) => return vec![],
-    };
-
-    let mut sessions: Vec<DiagnosticsSessionSummary> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let path = e.path();
-            if !path.is_dir() {
-                return None;
-            }
-            let dir_name = path.file_name()?.to_str()?.to_string();
-
-            // Try to read session_info.json for metadata
-            let info_path = path.join("session_info.json");
-            let (persona_slug, model_name, kind, flow_id) =
-                if let Ok(content) = std::fs::read_to_string(&info_path) {
-                    let info: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
-                    (
-                        info.get("persona_slug").and_then(|v| v.as_str()).map(String::from),
-                        info.get("model_name").and_then(|v| v.as_str()).map(String::from),
-                        info.get("kind").and_then(|v| v.as_str()).map(String::from),
-                        info.get("flow_id").and_then(|v| v.as_str()).map(String::from),
-                    )
-                } else {
-                    (None, None, None, None)
-                };
-
-            // Count turn_NNN.json files so the summary reports how far the
-            // session actually got.
-            let turn_count = std::fs::read_dir(&path)
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok())
-                        .filter(|e| {
-                            e.file_name()
-                                .to_str()
-                                .map(|n| n.starts_with("turn_") && n.ends_with(".json"))
-                                .unwrap_or(false)
-                        })
-                        .count()
-                })
-                .unwrap_or(0);
-
-            Some(DiagnosticsSessionSummary {
-                id: dir_name.clone(),
-                timestamp: dir_name,
-                persona_slug,
-                model_name,
-                kind,
-                flow_id,
-                turn_count,
-            })
-        })
-        .collect();
-
-    sessions.sort_by(|a, b| b.id.cmp(&a.id)); // newest first
-    sessions
-}
-
 async fn list_diagnostics() -> Json<Vec<DiagnosticsSessionSummary>> {
     Json(list_diagnostics_sessions())
 }
 
 async fn get_diagnostics_session(Path(id): Path<String>) -> Response {
-    let session_dir = paths::sessions_dir().join(&id);
-    if !session_dir.is_dir() {
-        return err_json(StatusCode::NOT_FOUND, format!("diagnostics session '{id}' not found"));
+    match read_diagnostics_session(&id) {
+        Some(session) => Json(session).into_response(),
+        None => err_json(
+            StatusCode::NOT_FOUND,
+            format!("diagnostics session '{id}' not found"),
+        ),
     }
-
-    // Read session_info.json
-    let session_info = std::fs::read_to_string(session_dir.join("session_info.json"))
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok());
-
-    // Read all turn/llm_request/config/compaction files as timeline
-    let mut timeline = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&session_dir) {
-        let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        files.sort_by_key(|e| e.file_name());
-
-        for entry in files {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name == "session_info.json" {
-                continue;
-            }
-            if !name.ends_with(".json") {
-                continue;
-            }
-
-            let kind = if name.starts_with("turn_") {
-                "turn"
-            } else if name.starts_with("llm_request_") {
-                "llm_request"
-            } else if name.contains("compaction") {
-                "compaction"
-            } else if name.starts_with("error_") {
-                "error"
-            } else {
-                "config_change"
-            };
-
-            let data = std::fs::read_to_string(entry.path())
-                .ok()
-                .and_then(|c| serde_json::from_str(&c).ok())
-                .unwrap_or(serde_json::Value::Null);
-
-            timeline.push(TimelineEvent {
-                kind: kind.to_string(),
-                file: name,
-                data,
-            });
-        }
-    }
-
-    Json(DiagnosticsSession {
-        id,
-        session_info,
-        timeline,
-    })
-    .into_response()
 }
 
 // ── API Tool handlers ───────────────────────────────────────────────────
@@ -922,17 +709,9 @@ struct RunFlowRequest {
 }
 
 #[derive(Serialize)]
-struct RunFlowPromptResult {
-    prompt_index: usize,
-    status: String, // "completed" | "interrupted" | "failed"
-    answer: Option<String>,
-    error: Option<String>,
-}
-
-#[derive(Serialize)]
 struct RunFlowResponse {
     flow_id: String,
-    prompts: Vec<RunFlowPromptResult>,
+    prompts: Vec<flows::FlowPromptResult>,
 }
 
 async fn post_run_flow(
@@ -941,16 +720,6 @@ async fn post_run_flow(
     body: Option<Json<RunFlowRequest>>,
 ) -> Response {
     let req = body.map(|Json(r)| r).unwrap_or_default();
-
-    let flow = match metalcraft_flows::load_flow(&paths::flows_dir(), &id) {
-        Some(f) => f,
-        None => return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found")),
-    };
-
-    let prompts = match flows::collect_reachable_prompts(&flow) {
-        Ok(p) => p,
-        Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("unrunnable flow: {e}")),
-    };
 
     let context = match AgentRuntimeContext::from_environment().map_err(|e| e.to_string()) {
         Ok(c) => c,
@@ -966,94 +735,16 @@ async fn post_run_flow(
         .unwrap_or_else(|| "coding-agent".to_string());
     let model_name = req.model_name.unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
-    // Create a single session for the whole flow run so it shows
-    // up in the Sessions list. All prompts log their turns into this one
-    // session directory; prompt boundaries are recorded as config-change
-    // events. The session is tagged with the flow id (kind == "flow").
-    let logger = match DiagnosticsLogger::new() {
-        Ok(l) => {
-            if let Ok(persona) = Persona::load(&persona_slug, &context.personas_dir) {
-                let system_prompt = persona.build_system_prompt(&context.skills_dir, &state.cwd);
-                l.log_session_info(
-                    &persona.name,
-                    &persona_slug,
-                    &model_name,
-                    &state.cwd,
-                    &system_prompt,
-                    &persona.resolved_tool_names(),
-                    &persona.skills,
-                    true,
-                    Some(&id),
-                );
-            }
-            Some(Arc::new(l))
-        }
-        Err(e) => {
-            eprintln!("flow run: failed to create session logger: {e}");
-            None
-        }
-    };
-
-    let mut results = Vec::with_capacity(prompts.len());
-    for (i, fp) in prompts.iter().enumerate() {
-        // Each prompt node can override the persona; fall back to the
-        // request-level persona if it doesn't.
-        let effective_persona = fp.persona.as_deref().unwrap_or(&persona_slug);
-        if let Some(l) = &logger {
-            l.log_config_change(
-                "flow_prompt",
-                serde_json::json!({
-                    "index": i,
-                    "persona": effective_persona,
-                    "prompt": fp.prompt,
-                }),
-            );
-        }
-        let outcome = runtime::run_one_shot_task(
-            &context,
-            RunOneShotRequest {
-                persona_slug: effective_persona,
-                cwd: &state.cwd,
-                model_name: &model_name,
-                task: &fp.prompt,
-                approval_mode: ApprovalMode::AutoApprove,
-                diagnostics: logger.clone(),
-            },
-        )
-        .await;
-        results.push(match outcome {
-            Ok(RunOutcome::Completed(s)) => RunFlowPromptResult {
-                prompt_index: i,
-                status: "completed".into(),
-                answer: s.final_answer().map(String::from),
-                error: None,
-            },
-            Ok(RunOutcome::Interrupted { reason, .. }) => RunFlowPromptResult {
-                prompt_index: i,
-                status: "interrupted".into(),
-                answer: None,
-                error: Some(reason),
-            },
-            Ok(RunOutcome::Failed { node, error, .. }) => RunFlowPromptResult {
-                prompt_index: i,
-                status: "failed".into(),
-                answer: None,
-                error: Some(format!("{node}: {error}")),
-            },
-            Err(e) => RunFlowPromptResult {
-                prompt_index: i,
-                status: "failed".into(),
-                answer: None,
-                error: Some(e.to_string()),
-            },
-        });
+    match flows::run_flow(&context, &id, &state.cwd, &persona_slug, &model_name).await {
+        Ok(results) => Json(RunFlowResponse {
+            flow_id: id,
+            prompts: results,
+        })
+        .into_response(),
+        // A missing flow yields 404; an unrunnable graph yields 400.
+        Err(e) if e.contains("not found") => err_json(StatusCode::NOT_FOUND, e),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }
-
-    Json(RunFlowResponse {
-        flow_id: id,
-        prompts: results,
-    })
-    .into_response()
 }
 
 // ── Chat handlers ───────────────────────────────────────────────────────

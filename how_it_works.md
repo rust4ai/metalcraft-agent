@@ -172,15 +172,17 @@ answer or `max_steps` (90) is hit.
 ## 5. The CLI: interactive and one-shot modes (`src/main.rs`)
 
 ```
-metalcraft-agent [--auto-approve] <persona> [task]
+metalcraft-agent [--auto-approve] [--persona <slug>] [task]
 ```
 
-Arg handling:
+Arg handling (`src/cli.rs::parse_cli_invocation`, unit-tested; env fallbacks applied in `main`):
 
 - `--api <KEY>` (or `WORKSHOP_API_KEY` env) short-circuits everything and starts the
   workshop REST server instead of an agent (see §11).
-- `--auto-approve` is extracted as a flag; the first remaining arg is the persona slug
-  (default `coding-agent`), and any further args joined together are the one-shot task.
+- `--auto-approve` is a flag. `--persona <slug>` / `-p <slug>` (or the `METALCRAFT_PERSONA`
+  env var) selects the persona, defaulting to the **Orchestrator** (`orchestrator-agent`).
+  Persona is a flag — NOT a positional — so every remaining positional arg is part of the
+  one-shot task (joined with spaces). This is what lets `metalcraft-agent "fix the bug"` work.
 - The CLI always creates a diagnostics session directory for runs.
 - If **stdin is not a TTY** (`atty`), approval is forced to auto-approve and a one-shot task
   is required (headless usage).
@@ -484,14 +486,17 @@ and the **step guard** (logs each turn). The workshop API can read these session
 cargo build
 cargo test
 
-# Interactive
-cargo run --bin metalcraft-agent -- coding-agent
+# Interactive (default Orchestrator persona)
+cargo run --bin metalcraft-agent
 
 # One-shot
-cargo run --bin metalcraft-agent -- coding-agent "summarize the README"
+cargo run --bin metalcraft-agent -- "summarize the README"
+
+# Pick a persona
+cargo run --bin metalcraft-agent -- --persona coding-agent "summarize the README"
 
 # Headless one-shot, no prompts
-cargo run --bin metalcraft-agent -- --auto-approve coding-agent "run the tests"
+cargo run --bin metalcraft-agent -- --auto-approve "run the tests"
 
 # Flow daemon (single pass)
 cargo run --bin metalcraft-daemon -- --once --auto-approve

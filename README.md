@@ -11,6 +11,7 @@ Metalcraft Agent is a Rust application leveraging the Metalcraft framework to cr
 - **Tool Interaction**: Interact with various tools with the option for auto-approval.
 - **Async Execution**: Built on Tokio for efficient async operations.
 - **Local Flow Scheduling**: Poll a local `flows/` directory and execute enabled workflows on an interval.
+- **Self-management by prompt**: The `workshop-agent` persona can create and edit the project's own personas, skills, and flows, and inspect past runs — the metalcraft-workshop GUI's editing surface, driven entirely by text. See [Managing the project by prompt](#managing-the-project-by-prompt).
 
 ## Project Structure
 
@@ -28,34 +29,57 @@ Metalcraft Agent is a Rust application leveraging the Metalcraft framework to cr
 ## Agent Usage
 
 ```bash
-metalcraft-agent [--auto-approve] <persona> [task]
+metalcraft-agent [--auto-approve] [--persona <slug>] [task]
 ```
 
-- **`<persona>`**: The persona to be used by the agent.
-- **`[task]`**: Specific task to be executed. If omitted, the agent enters interactive mode.
+- **`[task]`**: Specific task to be executed. If omitted, the agent enters interactive mode. Every positional argument is part of the task.
+- **`--persona <slug>` / `-p <slug>`**: The persona to use. Defaults to the **Orchestrator** (`orchestrator-agent`), which delegates the actual work to specialist sub-agents. Also settable via the `METALCRAFT_PERSONA` environment variable.
 - **`--auto-approve`**: Automatically approve prompts for all tools.
 - Sessions are always logged to a timestamped session directory under `logs/`.
 
-Flags can be combined and placed in any order before the persona argument.
+Flags can be combined and placed in any order.
 
 ### Examples
 
 ```bash
-# Interactive mode with default approval prompts
-metalcraft-agent coding-agent
+# Interactive mode with the default Orchestrator persona
+metalcraft-agent
 
-# One-shot task
-metalcraft-agent coding-agent "refactor the auth module"
+# One-shot task (Orchestrator delegates as needed)
+metalcraft-agent "refactor the auth module"
+
+# Pick a specific persona
+metalcraft-agent --persona coding-agent "refactor the auth module"
 
 # Skip all approval prompts
-metalcraft-agent --auto-approve coding-agent
+metalcraft-agent --auto-approve "fix the login bug"
 
-# Sessions are always logged
-metalcraft-agent coding-agent
-
-# Auto-approve with session logging
-metalcraft-agent --auto-approve coding-agent "fix the login bug"
+# Manage the project itself by prompt (personas/skills/flows) via the Workshop persona
+metalcraft-agent -p workshop-agent "create a skill 'greeting' whose body says hello"
 ```
+
+> **Note:** persona is now a flag, not a positional argument. The previous
+> `metalcraft-agent <persona> [task]` form is replaced by
+> `metalcraft-agent [--persona <slug>] [task]` so a bare task works.
+
+### Managing the project by prompt
+
+The **`workshop-agent`** persona exposes the same authoring surface as the
+metalcraft-workshop GUI as agent **meta tools**, so you can manage the project
+itself from a prompt. The Orchestrator delegates project-management requests to
+it automatically; you can also target it directly with `-p workshop-agent`.
+
+Meta tools (scoped to that persona):
+
+- **Personas** — `persona_list`, `persona_read`, `persona_write`, `persona_delete`
+- **Skills** — `skill_list`, `skill_read`, `skill_write`, `skill_delete`
+- **Flows** — `flow_list`, `flow_read`, `flow_validate`, `flow_write`, `flow_delete`, `flow_run`, `flow_templates_list`, `flow_template_read`
+- **Diagnostics** (read-only) — `diagnostics_list`, `diagnostics_read`
+
+Read-only meta tools auto-approve; mutating ones (writes/deletes, `flow_run`)
+require approval. Integration-pack-provided personas/skills are read-only.
+The persona's bundled skills (`workshop-overview`, `authoring-personas`,
+`authoring-skills`, `authoring-flows`) document each file format.
 
 ## Flow Daemon Usage
 

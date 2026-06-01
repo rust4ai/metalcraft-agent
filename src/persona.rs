@@ -129,6 +129,14 @@ impl Persona {
                     names.push(tool);
                 }
             }
+            // Packs whose tools are native Rust (e.g. digitalocean_spaces, which
+            // needs S3 SigV4 signing) ship no api_tools/ files, so pull their
+            // tool names from the native-pack registry too.
+            for tool in crate::tools::native_pack_tool_names(pack) {
+                if !names.contains(&tool) {
+                    names.push(tool);
+                }
+            }
         }
         names
     }

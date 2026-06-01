@@ -115,9 +115,17 @@ impl metalcraft::Tool for SubAgentTool {
                 use crate::tools::http_api::HttpApiTool;
                 let integration_tools = match args["pack"].as_str() {
                     Some(pack) if !pack.is_empty() => {
-                        HttpApiTool::installed_tool_names_for_pack(pack)
+                        let mut t = HttpApiTool::installed_tool_names_for_pack(pack);
+                        // Native-tool packs (e.g. digitalocean_spaces) ship no
+                        // api_tools/ files, so add their tools from the registry.
+                        t.extend(crate::tools::native_pack_tool_names(pack));
+                        t
                     }
-                    _ => HttpApiTool::installed_tool_names(),
+                    _ => {
+                        let mut t = HttpApiTool::installed_tool_names();
+                        t.extend(crate::tools::all_enabled_native_pack_tool_names());
+                        t
+                    }
                 };
                 for name in integration_tools {
                     if !tool_names.contains(&name) {

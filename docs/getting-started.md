@@ -42,28 +42,34 @@ Workshop endpoint `GET /api/v1/keys/recommended` lists the keys that enabled pac
 ## Running the agent CLI
 
 ```bash
-metalcraft-agent [--auto-approve] <persona> [task]
+metalcraft-agent [--auto-approve] [--persona <slug>] [task]
 ```
 
-- `<persona>` — persona to use (defaults to `coding-agent`).
-- `[task]` — a single request; omit it to enter the interactive REPL.
+- `--persona <slug>` / `-p <slug>` — persona to use (defaults to the Orchestrator, `orchestrator-agent`; also `METALCRAFT_PERSONA`).
+- `[task]` — a single request (all positional args); omit it to enter the interactive REPL.
 - `--auto-approve` — skip all approval prompts (required for non-interactive use).
 - Sessions are always logged to `logs/<timestamp>/`.
 
 Examples:
 
 ```bash
-# Interactive REPL with approval prompts
-metalcraft-agent coding-agent
+# Interactive REPL with the default Orchestrator persona
+metalcraft-agent
 
 # One-shot task
-metalcraft-agent coding-agent "refactor the auth module"
+metalcraft-agent "refactor the auth module"
+
+# Pick a persona
+metalcraft-agent --persona coding-agent "refactor the auth module"
 
 # Headless, no prompts, with session logging
-metalcraft-agent --auto-approve coding-agent "run the test suite and fix failures"
+metalcraft-agent --auto-approve "run the test suite and fix failures"
+
+# Manage the project itself by prompt
+metalcraft-agent -p workshop-agent "add a skill called release-checklist"
 
 # From source
-cargo run -- coding-agent
+cargo run -- "refactor the auth module"
 ```
 
 ## Running the daemon

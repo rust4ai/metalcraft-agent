@@ -1,6 +1,8 @@
 pub mod approval;
+pub mod cli;
 pub mod context;
 pub mod diagnostics;
+pub mod diagnostics_browse;
 pub mod diff_preview;
 pub mod event_listener;
 pub mod events;
@@ -12,6 +14,7 @@ pub mod paths;
 pub mod persona;
 pub mod runtime;
 pub mod seed;
+pub mod skill;
 pub mod tools;
 pub mod ui;
 pub mod workshop_api;

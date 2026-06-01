@@ -9,7 +9,6 @@
 //! `METALCRAFT_DATA_DIR` env var isn't raced by parallel tests.
 
 use std::fs;
-use std::path::PathBuf;
 
 fn requires_env(pack_json: &str) -> Vec<String> {
     let v: serde_json::Value = serde_json::from_str(pack_json).unwrap();

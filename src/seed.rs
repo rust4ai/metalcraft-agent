@@ -1,397 +1,60 @@
 use crate::paths;
+use include_dir::{include_dir, Dir};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-const SEED_PERSONAS: &[(&str, &str)] = &[
-    ("coding-agent.json", include_str!("../seed/personas/coding-agent.json")),
-    ("orchestrator-agent.json", include_str!("../seed/personas/orchestrator-agent.json")),
-    ("devops-agent.json", include_str!("../seed/personas/devops-agent.json")),
-    ("research-agent.json", include_str!("../seed/personas/research-agent.json")),
-    ("video-script-agent.json", include_str!("../seed/personas/video-script-agent.json")),
-];
+/// Every seed file — default personas, skills, flows, flow templates, and
+/// integration packs — embedded into the binary at compile time from the
+/// `seed/` directory, then written to the app data dir on startup by
+/// [`ensure_defaults`]. The released binary is therefore self-contained: it
+/// carries its seeds and needs no `seed/` folder shipped alongside it.
+///
+/// Adding a persona, skill, or whole integration pack is just dropping files
+/// under `seed/` — no edit to this file is needed.
+///
+/// Layout (top-level subdirs map to data dirs; `integration_packs/<id>/` is a
+/// pack tree):
+/// ```text
+/// seed/
+///   personas/*.json          -> versioned upgrade (see write_versioned_seeds)
+///   skills/*.md              -> write-if-missing
+///   flows/*                  -> write-if-missing
+///   api_tools/*              -> write-if-missing
+///   flow_templates/*         -> write-if-missing
+///   integration_packs/<id>/  -> pack-version-gated (see write_integration_packs)
+/// ```
+///
+/// Caveat: `include_dir` re-embeds when the *contents* of already-tracked files
+/// change. If you ADD a brand-new file and a stale build doesn't pick it up,
+/// force a rebuild (`touch src/seed.rs` or `cargo clean -p metalcraft-agent`).
+static SEED: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/seed");
 
-const SEED_SKILLS: &[(&str, &str)] = &[
-    ("ci-cd.md", include_str!("../seed/skills/ci-cd.md")),
-    ("code-review.md", include_str!("../seed/skills/code-review.md")),
-    ("commit-message.md", include_str!("../seed/skills/commit-message.md")),
-    ("debugging.md", include_str!("../seed/skills/debugging.md")),
-    ("dockerfile-best-practices.md", include_str!("../seed/skills/dockerfile-best-practices.md")),
-    ("edit-workflow.md", include_str!("../seed/skills/edit-workflow.md")),
-    ("explore-codebase.md", include_str!("../seed/skills/explore-codebase.md")),
-    ("planning.md", include_str!("../seed/skills/planning.md")),
-    ("research-methodology.md", include_str!("../seed/skills/research-methodology.md")),
-    ("summarize.md", include_str!("../seed/skills/summarize.md")),
-    ("video-scripting.md", include_str!("../seed/skills/video-scripting.md")),
-];
+/// Immediate files of an embedded top-level subdir as `(file_name, contents)`
+/// pairs. Used for the flat seed dirs (personas, skills, ...); returns empty if
+/// the subdir isn't embedded (e.g. `flows/` doesn't exist).
+fn embedded_flat(subdir: &str) -> Vec<(String, String)> {
+    let Some(dir) = SEED.get_dir(subdir) else {
+        return Vec::new();
+    };
+    dir.files()
+        .filter_map(|f| {
+            let name = f.path().file_name()?.to_str()?.to_string();
+            let content = f.contents_utf8()?.to_string();
+            Some((name, content))
+        })
+        .collect()
+}
 
-const SEED_API_TOOLS: &[(&str, &str)] = &[];
+/// Borrow an owned `(name, content)` list as the `&[(&str, &str)]` shape the
+/// seed writers take.
+fn as_refs(v: &[(String, String)]) -> Vec<(&str, &str)> {
+    v.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect()
+}
 
-/// Flows live in the user's project — we no longer seed any by default so
-/// the workshop's "+ New Flow" picker (template vs blank) is the canonical
-/// entry point.
-const SEED_FLOWS: &[(&str, &str)] = &[];
-
-/// Top-level flow templates that aren't tied to any specific integration
-/// pack. Pack-bundled templates live in `seed/integration_packs/<id>/flow_templates/`.
-const SEED_FLOW_TEMPLATES: &[(&str, &str)] = &[];
-
-/// Discord integration pack — bundles personas, skills, HTTP-API tools, and
-/// a flow template that all relate to Discord. Disabled by default; the
-/// workshop's Packs section is where the user enables it.
-const DISCORD_PACK: &[(&str, &str)] = &[
-    (
-        "pack.json",
-        include_str!("../seed/integration_packs/discord/pack.json"),
-    ),
-    (
-        "personas/discord-agent.json",
-        include_str!("../seed/integration_packs/discord/personas/discord-agent.json"),
-    ),
-    (
-        "personas/discord-reporter-agent.json",
-        include_str!("../seed/integration_packs/discord/personas/discord-reporter-agent.json"),
-    ),
-    (
-        "skills/discord-etiquette.md",
-        include_str!("../seed/integration_packs/discord/skills/discord-etiquette.md"),
-    ),
-    (
-        "skills/discord-formatting.md",
-        include_str!("../seed/integration_packs/discord/skills/discord-formatting.md"),
-    ),
-    (
-        "api_tools/discord_send_message.json",
-        include_str!("../seed/integration_packs/discord/api_tools/discord_send_message.json"),
-    ),
-    (
-        "api_tools/discord_edit_message.json",
-        include_str!("../seed/integration_packs/discord/api_tools/discord_edit_message.json"),
-    ),
-    (
-        "api_tools/discord_add_reaction.json",
-        include_str!("../seed/integration_packs/discord/api_tools/discord_add_reaction.json"),
-    ),
-    (
-        "api_tools/discord_get_messages.json",
-        include_str!("../seed/integration_packs/discord/api_tools/discord_get_messages.json"),
-    ),
-    (
-        "api_tools/discord_get_channel_info.json",
-        include_str!("../seed/integration_packs/discord/api_tools/discord_get_channel_info.json"),
-    ),
-    (
-        "flow_templates/daily-commit-summary.json",
-        include_str!("../seed/integration_packs/discord/flow_templates/daily-commit-summary.json"),
-    ),
-];
-
-/// Solarabase RAG integration pack — a persona, skill, and HTTP-API tools
-/// for using a Solarabase knowledge base for retrieval-augmented generation.
-/// Disabled by default; enabled from the workshop's Packs section. Reads its
-/// `SOLARABASE_*` config from the key store (see [`crate::key_store`]).
-const SOLARABASE_PACK: &[(&str, &str)] = &[
-    (
-        "pack.json",
-        include_str!("../seed/integration_packs/solarabase/pack.json"),
-    ),
-    (
-        "personas/knowledge-base-agent.json",
-        include_str!("../seed/integration_packs/solarabase/personas/knowledge-base-agent.json"),
-    ),
-    (
-        "skills/solarabase-rag.md",
-        include_str!("../seed/integration_packs/solarabase/skills/solarabase-rag.md"),
-    ),
-    (
-        "api_tools/solarabase_retrieve.json",
-        include_str!("../seed/integration_packs/solarabase/api_tools/solarabase_retrieve.json"),
-    ),
-    (
-        "api_tools/solarabase_query.json",
-        include_str!("../seed/integration_packs/solarabase/api_tools/solarabase_query.json"),
-    ),
-    (
-        "api_tools/solarabase_list_documents.json",
-        include_str!("../seed/integration_packs/solarabase/api_tools/solarabase_list_documents.json"),
-    ),
-    (
-        "api_tools/solarabase_get_document_pages.json",
-        include_str!("../seed/integration_packs/solarabase/api_tools/solarabase_get_document_pages.json"),
-    ),
-    (
-        "api_tools/solarabase_upload_document.json",
-        include_str!("../seed/integration_packs/solarabase/api_tools/solarabase_upload_document.json"),
-    ),
-];
-
-/// Starflask Media Studio integration pack — a persona, skill, and HTTP-API
-/// tools for generating media (images, video, 3D, speech) with Starflask
-/// (starflask.com). Disabled by default; enabled from the workshop's Packs
-/// section. Reads its `STARFLASK_API_KEY` from the key store (see
-/// [`crate::key_store`]).
-const STARFLASK_PACK: &[(&str, &str)] = &[
-    (
-        "pack.json",
-        include_str!("../seed/integration_packs/starflask/pack.json"),
-    ),
-    (
-        "personas/media-studio-agent.json",
-        include_str!("../seed/integration_packs/starflask/personas/media-studio-agent.json"),
-    ),
-    (
-        "skills/starflask-media.md",
-        include_str!("../seed/integration_packs/starflask/skills/starflask-media.md"),
-    ),
-    (
-        "api_tools/starflask_generate_image.json",
-        include_str!("../seed/integration_packs/starflask/api_tools/starflask_generate_image.json"),
-    ),
-    (
-        "api_tools/starflask_generate_video.json",
-        include_str!("../seed/integration_packs/starflask/api_tools/starflask_generate_video.json"),
-    ),
-    (
-        "api_tools/starflask_generate_3d.json",
-        include_str!("../seed/integration_packs/starflask/api_tools/starflask_generate_3d.json"),
-    ),
-    (
-        "api_tools/starflask_generate_speech.json",
-        include_str!("../seed/integration_packs/starflask/api_tools/starflask_generate_speech.json"),
-    ),
-    (
-        "api_tools/starflask_create_job.json",
-        include_str!("../seed/integration_packs/starflask/api_tools/starflask_create_job.json"),
-    ),
-    (
-        "api_tools/starflask_get_job.json",
-        include_str!("../seed/integration_packs/starflask/api_tools/starflask_get_job.json"),
-    ),
-    (
-        "api_tools/starflask_list_models.json",
-        include_str!("../seed/integration_packs/starflask/api_tools/starflask_list_models.json"),
-    ),
-    (
-        "api_tools/starflask_list_styles.json",
-        include_str!("../seed/integration_packs/starflask/api_tools/starflask_list_styles.json"),
-    ),
-    (
-        "api_tools/starflask_upload_media.json",
-        include_str!("../seed/integration_packs/starflask/api_tools/starflask_upload_media.json"),
-    ),
-    (
-        "api_tools/starflask_get_media.json",
-        include_str!("../seed/integration_packs/starflask/api_tools/starflask_get_media.json"),
-    ),
-    (
-        "api_tools/starflask_account.json",
-        include_str!("../seed/integration_packs/starflask/api_tools/starflask_account.json"),
-    ),
-];
-
-/// GitHub integration pack — a persona, skill, and HTTP-API tools for working
-/// with GitHub over its REST API: read public/private repos, push commits,
-/// manage branches, PRs, issues, and comments. Disabled by default; enabled
-/// from the workshop's Packs section. Reads its `GITHUB_TOKEN` (a personal
-/// access token) from the key store (see [`crate::key_store`]).
-const GITHUB_PACK: &[(&str, &str)] = &[
-    (
-        "pack.json",
-        include_str!("../seed/integration_packs/github/pack.json"),
-    ),
-    (
-        "personas/github-agent.json",
-        include_str!("../seed/integration_packs/github/personas/github-agent.json"),
-    ),
-    (
-        "skills/github-ops.md",
-        include_str!("../seed/integration_packs/github/skills/github-ops.md"),
-    ),
-    (
-        "api_tools/github_get_authenticated_user.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_get_authenticated_user.json"),
-    ),
-    (
-        "api_tools/github_list_repos.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_list_repos.json"),
-    ),
-    (
-        "api_tools/github_get_repo.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_get_repo.json"),
-    ),
-    (
-        "api_tools/github_get_file_contents.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_get_file_contents.json"),
-    ),
-    (
-        "api_tools/github_list_branches.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_list_branches.json"),
-    ),
-    (
-        "api_tools/github_get_ref.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_get_ref.json"),
-    ),
-    (
-        "api_tools/github_create_branch.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_create_branch.json"),
-    ),
-    (
-        "api_tools/github_create_or_update_file.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_create_or_update_file.json"),
-    ),
-    (
-        "api_tools/github_list_pull_requests.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_list_pull_requests.json"),
-    ),
-    (
-        "api_tools/github_create_pull_request.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_create_pull_request.json"),
-    ),
-    (
-        "api_tools/github_list_issues.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_list_issues.json"),
-    ),
-    (
-        "api_tools/github_create_issue.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_create_issue.json"),
-    ),
-    (
-        "api_tools/github_create_issue_comment.json",
-        include_str!("../seed/integration_packs/github/api_tools/github_create_issue_comment.json"),
-    ),
-];
-
-/// Linear integration pack — a persona, skill, and HTTP-API tools for reading
-/// and writing Linear issues (tasks) through the Linear GraphQL API. Disabled
-/// by default; enabled from the workshop's Packs section. Reads its
-/// `LINEAR_API_KEY` (a personal API key) from the key store (see
-/// [`crate::key_store`]).
-const LINEAR_PACK: &[(&str, &str)] = &[
-    (
-        "pack.json",
-        include_str!("../seed/integration_packs/linear/pack.json"),
-    ),
-    (
-        "personas/linear-agent.json",
-        include_str!("../seed/integration_packs/linear/personas/linear-agent.json"),
-    ),
-    (
-        "skills/linear-tasks.md",
-        include_str!("../seed/integration_packs/linear/skills/linear-tasks.md"),
-    ),
-    (
-        "api_tools/linear_viewer.json",
-        include_str!("../seed/integration_packs/linear/api_tools/linear_viewer.json"),
-    ),
-    (
-        "api_tools/linear_list_teams.json",
-        include_str!("../seed/integration_packs/linear/api_tools/linear_list_teams.json"),
-    ),
-    (
-        "api_tools/linear_list_projects.json",
-        include_str!("../seed/integration_packs/linear/api_tools/linear_list_projects.json"),
-    ),
-    (
-        "api_tools/linear_list_issues.json",
-        include_str!("../seed/integration_packs/linear/api_tools/linear_list_issues.json"),
-    ),
-    (
-        "api_tools/linear_get_issue.json",
-        include_str!("../seed/integration_packs/linear/api_tools/linear_get_issue.json"),
-    ),
-    (
-        "api_tools/linear_list_workflow_states.json",
-        include_str!("../seed/integration_packs/linear/api_tools/linear_list_workflow_states.json"),
-    ),
-    (
-        "api_tools/linear_create_issue.json",
-        include_str!("../seed/integration_packs/linear/api_tools/linear_create_issue.json"),
-    ),
-    (
-        "api_tools/linear_update_issue.json",
-        include_str!("../seed/integration_packs/linear/api_tools/linear_update_issue.json"),
-    ),
-    (
-        "api_tools/linear_create_comment.json",
-        include_str!("../seed/integration_packs/linear/api_tools/linear_create_comment.json"),
-    ),
-];
-
-/// Cloudflare DNS integration pack — a persona, skill, and HTTP-API tools for
-/// managing Cloudflare DNS (list zones, read/create/update/patch/delete DNS
-/// records) through the Cloudflare API. Disabled by default; enabled from the
-/// workshop's Packs section. Reads its `CLOUDFLARE_API_TOKEN` (a scoped API
-/// token with Zone:Read + DNS:Edit) from the key store (see
-/// [`crate::key_store`]).
-const CLOUDFLARE_PACK: &[(&str, &str)] = &[
-    (
-        "pack.json",
-        include_str!("../seed/integration_packs/cloudflare/pack.json"),
-    ),
-    (
-        "personas/cloudflare-agent.json",
-        include_str!("../seed/integration_packs/cloudflare/personas/cloudflare-agent.json"),
-    ),
-    (
-        "skills/cloudflare-dns.md",
-        include_str!("../seed/integration_packs/cloudflare/skills/cloudflare-dns.md"),
-    ),
-    (
-        "api_tools/cloudflare_verify_token.json",
-        include_str!("../seed/integration_packs/cloudflare/api_tools/cloudflare_verify_token.json"),
-    ),
-    (
-        "api_tools/cloudflare_list_zones.json",
-        include_str!("../seed/integration_packs/cloudflare/api_tools/cloudflare_list_zones.json"),
-    ),
-    (
-        "api_tools/cloudflare_list_dns_records.json",
-        include_str!(
-            "../seed/integration_packs/cloudflare/api_tools/cloudflare_list_dns_records.json"
-        ),
-    ),
-    (
-        "api_tools/cloudflare_get_dns_record.json",
-        include_str!(
-            "../seed/integration_packs/cloudflare/api_tools/cloudflare_get_dns_record.json"
-        ),
-    ),
-    (
-        "api_tools/cloudflare_create_dns_record.json",
-        include_str!(
-            "../seed/integration_packs/cloudflare/api_tools/cloudflare_create_dns_record.json"
-        ),
-    ),
-    (
-        "api_tools/cloudflare_update_dns_record.json",
-        include_str!(
-            "../seed/integration_packs/cloudflare/api_tools/cloudflare_update_dns_record.json"
-        ),
-    ),
-    (
-        "api_tools/cloudflare_patch_dns_record.json",
-        include_str!(
-            "../seed/integration_packs/cloudflare/api_tools/cloudflare_patch_dns_record.json"
-        ),
-    ),
-    (
-        "api_tools/cloudflare_delete_dns_record.json",
-        include_str!(
-            "../seed/integration_packs/cloudflare/api_tools/cloudflare_delete_dns_record.json"
-        ),
-    ),
-];
-
-const SEED_INTEGRATION_PACKS: &[(&str, &[(&str, &str)])] = &[
-    ("discord", DISCORD_PACK),
-    ("solarabase", SOLARABASE_PACK),
-    ("starflask", STARFLASK_PACK),
-    ("github", GITHUB_PACK),
-    ("linear", LINEAR_PACK),
-    ("cloudflare", CLOUDFLARE_PACK),
-];
-
-/// Ensure default personas and skills exist in the app data directory.
-/// Creates directories and writes seed files only if they don't already exist.
+/// Ensure default personas, skills, and integration packs exist in the app data
+/// directory. Creates the data dirs, then writes the embedded seed files
+/// (personas upgrade on version bump; everything else is written only when
+/// missing — packs gate on their own `pack.json` version).
 pub fn ensure_defaults() {
     let dirs = [
         paths::personas_dir(),
@@ -411,11 +74,21 @@ pub fn ensure_defaults() {
         }
     }
 
-    write_versioned_seeds(&paths::personas_dir(), SEED_PERSONAS);
-    write_seeds(&paths::skills_dir(), SEED_SKILLS);
-    write_seeds(&paths::flows_dir(), SEED_FLOWS);
-    write_seeds(&paths::api_tools_dir(), SEED_API_TOOLS);
-    write_seeds(&paths::flow_templates_dir(), SEED_FLOW_TEMPLATES);
+    // Personas re-seed on a version bump (how a built-in prompt change reaches
+    // existing installs); everything else is write-if-missing.
+    let personas = embedded_flat("personas");
+    write_versioned_seeds(&paths::personas_dir(), &as_refs(&personas));
+
+    for (subdir, target) in [
+        ("skills", paths::skills_dir()),
+        ("flows", paths::flows_dir()),
+        ("api_tools", paths::api_tools_dir()),
+        ("flow_templates", paths::flow_templates_dir()),
+    ] {
+        let seeds = embedded_flat(subdir);
+        write_seeds(&target, &as_refs(&seeds));
+    }
+
     write_integration_packs();
 }
 
@@ -439,7 +112,7 @@ fn write_seeds(dir: &Path, seeds: &[(&str, &str)]) {
 /// dirs — bump its `version` and it re-seeds on next start. The trade-off
 /// (shared with integration packs) is that this clobbers user edits to a
 /// built-in persona on a version bump; customizations should be saved under a
-/// new slug, which is never in `SEED_PERSONAS` and so is never touched.
+/// new slug, which is not a seeded persona and so is never touched.
 fn write_versioned_seeds(dir: &Path, seeds: &[(&str, &str)]) {
     for (filename, content) in seeds {
         let target = dir.join(filename);
@@ -474,27 +147,39 @@ fn json_version(doc: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
+/// Write every embedded integration pack to `<data>/integration_packs/<id>/`.
+/// Each pack is force-refreshed (all files overwritten) when its bundled
+/// `pack.json` version exceeds the installed one; otherwise files are written
+/// only when missing. Pack files are read-only in the UI, so overwriting is
+/// safe and is the only way a manifest change (e.g. a shrunk `requires_env`)
+/// reaches existing installs, which otherwise keep the first-seeded copy.
 fn write_integration_packs() {
     let root = paths::integration_packs_dir();
-    for (pack_id, files) in SEED_INTEGRATION_PACKS {
+    let Some(packs) = SEED.get_dir("integration_packs") else {
+        return;
+    };
+    for pack in packs.dirs() {
+        let Some(pack_id) = pack.path().file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
         let pack_dir = root.join(pack_id);
 
-        // If the bundled pack.json is a newer version than what's installed,
-        // force-refresh every file in the pack. Pack files are read-only in the
-        // UI, so users never hand-edit them — overwriting is safe and is the
-        // only way a manifest change (e.g. a shrunk `requires_env`) reaches
-        // existing installs, which otherwise keep the first-seeded copy forever.
+        // Every file in the pack, relative to the pack root (recursing into
+        // personas/, skills/, api_tools/, flow_templates/).
+        let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
+        collect_files(pack, pack.path(), &mut files);
+
         let bundled_ver = files
             .iter()
-            .find(|(rel, _)| *rel == "pack.json")
-            .and_then(|(_, content)| json_version(content));
+            .find(|(rel, _)| rel.to_str() == Some("pack.json"))
+            .and_then(|(_, content)| json_version(&String::from_utf8_lossy(content)));
         let installed_ver = fs::read_to_string(pack_dir.join("pack.json"))
             .ok()
             .and_then(|content| json_version(&content));
         let force_upgrade = matches!((bundled_ver, installed_ver), (Some(b), Some(i)) if b > i);
 
-        for (rel_path, content) in *files {
-            let target = pack_dir.join(rel_path);
+        for (rel_path, content) in files {
+            let target = pack_dir.join(&rel_path);
             if force_upgrade || !target.exists() {
                 if let Some(parent) = target.parent() {
                     if let Err(e) = fs::create_dir_all(parent) {
@@ -507,6 +192,19 @@ fn write_integration_packs() {
                 }
             }
         }
+    }
+}
+
+/// Recursively collect every embedded file under `dir` as
+/// `(path_relative_to_base, contents)`, descending into subdirectories.
+fn collect_files<'a>(dir: &Dir<'a>, base: &Path, out: &mut Vec<(PathBuf, &'a [u8])>) {
+    for f in dir.files() {
+        if let Ok(rel) = f.path().strip_prefix(base) {
+            out.push((rel.to_path_buf(), f.contents()));
+        }
+    }
+    for sub in dir.dirs() {
+        collect_files(sub, base, out);
     }
 }
 
@@ -560,5 +258,29 @@ mod tests {
         let got = fs::read_to_string(dir.join("p.json")).unwrap();
         assert!(got.contains("installed"), "unversioned seed must not overwrite existing");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The embedded `seed/` tree resolves and contains the expected top-level
+    /// dirs and at least the packs we ship — guards against an empty/mis-rooted
+    /// `include_dir!` and proves the digitalocean_spaces pack is bundled.
+    #[test]
+    fn embedded_seed_tree_has_expected_contents() {
+        assert!(!embedded_flat("personas").is_empty(), "personas should be embedded");
+        assert!(!embedded_flat("skills").is_empty(), "skills should be embedded");
+        let packs = SEED.get_dir("integration_packs").expect("integration_packs embedded");
+        let ids: Vec<&str> = packs
+            .dirs()
+            .filter_map(|d| d.path().file_name().and_then(|s| s.to_str()))
+            .collect();
+        for expected in ["cloudflare", "github", "digitalocean_spaces"] {
+            assert!(ids.contains(&expected), "pack '{expected}' should be embedded, got {ids:?}");
+        }
+        // The Spaces pack ships a manifest + persona + skill but no api_tools/.
+        let spaces = SEED.get_dir("integration_packs/digitalocean_spaces").expect("spaces pack");
+        let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
+        collect_files(spaces, spaces.path(), &mut files);
+        let names: Vec<String> = files.iter().map(|(p, _)| p.to_string_lossy().into_owned()).collect();
+        assert!(names.iter().any(|n| n == "pack.json"), "got {names:?}");
+        assert!(names.iter().any(|n| n.starts_with("personas/")), "got {names:?}");
     }
 }

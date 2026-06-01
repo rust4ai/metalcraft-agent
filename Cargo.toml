@@ -1,6 +1,6 @@
 [package]
 name = "metalcraft-agent"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 default-run = "metalcraft-agent"
 description = "Interactive AI coding agent with personas, skills, and tool approval"
@@ -28,6 +28,10 @@ cron = "0.15"
 dirs = "6"
 atty = "0.2"
 chrono = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+include_dir = "0.7"
 axum = { version = "0.8", features = ["macros"] }
 uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"

@@ -22,9 +22,10 @@ calling external HTTP APIs, and delegating to sub-agents. Sensitive actions pass
 
 ### Three ways to run an agent
 
-1. **Interactive REPL** — `metalcraft-agent coding-agent` opens a conversational session.
-2. **One-shot task** — `metalcraft-agent coding-agent "refactor the auth module"` runs a
-   single request and exits.
+1. **Interactive REPL** — `metalcraft-agent` opens a conversational session with the default
+   Orchestrator persona (use `--persona <slug>` to pick another).
+2. **One-shot task** — `metalcraft-agent "refactor the auth module"` runs a single request and
+   exits. Persona is selected with `--persona <slug>`; every positional arg is the task.
 3. **Flow scheduler daemon** — `metalcraft-daemon` polls the `flows/` directory and runs
    enabled workflows on a schedule (interval or cron). It can additionally serve the
    Workshop API and listen for inbound events (Discord/Slack/GitHub-style webhooks).

@@ -1,5 +1,6 @@
 use metalcraft::{AgentState, Executor, LlmCallHook, RunOutcome};
 use metalcraft_agent::approval::ApprovalMode;
+use metalcraft_agent::cli;
 use metalcraft_agent::context::{self, CompactionConfig};
 use metalcraft_agent::diagnostics::DiagnosticsLogger;
 use metalcraft_agent::guard;
@@ -61,11 +62,12 @@ fn build_prompt_str(persona_slug: &str, cwd: &str) -> String {
 }
 
 fn print_usage(personas_dir: &std::path::Path) {
-    eprintln!("{} {}", ui::error("Usage:"), ui::command("metalcraft-agent [--auto-approve] <persona> [task]"));
+    eprintln!("{} {}", ui::error("Usage:"), ui::command("metalcraft-agent [--auto-approve] [--persona <slug>] [task]"));
     eprintln!();
     eprintln!("  If [task] is given, run once and exit.");
     eprintln!("  If [task] is omitted, enter interactive mode.");
-    eprintln!("  --auto-approve  Skip approval prompts for all tools.");
+    eprintln!("  --persona <slug>  Persona to use (default: orchestrator-agent; also METALCRAFT_PERSONA).");
+    eprintln!("  --auto-approve    Skip approval prompts for all tools.");
     eprintln!();
     let available = Persona::list_available(personas_dir);
     if available.is_empty() {
@@ -115,14 +117,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
 
-    // Check for --api mode (workshop API server)
-    let api_key = raw_args
-        .windows(2)
-        .find(|w| w[0] == "--api")
-        .map(|w| w[1].clone())
-        .or_else(|| std::env::var("WORKSHOP_API_KEY").ok());
+    let invocation = match cli::parse_cli_invocation(&raw_args) {
+        Ok(inv) => inv,
+        Err(e) => {
+            eprintln!("{} {}", ui::error("Error:"), e);
+            print_usage(&runtime_context.personas_dir);
+            std::process::exit(1);
+        }
+    };
 
-    if api_key.is_some() || raw_args.iter().any(|a| a == "--api") {
+    // Workshop API server mode. Triggered by `--api [KEY]` or by a
+    // WORKSHOP_API_KEY in the environment (the env-only trigger preserves the
+    // historical behavior of running the server when the key is exported).
+    let api_key = invocation
+        .api_key
+        .clone()
+        .or_else(|| std::env::var("WORKSHOP_API_KEY").ok());
+    if invocation.api_requested || api_key.is_some() {
         let key = match api_key {
             Some(k) => k,
             None => {
@@ -131,10 +142,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        let api_port: u16 = raw_args
-            .windows(2)
-            .find(|w| w[0] == "--api-port")
-            .map(|w| w[1].parse::<u16>().expect("invalid --api-port value"))
+        let api_port: u16 = invocation
+            .api_port
             .or_else(|| std::env::var("WORKSHOP_API_PORT").ok().and_then(|p| p.parse().ok()))
             .unwrap_or(3002);
 
@@ -146,23 +155,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let auto_approve = raw_args.iter().any(|a| a == "--auto-approve");
-    let args: Vec<String> = raw_args
-        .into_iter()
-        .filter(|a| a != "--auto-approve")
-        .collect();
+    let auto_approve = invocation.auto_approve;
 
-    let default_persona = "coding-agent".to_string();
-    let persona_slug = if args.is_empty() {
-        &default_persona
-    } else {
-        &args[0]
-    };
-    let one_shot_task = if args.len() > 1 {
-        Some(args[1..].join(" "))
-    } else {
-        None
-    };
+    // Persona resolution: explicit `--persona/-p`, else METALCRAFT_PERSONA, else
+    // the Orchestrator — the default agent, which delegates the actual work via
+    // sub_agent rather than requiring the caller to pick a specialist up front.
+    let persona_slug_owned = invocation
+        .persona
+        .clone()
+        .or_else(|| std::env::var("METALCRAFT_PERSONA").ok())
+        .unwrap_or_else(|| "orchestrator-agent".to_string());
+    let persona_slug = persona_slug_owned.as_str();
+    let one_shot_task = invocation.task.clone();
 
     let persona = Persona::load(persona_slug, &runtime_context.personas_dir)
         .map_err(|e| {
@@ -268,7 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if is_headless {
-        eprintln!("{} no TTY and no task provided. Use: metalcraft-agent <persona> \"<task>\"", ui::error("Error:"));
+        eprintln!("{} no TTY and no task provided. Use: metalcraft-agent \"<task>\" (optionally --persona <slug>)", ui::error("Error:"));
         std::process::exit(1);
     }
 
