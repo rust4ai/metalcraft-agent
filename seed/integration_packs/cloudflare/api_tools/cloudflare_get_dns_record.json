@@ -1,0 +1,25 @@
+{
+  "name": "cloudflare_get_dns_record",
+  "description": "Get a single DNS record by id. Returns {id, type, name, content, ttl, proxied, priority, comment, ...}. Requires `zone_id` and `record_id` (both from cloudflare_list_dns_records). Use this to confirm exactly what a record holds before updating or deleting it.",
+  "method": "GET",
+  "url": "https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}",
+  "headers": {
+    "Authorization": "Bearer $CLOUDFLARE_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "zone_id": {
+        "type": "string",
+        "description": "The zone id the record belongs to."
+      },
+      "record_id": {
+        "type": "string",
+        "description": "The DNS record id to fetch."
+      }
+    },
+    "required": ["zone_id", "record_id"]
+  },
+  "body_mapping": "none"
+}

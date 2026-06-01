@@ -1,0 +1,26 @@
+{
+  "name": "cloudflare_update_dns_record",
+  "description": "REPLACE an existing DNS record (HTTP PUT) — every field not sent is reset to its default, so you must resend `type`, `name`, and `content` even if only one is changing. For a small edit (flip `proxied`, change just `content` or `ttl`), prefer cloudflare_patch_dns_record instead. Requires `zone_id`, `record_id`, `type`, `name`, `content`. Optional `ttl` (1 = automatic), `proxied`, `priority` (MX/SRV), `comment`. This changes live DNS — confirm the record and values first.",
+  "method": "PUT",
+  "url": "https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}",
+  "headers": {
+    "Authorization": "Bearer $CLOUDFLARE_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "zone_id": { "type": "string", "description": "The zone id the record belongs to." },
+      "record_id": { "type": "string", "description": "The DNS record id to replace." },
+      "type": { "type": "string", "description": "Record type, e.g. 'A', 'AAAA', 'CNAME', 'TXT', 'MX'." },
+      "name": { "type": "string", "description": "Full record name, e.g. 'www.example.com'." },
+      "content": { "type": "string", "description": "Record value: IPv4 for A, IPv6 for AAAA, hostname for CNAME/MX, string for TXT." },
+      "ttl": { "type": "integer", "description": "Time to live in seconds. 1 means 'automatic'." },
+      "proxied": { "type": "boolean", "description": "Route through Cloudflare's proxy. Only valid for A, AAAA, CNAME." },
+      "priority": { "type": "integer", "description": "Priority — required for MX and SRV records." },
+      "comment": { "type": "string", "description": "Optional note stored on the record." }
+    },
+    "required": ["zone_id", "record_id", "type", "name", "content"]
+  },
+  "body_mapping": "params"
+}

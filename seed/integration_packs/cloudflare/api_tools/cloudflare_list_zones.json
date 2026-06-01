@@ -1,0 +1,24 @@
+{
+  "name": "cloudflare_list_zones",
+  "description": "List the zones (domains) the token can access. Returns an array of {id, name, status, ...}; the zone `id` is the `zone_id` every DNS record tool needs. Optional `name` to filter to an exact domain (e.g. 'example.com') and `per_page` (default 50, max 50 effective here). Use this first to resolve a domain name to its zone id.",
+  "method": "GET",
+  "url": "https://api.cloudflare.com/client/v4/zones?name={name}&per_page={per_page}",
+  "headers": {
+    "Authorization": "Bearer $CLOUDFLARE_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Exact domain name to filter zones by, e.g. 'example.com'. Omit to list all accessible zones."
+      },
+      "per_page": {
+        "type": "integer",
+        "description": "Results per page (default 50)."
+      }
+    }
+  },
+  "body_mapping": "none"
+}

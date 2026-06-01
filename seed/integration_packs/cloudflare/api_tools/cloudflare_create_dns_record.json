@@ -1,0 +1,25 @@
+{
+  "name": "cloudflare_create_dns_record",
+  "description": "Create a new DNS record in a zone. Requires `zone_id`, `type` (A, AAAA, CNAME, TXT, MX, NS, SRV, CAA, ...), `name` (full record name, e.g. 'www.example.com'), and `content` (the value: an IPv4 for A, IPv6 for AAAA, a hostname for CNAME/MX, the string for TXT). Optional `ttl` (seconds; 1 = automatic), `proxied` (true to route through Cloudflare's proxy — only for A/AAAA/CNAME), `priority` (required for MX/SRV), and `comment`. This changes live DNS — confirm the zone and values first.",
+  "method": "POST",
+  "url": "https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
+  "headers": {
+    "Authorization": "Bearer $CLOUDFLARE_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "zone_id": { "type": "string", "description": "The zone id to create the record in." },
+      "type": { "type": "string", "description": "Record type, e.g. 'A', 'AAAA', 'CNAME', 'TXT', 'MX', 'NS', 'SRV', 'CAA'." },
+      "name": { "type": "string", "description": "Full record name, e.g. 'www.example.com' (use the zone apex name for the root)." },
+      "content": { "type": "string", "description": "Record value: IPv4 for A, IPv6 for AAAA, hostname for CNAME/MX, string for TXT." },
+      "ttl": { "type": "integer", "description": "Time to live in seconds. 1 means 'automatic'. Forced to auto when proxied." },
+      "proxied": { "type": "boolean", "description": "Route through Cloudflare's proxy (orange cloud). Only valid for A, AAAA, CNAME. Default false." },
+      "priority": { "type": "integer", "description": "Priority — required for MX and SRV records (lower = higher priority)." },
+      "comment": { "type": "string", "description": "Optional note stored on the record." }
+    },
+    "required": ["zone_id", "type", "name", "content"]
+  },
+  "body_mapping": "params"
+}

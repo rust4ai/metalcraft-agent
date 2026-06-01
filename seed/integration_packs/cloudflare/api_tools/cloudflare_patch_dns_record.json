@@ -1,0 +1,26 @@
+{
+  "name": "cloudflare_patch_dns_record",
+  "description": "Partially update a DNS record (HTTP PATCH) — only the fields you send are changed; everything else is left as-is. Prefer this over cloudflare_update_dns_record for small edits like flipping `proxied`, changing `content`, or adjusting `ttl`. Requires `zone_id` and `record_id`; send any of `type`, `name`, `content`, `ttl` (1 = automatic), `proxied`, `priority`, `comment` to change them. This changes live DNS — confirm the record first.",
+  "method": "PATCH",
+  "url": "https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}",
+  "headers": {
+    "Authorization": "Bearer $CLOUDFLARE_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "zone_id": { "type": "string", "description": "The zone id the record belongs to." },
+      "record_id": { "type": "string", "description": "The DNS record id to update." },
+      "type": { "type": "string", "description": "New record type (optional)." },
+      "name": { "type": "string", "description": "New full record name (optional), e.g. 'www.example.com'." },
+      "content": { "type": "string", "description": "New record value (optional)." },
+      "ttl": { "type": "integer", "description": "New TTL in seconds (optional). 1 means 'automatic'." },
+      "proxied": { "type": "boolean", "description": "Whether to route through Cloudflare's proxy (optional). Only valid for A, AAAA, CNAME." },
+      "priority": { "type": "integer", "description": "New priority (optional) — for MX and SRV records." },
+      "comment": { "type": "string", "description": "New note stored on the record (optional)." }
+    },
+    "required": ["zone_id", "record_id"]
+  },
+  "body_mapping": "params"
+}

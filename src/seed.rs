@@ -316,12 +316,78 @@ const LINEAR_PACK: &[(&str, &str)] = &[
     ),
 ];
 
+/// Cloudflare DNS integration pack — a persona, skill, and HTTP-API tools for
+/// managing Cloudflare DNS (list zones, read/create/update/patch/delete DNS
+/// records) through the Cloudflare API. Disabled by default; enabled from the
+/// workshop's Packs section. Reads its `CLOUDFLARE_API_TOKEN` (a scoped API
+/// token with Zone:Read + DNS:Edit) from the key store (see
+/// [`crate::key_store`]).
+const CLOUDFLARE_PACK: &[(&str, &str)] = &[
+    (
+        "pack.json",
+        include_str!("../seed/integration_packs/cloudflare/pack.json"),
+    ),
+    (
+        "personas/cloudflare-agent.json",
+        include_str!("../seed/integration_packs/cloudflare/personas/cloudflare-agent.json"),
+    ),
+    (
+        "skills/cloudflare-dns.md",
+        include_str!("../seed/integration_packs/cloudflare/skills/cloudflare-dns.md"),
+    ),
+    (
+        "api_tools/cloudflare_verify_token.json",
+        include_str!("../seed/integration_packs/cloudflare/api_tools/cloudflare_verify_token.json"),
+    ),
+    (
+        "api_tools/cloudflare_list_zones.json",
+        include_str!("../seed/integration_packs/cloudflare/api_tools/cloudflare_list_zones.json"),
+    ),
+    (
+        "api_tools/cloudflare_list_dns_records.json",
+        include_str!(
+            "../seed/integration_packs/cloudflare/api_tools/cloudflare_list_dns_records.json"
+        ),
+    ),
+    (
+        "api_tools/cloudflare_get_dns_record.json",
+        include_str!(
+            "../seed/integration_packs/cloudflare/api_tools/cloudflare_get_dns_record.json"
+        ),
+    ),
+    (
+        "api_tools/cloudflare_create_dns_record.json",
+        include_str!(
+            "../seed/integration_packs/cloudflare/api_tools/cloudflare_create_dns_record.json"
+        ),
+    ),
+    (
+        "api_tools/cloudflare_update_dns_record.json",
+        include_str!(
+            "../seed/integration_packs/cloudflare/api_tools/cloudflare_update_dns_record.json"
+        ),
+    ),
+    (
+        "api_tools/cloudflare_patch_dns_record.json",
+        include_str!(
+            "../seed/integration_packs/cloudflare/api_tools/cloudflare_patch_dns_record.json"
+        ),
+    ),
+    (
+        "api_tools/cloudflare_delete_dns_record.json",
+        include_str!(
+            "../seed/integration_packs/cloudflare/api_tools/cloudflare_delete_dns_record.json"
+        ),
+    ),
+];
+
 const SEED_INTEGRATION_PACKS: &[(&str, &[(&str, &str)])] = &[
     ("discord", DISCORD_PACK),
     ("solarabase", SOLARABASE_PACK),
     ("starflask", STARFLASK_PACK),
     ("github", GITHUB_PACK),
     ("linear", LINEAR_PACK),
+    ("cloudflare", CLOUDFLARE_PACK),
 ];
 
 /// Ensure default personas and skills exist in the app data directory.
