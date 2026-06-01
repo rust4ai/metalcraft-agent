@@ -15,6 +15,13 @@ pub struct Persona {
     pub packs: Vec<String>,
     #[serde(default)]
     pub skills: Vec<String>,
+    /// Optional semantic version (e.g. "1.1.0") for built-in/seed personas.
+    /// Drives force-upgrade on startup: when a bundled seed persona's version
+    /// is higher than the installed copy's (a missing version counts as 0),
+    /// the installed file is overwritten. User-created personas omit this and
+    /// are never force-upgraded. See `seed::write_versioned_seeds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     pub system_prompt: String,
 }
 
@@ -126,25 +133,129 @@ impl Persona {
         names
     }
 
-    /// Build the system prompt. Lists available skills by name — use `load_skill` tool to load on demand.
-    pub fn build_system_prompt(&self, _skills_dir: &Path, cwd: &str) -> String {
-        let mut prompt = self.system_prompt.clone();
+    /// Build the system prompt. The persona's `system_prompt` is treated as a
+    /// template: `{{cwd}}`, `{{available_skills}}`, `{{available_personas}}`,
+    /// and `{{installed_packs}}` are substituted with live values so an author
+    /// can place each list exactly where they want it. Any of those lists that
+    /// the template does NOT reference is appended afterward with a default
+    /// heading, preserving the behavior of personas written before templating.
+    pub fn build_system_prompt(&self, skills_dir: &Path, cwd: &str) -> String {
+        let skills_block = self.skills_block(skills_dir);
+        let personas_block = self.personas_block();
+        let packs_block = installed_packs_block();
 
-        prompt.push_str(&format!("\n\nWorking directory: {}", cwd));
+        let vars = [
+            ("cwd", cwd.to_string()),
+            ("available_skills", skills_block.clone()),
+            ("available_personas", personas_block.clone()),
+            ("installed_packs", packs_block),
+        ];
 
-        if !self.skills.is_empty() {
+        let mut prompt = render_template(&self.system_prompt, &vars);
+
+        // Fallback append: only for lists the template didn't already place,
+        // so authored placeholders never produce a duplicate section.
+        if !template_uses(&self.system_prompt, "cwd") {
+            prompt.push_str(&format!("\n\nWorking directory: {}", cwd));
+        }
+
+        if !skills_block.is_empty() && !template_uses(&self.system_prompt, "available_skills") {
             prompt.push_str("\n\n# Available Skills\n");
             prompt.push_str("You have access to the `load_skill` tool. Call it with a skill name to load detailed guidance.\n");
             prompt.push_str("Available skills:\n");
-            for skill in &self.skills {
-                let desc = load_skill_description(skill, _skills_dir);
-                prompt.push_str(&format!("- **{}**: {}\n", skill, desc));
-            }
+            prompt.push_str(&skills_block);
+        }
+
+        // Personas that can delegate (the `sub_agent` tool) need to know which
+        // specialist personas are actually installed/enabled — otherwise they
+        // can only guess slugs from the hardcoded examples in their prompt and
+        // will silently skip delegating to packs added after the prompt was
+        // written (e.g. cloudflare-agent). Inject the live list so the model
+        // picks a real `persona` value instead of inferring one.
+        if self.tools.iter().any(|t| t == "sub_agent")
+            && !personas_block.is_empty()
+            && !template_uses(&self.system_prompt, "available_personas")
+        {
+            prompt.push_str("\n\n# Available Sub-Agent Personas\n");
+            prompt.push_str("Pass one of these slugs as `persona` to `sub_agent` to delegate to a specialist. This is the live list of installed/enabled personas — prefer it over any examples above.\n");
+            prompt.push_str(&personas_block);
         }
 
         prompt
     }
 
+    /// Bulleted list of this persona's skills with descriptions (one per line,
+    /// trailing newline). Empty when the persona declares no skills.
+    fn skills_block(&self, skills_dir: &Path) -> String {
+        let mut out = String::new();
+        for skill in &self.skills {
+            let desc = load_skill_description(skill, skills_dir);
+            out.push_str(&format!("- **{}**: {}\n", skill, desc));
+        }
+        out
+    }
+
+    /// Bulleted list of installed/enabled specialist personas (excluding self)
+    /// as `slug (pack: id): description`. Empty when none besides self exist.
+    fn personas_block(&self) -> String {
+        let mut out = String::new();
+        for s in Self::list_summaries(&crate::paths::personas_dir()) {
+            if s.name == self.name {
+                continue;
+            }
+            let pack = s
+                .pack_id
+                .as_deref()
+                .map(|p| format!(" (pack: {p})"))
+                .unwrap_or_default();
+            out.push_str(&format!("- **{}**{}: {}\n", s.slug, pack, s.description));
+        }
+        out
+    }
+
+}
+
+/// Bulleted list of enabled integration packs as `id (name): description`
+/// (one per line, trailing newline). Empty when no packs are enabled.
+fn installed_packs_block() -> String {
+    let mut out = String::new();
+    for pack in crate::integration_packs::enabled_packs() {
+        let m = &pack.manifest;
+        out.push_str(&format!("- **{}** ({}): {}\n", m.id, m.name, m.description));
+    }
+    out
+}
+
+/// True if `template` references the `{{name}}` variable (optionally padded
+/// with inner whitespace, e.g. `{{ name }}`).
+fn template_uses(template: &str, name: &str) -> bool {
+    template.match_indices("{{").any(|(open, _)| {
+        template[open + 2..]
+            .find("}}")
+            .is_some_and(|close| template[open + 2..open + 2 + close].trim() == name)
+    })
+}
+
+/// Minimal mustache-style renderer: replaces every `{{ name }}` occurrence
+/// (inner whitespace ignored) with the matching value. Unknown placeholders
+/// are left untouched so a typo is visible rather than silently dropped.
+fn render_template(template: &str, vars: &[(&str, String)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find("{{") {
+        let Some(close_rel) = rest[open + 2..].find("}}") else {
+            break;
+        };
+        let key = rest[open + 2..open + 2 + close_rel].trim();
+        out.push_str(&rest[..open]);
+        match vars.iter().find(|(k, _)| *k == key) {
+            Some((_, val)) => out.push_str(val.trim_end_matches('\n')),
+            None => out.push_str(&rest[open..open + 2 + close_rel + 2]),
+        }
+        rest = &rest[open + 2 + close_rel + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Parse YAML frontmatter description from a skill file, resolving the local
@@ -194,5 +305,37 @@ pub fn strip_frontmatter(content: &str) -> &str {
             after_close.trim_start_matches('\n')
         }
         None => content,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renders_known_vars_and_ignores_whitespace() {
+        let out = render_template(
+            "dir={{cwd}} packs:\n{{ installed_packs }}done",
+            &[
+                ("cwd", "/tmp".to_string()),
+                ("installed_packs", "- a\n- b\n".to_string()),
+            ],
+        );
+        // trailing newline of a list value is trimmed at the splice point
+        assert_eq!(out, "dir=/tmp packs:\n- a\n- bdone");
+    }
+
+    #[test]
+    fn leaves_unknown_placeholder_untouched() {
+        let out = render_template("x={{nope}}", &[("cwd", "/tmp".to_string())]);
+        assert_eq!(out, "x={{nope}}");
+    }
+
+    #[test]
+    fn template_uses_detects_padded_var() {
+        assert!(template_uses("a {{ available_personas }} b", "available_personas"));
+        assert!(template_uses("{{cwd}}", "cwd"));
+        assert!(!template_uses("{{cwdx}}", "cwd"));
+        assert!(!template_uses("no placeholders here", "cwd"));
     }
 }

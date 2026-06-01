@@ -411,7 +411,7 @@ pub fn ensure_defaults() {
         }
     }
 
-    write_seeds(&paths::personas_dir(), SEED_PERSONAS);
+    write_versioned_seeds(&paths::personas_dir(), SEED_PERSONAS);
     write_seeds(&paths::skills_dir(), SEED_SKILLS);
     write_seeds(&paths::flows_dir(), SEED_FLOWS);
     write_seeds(&paths::api_tools_dir(), SEED_API_TOOLS);
@@ -430,11 +430,42 @@ fn write_seeds(dir: &Path, seeds: &[(&str, &str)]) {
     }
 }
 
-/// Parse a pack manifest's `version` into a comparable (major, minor, patch)
-/// tuple. Returns `None` when the JSON is unparseable or the version is
-/// missing/malformed — callers treat that as "don't force an upgrade".
-fn manifest_version(pack_json: &str) -> Option<(u64, u64, u64)> {
-    let v: serde_json::Value = serde_json::from_str(pack_json).ok()?;
+/// Write seed files, force-overwriting any whose bundled `version` is higher
+/// than the installed copy's. A missing installed version counts as 0.0.0, so
+/// a versioned seed reaches installs that predate the version field. A seed
+/// with no bundled `version` is only written when missing (like [`write_seeds`]).
+///
+/// This is how a prompt change to a built-in persona reaches existing data
+/// dirs — bump its `version` and it re-seeds on next start. The trade-off
+/// (shared with integration packs) is that this clobbers user edits to a
+/// built-in persona on a version bump; customizations should be saved under a
+/// new slug, which is never in `SEED_PERSONAS` and so is never touched.
+fn write_versioned_seeds(dir: &Path, seeds: &[(&str, &str)]) {
+    for (filename, content) in seeds {
+        let target = dir.join(filename);
+        let force_upgrade = match json_version(content) {
+            Some(bundled) => bundled > installed_version(&target).unwrap_or((0, 0, 0)),
+            None => false,
+        };
+        if force_upgrade || !target.exists() {
+            if let Err(e) = fs::write(&target, content) {
+                eprintln!("Warning: could not write {}: {e}", target.display());
+            }
+        }
+    }
+}
+
+/// Read and parse the `version` of a seed file already on disk, if any.
+fn installed_version(target: &Path) -> Option<(u64, u64, u64)> {
+    fs::read_to_string(target).ok().and_then(|c| json_version(&c))
+}
+
+/// Parse a JSON document's `version` field into a comparable (major, minor,
+/// patch) tuple. Returns `None` when the JSON is unparseable or the version is
+/// missing/malformed — callers treat that as "don't force an upgrade". Used for
+/// both pack manifests and seed personas.
+fn json_version(doc: &str) -> Option<(u64, u64, u64)> {
+    let v: serde_json::Value = serde_json::from_str(doc).ok()?;
     let s = v.get("version")?.as_str()?;
     let mut parts = s.split('.').map(|p| p.parse::<u64>().ok());
     let major = parts.next()??;
@@ -456,10 +487,10 @@ fn write_integration_packs() {
         let bundled_ver = files
             .iter()
             .find(|(rel, _)| *rel == "pack.json")
-            .and_then(|(_, content)| manifest_version(content));
+            .and_then(|(_, content)| json_version(content));
         let installed_ver = fs::read_to_string(pack_dir.join("pack.json"))
             .ok()
-            .and_then(|content| manifest_version(&content));
+            .and_then(|content| json_version(&content));
         let force_upgrade = matches!((bundled_ver, installed_ver), (Some(b), Some(i)) if b > i);
 
         for (rel_path, content) in *files {
@@ -476,5 +507,58 @@ fn write_integration_packs() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mc-seed-test-{}-{}", std::process::id(), tag));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn json_version_parses_and_tolerates_missing() {
+        assert_eq!(json_version(r#"{"version":"1.2.3"}"#), Some((1, 2, 3)));
+        assert_eq!(json_version(r#"{"version":"2"}"#), Some((2, 0, 0)));
+        assert_eq!(json_version(r#"{"name":"x"}"#), None);
+        assert_eq!(json_version("not json"), None);
+    }
+
+    #[test]
+    fn versioned_seed_upgrades_versionless_install() {
+        let dir = tmp_dir("upgrade");
+        // Pre-existing install with NO version field (predates the version field).
+        fs::write(dir.join("p.json"), r#"{"name":"old"}"#).unwrap();
+        write_versioned_seeds(&dir, &[("p.json", r#"{"name":"new","version":"1.1.0"}"#)]);
+        let got = fs::read_to_string(dir.join("p.json")).unwrap();
+        assert!(got.contains("\"new\""), "versioned seed should overwrite versionless install");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn versioned_seed_skips_equal_or_newer_install() {
+        let dir = tmp_dir("skip");
+        fs::write(dir.join("p.json"), r#"{"name":"installed","version":"1.1.0"}"#).unwrap();
+        // Same version -> no overwrite (preserves any user edit at this version).
+        write_versioned_seeds(&dir, &[("p.json", r#"{"name":"bundled","version":"1.1.0"}"#)]);
+        let got = fs::read_to_string(dir.join("p.json")).unwrap();
+        assert!(got.contains("installed"), "equal version must not clobber");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unversioned_seed_only_writes_when_missing() {
+        let dir = tmp_dir("missing");
+        // Bundled seed has no version -> behaves like write-if-missing.
+        fs::write(dir.join("p.json"), r#"{"name":"installed"}"#).unwrap();
+        write_versioned_seeds(&dir, &[("p.json", r#"{"name":"bundled"}"#)]);
+        let got = fs::read_to_string(dir.join("p.json")).unwrap();
+        assert!(got.contains("installed"), "unversioned seed must not overwrite existing");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

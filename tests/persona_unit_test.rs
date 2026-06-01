@@ -75,6 +75,7 @@ fn build_system_prompt_without_skills() {
         tools: vec![],
         packs: vec![],
         skills: vec![],
+        version: None,
         system_prompt: "You are a test.".into(),
     };
 
