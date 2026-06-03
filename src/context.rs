@@ -132,7 +132,7 @@ async fn summarize_messages<M: CompletionModel + 'static>(
         .build();
 
     let summary = agent
-        .chat(&format!("Summarize this conversation:\n\n{transcript}"), Vec::<RigMessage>::new())
+        .chat(&format!("Summarize this conversation:\n\n{transcript}"), &mut Vec::<RigMessage>::new())
         .await
         .map_err(|e| format!("Compaction LLM call failed: {e}"))?;
 

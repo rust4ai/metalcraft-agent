@@ -16,5 +16,6 @@ pub mod runtime;
 pub mod seed;
 pub mod skill;
 pub mod tools;
+pub mod trace;
 pub mod ui;
 pub mod workshop_api;

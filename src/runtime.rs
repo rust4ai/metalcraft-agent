@@ -1,4 +1,6 @@
-use metalcraft::{create_react_agent_with_hooks, AgentState, Executor, LlmCallHook, RunOutcome};
+use metalcraft::{
+    create_react_agent_with_hooks, AgentState, Executor, LlmCallHook, LlmResponseHook, RunOutcome,
+};
 use rig::client::CompletionClient;
 use rig::completion::CompletionModel;
 use rig::providers::openai;
@@ -61,6 +63,7 @@ pub fn build_agent_runtime<M>(
     model_name: &str,
     approval_mode: ApprovalMode,
     llm_call_hook: Option<LlmCallHook>,
+    llm_response_hook: Option<LlmResponseHook>,
     make_compaction_model: impl FnOnce(&openai::Client, &str) -> M,
 ) -> Result<BuiltAgentRuntime<M>, Box<dyn std::error::Error>>
 where
@@ -83,7 +86,15 @@ where
     let model = client.completion_model(model_name);
     let compaction_model = make_compaction_model(&client, model_name);
     let hook = approval::build_hook(approval_mode);
-    let graph = create_react_agent_with_hooks(model, registry, &system_prompt, hook, llm_call_hook)?.into_arc();
+    let graph = create_react_agent_with_hooks(
+        model,
+        registry,
+        &system_prompt,
+        hook,
+        llm_call_hook,
+        llm_response_hook,
+    )?
+    .into_arc();
 
     Ok(BuiltAgentRuntime {
         graph,
@@ -112,6 +123,7 @@ pub async fn run_one_shot_task(
         request.model_name,
         request.approval_mode.clone(),
         llm_call_hook,
+        None, // one-shot runs don't emit OTLP traces
         |client, model_name| client.completion_model(model_name),
     )?;
     // Let the guard know which of this persona's tools are status polls, so

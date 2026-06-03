@@ -12,6 +12,7 @@ Metalcraft Agent is a Rust application leveraging the Metalcraft framework to cr
 - **Async Execution**: Built on Tokio for efficient async operations.
 - **Local Flow Scheduling**: Poll a local `flows/` directory and execute enabled workflows on an interval.
 - **Self-management by prompt**: The `workshop-agent` persona can create and edit the project's own personas, skills, and flows, and inspect past runs — the metalcraft-workshop GUI's editing surface, driven entirely by text. See [Managing the project by prompt](#managing-the-project-by-prompt).
+- **OpenTelemetry traces**: Every Workshop-API chat turn emits an OTLP/JSON trace (spans for each LLM call and tool execution, with real timings and token usage) ready to ingest into any GenAI-aware observability backend. See [OpenTelemetry Traces](#opentelemetry-traces).
 
 ## Project Structure
 
@@ -251,6 +252,45 @@ When `--diagnostics` is enabled, a timestamped session directory is created unde
 - **`persona_switch_after_turn_NNN.json`** — logged when the user switches personas mid-session via `/persona set`.
 - **`model_switch_after_turn_NNN.json`** — logged when the user switches models mid-session via `/model use`.
 - **`compaction_after_turn_NNN.json`** — logged when context compaction occurs, recording before/after token counts.
+
+## OpenTelemetry Traces
+
+Alongside the bespoke diagnostics above, each Workshop-API chat session also
+emits an **OpenTelemetry trace** following the [OTel GenAI semantic
+conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/). Traces are
+written to:
+
+```
+<data-dir>/traces/<session>/otlp-trace.json
+```
+
+where `<session>` is the **same** directory name used under
+`<data-dir>/sessions/` (the diagnostics logs), so a diagnostics session and its
+trace line up 1:1. (`<data-dir>` resolves via `METALCRAFT_DATA_DIR`, else the OS
+data dir, else `./data`.)
+
+Each file is a single OTLP/JSON `TracesData` document. One chat session is one
+trace; within it:
+
+- a **session** root span groups the whole chat,
+- one **`agent turn N`** span per user message,
+- one **`chat <model>`** span (kind `CLIENT`) per LLM call, carrying
+  `gen_ai.request.model`, the real call duration, and — via the metalcraft
+  `LlmResponseHook` — token usage (`gen_ai.usage.input_tokens` /
+  `output_tokens` / `total_tokens`, plus cache-read and reasoning tokens when
+  reported),
+- one **`execute_tool <name>`** span (kind `INTERNAL`) per tool call, with
+  `gen_ai.tool.name`, arguments, result, real duration, and an `ERROR` status
+  when the tool failed.
+
+Prompts and responses are attached as span events (`gen_ai.user.message`,
+`gen_ai.assistant.message`, `gen_ai.tool.message`). Because the output is
+standard OTLP, it can be ingested directly by GenAI-aware observability
+backends (Arize Phoenix, Langfuse, Braintrust, Raindrop, an OpenTelemetry
+Collector, …) without any vendor-specific format.
+
+Tracing is best-effort: a failure to create or write a trace never blocks or
+fails a chat turn.
 
 ## Building and Testing
 

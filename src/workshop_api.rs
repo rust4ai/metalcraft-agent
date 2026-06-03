@@ -21,6 +21,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::approval::ApprovalMode;
 use crate::diagnostics::DiagnosticsLogger;
+use crate::trace::TraceLogger;
 use crate::flows;
 use crate::paths;
 use crate::persona::{Persona, PersonaSummary};
@@ -50,9 +51,24 @@ struct ChatSession {
     state: Option<AgentState>,
     created_at: String,
     diagnostics: Option<Arc<DiagnosticsLogger>>,
+    /// OTLP trace writer, parallel to `diagnostics`. Shares its session id.
+    trace: Option<Arc<TraceLogger>>,
     /// True while a turn is mid-flight. Prevents two concurrent turns from
     /// stomping on the same state.
     busy: bool,
+}
+
+/// Build a [`TraceLogger`] keyed to a diagnostics logger's session-dir name, so
+/// `traces/<id>` and `sessions/<id>` share the same `<id>`. Returns `None` if
+/// there is no diagnostics logger or the trace dir can't be created — tracing
+/// is strictly best-effort and never blocks a chat turn.
+fn trace_for(diagnostics: Option<&DiagnosticsLogger>, model: &str) -> Option<Arc<TraceLogger>> {
+    let session_id = diagnostics?
+        .session_dir()
+        .file_name()
+        .and_then(|n| n.to_str())?
+        .to_string();
+    TraceLogger::new(&session_id, model).ok().map(Arc::new)
 }
 
 struct ApiState {
@@ -953,6 +969,7 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
             state,
             created_at: pc.created_at,
             diagnostics: None,
+            trace: None, // recreated lazily on the first turn, like diagnostics
             busy: false, // anything that was busy at shutdown couldn't have
                           // finished cleanly; reset so the user can retry.
         };
@@ -1029,6 +1046,10 @@ async fn post_create_chat(
     }
     let id = uuid::Uuid::new_v4().to_string();
     let model_name = req.model_name.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let diagnostics = DiagnosticsLogger::new().ok().map(Arc::new);
+    // The OTLP trace shares the diagnostics session-dir name so traces/<id> and
+    // sessions/<id> line up. Best-effort, like diagnostics: never block a chat.
+    let trace = trace_for(diagnostics.as_deref(), &model_name);
     let session = ChatSession {
         id: id.clone(),
         persona_slug: req.persona_slug,
@@ -1036,7 +1057,8 @@ async fn post_create_chat(
         cwd: state.cwd.clone(),
         state: None,
         created_at: chrono::Utc::now().to_rfc3339(),
-        diagnostics: DiagnosticsLogger::new().ok().map(Arc::new),
+        diagnostics,
+        trace,
         busy: false,
     };
     let session_arc = Arc::new(Mutex::new(session));
@@ -1178,7 +1200,7 @@ async fn post_chat_turn(
     // Lock the session up-front: stamp it busy, snapshot what we need to run
     // the executor, and seed/continue the AgentState. If anything fails we
     // release `busy` before returning.
-    let (persona_slug, model_name, cwd, agent_state, turn_index, diagnostics) = {
+    let (persona_slug, model_name, cwd, agent_state, turn_index, diagnostics, trace) = {
         let mut s = session.lock().await;
         if s.busy {
             return err_json(StatusCode::CONFLICT, "chat is already mid-turn");
@@ -1218,6 +1240,11 @@ async fn post_chat_turn(
                 s.diagnostics = Some(logger);
             }
         }
+        // Mirror the trace logger: a reloaded chat has neither logger; recreate
+        // both so the OTLP trace resumes on the same session id as diagnostics.
+        if s.trace.is_none() {
+            s.trace = trace_for(s.diagnostics.as_deref(), &s.model_name);
+        }
 
         (
             s.persona_slug.clone(),
@@ -1226,6 +1253,7 @@ async fn post_chat_turn(
             next_state,
             prior_turns, // new turn's index = prior count (0-based)
             s.diagnostics.clone(),
+            s.trace.clone(),
         )
     };
 
@@ -1265,6 +1293,11 @@ async fn post_chat_turn(
         })
         .await;
 
+    // Open the OTLP turn span for this user message before any agent activity.
+    if let Some(t) = &trace {
+        t.start_turn(&req.message);
+    }
+
     tokio::spawn(async move {
         // Per-turn timing state, shared between the LlmCallHook (start) and
         // the step_guard (finish).
@@ -1279,12 +1312,35 @@ async fn post_chat_turn(
             let tx = tx.clone();
             let started = llm_started_at.clone();
             let diagnostics = diagnostics.clone();
+            let trace = trace.clone();
             Arc::new(move |snapshot: &metalcraft::LlmCallSnapshot| {
                 if let Some(logger) = &diagnostics {
                     logger.log_llm_request(snapshot);
                 }
+                if let Some(t) = &trace {
+                    t.on_llm_start();
+                }
                 *started.lock().unwrap() = Some(std::time::Instant::now());
                 let _ = tx.try_send(ChatEvent::LlmStarted);
+            })
+        };
+
+        // LlmResponseHook fires after each `.send()` returns, while the LLM span
+        // is still open (the step_guard hasn't run yet) — stamp token usage onto
+        // it. This is the only signal the pre-call hook above can't provide.
+        let llm_response_hook: metalcraft::LlmResponseHook = {
+            let trace = trace.clone();
+            Arc::new(move |snapshot: &metalcraft::LlmResponseSnapshot| {
+                if let Some(t) = &trace {
+                    let u = &snapshot.usage;
+                    t.on_llm_usage(
+                        u.input_tokens,
+                        u.output_tokens,
+                        u.total_tokens,
+                        u.cached_input_tokens,
+                        u.reasoning_tokens,
+                    );
+                }
             })
         };
 
@@ -1298,6 +1354,7 @@ async fn post_chat_turn(
             let llm_started_at = llm_started_at.clone();
             let tools_in_flight = tools_in_flight.clone();
             let diagnostics = diagnostics.clone();
+            let trace = trace.clone();
             Arc::new(move |state: &AgentState, _ev| {
                 if let Some(logger) = &diagnostics {
                     logger.log_turn(state);
@@ -1314,17 +1371,31 @@ async fn post_chat_turn(
                 //   then ToolStarted per ToolCall,
                 //   then ToolCompleted per ToolResult.
                 let mut assistant_msgs: Vec<ChatMessageWire> = Vec::new();
+                // Raw assistant text for the OTLP LLM-span response event.
+                let mut assistant_text = String::new();
                 let mut new_tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
-                let mut new_tool_results: Vec<(String, String, ChatMessageWire)> = Vec::new();
+                // (id, name, wire, raw_result) — raw_result feeds the trace span.
+                let mut new_tool_results: Vec<(String, String, ChatMessageWire, String)> = Vec::new();
 
                 for m in new {
                     match m {
-                        AgentMessage::Assistant(_) => assistant_msgs.push(ChatMessageWire::from(m)),
+                        AgentMessage::Assistant(t) => {
+                            if !assistant_text.is_empty() {
+                                assistant_text.push('\n');
+                            }
+                            assistant_text.push_str(t);
+                            assistant_msgs.push(ChatMessageWire::from(m));
+                        }
                         AgentMessage::ToolCall { id, name, args, .. } => {
                             new_tool_calls.push((id.clone(), name.clone(), args.clone()));
                         }
-                        AgentMessage::ToolResult { id, name, .. } => {
-                            new_tool_results.push((id.clone(), name.clone(), ChatMessageWire::from(m)));
+                        AgentMessage::ToolResult { id, name, result, .. } => {
+                            new_tool_results.push((
+                                id.clone(),
+                                name.clone(),
+                                ChatMessageWire::from(m),
+                                result.clone(),
+                            ));
                         }
                         AgentMessage::User(_) => {
                             // User messages mid-turn shouldn't happen, but
@@ -1344,6 +1415,13 @@ async fn post_chat_turn(
                         .take()
                         .map(|t| t.elapsed().as_millis() as u64)
                         .unwrap_or(0);
+                    if let Some(t) = &trace {
+                        t.on_llm_complete(if assistant_text.is_empty() {
+                            None
+                        } else {
+                            Some(&assistant_text)
+                        });
+                    }
                     let _ = tx.try_send(ChatEvent::LlmCompleted {
                         messages: assistant_msgs,
                         duration_ms,
@@ -1353,6 +1431,9 @@ async fn post_chat_turn(
                             .lock()
                             .unwrap()
                             .insert(tool_call_id.clone(), std::time::Instant::now());
+                        if let Some(t) = &trace {
+                            t.on_tool_start(&tool_call_id, &name, &args);
+                        }
                         let _ = tx.try_send(ChatEvent::ToolStarted {
                             tool_call_id,
                             name,
@@ -1361,13 +1442,16 @@ async fn post_chat_turn(
                     }
                 }
 
-                for (tool_call_id, name, result) in new_tool_results {
+                for (tool_call_id, name, result, raw_result) in new_tool_results {
                     let duration_ms = tools_in_flight
                         .lock()
                         .unwrap()
                         .remove(&tool_call_id)
                         .map(|t| t.elapsed().as_millis() as u64)
                         .unwrap_or(0);
+                    if let Some(t) = &trace {
+                        t.on_tool_complete(&tool_call_id, &raw_result);
+                    }
                     let _ = tx.try_send(ChatEvent::ToolCompleted {
                         tool_call_id,
                         name,
@@ -1394,6 +1478,7 @@ async fn post_chat_turn(
             agent_state,
             step_guard,
             Some(llm_call_hook),
+            Some(llm_response_hook),
         )
         .await;
 
@@ -1407,6 +1492,9 @@ async fn post_chat_turn(
             match outcome {
                 Ok(RunOutcome::Completed(state)) => {
                     s.state = Some(state);
+                    if let Some(t) = &trace {
+                        t.end_turn(true);
+                    }
                     let _ = tx.send(ChatEvent::Done {
                         status: "completed".into(),
                         reason: None,
@@ -1415,6 +1503,9 @@ async fn post_chat_turn(
                 }
                 Ok(RunOutcome::Interrupted { state, reason, .. }) => {
                     s.state = Some(state);
+                    if let Some(t) = &trace {
+                        t.end_turn(true);
+                    }
                     let _ = tx.send(ChatEvent::Done {
                         status: "interrupted".into(),
                         reason: Some(reason),
@@ -1429,6 +1520,10 @@ async fn post_chat_turn(
                     let reason = format!("{node}: {error}");
                     if let Some(logger) = &diagnostics {
                         logger.log_error(&reason);
+                    }
+                    if let Some(t) = &trace {
+                        t.on_error(&reason);
+                        t.end_turn(false);
                     }
                     s.state = Some(state);
                     let _ = tx.send(ChatEvent::Done {
@@ -1445,6 +1540,10 @@ async fn post_chat_turn(
                     let reason = error_chain(e.as_ref());
                     if let Some(logger) = &diagnostics {
                         logger.log_error(&reason);
+                    }
+                    if let Some(t) = &trace {
+                        t.on_error(&reason);
+                        t.end_turn(false);
                     }
                     s.state = Some(state_before_turn);
                     let _ = tx.send(ChatEvent::Done {
@@ -1477,6 +1576,7 @@ async fn run_chat_turn(
     initial_state: AgentState,
     step_guard: StepGuard<AgentState>,
     llm_call_hook: Option<metalcraft::LlmCallHook>,
+    llm_response_hook: Option<metalcraft::LlmResponseHook>,
 ) -> Result<RunOutcome<AgentState>, Box<dyn std::error::Error + Send + Sync>> {
     use crate::runtime::build_agent_runtime;
     use rig::client::CompletionClient;
@@ -1489,6 +1589,7 @@ async fn run_chat_turn(
         model_name,
         ApprovalMode::AutoApprove,
         llm_call_hook,
+        llm_response_hook,
         |client, name| client.completion_model(name),
     )
     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;

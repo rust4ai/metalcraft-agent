@@ -48,6 +48,14 @@ pub fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }
 
+/// OpenTelemetry trace output, one `<session>/otlp-trace.json` per chat
+/// session. Sits beside [`sessions_dir`] (the bespoke diagnostics logs) and
+/// shares the same `<session>` directory name, so a diagnostics session and
+/// its OTLP trace line up 1:1.
+pub fn traces_dir() -> PathBuf {
+    data_dir().join("traces")
+}
+
 pub fn api_tools_dir() -> PathBuf {
     data_dir().join("api_tools")
 }
