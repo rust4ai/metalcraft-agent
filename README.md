@@ -245,13 +245,20 @@ Ensure you have the correct personas set up in the `personas/` directory to use 
 
 ## Diagnostics
 
-When `--diagnostics` is enabled, a timestamped session directory is created under `logs/` containing:
+A timestamped session directory is created under `<data-dir>/sessions/<session>/`
+containing:
 
 - **`session_info.json`** — startup configuration: persona, model, tools, skills, system prompt, working directory, and approval mode.
 - **`turn_NNN.json`** — full message array after each agent step, capturing the complete LLM conversation including tool calls and results.
+- **`llm_request_NNN.json`** — the raw context (system prompt, history, prompt, tool definitions) sent to the model before each call.
 - **`persona_switch_after_turn_NNN.json`** — logged when the user switches personas mid-session via `/persona set`.
 - **`model_switch_after_turn_NNN.json`** — logged when the user switches models mid-session via `/model use`.
 - **`compaction_after_turn_NNN.json`** — logged when context compaction occurs, recording before/after token counts.
+- **`error_after_turn_NNN.json`** — logged when a turn fails, recording the failure reason.
+
+`<data-dir>` resolves via `METALCRAFT_DATA_DIR`, else the OS data dir, else
+`./data`. Each session here lines up 1:1 with its OpenTelemetry trace under
+`<data-dir>/traces/<session>/` (see [OpenTelemetry Traces](#opentelemetry-traces)).
 
 ## OpenTelemetry Traces
 
