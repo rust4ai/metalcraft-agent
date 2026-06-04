@@ -1,0 +1,51 @@
+# DigitalOcean App Platform spec for the metalcraft-agent daemon.
+#
+# Deploy:
+#   doctl apps create --spec .do/app.yaml
+# Update an existing app:
+#   doctl apps update <APP_ID> --spec .do/app.yaml
+#
+# This runs the daemon's Workshop API as a single public HTTP service. The API
+# is enabled because WORKSHOP_API_KEY is set; it binds to $PORT (injected by
+# App Platform) and exposes an unauthenticated /health probe.
+#
+# ⚠️ App Platform has an EPHEMERAL filesystem — there is no persistent volume.
+# Seeded personas/skills load fine (embedded in the binary), but anything
+# created at runtime (chats, new personas/skills/flows, stored keys) is lost on
+# every deploy/restart. For durable state, back it with DO Spaces or a managed
+# DB, or run on a Droplet with docker-compose instead.
+name: metalcraft-agent
+region: nyc
+services:
+  - name: daemon
+    dockerfile_path: Dockerfile
+    source_dir: /
+    github:
+      repo: rust4ai/metalcraft-agent
+      branch: master
+      deploy_on_push: true
+    instance_count: 1
+    instance_size_slug: basic-xs
+    http_port: 8080
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 20
+      period_seconds: 15
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+    envs:
+      - key: PORT
+        scope: RUN_TIME
+        value: "8080"
+      # Enables the Workshop API (and thus /health). Set the actual value as an
+      # encrypted secret in the DO dashboard or via `doctl`.
+      - key: WORKSHOP_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: OPENAI_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: RUST_LOG
+        scope: RUN_TIME
+        value: info

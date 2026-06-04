@@ -215,7 +215,16 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/integration-packs/{id}", get(get_integration_pack))
         .route("/api/v1/integration-packs/{id}/enabled", put(put_pack_enabled))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        // Health check — registered after the auth layer so it stays
+        // unauthenticated (for Railway / DO App Platform probes).
+        .route("/health", get(health))
         .with_state(state)
+}
+
+/// Liveness/readiness probe. Returns 200 with a small JSON body. Not behind
+/// the auth middleware so platform health checks succeed without a key.
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
 }
 
 /// Bind and serve the router on the given port. Blocks until ctrl-c.
