@@ -1,6 +1,7 @@
 pub mod approval;
 pub mod cli;
 pub mod context;
+pub mod daemon;
 pub mod diagnostics;
 pub mod diagnostics_browse;
 pub mod diff_preview;
