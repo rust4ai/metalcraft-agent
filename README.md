@@ -299,6 +299,55 @@ Collector, …) without any vendor-specific format.
 Tracing is best-effort: a failure to create or write a trace never blocks or
 fails a chat turn.
 
+## Deploying with Docker + Caddy (HTTPS)
+
+The repo ships a `Caddyfile` and `docker-compose.caddy.yml` that run the daemon's
+Workshop API behind [Caddy](https://caddyserver.com/) for automatic HTTPS
+(Let's Encrypt — no certbot, no manual cert files). Caddy terminates TLS on
+ports 80/443 and reverse-proxies to the daemon over the internal compose
+network; the daemon itself is **not** published to the host.
+
+```
+Internet ──443/80──> Caddy (auto TLS) ──reverse_proxy──> daemon:8080 (Workshop API, /health)
+```
+
+**Prereqs:** a domain with an A record pointing at the host, and ports 80 + 443
+open (Let's Encrypt validates over `:80`).
+
+1. Create a `.env` next to the compose file:
+
+   ```
+   DOMAIN=agent.example.com
+   TLS_EMAIL=you@example.com
+   OPENAI_API_KEY=sk-...
+   WORKSHOP_API_KEY=<long random secret>
+   ```
+
+   `WORKSHOP_API_KEY` is what *enables* the Workshop API. Once set, every route
+   except the unauthenticated `/health` probe requires
+   `Authorization: Bearer <key>`.
+
+2. Point the A record for your `DOMAIN` at the host, and open ports 80 + 443.
+
+3. Build and start:
+
+   ```bash
+   docker compose -f docker-compose.caddy.yml up -d --build
+   ```
+
+4. Verify:
+
+   ```bash
+   curl https://agent.example.com/health
+   ```
+
+Caddy fetches and auto-renews the certificate on first request; certs persist in
+the `caddy-data` volume across restarts. Runtime state (chats, personas, etc.)
+persists in the `daemon-data` volume.
+
+**Local testing without a domain:** set `DOMAIN=localhost` — Caddy serves an
+internal self-signed cert instead of calling Let's Encrypt.
+
 ## Building and Testing
 
 To build the project:

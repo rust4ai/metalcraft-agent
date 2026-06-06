@@ -1,0 +1,23 @@
+# Caddy reverse proxy for the metalcraft-agent daemon's Workshop API.
+#
+# DOMAIN and TLS_EMAIL are injected from the environment (see
+# docker-compose.caddy.yml). Caddy automatically provisions and renews a
+# Let's Encrypt certificate for DOMAIN — no manual cert handling needed.
+#
+# For local testing without a public domain, set DOMAIN=localhost; Caddy will
+# serve an internal self-signed cert instead of hitting Let's Encrypt.
+
+{
+	email {$TLS_EMAIL}
+}
+
+{$DOMAIN} {
+	# Forward everything to the daemon's Workshop API inside the compose network.
+	reverse_proxy daemon:8080
+
+	encode gzip
+	log {
+		output stdout
+		format console
+	}
+}

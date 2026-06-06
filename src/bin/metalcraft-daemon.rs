@@ -47,6 +47,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--api-port" => {
                 config.workshop_api_port = args.next().ok_or("--api-port requires a value")?.parse()?;
             }
+            // Retired external-gateway flags. Accepted and ignored (each consumed
+            // a value) so older deploy start commands don't crash the daemon on
+            // upgrade — the external gateway was replaced by gateway channels.
+            "--event-port" | "--event-host" | "--event-persona" | "--events"
+            | "--platforms" | "--admin-user-ids" => {
+                let _ = args.next();
+                eprintln!(
+                    "warning: '{arg}' is deprecated and ignored (the external gateway was \
+                     removed; configure gateway channels in the workshop instead)"
+                );
+            }
             "--help" | "-h" => {
                 print_usage();
                 return Ok(());

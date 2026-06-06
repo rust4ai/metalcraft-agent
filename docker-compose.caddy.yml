@@ -1,0 +1,60 @@
+# Run the daemon's Workshop API behind Caddy for automatic HTTPS.
+#
+# Prereqs:
+#   - A domain (e.g. agent.example.com) with an A record -> this host's IP
+#   - Ports 80 and 443 open to the internet (Let's Encrypt validates over :80)
+#
+# Setup:
+#   1. Put these in a .env file next to this compose file:
+#        DOMAIN=agent.example.com
+#        TLS_EMAIL=you@example.com
+#        OPENAI_API_KEY=sk-...
+#        WORKSHOP_API_KEY=<a long random secret>   # enables the API + auth
+#   2. docker compose -f docker-compose.caddy.yml up -d --build
+#   3. Verify:  curl https://$DOMAIN/health
+#
+# The daemon is NOT published on the host — only Caddy is exposed. All daemon
+# traffic flows over the internal compose network.
+
+services:
+  daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      WORKSHOP_API_KEY: ${WORKSHOP_API_KEY}   # required to enable the Workshop API
+      PORT: "8080"                            # Workshop API binds here (0.0.0.0:8080)
+      METALCRAFT_DATA_DIR: /data
+      RUST_LOG: info
+    command:
+      - metalcraft-daemon
+      - --auto-approve
+      - --api-port
+      - "8080"
+    volumes:
+      - daemon-data:/data
+    expose:
+      - "8080"        # visible to caddy only, not published to the host
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      TLS_EMAIL: ${TLS_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # persisted certs — survives restarts
+      - caddy-config:/config
+    depends_on:
+      - daemon
+    restart: unless-stopped
+
+volumes:
+  daemon-data:
+  caddy-data:
+  caddy-config:
