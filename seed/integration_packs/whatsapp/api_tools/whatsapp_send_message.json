@@ -1,0 +1,28 @@
+{
+  "name": "whatsapp_send_message",
+  "description": "Send a WhatsApp message via Twilio. channel_id is the recipient's phone number in E.164 format (e.g. +15551234567).",
+  "method": "POST",
+  "url": "$AGENT_GATEWAY_URL/api/v1/messages",
+  "headers": {
+    "Authorization": "Bearer $AGENT_GATEWAY_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "channel_id": {
+        "type": "string",
+        "description": "Recipient phone number in E.164 format, e.g. +15551234567"
+      },
+      "content": {
+        "type": "string",
+        "description": "The message text to send"
+      }
+    },
+    "required": ["channel_id", "content"]
+  },
+  "body_mapping": "params",
+  "body_defaults": {
+    "platform": "whatsapp"
+  }
+}

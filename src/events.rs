@@ -53,6 +53,9 @@ impl GatewayEvent {
                     String::new()
                 }
             ),
+            "whatsapp" => format!(
+                "Respond using whatsapp_send_message with channel_id \"{channel}\" (the sender's phone number)."
+            ),
             "slack" | "github" => {
                 // For non-Discord platforms, give a generic instruction
                 // The agent's available tools determine what it can actually do
