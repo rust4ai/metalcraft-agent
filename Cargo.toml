@@ -30,6 +30,8 @@ atty = "0.2"
 chrono = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
+sha1 = "0.10"
+base64 = "0.22"
 hex = "0.4"
 include_dir = "0.7"
 axum = { version = "0.8", features = ["macros"] }

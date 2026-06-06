@@ -41,31 +41,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--auto-approve" => {
                 config.auto_approve = true;
             }
-            "--event-port" => {
-                config.event_port = args.next().ok_or("--event-port requires a value")?.parse()?;
-            }
-            "--event-host" => {
-                config.event_host = args.next().ok_or("--event-host requires a value")?;
-            }
-            "--event-persona" => {
-                config.event_persona = Some(args.next().ok_or("--event-persona requires a value")?);
-            }
-            "--events" => {
-                let value = args.next().ok_or("--events requires a value")?;
-                config.event_types = value.split(',').map(|s| s.trim().to_string()).collect();
-            }
-            "--platforms" => {
-                let value = args.next().ok_or("--platforms requires a value")?;
-                config.event_platforms = Some(value.split(',').map(|s| s.trim().to_string()).collect());
-            }
-            "--admin-user-ids" => {
-                let value = args.next().ok_or("--admin-user-ids requires a value")?;
-                config.admin_user_ids = value
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-            }
             "--api" => {
                 config.workshop_api_key = Some(args.next().ok_or("--api requires a key")?);
             }
@@ -95,21 +70,11 @@ fn print_usage() {
            --poll-seconds <n>       Poll interval (default: 30)\n  \
            --once                   Run once and exit\n  \
            --auto-approve           Skip tool approval prompts\n\n\
-         Event listener options (requires AGENT_GATEWAY_URL):\n  \
-           --event-port <n>         Webhook listener port (default: 3001)\n  \
-           --event-host <host>      Host for gateway callback URL (default: localhost)\n  \
-           --event-persona <slug>   Persona for event tasks (default: same as --persona)\n  \
-           --events <list>          Comma-separated event types (default: message_create)\n  \
-           --platforms <list>       Comma-separated platforms (default: all)\n  \
-           --admin-user-ids <list>  Comma-separated platform user IDs allowed to trigger the agent (required)\n\n\
          Workshop API options:\n  \
            --api <KEY>              Enable workshop admin API with Bearer KEY (env: WORKSHOP_API_KEY)\n  \
            --api-port <n>           Workshop API port (default: 3002, env: WORKSHOP_API_PORT or PORT)\n\n\
-         Most flow/event options also have STARKBOT_* env equivalents (see daemon.rs).\n\n\
-         Required env vars for event listener:\n  \
-           AGENT_GATEWAY_URL        Gateway base URL\n  \
-           AGENT_GATEWAY_API_KEY    Gateway auth token\n  \
-           EVENTD_WEBHOOK_SECRET    Secret for authenticating inbound webhooks\n  \
-           EVENTD_ADMIN_USER_IDS    Comma-separated admin user IDs (alternative to --admin-user-ids)"
+         The workshop API also hosts gateway channels (inbound webhooks at\n  \
+         /webhook/<adapter> and management under /api/v1/gateway/*).\n\n\
+         Most flow options also have STARKBOT_* env equivalents (see daemon.rs)."
     );
 }

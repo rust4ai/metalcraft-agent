@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::{Path, State},
+    extract::{Form, Path, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{
@@ -214,10 +214,23 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/integration-packs", get(list_integration_packs))
         .route("/api/v1/integration-packs/{id}", get(get_integration_pack))
         .route("/api/v1/integration-packs/{id}/enabled", put(put_pack_enabled))
+        // Gateway channels: declarative channel *types* + user-created channel
+        // *instances*. Inbound messages arrive on the unauthenticated webhook
+        // routes below; these manage configuration.
+        .route("/api/v1/gateway/types", get(list_gateway_types))
+        .route("/api/v1/gateway/channels", get(list_gateway_channels).post(post_create_gateway_channel))
+        .route("/api/v1/gateway/channels/{id}", put(put_gateway_channel).delete(delete_gateway_channel))
+        .route("/api/v1/gateway/channels/{id}/enabled", put(put_gateway_channel_enabled))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         // Health check — registered after the auth layer so it stays
         // unauthenticated (for Railway / DO App Platform probes).
         .route("/health", get(health))
+        // Inbound gateway webhooks — unauthenticated like /health; each adapter
+        // verifies provenance its own way (signed requests). PipeStreamr is the
+        // active path; the Twilio route stays mounted but no channel type ships
+        // for it right now.
+        .route("/webhook/pipestreamr", post(handle_pipestreamr_webhook))
+        .route("/webhook/twilio", post(handle_twilio_webhook))
         .with_state(state)
 }
 
@@ -592,7 +605,22 @@ async fn list_keys() -> Json<Vec<KeySummary>> {
 /// key store UI surface "these enabled packs need these keys" without the user
 /// having to read each pack's manifest.
 async fn list_recommended_keys() -> Json<Vec<RecommendedKey>> {
-    let out = crate::integration_packs::recommended_env()
+    // Merge recommendations from enabled integration packs and enabled gateway
+    // channel types. The `packs` field carries the source label (pack id or
+    // channel-type name) so the key-store UI can show "who wants this".
+    let mut merged: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for (name, sources) in crate::integration_packs::recommended_env() {
+        merged.entry(name).or_default().extend(sources);
+    }
+    for (name, sources) in crate::gateway_channels::recommended_env() {
+        let entry = merged.entry(name).or_default();
+        for s in sources {
+            if !entry.contains(&s) {
+                entry.push(s);
+            }
+        }
+    }
+    let out = merged
         .into_iter()
         .map(|(name, packs)| RecommendedKey {
             configured: crate::key_store::lookup(&name).is_some(),
@@ -1766,4 +1794,294 @@ async fn put_pack_enabled(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }
+}
+
+// ── Gateway channel handlers ────────────────────────────────────────────
+//
+// Channel *types* are read-only declarative manifests (serialized straight from
+// `gateway_channels::ChannelType`). Channel *instances* are user-created configs
+// (`gateway_channels::ChannelInstance`) — listed, created, edited, enabled, and
+// deleted here. Inbound messages flow through the unauthenticated webhook
+// handlers further below.
+
+/// List the installed gateway channel types (with their per-instance settings
+/// schema), so the workshop can render a "new channel" form.
+async fn list_gateway_types() -> Json<Vec<crate::gateway_channels::ChannelType>> {
+    Json(crate::gateway_channels::list_types())
+}
+
+/// List all configured gateway channel instances.
+async fn list_gateway_channels() -> Json<Vec<crate::gateway_channels::ChannelInstance>> {
+    Json(crate::gateway_channels::load_instances())
+}
+
+#[derive(Deserialize)]
+struct CreateGatewayChannelRequest {
+    type_id: String,
+    name: String,
+    #[serde(default)]
+    settings: HashMap<String, String>,
+}
+
+async fn post_create_gateway_channel(Json(req): Json<CreateGatewayChannelRequest>) -> Response {
+    match crate::gateway_channels::create_instance(&req.type_id, &req.name, req.settings) {
+        Ok(instance) => (StatusCode::CREATED, Json(instance)).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateGatewayChannelRequest {
+    name: String,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    settings: HashMap<String, String>,
+}
+
+async fn put_gateway_channel(
+    Path(id): Path<String>,
+    Json(req): Json<UpdateGatewayChannelRequest>,
+) -> Response {
+    match crate::gateway_channels::update_instance(&id, &req.name, req.enabled, req.settings) {
+        Ok(instance) => Json(instance).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn put_gateway_channel_enabled(
+    Path(id): Path<String>,
+    Json(req): Json<SetEnabledRequest>,
+) -> Response {
+    match crate::gateway_channels::set_enabled(&id, req.enabled) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn delete_gateway_channel(Path(id): Path<String>) -> Response {
+    match crate::gateway_channels::delete_instance(&id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => err_json(StatusCode::NOT_FOUND, format!("channel '{id}' not found")),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+// ── Inbound gateway webhooks ─────────────────────────────────────────────
+
+/// Cap concurrent agent runs triggered by inbound webhooks so a burst of
+/// messages can't spawn unbounded tasks.
+const MAX_WEBHOOK_TASKS: usize = 4;
+
+fn webhook_semaphore() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
+    static SEM: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    SEM.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_WEBHOOK_TASKS)))
+}
+
+/// Whether inbound webhooks may be accepted without a verified signature.
+/// Off by default — webhooks are **fail-closed**: a missing signing secret means
+/// requests are rejected. Set `GATEWAY_ALLOW_UNSIGNED=1` to bypass for **local
+/// testing only**.
+fn allow_unsigned_webhooks() -> bool {
+    matches!(
+        std::env::var("GATEWAY_ALLOW_UNSIGNED").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
+/// Inbound Twilio WhatsApp webhook (form-encoded). Validates Twilio's signature
+/// when `TWILIO_WEBHOOK_BASE_URL` is configured, parses the message, routes it
+/// to the enabled channel instance whose `from` number received it, and runs
+/// that channel's persona to reply (via the `whatsapp_send_message` tool).
+///
+/// Always returns 200 for accepted-but-unroutable cases so Twilio doesn't retry
+/// a message we've deliberately ignored.
+async fn handle_twilio_webhook(headers: HeaderMap, Form(form): Form<HashMap<String, String>>) -> StatusCode {
+    // Optional signature verification. We can only validate against the exact
+    // public URL Twilio signed, so this is gated on TWILIO_WEBHOOK_BASE_URL
+    // being set to that URL's origin (e.g. https://agent.example.com).
+    if let Some(base) = std::env::var("TWILIO_WEBHOOK_BASE_URL").ok().filter(|s| !s.is_empty()) {
+        let token = crate::key_store::lookup("TWILIO_AUTH_TOKEN").unwrap_or_default();
+        let signature = headers
+            .get("x-twilio-signature")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        let url = format!("{}/webhook/twilio", base.trim_end_matches('/'));
+        if token.is_empty() || !crate::tools::twilio::validate_signature(&token, &url, &form, signature) {
+            log::warn!("Rejected Twilio webhook: invalid or missing X-Twilio-Signature");
+            return StatusCode::FORBIDDEN;
+        }
+    }
+
+    let Some(inbound) = crate::tools::twilio::parse_inbound(&form) else {
+        // Status callback or non-message payload — nothing to do.
+        return StatusCode::OK;
+    };
+
+    let Some(channel) = crate::gateway_channels::resolve_by_inbound_to(&inbound.to) else {
+        log::warn!(
+            "Twilio webhook for '{}' matched no enabled WhatsApp channel — ignoring",
+            inbound.to
+        );
+        return StatusCode::OK;
+    };
+
+    let Some(persona_slug) = channel.setting("persona").map(str::to_string) else {
+        log::error!("WhatsApp channel '{}' has no persona configured", channel.name);
+        return StatusCode::OK;
+    };
+    let model_name = channel
+        .setting("model")
+        .map(str::to_string)
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let reply_from = channel.setting("from").unwrap_or(&inbound.to).to_string();
+
+    let sender = inbound.profile_name.clone().unwrap_or_else(|| inbound.from.clone());
+    let prompt = format!(
+        "WhatsApp message from {sender} ({from}):\n\n{body}\n\n\
+         Respond using gateway_send_message with platform \"whatsapp\", channel_id \"{from}\", and from \"{reply_from}\".",
+        sender = sender,
+        from = inbound.from,
+        body = inbound.body,
+        reply_from = reply_from,
+    );
+
+    spawn_webhook_agent(persona_slug, model_name, prompt, inbound.from)
+}
+
+/// Inbound PipeStreamr webhook (JSON `message.created`). Validates the
+/// `X-PipeStreamr-Signature` (HMAC-SHA256 over the raw body) when
+/// `PIPESTREAMR_WEBHOOK_SECRET` is set, routes the message to the enabled
+/// channel whose `from` number received it, and runs that channel's persona to
+/// reply (via `gateway_send_message` with platform "pipestreamr"). Returns 200
+/// for accepted-but-unroutable cases so PipeStreamr doesn't retry.
+async fn handle_pipestreamr_webhook(headers: HeaderMap, body: axum::body::Bytes) -> StatusCode {
+    // Fail-closed: require a configured signing secret and a valid signature.
+    match crate::key_store::lookup("PIPESTREAMR_WEBHOOK_SECRET").filter(|s| !s.is_empty()) {
+        Some(secret) => {
+            let signature = headers
+                .get("x-pipestreamr-signature")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            if !crate::tools::pipestreamr::validate_signature(&secret, &body, signature) {
+                log::warn!("Rejected PipeStreamr webhook: invalid or missing X-PipeStreamr-Signature");
+                return StatusCode::FORBIDDEN;
+            }
+        }
+        None => {
+            if !allow_unsigned_webhooks() {
+                log::warn!(
+                    "Rejected PipeStreamr webhook: PIPESTREAMR_WEBHOOK_SECRET is not set. \
+                     Set it to the secret configured on your PipeStreamr webhook (or set \
+                     GATEWAY_ALLOW_UNSIGNED=1 for local testing only)."
+                );
+                return StatusCode::FORBIDDEN;
+            }
+            log::warn!(
+                "Accepting UNSIGNED PipeStreamr webhook because GATEWAY_ALLOW_UNSIGNED is set — \
+                 do not use this in production."
+            );
+        }
+    }
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
+    let Some(inbound) = crate::tools::pipestreamr::parse_inbound(&payload) else {
+        // Not an inbound message (log/status/outbound echo) — nothing to do.
+        return StatusCode::OK;
+    };
+
+    // Route on the PipeStreamr integration UUID (`source_id`) — stable and
+    // unique, unlike phone-number matching — against each channel's
+    // `integration_id` setting.
+    let Some(source_id) = inbound.source_id.clone() else {
+        log::warn!("PipeStreamr webhook has no source_id; cannot route — ignoring");
+        return StatusCode::OK;
+    };
+    let Some(channel) = crate::gateway_channels::resolve_by_setting("integration_id", &source_id) else {
+        log::warn!("PipeStreamr webhook for integration '{source_id}' matched no enabled channel — ignoring");
+        return StatusCode::OK;
+    };
+
+    let Some(persona_slug) = channel.setting("persona").map(str::to_string) else {
+        log::error!("Channel '{}' has no persona configured", channel.name);
+        return StatusCode::OK;
+    };
+    let model_name = channel
+        .setting("model")
+        .map(str::to_string)
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    // Reply back through the same integration that received the message.
+    let from_clause = format!(" and from \"{source_id}\"");
+
+    let sender = inbound.from_name.clone().unwrap_or_else(|| inbound.from.clone());
+    let prompt = format!(
+        "WhatsApp message from {sender} ({from}):\n\n{body}\n\n\
+         Respond using gateway_send_message with platform \"pipestreamr\", channel_id \"{from}\"{from_clause}.",
+        sender = sender,
+        from = inbound.from,
+        body = inbound.body,
+        from_clause = from_clause,
+    );
+
+    spawn_webhook_agent(persona_slug, model_name, prompt, inbound.from)
+}
+
+/// Shared tail for inbound webhook handlers: build the runtime context, acquire
+/// a concurrency permit, and fire-and-forget a one-shot agent run that produces
+/// (and sends) the reply. Returns the HTTP status the webhook should respond
+/// with. `who` is a human label for logging.
+fn spawn_webhook_agent(
+    persona_slug: String,
+    model_name: String,
+    prompt: String,
+    who: String,
+) -> StatusCode {
+    let context = match AgentRuntimeContext::from_environment() {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            log::error!("Gateway webhook: failed to build runtime context: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+    let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into());
+
+    let permit = match webhook_semaphore().clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            log::warn!("Dropping inbound message from {who} — max concurrent webhook tasks ({MAX_WEBHOOK_TASKS}) reached");
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+    };
+
+    tokio::spawn(async move {
+        let _permit = permit;
+        log::info!("Processing inbound message from {who}");
+        let outcome = crate::runtime::run_one_shot_task(
+            &context,
+            crate::runtime::RunOneShotRequest {
+                persona_slug: &persona_slug,
+                cwd: &cwd,
+                model_name: &model_name,
+                task: &prompt,
+                approval_mode: ApprovalMode::AutoApprove,
+                diagnostics: None,
+            },
+        )
+        .await;
+        match outcome {
+            Ok(metalcraft::RunOutcome::Completed(_)) => log::info!("Inbound message from {who} handled"),
+            Ok(metalcraft::RunOutcome::Interrupted { reason, .. }) => {
+                log::warn!("Inbound message from {who} interrupted: {reason}")
+            }
+            Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
+                log::error!("Inbound message from {who} failed at {node}: {error}")
+            }
+            Err(e) => log::error!("Inbound message from {who} failed: {e}"),
+        }
+    });
+
+    StatusCode::OK
 }

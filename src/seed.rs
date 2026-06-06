@@ -65,6 +65,7 @@ pub fn ensure_defaults() {
         paths::flow_templates_dir(),
         paths::chats_dir(),
         paths::integration_packs_dir(),
+        paths::gateway_channels_dir(),
         paths::upload_root(),
     ];
 
@@ -90,6 +91,36 @@ pub fn ensure_defaults() {
     }
 
     write_integration_packs();
+
+    // Gateway channel *types* — declarative manifests laid out like packs
+    // (`<id>/channel_type.json` + optional extra files), version-gated on the
+    // manifest the same way. See [`crate::gateway_channels`].
+    write_seed_tree("gateway_channels", &paths::gateway_channels_dir(), "channel_type.json");
+
+    retire_obsolete_seeds();
+}
+
+/// Remove seeds that shipped in older versions but have since moved or been
+/// replaced, so they don't linger as stale, enable-able items on upgraded
+/// installs.
+fn retire_obsolete_seeds() {
+    // The `whatsapp` integration pack became a gateway channel type (its
+    // outbound tool is now the native, generic `gateway_send_message`).
+    retire_dir(paths::integration_packs_dir().join("whatsapp"), "'whatsapp' integration pack");
+    // The direct-Twilio `whatsapp` gateway channel type is disabled for now —
+    // all WhatsApp traffic flows through the `pipestreamr` channel type. Drop
+    // any previously-seeded copy so it stops appearing in the gateway UI.
+    retire_dir(paths::gateway_channels_dir().join("whatsapp"), "'whatsapp' (twilio) gateway channel type");
+}
+
+fn retire_dir(dir: PathBuf, label: &str) {
+    if dir.is_dir() {
+        if let Err(e) = fs::remove_dir_all(&dir) {
+            eprintln!("Warning: could not remove retired {label} at {}: {e}", dir.display());
+        } else {
+            log::info!("Retired obsolete {label}");
+        }
+    }
 }
 
 fn write_seeds(dir: &Path, seeds: &[(&str, &str)]) {
@@ -154,32 +185,40 @@ fn json_version(doc: &str) -> Option<(u64, u64, u64)> {
 /// safe and is the only way a manifest change (e.g. a shrunk `requires_env`)
 /// reaches existing installs, which otherwise keep the first-seeded copy.
 fn write_integration_packs() {
-    let root = paths::integration_packs_dir();
-    let Some(packs) = SEED.get_dir("integration_packs") else {
+    write_seed_tree("integration_packs", &paths::integration_packs_dir(), "pack.json");
+}
+
+/// Write every embedded `<seed_subdir>/<id>/` tree to `<dest_root>/<id>/`. Each
+/// item is force-refreshed (all files overwritten) when its bundled `manifest`
+/// version exceeds the installed one; otherwise files are written only when
+/// missing. Shared by integration packs (`pack.json`) and gateway channel types
+/// (`channel_type.json`) — both ship read-only directory trees gated on a
+/// versioned manifest, so a manifest change reaches existing installs.
+fn write_seed_tree(seed_subdir: &str, dest_root: &Path, manifest: &str) {
+    let Some(group) = SEED.get_dir(seed_subdir) else {
         return;
     };
-    for pack in packs.dirs() {
-        let Some(pack_id) = pack.path().file_name().and_then(|s| s.to_str()) else {
+    for item in group.dirs() {
+        let Some(id) = item.path().file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        let pack_dir = root.join(pack_id);
+        let item_dir = dest_root.join(id);
 
-        // Every file in the pack, relative to the pack root (recursing into
-        // personas/, skills/, api_tools/, flow_templates/).
+        // Every file in the item, relative to its root (recursing into subdirs).
         let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
-        collect_files(pack, pack.path(), &mut files);
+        collect_files(item, item.path(), &mut files);
 
         let bundled_ver = files
             .iter()
-            .find(|(rel, _)| rel.to_str() == Some("pack.json"))
+            .find(|(rel, _)| rel.to_str() == Some(manifest))
             .and_then(|(_, content)| json_version(&String::from_utf8_lossy(content)));
-        let installed_ver = fs::read_to_string(pack_dir.join("pack.json"))
+        let installed_ver = fs::read_to_string(item_dir.join(manifest))
             .ok()
             .and_then(|content| json_version(&content));
         let force_upgrade = matches!((bundled_ver, installed_ver), (Some(b), Some(i)) if b > i);
 
         for (rel_path, content) in files {
-            let target = pack_dir.join(&rel_path);
+            let target = item_dir.join(&rel_path);
             if force_upgrade || !target.exists() {
                 if let Some(parent) = target.parent() {
                     if let Err(e) = fs::create_dir_all(parent) {

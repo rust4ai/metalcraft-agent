@@ -9,7 +9,6 @@
 
 use crate::approval::ApprovalMode;
 use crate::diagnostics::DiagnosticsLogger;
-use crate::event_listener::{self, EventListenerConfig};
 use crate::flows::{self, FlowSchedule};
 use crate::paths;
 use crate::persona::Persona;
@@ -34,14 +33,6 @@ pub struct DaemonConfig {
     pub poll_seconds: u64,
     pub once: bool,
     pub auto_approve: bool,
-
-    // Event listener
-    pub event_port: u16,
-    pub event_host: String,
-    pub event_persona: Option<String>,
-    pub event_types: Vec<String>,
-    pub event_platforms: Option<Vec<String>>,
-    pub admin_user_ids: Vec<String>,
 
     // Workshop admin API
     pub workshop_api_key: Option<String>,
@@ -74,17 +65,6 @@ impl DaemonConfig {
         let once = env_flag("STARKBOT_ONCE", false);
         let auto_approve = env_flag("STARKBOT_AUTO_APPROVE", false);
 
-        let event_port = std::env::var("EVENTD_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(3001);
-        let event_host = std::env::var("EVENTD_HOST").unwrap_or_else(|_| "localhost".into());
-        let event_persona = std::env::var("STARKBOT_EVENT_PERSONA").ok().filter(|s| !s.is_empty());
-        let event_types =
-            csv_env("STARKBOT_EVENTS").unwrap_or_else(|| vec!["message_create".into()]);
-        let event_platforms = csv_env("STARKBOT_PLATFORMS");
-        let admin_user_ids = csv_env("EVENTD_ADMIN_USER_IDS").unwrap_or_default();
-
         let workshop_api_key = std::env::var("WORKSHOP_API_KEY").ok().filter(|s| !s.is_empty());
         let workshop_api_port = std::env::var("WORKSHOP_API_PORT")
             .ok()
@@ -99,12 +79,6 @@ impl DaemonConfig {
             poll_seconds,
             once,
             auto_approve,
-            event_port,
-            event_host,
-            event_persona,
-            event_types,
-            event_platforms,
-            admin_user_ids,
             workshop_api_key,
             workshop_api_port,
         }
@@ -129,9 +103,10 @@ pub async fn run_daemon() -> Result<(), DynError> {
     run(DaemonConfig::from_env()).await
 }
 
-/// Run the daemon: spawn the workshop API (if keyed) and the event listener (if
-/// `AGENT_GATEWAY_URL` is set), then run the flow polling loop until Ctrl+C (or
-/// once, if `config.once`). Assumes `.env`/logging/seeds are already set up.
+/// Run the daemon: spawn the workshop API (if keyed), then run the flow polling
+/// loop until Ctrl+C (or once, if `config.once`). The workshop API also hosts
+/// the gateway channels (inbound webhooks + management). Assumes
+/// `.env`/logging/seeds are already set up.
 pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     let approval_mode = config.approval_mode();
     let DaemonConfig {
@@ -141,12 +116,6 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
         poll_seconds,
         once,
         auto_approve: _,
-        event_port,
-        event_host,
-        event_persona,
-        event_types,
-        event_platforms,
-        admin_user_ids,
         workshop_api_key,
         workshop_api_port,
     } = config;
@@ -175,54 +144,6 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
         log::info!("Workshop API spawned on port {port}");
     }
 
-    // Spawn event listener if gateway is configured.
-    let mut event_listener_enabled = false;
-    if std::env::var("AGENT_GATEWAY_URL").is_ok() {
-        let webhook_secret = match std::env::var("EVENTD_WEBHOOK_SECRET") {
-            Ok(s) if !s.is_empty() => s,
-            _ => {
-                log::error!("EVENTD_WEBHOOK_SECRET is required when AGENT_GATEWAY_URL is set. The event listener will not accept unauthenticated webhooks.");
-                return Err("Missing required env var: EVENTD_WEBHOOK_SECRET".into());
-            }
-        };
-
-        if admin_user_ids.is_empty() {
-            log::error!("EVENTD_ADMIN_USER_IDS is required when AGENT_GATEWAY_URL is set. Set it to a comma-separated list of Discord/platform user IDs allowed to trigger the agent.");
-            return Err("Missing required config: admin user IDs".into());
-        }
-
-        if std::env::var("AGENT_GATEWAY_API_KEY").unwrap_or_default().is_empty() {
-            log::error!("AGENT_GATEWAY_API_KEY is required when AGENT_GATEWAY_URL is set.");
-            return Err("Missing required env var: AGENT_GATEWAY_API_KEY".into());
-        }
-
-        log::info!(
-            "Event listener: {} admin user(s) configured, listening for {:?}",
-            admin_user_ids.len(),
-            event_types,
-        );
-
-        let listener_config = EventListenerConfig {
-            port: event_port,
-            host: event_host,
-            persona_slug: event_persona.unwrap_or_else(|| persona_slug.clone()),
-            model_name: model_name.clone(),
-            events: event_types,
-            platforms: event_platforms,
-            webhook_secret,
-            admin_user_ids,
-            approval_mode: approval_mode.clone(),
-            cwd: cwd.clone(),
-        };
-
-        let listener_context = AgentRuntimeContext::from_environment()?;
-        tokio::spawn(async move {
-            event_listener::start(listener_config, listener_context).await;
-        });
-        log::info!("Event listener spawned on port {event_port}");
-        event_listener_enabled = true;
-    }
-
     // Always-visible startup banner, printed regardless of RUST_LOG.
     println!("──────────────────────────────────────────────");
     println!("  metalcraft-daemon running");
@@ -237,11 +158,6 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     match &workshop_api_key {
         Some(_) => println!("  workshop API:   enabled on port {workshop_api_port}"),
         None => println!("  workshop API:   disabled (set WORKSHOP_API_KEY to enable)"),
-    }
-    if event_listener_enabled {
-        println!("  event listener: enabled on port {event_port}");
-    } else {
-        println!("  event listener: disabled (set AGENT_GATEWAY_URL to enable)");
     }
     println!("──────────────────────────────────────────────");
 
@@ -393,16 +309,6 @@ fn env_flag(key: &str, default: bool) -> bool {
         Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
         Err(_) => default,
     }
-}
-
-fn csv_env(key: &str) -> Option<Vec<String>> {
-    let raw = std::env::var(key).ok()?;
-    let items: Vec<String> = raw
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if items.is_empty() { None } else { Some(items) }
 }
 
 fn is_due(state: Option<&FlowRunState>, schedule: &FlowSchedule) -> bool {

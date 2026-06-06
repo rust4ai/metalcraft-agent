@@ -76,6 +76,20 @@ pub fn integration_packs_state_file() -> PathBuf {
     data_dir().join("integration_packs.json")
 }
 
+/// Directory of installed gateway *channel types* — declarative JSON manifests
+/// (one `<id>/channel_type.json` per type), seeded from the binary like
+/// integration packs. See [`crate::gateway_channels`].
+pub fn gateway_channels_dir() -> PathBuf {
+    data_dir().join("gateway_channels")
+}
+
+/// Persisted gateway *channel instances* — user-created, named configurations
+/// of a channel type (WhatsApp number, target persona, enabled flag). A JSON
+/// array at `<data>/gateway_channels.json`.
+pub fn gateway_channels_state_file() -> PathBuf {
+    data_dir().join("gateway_channels.json")
+}
+
 /// Plaintext API-key / secret store (see [`crate::key_store`]).
 pub fn keys_file() -> PathBuf {
     data_dir().join("keys.json")

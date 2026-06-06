@@ -1,17 +1,20 @@
 pub mod bash;
 pub mod edit_file;
 pub mod find_files;
+pub mod gateway;
 pub mod grep;
 pub mod http_api;
 pub mod list_files;
 pub mod load_skill;
 pub mod meta_diagnostics;
+pub mod pipestreamr;
 pub mod meta_flow;
 pub mod meta_persona;
 pub mod meta_skill;
 pub mod read_file;
 pub mod spaces;
 pub mod sub_agent;
+pub mod twilio;
 pub mod web_fetch;
 pub mod write_file;
 
@@ -89,6 +92,12 @@ pub fn create_registry_for_with_config(
             "spaces_get_object" => registry.register(spaces::SpacesGetObjectTool),
             "spaces_put_object" => registry.register(spaces::SpacesPutObjectTool),
             "spaces_delete_object" => registry.register(spaces::SpacesDeleteObjectTool),
+            // Generic gateway send — replies on any gateway channel (WhatsApp
+            // today). Native (not a declarative HTTP-API tool) because the
+            // adapters use auth schemes `$VAR` header substitution can't express
+            // (e.g. Twilio's HTTP Basic auth from two key-store secrets). It
+            // dispatches by the channel type's `adapter`. See `tools::gateway`.
+            "gateway_send_message" => registry.register(gateway::GatewaySendMessageTool),
             "sub_agent" => {
                 if let Some(cfg) = config {
                     registry.register(sub_agent::SubAgentTool::new(

@@ -1,0 +1,44 @@
+{
+  "id": "pipestreamr",
+  "name": "PipeStreamr",
+  "description": "WhatsApp (and more) via the PipeStreamr passthru. Outbound replies go through PipeStreamr's /api/v1/messages/send; inbound messages arrive as PipeStreamr webhooks. Point your PipeStreamr project webhook at <daemon>/webhook/pipestreamr.",
+  "version": "1.2.0",
+  "adapter": "pipestreamr",
+  "requires_env": [
+    "PIPESTREAMR_API_KEY",
+    "PIPESTREAMR_WEBHOOK_SECRET"
+  ],
+  "settings": [
+    {
+      "key": "integration_id",
+      "label": "PipeStreamr integration ID",
+      "input_type": "text",
+      "required": true,
+      "placeholder": "550e8400-e29b-41d4-a716-446655440000",
+      "help": "The PipeStreamr integration UUID for this channel. Inbound webhooks are routed to this channel by matching it, and replies are sent back through it. Find it in PipeStreamr under the integration's settings."
+    },
+    {
+      "key": "from",
+      "label": "WhatsApp number (label)",
+      "input_type": "tel",
+      "required": false,
+      "placeholder": "+14155238886",
+      "help": "Optional — the WhatsApp number behind this integration, shown for reference. Routing uses the integration ID, not this number."
+    },
+    {
+      "key": "persona",
+      "label": "Persona",
+      "input_type": "persona",
+      "required": true,
+      "placeholder": "whatsapp-agent",
+      "help": "The persona that answers inbound messages on this channel."
+    },
+    {
+      "key": "model",
+      "label": "Model",
+      "input_type": "model",
+      "required": false,
+      "help": "Model the persona runs with. Leave blank for the daemon default."
+    }
+  ]
+}

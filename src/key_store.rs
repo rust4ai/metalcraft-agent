@@ -4,7 +4,7 @@
 //! are referenced from HTTP-API tool configs via `$NAME` placeholders (see
 //! [`crate::tools::http_api`]); [`lookup`] resolves a name from the store and
 //! falls back to a process environment variable so existing env-based config
-//! (the discord pack's `$AGENT_GATEWAY_URL`, `OPENAI_API_KEY`, …) keeps working.
+//! (`OPENAI_API_KEY`, a pack's `$GITHUB_TOKEN`, …) keeps working.
 //!
 //! Stored in **plaintext** — protection relies on OS file permissions, the same
 //! as the app's other on-disk state. Never log values; the workshop API only
