@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod diagnostics_browse;
 pub mod diff_preview;
 pub mod flows;
+pub mod gateway_activity;
 pub mod gateway_channels;
 pub mod guard;
 pub mod integration_packs;

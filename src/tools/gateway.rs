@@ -85,6 +85,43 @@ impl metalcraft::Tool for GatewaySendMessageTool {
                 "no send adapter for platform '{platform}' (adapter '{other}'). Enable a gateway channel of a supported type."
             )),
         };
+
+        record_outbound(&adapter, channel_id, content, from, &result);
+
         result.map_err(err)
     }
+}
+
+/// Record an outbound send in the gateway activity log. Best-effort and never
+/// affects the send result. The originating channel is resolved from `from`
+/// (the PipeStreamr `integration_id`, or a Twilio sender number) so the reply
+/// files under the same channel as the inbound message that prompted it.
+fn record_outbound(
+    adapter: &str,
+    recipient: &str,
+    content: &str,
+    from: Option<&str>,
+    result: &Result<serde_json::Value, String>,
+) {
+    let channel = from.and_then(|f| {
+        gateway_channels::resolve_by_setting("integration_id", f)
+            .or_else(|| gateway_channels::resolve_by_setting("from", f))
+    });
+    let (outcome, detail) = match result {
+        Ok(_) => ("sent", None),
+        Err(e) => ("send_failed", Some(e.clone())),
+    };
+    crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+        direction: "outbound".into(),
+        platform: adapter.to_string(),
+        from: from.map(str::to_string),
+        to: Some(recipient.to_string()),
+        body: crate::gateway_activity::truncate_body(content),
+        source_id: from.map(str::to_string),
+        channel_id: channel.as_ref().map(|c| c.id.clone()),
+        channel_name: channel.as_ref().map(|c| c.name.clone()),
+        outcome: outcome.into(),
+        detail,
+        ..Default::default()
+    });
 }

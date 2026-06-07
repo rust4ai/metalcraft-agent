@@ -221,6 +221,8 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/gateway/channels", get(list_gateway_channels).post(post_create_gateway_channel))
         .route("/api/v1/gateway/channels/{id}", put(put_gateway_channel).delete(delete_gateway_channel))
         .route("/api/v1/gateway/channels/{id}/enabled", put(put_gateway_channel_enabled))
+        .route("/api/v1/gateway/channels/{id}/events", get(list_gateway_channel_events))
+        .route("/api/v1/gateway/activity", get(list_gateway_activity))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         // Health check — registered after the auth layer so it stays
         // unauthenticated (for Railway / DO App Platform probes).
@@ -1815,6 +1817,19 @@ async fn list_gateway_channels() -> Json<Vec<crate::gateway_channels::ChannelIns
     Json(crate::gateway_channels::load_instances())
 }
 
+/// Recent inbound/outbound activity for a single channel (newest first).
+async fn list_gateway_channel_events(
+    Path(id): Path<String>,
+) -> Json<Vec<crate::gateway_activity::GatewayEvent>> {
+    Json(crate::gateway_activity::list(Some(&id), 200))
+}
+
+/// Recent gateway activity across all channels, including inbound messages that
+/// matched no channel (the global Network view). Newest first.
+async fn list_gateway_activity() -> Json<Vec<crate::gateway_activity::GatewayEvent>> {
+    Json(crate::gateway_activity::list(None, 300))
+}
+
 #[derive(Deserialize)]
 struct CreateGatewayChannelRequest {
     type_id: String,
@@ -1909,6 +1924,13 @@ async fn handle_twilio_webhook(headers: HeaderMap, Form(form): Form<HashMap<Stri
         let url = format!("{}/webhook/twilio", base.trim_end_matches('/'));
         if token.is_empty() || !crate::tools::twilio::validate_signature(&token, &url, &form, signature) {
             log::warn!("Rejected Twilio webhook: invalid or missing X-Twilio-Signature");
+            crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+                direction: "inbound".into(),
+                platform: "twilio".into(),
+                outcome: "signature_rejected".into(),
+                detail: Some("invalid or missing X-Twilio-Signature".into()),
+                ..Default::default()
+            });
             return StatusCode::FORBIDDEN;
         }
     }
@@ -1923,11 +1945,35 @@ async fn handle_twilio_webhook(headers: HeaderMap, Form(form): Form<HashMap<Stri
             "Twilio webhook for '{}' matched no enabled WhatsApp channel — ignoring",
             inbound.to
         );
+        crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+            direction: "inbound".into(),
+            platform: "twilio".into(),
+            from: Some(inbound.from.clone()),
+            from_name: inbound.profile_name.clone(),
+            to: Some(inbound.to.clone()),
+            body: crate::gateway_activity::truncate_body(&inbound.body),
+            outcome: "no_matching_channel".into(),
+            detail: Some(format!("no enabled WhatsApp channel for number {}", inbound.to)),
+            ..Default::default()
+        });
         return StatusCode::OK;
     };
 
     let Some(persona_slug) = channel.setting("persona").map(str::to_string) else {
         log::error!("WhatsApp channel '{}' has no persona configured", channel.name);
+        crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+            direction: "inbound".into(),
+            platform: "twilio".into(),
+            from: Some(inbound.from.clone()),
+            from_name: inbound.profile_name.clone(),
+            to: Some(inbound.to.clone()),
+            body: crate::gateway_activity::truncate_body(&inbound.body),
+            channel_id: Some(channel.id.clone()),
+            channel_name: Some(channel.name.clone()),
+            outcome: "no_persona".into(),
+            detail: Some("channel has no persona configured".into()),
+            ..Default::default()
+        });
         return StatusCode::OK;
     };
     let model_name = channel
@@ -1935,6 +1981,20 @@ async fn handle_twilio_webhook(headers: HeaderMap, Form(form): Form<HashMap<Stri
         .map(str::to_string)
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let reply_from = channel.setting("from").unwrap_or(&inbound.to).to_string();
+
+    crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+        direction: "inbound".into(),
+        platform: "twilio".into(),
+        from: Some(inbound.from.clone()),
+        from_name: inbound.profile_name.clone(),
+        to: Some(inbound.to.clone()),
+        body: crate::gateway_activity::truncate_body(&inbound.body),
+        channel_id: Some(channel.id.clone()),
+        channel_name: Some(channel.name.clone()),
+        outcome: "routed".into(),
+        detail: Some(format!("persona {persona_slug}")),
+        ..Default::default()
+    });
 
     let sender = inbound.profile_name.clone().unwrap_or_else(|| inbound.from.clone());
     let prompt = format!(
@@ -1965,6 +2025,13 @@ async fn handle_pipestreamr_webhook(headers: HeaderMap, body: axum::body::Bytes)
                 .unwrap_or_default();
             if !crate::tools::pipestreamr::validate_signature(&secret, &body, signature) {
                 log::warn!("Rejected PipeStreamr webhook: invalid or missing X-PipeStreamr-Signature");
+                crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+                    direction: "inbound".into(),
+                    platform: "pipestreamr".into(),
+                    outcome: "signature_rejected".into(),
+                    detail: Some("invalid or missing X-PipeStreamr-Signature".into()),
+                    ..Default::default()
+                });
                 return StatusCode::FORBIDDEN;
             }
         }
@@ -1998,15 +2065,51 @@ async fn handle_pipestreamr_webhook(headers: HeaderMap, body: axum::body::Bytes)
     // `integration_id` setting.
     let Some(source_id) = inbound.source_id.clone() else {
         log::warn!("PipeStreamr webhook has no source_id; cannot route — ignoring");
+        crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+            direction: "inbound".into(),
+            platform: "pipestreamr".into(),
+            from: Some(inbound.from.clone()),
+            from_name: inbound.from_name.clone(),
+            body: crate::gateway_activity::truncate_body(&inbound.body),
+            outcome: "no_matching_channel".into(),
+            detail: Some("webhook had no source_id to route on".into()),
+            ..Default::default()
+        });
         return StatusCode::OK;
     };
     let Some(channel) = crate::gateway_channels::resolve_by_setting("integration_id", &source_id) else {
         log::warn!("PipeStreamr webhook for integration '{source_id}' matched no enabled channel — ignoring");
+        crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+            direction: "inbound".into(),
+            platform: "pipestreamr".into(),
+            from: Some(inbound.from.clone()),
+            from_name: inbound.from_name.clone(),
+            body: crate::gateway_activity::truncate_body(&inbound.body),
+            source_id: Some(source_id.clone()),
+            outcome: "no_matching_channel".into(),
+            detail: Some(format!(
+                "no enabled channel has integration_id = {source_id}"
+            )),
+            ..Default::default()
+        });
         return StatusCode::OK;
     };
 
     let Some(persona_slug) = channel.setting("persona").map(str::to_string) else {
         log::error!("Channel '{}' has no persona configured", channel.name);
+        crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+            direction: "inbound".into(),
+            platform: "pipestreamr".into(),
+            from: Some(inbound.from.clone()),
+            from_name: inbound.from_name.clone(),
+            body: crate::gateway_activity::truncate_body(&inbound.body),
+            source_id: Some(source_id.clone()),
+            channel_id: Some(channel.id.clone()),
+            channel_name: Some(channel.name.clone()),
+            outcome: "no_persona".into(),
+            detail: Some("channel has no persona configured".into()),
+            ..Default::default()
+        });
         return StatusCode::OK;
     };
     let model_name = channel
@@ -2025,6 +2128,20 @@ async fn handle_pipestreamr_webhook(headers: HeaderMap, body: axum::body::Bytes)
         body = inbound.body,
         from_clause = from_clause,
     );
+
+    crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+        direction: "inbound".into(),
+        platform: "pipestreamr".into(),
+        from: Some(inbound.from.clone()),
+        from_name: inbound.from_name.clone(),
+        body: crate::gateway_activity::truncate_body(&inbound.body),
+        source_id: Some(source_id.clone()),
+        channel_id: Some(channel.id.clone()),
+        channel_name: Some(channel.name.clone()),
+        outcome: "routed".into(),
+        detail: Some(format!("persona {persona_slug}")),
+        ..Default::default()
+    });
 
     spawn_webhook_agent(persona_slug, model_name, prompt, inbound.from)
 }
