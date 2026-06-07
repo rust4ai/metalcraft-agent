@@ -15,6 +15,7 @@ pub mod paths;
 pub mod persona;
 pub mod runtime;
 pub mod seed;
+pub mod session_io;
 pub mod skill;
 pub mod tools;
 pub mod trace;

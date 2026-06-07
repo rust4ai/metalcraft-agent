@@ -237,6 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         approval_mode.clone(),
         Some(llm_call_hook.clone()),
         None, // CLI runs don't emit OTLP traces
+        runtime::RuntimeOptions::default(),
         |client, model_name| client.completion_model(model_name),
     )?;
     let step_guard = guard::build_agent_guard(guard::GuardConfig::default(), Some(diagnostics.clone()));
@@ -342,6 +343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         approval_mode.clone(),
                         Some(llm_call_hook.clone()),
                         None, // CLI runs don't emit OTLP traces
+                        runtime::RuntimeOptions::default(),
                         |client, model_name| client.completion_model(model_name),
                     ) {
                         Ok(runtime::BuiltAgentRuntime {
@@ -392,6 +394,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         approval_mode.clone(),
                         Some(llm_call_hook.clone()),
                         None, // CLI runs don't emit OTLP traces
+                        runtime::RuntimeOptions::default(),
                         |client, model_name| client.completion_model(model_name),
                     ) {
                         Ok(runtime::BuiltAgentRuntime {
@@ -449,6 +452,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 approval_mode.clone(),
                 Some(llm_call_hook.clone()),
                 None, // CLI runs don't emit OTLP traces
+                runtime::RuntimeOptions::default(),
                 |client, model_name| client.completion_model(model_name),
             ) {
                 Ok(runtime::BuiltAgentRuntime {

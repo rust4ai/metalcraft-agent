@@ -81,6 +81,7 @@ fn sub_agent_registered_with_config() {
         system_prompt: "You are helpful.".into(),
         skills_dir: std::path::PathBuf::from("skills"),
         available_skills: vec![],
+        reply_sink: None,
     };
 
     let tools: Vec<String> = vec!["read_file", "sub_agent"]

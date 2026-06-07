@@ -82,6 +82,9 @@ impl metalcraft::Tool for SubAgentTool {
                 system_prompt: base_prompt.clone(),
                 skills_dir: crate::paths::skills_dir(),
                 available_skills: persona.skills.clone(),
+                // A sub-agent has no user-facing channel of its own; its result
+                // is returned to the parent, not delivered via say_to_user.
+                reply_sink: None,
             };
             let registry = crate::tools::create_registry_for_with_config(
                 &persona.resolved_tool_names(),

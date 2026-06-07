@@ -1,6 +1,9 @@
 use metalcraft::{
-    create_react_agent_with_hooks, AgentState, Executor, LlmCallHook, LlmResponseHook, RunOutcome,
+    create_react_agent_with_options, AgentOptions, AgentState, Executor, LlmCallHook,
+    LlmResponseHook, RunOutcome, ToolChoice,
 };
+
+use crate::tools::ReplySink;
 use rig::client::CompletionClient;
 use rig::completion::CompletionModel;
 use rig::providers::openai;
@@ -56,6 +59,23 @@ pub struct RunOneShotRequest<'a> {
     pub diagnostics: Option<Arc<DiagnosticsLogger>>,
 }
 
+/// Per-run I/O wiring that varies by session preset. `default()` reproduces the
+/// historical free-text agent (model decides text-vs-tool; a free-text answer
+/// ends the turn) — used by the CLI and one-shot/flow runs. Workshop and gateway
+/// sessions instead force tool-only output and reply through `say_to_user`.
+#[derive(Default)]
+pub struct RuntimeOptions {
+    /// Delivery sink for the `say_to_user` tool (SSE for workshop, adapter send
+    /// for gateway). `None` ⇒ `say_to_user` just acks.
+    pub reply_sink: Option<ReplySink>,
+    /// Tool-choice policy. `Required` forces tool-only output.
+    pub tool_choice: ToolChoice,
+    /// Tools that end the turn when called. For tool-only sessions this is
+    /// `["say_to_user"]`; the tool is auto-injected into the registry if the
+    /// persona doesn't already list it.
+    pub terminal_tools: Vec<String>,
+}
+
 pub fn build_agent_runtime<M>(
     context: &AgentRuntimeContext,
     persona: &Persona,
@@ -64,6 +84,7 @@ pub fn build_agent_runtime<M>(
     approval_mode: ApprovalMode,
     llm_call_hook: Option<LlmCallHook>,
     llm_response_hook: Option<LlmResponseHook>,
+    options: RuntimeOptions,
     make_compaction_model: impl FnOnce(&openai::Client, &str) -> M,
 ) -> Result<BuiltAgentRuntime<M>, Box<dyn std::error::Error>>
 where
@@ -76,23 +97,35 @@ where
         system_prompt: system_prompt.clone(),
         skills_dir: context.skills_dir.clone(),
         available_skills: persona.skills.clone(),
+        reply_sink: options.reply_sink,
     };
 
     // Resolve the persona's full tool set (explicit tools + any pack-scoped
-    // integration tools) — this is what the registry and step guard see.
-    let resolved_tools = persona.resolved_tool_names();
+    // integration tools) — this is what the registry and step guard see. Any
+    // terminal tool (e.g. `say_to_user`) the session needs is injected here even
+    // if the persona didn't list it, so tool-only mode always has a way to end.
+    let mut resolved_tools = persona.resolved_tool_names();
+    for terminal in &options.terminal_tools {
+        if !resolved_tools.iter().any(|t| t == terminal) {
+            resolved_tools.push(terminal.clone());
+        }
+    }
     let registry = crate::tools::create_registry_for_with_config(&resolved_tools, Some(&tool_config));
     let client = openai::Client::new(&context.api_key)?;
     let model = client.completion_model(model_name);
     let compaction_model = make_compaction_model(&client, model_name);
     let hook = approval::build_hook(approval_mode);
-    let graph = create_react_agent_with_hooks(
+    let graph = create_react_agent_with_options(
         model,
         registry,
         &system_prompt,
-        hook,
-        llm_call_hook,
-        llm_response_hook,
+        AgentOptions {
+            before_tool_call: hook,
+            llm_call_hook,
+            llm_response_hook,
+            tool_choice: options.tool_choice,
+            terminal_tools: options.terminal_tools,
+        },
     )?
     .into_arc();
 
@@ -124,6 +157,7 @@ pub async fn run_one_shot_task(
         request.approval_mode.clone(),
         llm_call_hook,
         None, // one-shot runs don't emit OTLP traces
+        RuntimeOptions::default(), // free-text agent; no session reply sink
         |client, model_name| client.completion_model(model_name),
     )?;
     // Let the guard know which of this persona's tools are status polls, so

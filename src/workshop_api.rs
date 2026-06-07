@@ -25,7 +25,8 @@ use crate::trace::TraceLogger;
 use crate::flows;
 use crate::paths;
 use crate::persona::{Persona, PersonaSummary};
-use crate::runtime::{AgentRuntimeContext, DEFAULT_MODEL};
+use crate::runtime::{AgentRuntimeContext, RuntimeOptions, DEFAULT_MODEL};
+use crate::session_io::SessionPreset;
 use crate::diagnostics_browse::{
     list_diagnostics_sessions, read_diagnostics_session, DiagnosticsSessionSummary,
 };
@@ -48,6 +49,9 @@ struct ChatSession {
     persona_slug: String,
     model_name: String,
     cwd: String,
+    /// The session's I/O type — workshop chat vs. a bound gateway conversation.
+    /// Decides where `say_to_user` replies are delivered.
+    preset: SessionPreset,
     state: Option<AgentState>,
     created_at: String,
     diagnostics: Option<Arc<DiagnosticsLogger>>,
@@ -56,6 +60,9 @@ struct ChatSession {
     /// True while a turn is mid-flight. Prevents two concurrent turns from
     /// stomping on the same state.
     busy: bool,
+    /// Inbound gateway messages that arrived while a turn was already running,
+    /// drained FIFO when the in-flight turn finishes. Empty for workshop chats.
+    pending: std::collections::VecDeque<String>,
 }
 
 /// Build a [`TraceLogger`] keyed to a diagnostics logger's session-dir name, so
@@ -892,6 +899,10 @@ struct PersistedChat {
     model_name: String,
     cwd: String,
     created_at: String,
+    /// Session I/O type. Defaults to `Workshop` so chats written before this
+    /// field existed still load.
+    #[serde(default)]
+    preset: SessionPreset,
     #[serde(default)]
     messages: Vec<ChatMessageWire>,
 }
@@ -911,6 +922,7 @@ async fn persist_chat(session: &Arc<Mutex<ChatSession>>) {
             model_name: s.model_name.clone(),
             cwd: s.cwd.clone(),
             created_at: s.created_at.clone(),
+            preset: s.preset.clone(),
             messages: s
                 .state
                 .as_ref()
@@ -1005,12 +1017,14 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
             persona_slug: pc.persona_slug,
             model_name: pc.model_name,
             cwd: pc.cwd,
+            preset: pc.preset,
             state,
             created_at: pc.created_at,
             diagnostics: None,
             trace: None, // recreated lazily on the first turn, like diagnostics
             busy: false, // anything that was busy at shutdown couldn't have
                           // finished cleanly; reset so the user can retry.
+            pending: std::collections::VecDeque::new(),
         };
         out.insert(pc.id.clone(), Arc::new(Mutex::new(session)));
     }
@@ -1094,11 +1108,13 @@ async fn post_create_chat(
         persona_slug: req.persona_slug,
         model_name: model_name.clone(),
         cwd: state.cwd.clone(),
+        preset: SessionPreset::Workshop,
         state: None,
         created_at: chrono::Utc::now().to_rfc3339(),
         diagnostics,
         trace,
         busy: false,
+        pending: std::collections::VecDeque::new(),
     };
     let session_arc = Arc::new(Mutex::new(session));
     {
@@ -1214,6 +1230,12 @@ enum ChatEvent {
         duration_ms: u64,
         result: ChatMessageWire,
     },
+    /// The agent's user-facing reply, produced by a `say_to_user` tool call.
+    /// In tool-only mode this — not free-text `LlmCompleted` content — is the
+    /// assistant's message; the workshop renders it as the reply bubble. The
+    /// underlying `say_to_user` tool start/finish events are suppressed so the
+    /// reply isn't also shown as a raw tool card.
+    Reply { content: String },
     /// Terminal event. `status` is "completed" | "interrupted" | "failed".
     Done {
         status: String,
@@ -1473,11 +1495,15 @@ async fn post_chat_turn(
                         if let Some(t) = &trace {
                             t.on_tool_start(&tool_call_id, &name, &args);
                         }
-                        let _ = tx.try_send(ChatEvent::ToolStarted {
-                            tool_call_id,
-                            name,
-                            args,
-                        });
+                        // `say_to_user` is surfaced as a `Reply` (emitted by the
+                        // reply sink during execution), not as a tool card.
+                        if name != "say_to_user" {
+                            let _ = tx.try_send(ChatEvent::ToolStarted {
+                                tool_call_id,
+                                name,
+                                args,
+                            });
+                        }
                     }
                 }
 
@@ -1491,12 +1517,15 @@ async fn post_chat_turn(
                     if let Some(t) = &trace {
                         t.on_tool_complete(&tool_call_id, &raw_result);
                     }
-                    let _ = tx.try_send(ChatEvent::ToolCompleted {
-                        tool_call_id,
-                        name,
-                        duration_ms,
-                        result,
-                    });
+                    // See the matching suppression for `ToolStarted`.
+                    if name != "say_to_user" {
+                        let _ = tx.try_send(ChatEvent::ToolCompleted {
+                            tool_call_id,
+                            name,
+                            duration_ms,
+                            result,
+                        });
+                    }
                 }
 
                 GuardAction::Continue
@@ -1509,6 +1538,21 @@ async fn post_chat_turn(
         // history (the next turn would start from scratch).
         let state_before_turn = agent_state.clone();
 
+        // Tool-only output: the agent replies by calling `say_to_user`, which
+        // routes the text here as a `Reply` event on the SSE stream. The tool
+        // is also terminal, so the turn ends once the reply is sent.
+        let reply_sink: crate::tools::ReplySink = {
+            let tx = tx.clone();
+            Arc::new(move |content: String| {
+                let tx = tx.clone();
+                Box::pin(async move {
+                    tx.send(ChatEvent::Reply { content })
+                        .await
+                        .map_err(|e| e.to_string())
+                })
+            })
+        };
+
         let outcome = run_chat_turn(
             &context,
             &persona_slug,
@@ -1518,6 +1562,11 @@ async fn post_chat_turn(
             step_guard,
             Some(llm_call_hook),
             Some(llm_response_hook),
+            RuntimeOptions {
+                reply_sink: Some(reply_sink),
+                tool_choice: metalcraft::ToolChoice::Required,
+                terminal_tools: vec!["say_to_user".to_string()],
+            },
         )
         .await;
 
@@ -1616,6 +1665,7 @@ async fn run_chat_turn(
     step_guard: StepGuard<AgentState>,
     llm_call_hook: Option<metalcraft::LlmCallHook>,
     llm_response_hook: Option<metalcraft::LlmResponseHook>,
+    options: crate::runtime::RuntimeOptions,
 ) -> Result<RunOutcome<AgentState>, Box<dyn std::error::Error + Send + Sync>> {
     use crate::runtime::build_agent_runtime;
     use rig::client::CompletionClient;
@@ -1629,6 +1679,7 @@ async fn run_chat_turn(
         ApprovalMode::AutoApprove,
         llm_call_hook,
         llm_response_hook,
+        options,
         |client, name| client.completion_model(name),
     )
     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
@@ -1911,7 +1962,11 @@ fn allow_unsigned_webhooks() -> bool {
 ///
 /// Always returns 200 for accepted-but-unroutable cases so Twilio doesn't retry
 /// a message we've deliberately ignored.
-async fn handle_twilio_webhook(headers: HeaderMap, Form(form): Form<HashMap<String, String>>) -> StatusCode {
+async fn handle_twilio_webhook(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> StatusCode {
     // Optional signature verification. We can only validate against the exact
     // public URL Twilio signed, so this is gated on TWILIO_WEBHOOK_BASE_URL
     // being set to that URL's origin (e.g. https://agent.example.com).
@@ -1996,17 +2051,25 @@ async fn handle_twilio_webhook(headers: HeaderMap, Form(form): Form<HashMap<Stri
         ..Default::default()
     });
 
-    let sender = inbound.profile_name.clone().unwrap_or_else(|| inbound.from.clone());
-    let prompt = format!(
-        "WhatsApp message from {sender} ({from}):\n\n{body}\n\n\
-         Respond using gateway_send_message with platform \"whatsapp\", channel_id \"{from}\", and from \"{reply_from}\".",
-        sender = sender,
-        from = inbound.from,
-        body = inbound.body,
-        reply_from = reply_from,
-    );
+    let adapter = crate::gateway_channels::find_type(&channel.type_id)
+        .map(|t| t.adapter)
+        .unwrap_or_else(|| channel.type_id.clone());
 
-    spawn_webhook_agent(persona_slug, model_name, prompt, inbound.from)
+    dispatch_inbound(
+        state,
+        NormalizedInbound {
+            channel_instance_id: channel.id.clone(),
+            channel_name: channel.name.clone(),
+            adapter,
+            persona_slug,
+            model_name,
+            sender: inbound.from.clone(),
+            sender_name: inbound.profile_name.clone(),
+            from: Some(reply_from),
+            body: inbound.body.clone(),
+        },
+    )
+    .await
 }
 
 /// Inbound PipeStreamr webhook (JSON `message.created`). Validates the
@@ -2015,7 +2078,11 @@ async fn handle_twilio_webhook(headers: HeaderMap, Form(form): Form<HashMap<Stri
 /// channel whose `from` number received it, and runs that channel's persona to
 /// reply (via `gateway_send_message` with platform "pipestreamr"). Returns 200
 /// for accepted-but-unroutable cases so PipeStreamr doesn't retry.
-async fn handle_pipestreamr_webhook(headers: HeaderMap, body: axum::body::Bytes) -> StatusCode {
+async fn handle_pipestreamr_webhook(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> StatusCode {
     // Fail-closed: require a configured signing secret and a valid signature.
     match crate::key_store::lookup("PIPESTREAMR_WEBHOOK_SECRET").filter(|s| !s.is_empty()) {
         Some(secret) => {
@@ -2116,18 +2183,6 @@ async fn handle_pipestreamr_webhook(headers: HeaderMap, body: axum::body::Bytes)
         .setting("model")
         .map(str::to_string)
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    // Reply back through the same integration that received the message.
-    let from_clause = format!(" and from \"{source_id}\"");
-
-    let sender = inbound.from_name.clone().unwrap_or_else(|| inbound.from.clone());
-    let prompt = format!(
-        "WhatsApp message from {sender} ({from}):\n\n{body}\n\n\
-         Respond using gateway_send_message with platform \"pipestreamr\", channel_id \"{from}\"{from_clause}.",
-        sender = sender,
-        from = inbound.from,
-        body = inbound.body,
-        from_clause = from_clause,
-    );
 
     crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
         direction: "inbound".into(),
@@ -2143,19 +2198,285 @@ async fn handle_pipestreamr_webhook(headers: HeaderMap, body: axum::body::Bytes)
         ..Default::default()
     });
 
-    spawn_webhook_agent(persona_slug, model_name, prompt, inbound.from)
+    let adapter = crate::gateway_channels::find_type(&channel.type_id)
+        .map(|t| t.adapter)
+        .unwrap_or_else(|| channel.type_id.clone());
+
+    dispatch_inbound(
+        state,
+        NormalizedInbound {
+            channel_instance_id: channel.id.clone(),
+            channel_name: channel.name.clone(),
+            adapter,
+            persona_slug,
+            model_name,
+            sender: inbound.from.clone(),
+            sender_name: inbound.from_name.clone(),
+            // Reply back through the same integration that received the message.
+            from: Some(source_id.clone()),
+            body: inbound.body.clone(),
+        },
+    )
+    .await
 }
 
 /// Shared tail for inbound webhook handlers: build the runtime context, acquire
 /// a concurrency permit, and fire-and-forget a one-shot agent run that produces
 /// (and sends) the reply. Returns the HTTP status the webhook should respond
 /// with. `who` is a human label for logging.
-fn spawn_webhook_agent(
+/// A routed inbound gateway message, normalized across adapters. This is the
+/// common shape both webhook handlers reduce to before handing off to the
+/// shared [`dispatch_inbound`] — the same way `POST /turn` normalizes a workshop
+/// message. The agent loop downstream is identical for every channel; only the
+/// reply sink (built from these fields) differs.
+struct NormalizedInbound {
+    channel_instance_id: String,
+    channel_name: String,
+    /// Native send adapter, e.g. `"pipestreamr"` / `"twilio"`.
+    adapter: String,
     persona_slug: String,
     model_name: String,
-    prompt: String,
-    who: String,
-) -> StatusCode {
+    /// The sender — the counterparty replies are sent back to.
+    sender: String,
+    sender_name: Option<String>,
+    /// Outbound sender identity (integration id for PipeStreamr, our number for
+    /// Twilio). Passed to the adapter's `send`.
+    from: Option<String>,
+    body: String,
+}
+
+/// Deterministic chat id for a gateway conversation: one chat per sender per
+/// channel instance, stable across restarts (the persisted file is named by id,
+/// so `load_persisted_chats` rehydrates the same conversation). Filename- and
+/// URL-safe: phone numbers reduce to digits; other ids keep ascii alphanumerics.
+fn gateway_chat_id(channel_instance_id: &str, sender: &str) -> String {
+    let digits = crate::gateway_channels::normalize_number(sender);
+    let suffix = if digits.is_empty() {
+        let s: String = sender.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        if s.is_empty() { "anon".to_string() } else { s.to_ascii_lowercase() }
+    } else {
+        digits
+    };
+    format!("gw-{channel_instance_id}-{suffix}")
+}
+
+/// Build the reply sink for a gateway session: `say_to_user` text is sent back
+/// out through the bound adapter to the original sender, and the send is logged
+/// to the gateway activity feed (mirroring `gateway::record_outbound`).
+fn gateway_reply_sink(
+    adapter: String,
+    recipient: String,
+    from: Option<String>,
+    channel_id: String,
+    channel_name: String,
+) -> crate::tools::ReplySink {
+    Arc::new(move |content: String| {
+        let adapter = adapter.clone();
+        let recipient = recipient.clone();
+        let from = from.clone();
+        let channel_id = channel_id.clone();
+        let channel_name = channel_name.clone();
+        Box::pin(async move {
+            let result = match adapter.as_str() {
+                "pipestreamr" => {
+                    crate::tools::pipestreamr::send(&recipient, &content, from.as_deref()).await
+                }
+                "twilio" => {
+                    crate::tools::twilio::send_whatsapp(&recipient, &content, from.as_deref()).await
+                }
+                other => Err(format!("no send adapter for '{other}'")),
+            };
+            let (outcome, detail) = match &result {
+                Ok(_) => ("sent", None),
+                Err(e) => ("send_failed", Some(e.clone())),
+            };
+            crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+                direction: "outbound".into(),
+                platform: adapter.clone(),
+                from: from.clone(),
+                to: Some(recipient.clone()),
+                body: crate::gateway_activity::truncate_body(&content),
+                source_id: from.clone(),
+                channel_id: Some(channel_id.clone()),
+                channel_name: Some(channel_name.clone()),
+                outcome: outcome.into(),
+                detail,
+                ..Default::default()
+            });
+            result.map(|_| ())
+        })
+    })
+}
+
+/// Find an existing gateway chat for this sender, or create one (with a
+/// diagnostics session) and persist it. Mirrors `post_create_chat` but keyed by
+/// the deterministic gateway id and stamped with a `Gateway` preset.
+async fn get_or_create_gateway_session(
+    state: &Arc<ApiState>,
+    n: &NormalizedInbound,
+    chat_id: &str,
+) -> Arc<Mutex<ChatSession>> {
+    {
+        let chats = state.chats.lock().await;
+        if let Some(existing) = chats.get(chat_id) {
+            return existing.clone();
+        }
+    }
+    let diagnostics = DiagnosticsLogger::new().ok().map(Arc::new);
+    if let Some(logger) = &diagnostics {
+        if let Ok(persona) = Persona::load(&n.persona_slug, &paths::personas_dir()) {
+            let system_prompt = persona.build_system_prompt(&paths::skills_dir(), &state.cwd);
+            logger.log_session_info(
+                &persona.name,
+                &n.persona_slug,
+                &n.model_name,
+                &state.cwd,
+                &system_prompt,
+                &persona.resolved_tool_names(),
+                &persona.skills,
+                true,
+                None,
+            );
+        }
+    }
+    let session = ChatSession {
+        id: chat_id.to_string(),
+        persona_slug: n.persona_slug.clone(),
+        model_name: n.model_name.clone(),
+        cwd: state.cwd.clone(),
+        preset: SessionPreset::Gateway {
+            channel_instance_id: n.channel_instance_id.clone(),
+            adapter: n.adapter.clone(),
+            recipient: n.sender.clone(),
+            from: n.from.clone(),
+        },
+        state: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        diagnostics,
+        trace: None,
+        busy: false,
+        pending: std::collections::VecDeque::new(),
+    };
+    let arc = Arc::new(Mutex::new(session));
+    {
+        let mut chats = state.chats.lock().await;
+        // Re-check under the lock in case a concurrent inbound created it first.
+        if let Some(existing) = chats.get(chat_id) {
+            return existing.clone();
+        }
+        chats.insert(chat_id.to_string(), arc.clone());
+    }
+    persist_chat(&arc).await;
+    arc
+}
+
+/// Run exactly one gateway turn against `session` with `body` as the user
+/// message, logging to diagnostics and delivering the reply via `sink`. Writes
+/// the resulting state back and persists. Headless analogue of `post_chat_turn`.
+async fn run_one_gateway_turn(
+    session: &Arc<Mutex<ChatSession>>,
+    context: &AgentRuntimeContext,
+    sink: crate::tools::ReplySink,
+    body: String,
+) {
+    let (persona_slug, model_name, cwd, agent_state, diagnostics) = {
+        let mut s = session.lock().await;
+        let next_state = match s.state.take() {
+            Some(prev) => prev.continue_with(body.clone()),
+            None => AgentState::new(body.clone()),
+        };
+        // A gateway chat reloaded from disk has no diagnostics logger; recreate
+        // it on the first turn so the Sessions pane resumes (like post_chat_turn).
+        if s.diagnostics.is_none() {
+            if let Some(logger) = DiagnosticsLogger::new().ok().map(Arc::new) {
+                if let Ok(persona) = Persona::load(&s.persona_slug, &paths::personas_dir()) {
+                    let system_prompt = persona.build_system_prompt(&paths::skills_dir(), &s.cwd);
+                    logger.log_session_info(
+                        &persona.name,
+                        &s.persona_slug,
+                        &s.model_name,
+                        &s.cwd,
+                        &system_prompt,
+                        &persona.resolved_tool_names(),
+                        &persona.skills,
+                        true,
+                        None,
+                    );
+                }
+                s.diagnostics = Some(logger);
+            }
+        }
+        (
+            s.persona_slug.clone(),
+            s.model_name.clone(),
+            s.cwd.clone(),
+            next_state,
+            s.diagnostics.clone(),
+        )
+    };
+
+    let state_before_turn = agent_state.clone();
+
+    let llm_call_hook: Option<metalcraft::LlmCallHook> = diagnostics.as_ref().map(|d| {
+        let logger = d.clone();
+        Arc::new(move |snapshot: &metalcraft::LlmCallSnapshot| {
+            logger.log_llm_request(snapshot);
+        }) as metalcraft::LlmCallHook
+    });
+    let step_guard =
+        crate::guard::build_agent_guard(crate::guard::GuardConfig::default(), diagnostics.clone());
+
+    let outcome = run_chat_turn(
+        context,
+        &persona_slug,
+        &cwd,
+        &model_name,
+        agent_state,
+        step_guard,
+        llm_call_hook,
+        None,
+        RuntimeOptions {
+            reply_sink: Some(sink),
+            tool_choice: metalcraft::ToolChoice::Required,
+            terminal_tools: vec!["say_to_user".to_string()],
+        },
+    )
+    .await;
+
+    {
+        let mut s = session.lock().await;
+        match outcome {
+            Ok(RunOutcome::Completed(st)) => s.state = Some(st),
+            Ok(RunOutcome::Interrupted { state: st, .. }) => s.state = Some(st),
+            Ok(RunOutcome::Failed { state: st, node, error }) => {
+                if let Some(logger) = &s.diagnostics {
+                    logger.log_error(&format!("{node}: {error}"));
+                }
+                s.state = Some(st);
+            }
+            Err(e) => {
+                // Framework error with no recoverable state: roll back so the
+                // conversation history isn't wiped.
+                if let Some(logger) = &s.diagnostics {
+                    logger.log_error(&error_chain(e.as_ref()));
+                }
+                s.state = Some(state_before_turn);
+            }
+        }
+    }
+    persist_chat(session).await;
+}
+
+/// Shared entry point for inbound gateway messages. Routes the message into the
+/// same persistent `ChatSession` machinery the workshop UI uses — one chat per
+/// sender — so gateway conversations show up in the Chats and Sessions panes and
+/// accumulate history. Replies are delivered out through the bound adapter by
+/// the session's reply sink (no platform-specific tool instruction). Returns the
+/// HTTP status the webhook should answer with.
+async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusCode {
+    // Build the runtime context up front. Its error is a non-`Send`
+    // `Box<dyn Error>`, so it must be fully handled here — before any `.await` —
+    // or the handler future stops being `Send`.
     let context = match AgentRuntimeContext::from_environment() {
         Ok(ctx) => ctx,
         Err(e) => {
@@ -2163,42 +2484,110 @@ fn spawn_webhook_agent(
             return StatusCode::INTERNAL_SERVER_ERROR;
         }
     };
-    let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into());
 
+    let chat_id = gateway_chat_id(&n.channel_instance_id, &n.sender);
+    let session = get_or_create_gateway_session(&state, &n, &chat_id).await;
+
+    // Claim the turn. If one is already running for this sender, enqueue the
+    // body so it's processed when the in-flight turn finishes (no lost messages).
+    {
+        let mut s = session.lock().await;
+        if s.busy {
+            s.pending.push_back(n.body.clone());
+            log::info!("Inbound from {} queued — chat {chat_id} is mid-turn", n.sender);
+            crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+                direction: "inbound".into(),
+                platform: n.adapter.clone(),
+                from: Some(n.sender.clone()),
+                from_name: n.sender_name.clone(),
+                body: crate::gateway_activity::truncate_body(&n.body),
+                channel_id: Some(n.channel_instance_id.clone()),
+                channel_name: Some(n.channel_name.clone()),
+                outcome: "queued".into(),
+                detail: Some("a turn is already in flight for this sender".into()),
+                ..Default::default()
+            });
+            return StatusCode::OK;
+        }
+        s.busy = true;
+    }
+
+    // Cap concurrent agent runs. If saturated, release the claim and enqueue so
+    // the message isn't dropped; 503 invites the provider to retry.
     let permit = match webhook_semaphore().clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
-            log::warn!("Dropping inbound message from {who} — max concurrent webhook tasks ({MAX_WEBHOOK_TASKS}) reached");
+            let mut s = session.lock().await;
+            s.busy = false;
+            s.pending.push_back(n.body.clone());
+            log::warn!(
+                "Inbound from {} deferred — max concurrent agent runs ({MAX_WEBHOOK_TASKS}) reached",
+                n.sender
+            );
             return StatusCode::SERVICE_UNAVAILABLE;
         }
     };
 
+    // Process this message, then drain any messages that queued while we ran,
+    // FIFO, before releasing the busy flag. Fire-and-forget: the webhook has
+    // already been acknowledged.
+    let sink = gateway_reply_sink(
+        n.adapter.clone(),
+        n.sender.clone(),
+        n.from.clone(),
+        n.channel_instance_id.clone(),
+        n.channel_name.clone(),
+    );
     tokio::spawn(async move {
         let _permit = permit;
-        log::info!("Processing inbound message from {who}");
-        let outcome = crate::runtime::run_one_shot_task(
-            &context,
-            crate::runtime::RunOneShotRequest {
-                persona_slug: &persona_slug,
-                cwd: &cwd,
-                model_name: &model_name,
-                task: &prompt,
-                approval_mode: ApprovalMode::AutoApprove,
-                diagnostics: None,
-            },
-        )
-        .await;
-        match outcome {
-            Ok(metalcraft::RunOutcome::Completed(_)) => log::info!("Inbound message from {who} handled"),
-            Ok(metalcraft::RunOutcome::Interrupted { reason, .. }) => {
-                log::warn!("Inbound message from {who} interrupted: {reason}")
+        let mut body = n.body.clone();
+        loop {
+            run_one_gateway_turn(&session, &context, sink.clone(), body).await;
+            let mut s = session.lock().await;
+            match s.pending.pop_front() {
+                Some(next) => body = next,
+                None => {
+                    s.busy = false;
+                    break;
+                }
             }
-            Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
-                log::error!("Inbound message from {who} failed at {node}: {error}")
-            }
-            Err(e) => log::error!("Inbound message from {who} failed: {e}"),
         }
     });
 
     StatusCode::OK
+}
+
+#[cfg(test)]
+mod gateway_tests {
+    use super::gateway_chat_id;
+
+    #[test]
+    fn chat_id_is_deterministic_per_sender_and_channel() {
+        let a = gateway_chat_id("chan-1", "+1 (555) 000-1234");
+        let b = gateway_chat_id("chan-1", "whatsapp:+15550001234");
+        // Same sender (modulo formatting) on the same channel → same chat,
+        // so a conversation accumulates and survives restarts.
+        assert_eq!(a, b);
+        assert_eq!(a, "gw-chan-1-15550001234");
+    }
+
+    #[test]
+    fn chat_id_separates_senders_and_channels() {
+        assert_ne!(
+            gateway_chat_id("chan-1", "+15550001234"),
+            gateway_chat_id("chan-1", "+15550009999")
+        );
+        assert_ne!(
+            gateway_chat_id("chan-1", "+15550001234"),
+            gateway_chat_id("chan-2", "+15550001234")
+        );
+    }
+
+    #[test]
+    fn chat_id_handles_non_numeric_senders() {
+        let id = gateway_chat_id("chan-1", "user@example.com");
+        assert_eq!(id, "gw-chan-1-userexamplecom");
+        // Empty/symbol-only sender falls back to a stable placeholder.
+        assert_eq!(gateway_chat_id("chan-1", "!!!"), "gw-chan-1-anon");
+    }
 }

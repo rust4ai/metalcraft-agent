@@ -12,6 +12,7 @@ pub mod meta_flow;
 pub mod meta_persona;
 pub mod meta_skill;
 pub mod read_file;
+pub mod say_to_user;
 pub mod spaces;
 pub mod sub_agent;
 pub mod twilio;
@@ -19,7 +20,17 @@ pub mod web_fetch;
 pub mod write_file;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use futures_util::future::BoxFuture;
 use metalcraft::ToolRegistry;
+
+/// Where a session's user-facing reply is delivered. The agent always replies
+/// through the channel-agnostic `say_to_user` tool; the *caller* that builds the
+/// runtime supplies this closure to route that text to the right place — the SSE
+/// stream for a workshop chat, or a gateway adapter (PipeStreamr/Twilio) for a
+/// gateway session. Takes the message text, returns Ok on delivery.
+pub type ReplySink =
+    Arc<dyn Fn(String) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
 /// Configuration for tools that need runtime parameters.
 pub struct ToolConfig {
@@ -28,6 +39,9 @@ pub struct ToolConfig {
     pub system_prompt: String,
     pub skills_dir: PathBuf,
     pub available_skills: Vec<String>,
+    /// Delivery sink for the `say_to_user` tool. `None` outside a session
+    /// context (e.g. one-shot/flow runs), where `say_to_user` just acks.
+    pub reply_sink: Option<ReplySink>,
 }
 
 /// Register only the tools listed by name.
@@ -98,6 +112,9 @@ pub fn create_registry_for_with_config(
             // (e.g. Twilio's HTTP Basic auth from two key-store secrets). It
             // dispatches by the channel type's `adapter`. See `tools::gateway`.
             "gateway_send_message" => registry.register(gateway::GatewaySendMessageTool),
+            "say_to_user" => registry.register(say_to_user::SayToUserTool::new(
+                config.and_then(|c| c.reply_sink.clone()),
+            )),
             "sub_agent" => {
                 if let Some(cfg) = config {
                     registry.register(sub_agent::SubAgentTool::new(
