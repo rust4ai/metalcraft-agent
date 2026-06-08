@@ -69,7 +69,7 @@ static INIT: Once = Once::new();
 
 fn init() {
     INIT.call_once(|| {
-        let data_dir = std::env::temp_dir().join(format!("mc-meta-spice-{}", std::process::id()));
+        let data_dir = std::env::temp_dir().join(format!("mc-config-spice-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data_dir);
         // SAFETY: set before any other thread touches the environment or
         // paths::data_dir(); guarded by `Once` so it happens exactly once.
@@ -407,7 +407,7 @@ async fn live_config_agent_installs_linear() {
 
     // Throwaway key — we never call Linear, only verify it round-trips into the
     // store. Use a recognizable sentinel so the post-run assertion is precise.
-    const TEST_KEY_VALUE: &str = "lin_api_metaspice_TESTKEY_do_not_use";
+    const TEST_KEY_VALUE: &str = "lin_api_configspice_TESTKEY_do_not_use";
 
     // Preconditions: linear must start disabled and unkeyed so the agent has to
     // do both steps itself.
