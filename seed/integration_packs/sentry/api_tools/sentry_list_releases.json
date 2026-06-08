@@ -1,0 +1,21 @@
+{
+  "name": "sentry_list_releases",
+  "description": "List releases for the configured Sentry organization, newest first — useful for correlating a spike of errors with a recent deploy. Each release includes `version`, `shortVersion`, `dateCreated`, `dateReleased`, `projects`, and deploy/commit counts. Optional `query` filters by version substring (e.g. a release name or git sha).",
+  "method": "GET",
+  "url": "https://sentry.io/api/0/organizations/$SENTRY_ORG_SLUG/releases/?query={query}",
+  "headers": {
+    "Authorization": "Bearer $SENTRY_AUTH_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Optional version substring to filter releases by."
+      }
+    },
+    "required": []
+  },
+  "body_mapping": "none"
+}

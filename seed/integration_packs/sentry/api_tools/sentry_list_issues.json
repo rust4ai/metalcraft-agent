@@ -1,0 +1,33 @@
+{
+  "name": "sentry_list_issues",
+  "description": "List issues (grouped errors) in a Sentry project, newest activity first. Provide `project_slug` (from sentry_list_projects). Optional: `query` is a Sentry search string and defaults to `is:unresolved` when omitted (examples: `is:unresolved level:error`, `is:unresolved firstSeen:-24h`, `assigned:me`); `statsPeriod` bounds the window (e.g. `24h` default, `14d`); `limit` caps results (max 100). Each issue includes `id` (numeric, used by sentry_get_issue / sentry_update_issue), `shortId`, `title`, `culprit`, `level`, `status`, `count`, `userCount`, `firstSeen`, and `lastSeen`.",
+  "method": "GET",
+  "url": "https://sentry.io/api/0/projects/$SENTRY_ORG_SLUG/{project_slug}/issues/?query={query}&statsPeriod={statsPeriod}&limit={limit}",
+  "headers": {
+    "Authorization": "Bearer $SENTRY_AUTH_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "project_slug": {
+        "type": "string",
+        "description": "The project's slug (the `slug` field from sentry_list_projects)."
+      },
+      "query": {
+        "type": "string",
+        "description": "Optional Sentry search query. Defaults to `is:unresolved` if omitted."
+      },
+      "statsPeriod": {
+        "type": "string",
+        "description": "Optional time window, e.g. `24h` (default) or `14d`."
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Optional max number of issues to return (max 100)."
+      }
+    },
+    "required": ["project_slug"]
+  },
+  "body_mapping": "none"
+}

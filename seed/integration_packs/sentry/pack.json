@@ -1,0 +1,10 @@
+{
+  "id": "sentry",
+  "name": "Sentry",
+  "description": "Persona, skill, and HTTP API tools to monitor Sentry error tracking via its REST API and a personal User Auth Token — list projects, query recent/filtered issues, inspect an issue's latest event and stacktrace, resolve/ignore/assign issues, and list releases. Authenticated by SENTRY_AUTH_TOKEN against the organization SENTRY_ORG_SLUG (sentry.io SaaS).",
+  "version": "1.0.0",
+  "requires_env": [
+    "SENTRY_AUTH_TOKEN",
+    "SENTRY_ORG_SLUG"
+  ]
+}

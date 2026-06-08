@@ -1,0 +1,21 @@
+{
+  "name": "sentry_get_latest_event",
+  "description": "Retrieve the most recent event (occurrence) for a Sentry issue — the data you need to debug it: the exception type and value, the full stacktrace (`entries` with frames), `tags`, `contexts` (runtime, OS, browser), request data, and `dateCreated`. Provide the issue's numeric `issue_id` (the `id` field from sentry_list_issues).",
+  "method": "GET",
+  "url": "https://sentry.io/api/0/organizations/$SENTRY_ORG_SLUG/issues/{issue_id}/events/latest/",
+  "headers": {
+    "Authorization": "Bearer $SENTRY_AUTH_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "issue_id": {
+        "type": "string",
+        "description": "The issue's numeric id (the `id` field from sentry_list_issues)."
+      }
+    },
+    "required": ["issue_id"]
+  },
+  "body_mapping": "none"
+}

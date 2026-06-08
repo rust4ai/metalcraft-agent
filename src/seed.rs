@@ -311,7 +311,7 @@ mod tests {
             .dirs()
             .filter_map(|d| d.path().file_name().and_then(|s| s.to_str()))
             .collect();
-        for expected in ["cloudflare", "github", "digitalocean_spaces"] {
+        for expected in ["cloudflare", "github", "digitalocean_spaces", "sentry"] {
             assert!(ids.contains(&expected), "pack '{expected}' should be embedded, got {ids:?}");
         }
         // The Spaces pack ships a manifest + persona + skill but no api_tools/.

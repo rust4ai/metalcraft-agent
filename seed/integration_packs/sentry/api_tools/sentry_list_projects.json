@@ -1,0 +1,16 @@
+{
+  "name": "sentry_list_projects",
+  "description": "List the projects in the configured Sentry organization that the token can access. Returns each project's `slug` (use it as `project_slug` for sentry_list_issues), numeric `id`, `name`, `platform`, and `dateCreated`. Call this first to discover project slugs.",
+  "method": "GET",
+  "url": "https://sentry.io/api/0/organizations/$SENTRY_ORG_SLUG/projects/",
+  "headers": {
+    "Authorization": "Bearer $SENTRY_AUTH_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "body_mapping": "none"
+}

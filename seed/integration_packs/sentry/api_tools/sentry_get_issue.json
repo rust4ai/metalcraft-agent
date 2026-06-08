@@ -1,0 +1,21 @@
+{
+  "name": "sentry_get_issue",
+  "description": "Retrieve full detail for a single Sentry issue: status, assignment, `count`, `userCount`, `firstSeen`/`lastSeen`, tag distributions, and metadata. Provide the issue's numeric `issue_id` (the `id` field from sentry_list_issues, not the shortId). For the actual stacktrace of the latest occurrence, use sentry_get_latest_event.",
+  "method": "GET",
+  "url": "https://sentry.io/api/0/organizations/$SENTRY_ORG_SLUG/issues/{issue_id}/",
+  "headers": {
+    "Authorization": "Bearer $SENTRY_AUTH_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "issue_id": {
+        "type": "string",
+        "description": "The issue's numeric id (the `id` field from sentry_list_issues)."
+      }
+    },
+    "required": ["issue_id"]
+  },
+  "body_mapping": "none"
+}
