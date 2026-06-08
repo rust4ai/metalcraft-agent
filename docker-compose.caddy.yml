@@ -18,6 +18,10 @@
 
 services:
   daemon:
+    # On the VPS: `docker compose -f docker-compose.caddy.yml pull && up -d`
+    # pulls this prebuilt image from GHCR — no compiling on the host.
+    # Locally you can still `up --build` to build from source via `build:`.
+    image: ghcr.io/rust4ai/metalcraft-agent:${TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile

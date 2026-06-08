@@ -19,6 +19,9 @@ services:
     restart: unless-stopped
 
   daemon:
+    # On the VPS: `docker compose pull && up -d` pulls this prebuilt image
+    # from GHCR. Locally, `up --build` still builds from source via `build:`.
+    image: ghcr.io/rust4ai/metalcraft-agent:${TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile

@@ -1,0 +1,21 @@
+# Keep the Docker build context tiny. Without this, the 40GB+ target/ dir is
+# shipped to the daemon on every build.
+target
+.git
+.env
+logs
+flows
+
+# Runtime-seeded data dirs (canonical copies live in seed/)
+personas
+skills
+
+# Docs / local-only files not needed in the image
+*.md
+docs
+openapi
+.do
+.claude
+docker-compose*.yml
+Caddyfile
+railway.toml
