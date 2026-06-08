@@ -2014,23 +2014,13 @@ async fn handle_twilio_webhook(
         return StatusCode::OK;
     };
 
-    let Some(persona_slug) = channel.setting("persona").map(str::to_string) else {
-        log::error!("WhatsApp channel '{}' has no persona configured", channel.name);
-        crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
-            direction: "inbound".into(),
-            platform: "twilio".into(),
-            from: Some(inbound.from.clone()),
-            from_name: inbound.profile_name.clone(),
-            to: Some(inbound.to.clone()),
-            body: crate::gateway_activity::truncate_body(&inbound.body),
-            channel_id: Some(channel.id.clone()),
-            channel_name: Some(channel.name.clone()),
-            outcome: "no_persona".into(),
-            detail: Some("channel has no persona configured".into()),
-            ..Default::default()
-        });
-        return StatusCode::OK;
-    };
+    // Default to the orchestrator (which delegates to specialists) when a
+    // channel doesn't pin a specific persona.
+    let persona_slug = channel
+        .setting("persona")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "orchestrator-agent".to_string());
     let model_name = channel
         .setting("model")
         .map(str::to_string)
@@ -2162,23 +2152,13 @@ async fn handle_pipestreamr_webhook(
         return StatusCode::OK;
     };
 
-    let Some(persona_slug) = channel.setting("persona").map(str::to_string) else {
-        log::error!("Channel '{}' has no persona configured", channel.name);
-        crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
-            direction: "inbound".into(),
-            platform: "pipestreamr".into(),
-            from: Some(inbound.from.clone()),
-            from_name: inbound.from_name.clone(),
-            body: crate::gateway_activity::truncate_body(&inbound.body),
-            source_id: Some(source_id.clone()),
-            channel_id: Some(channel.id.clone()),
-            channel_name: Some(channel.name.clone()),
-            outcome: "no_persona".into(),
-            detail: Some("channel has no persona configured".into()),
-            ..Default::default()
-        });
-        return StatusCode::OK;
-    };
+    // The orchestrator delegates to specialist personas as needed, so it's the
+    // sensible default when a channel doesn't pin a specific persona.
+    let persona_slug = channel
+        .setting("persona")
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "orchestrator-agent".to_string());
     let model_name = channel
         .setting("model")
         .map(str::to_string)

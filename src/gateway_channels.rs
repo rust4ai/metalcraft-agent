@@ -14,8 +14,8 @@
 //! instances of one type are allowed. Instances are persisted as a JSON array at
 //! `<data>/gateway_channels.json`:
 //! ```json
-//! [ { "id": "uuid", "type_id": "whatsapp", "name": "Support line",
-//!     "enabled": true, "settings": { "from": "+1555…", "persona": "whatsapp-agent" } } ]
+//! [ { "id": "uuid", "type_id": "pipestreamr", "name": "Support line",
+//!     "enabled": true, "settings": { "from": "+1555…", "persona": "orchestrator-agent" } } ]
 //! ```
 //!
 //! Account-level secrets (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`) live in the

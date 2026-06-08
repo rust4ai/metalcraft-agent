@@ -29,9 +29,9 @@
       "key": "persona",
       "label": "Persona",
       "input_type": "persona",
-      "required": true,
-      "placeholder": "whatsapp-agent",
-      "help": "The persona that answers inbound messages on this channel."
+      "required": false,
+      "placeholder": "orchestrator-agent",
+      "help": "The persona that answers inbound messages on this channel. Leave blank to use the orchestrator-agent, which delegates to specialist personas as needed."
     },
     {
       "key": "model",

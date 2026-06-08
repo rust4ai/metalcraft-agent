@@ -57,8 +57,8 @@ pub struct GatewayEvent {
     /// The matched gateway channel's name, for display.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_name: Option<String>,
-    /// Outcome: `routed`, `no_matching_channel`, `no_persona`,
-    /// `signature_rejected`, `sent`, `send_failed`.
+    /// Outcome: `routed`, `no_matching_channel`, `signature_rejected`,
+    /// `sent`, `send_failed`.
     pub outcome: String,
     /// Extra context — persona used, error message, etc.
     #[serde(skip_serializing_if = "Option::is_none")]
