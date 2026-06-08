@@ -9,6 +9,8 @@ pub mod load_skill;
 pub mod meta_diagnostics;
 pub mod pipestreamr;
 pub mod meta_flow;
+pub mod meta_integration;
+pub mod meta_keys;
 pub mod meta_persona;
 pub mod meta_skill;
 pub mod read_file;
@@ -97,6 +99,15 @@ pub fn create_registry_for_with_config(
             "flow_template_read" => registry.register(meta_flow::FlowTemplateReadTool),
             "diagnostics_list" => registry.register(meta_diagnostics::DiagnosticsListTool),
             "diagnostics_read" => registry.register(meta_diagnostics::DiagnosticsReadTool),
+            // Integration packs: install (enable/disable) capabilities for the
+            // agent itself, and inspect what's available + which keys they need.
+            "pack_list" => registry.register(meta_integration::PackListTool),
+            "pack_enable" => registry.register(meta_integration::PackEnableTool),
+            // API key / secret store: the secrets HTTP-API tools reference via
+            // `$NAME`. Setting a key here is what lets an enabled pack authenticate.
+            "key_list" => registry.register(meta_keys::KeyListTool),
+            "key_set" => registry.register(meta_keys::KeySetTool),
+            "key_delete" => registry.register(meta_keys::KeyDeleteTool),
             // DigitalOcean Spaces (S3-compatible) file storage — native tools
             // because S3 requires per-request AWS SigV4 signing the declarative
             // HTTP-API tool can't produce. Shipped by the `digitalocean_spaces`
