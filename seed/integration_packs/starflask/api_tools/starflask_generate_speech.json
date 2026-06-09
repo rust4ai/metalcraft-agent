@@ -27,7 +27,7 @@
   },
   "body_mapping": "params_nested",
   "body_defaults": {
-    "type": "audio",
+    "type": "audio:generate",
     "payload": {
       "structured_data": {
         "model_key": "chatterbox-tts"

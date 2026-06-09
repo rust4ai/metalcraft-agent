@@ -35,7 +35,7 @@
   },
   "body_mapping": "params_nested",
   "body_defaults": {
-    "type": "image",
+    "type": "image:generate",
     "payload": {
       "structured_data": {
         "model_key": "ideogram-v3"

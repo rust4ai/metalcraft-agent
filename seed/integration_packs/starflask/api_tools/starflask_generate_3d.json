@@ -39,7 +39,7 @@
   },
   "body_mapping": "params_nested",
   "body_defaults": {
-    "type": "mesh",
+    "type": "mesh:generate",
     "payload": {
       "structured_data": {
         "model_key": "meshy-v6"

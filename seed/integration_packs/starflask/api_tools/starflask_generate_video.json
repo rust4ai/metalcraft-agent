@@ -31,7 +31,7 @@
   },
   "body_mapping": "params_nested",
   "body_defaults": {
-    "type": "video",
+    "type": "video:generate",
     "payload": {
       "structured_data": {
         "model_key": "kling-text2video"
