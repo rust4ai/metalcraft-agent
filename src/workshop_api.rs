@@ -1661,7 +1661,7 @@ async fn run_chat_turn(
     persona_slug: &str,
     cwd: &str,
     model_name: &str,
-    initial_state: AgentState,
+    mut initial_state: AgentState,
     step_guard: StepGuard<AgentState>,
     llm_call_hook: Option<metalcraft::LlmCallHook>,
     llm_response_hook: Option<metalcraft::LlmResponseHook>,
@@ -1683,6 +1683,32 @@ async fn run_chat_turn(
         |client, name| client.completion_model(name),
     )
     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+
+    // Keep the conversation inside the model's context window before running the
+    // turn. Workshop and gateway sessions accumulate history indefinitely
+    // (`AgentState::continue_with` only appends), so without this a long-running
+    // chat — e.g. someone who keeps messaging the WhatsApp gateway — would
+    // eventually exceed the provider's context limit and every further turn would
+    // fail. The CLI does this in its loop; both daemon entry points funnel
+    // through here. Best-effort: a compaction failure logs and proceeds with the
+    // uncompacted state rather than dropping the turn.
+    let compaction_config = crate::context::CompactionConfig::default();
+    match crate::context::compact_if_needed(
+        &mut initial_state,
+        &runtime.compaction_model,
+        &compaction_config,
+    )
+    .await
+    {
+        Ok(true) => log::info!(
+            "Context compacted before turn -> ~{} tokens, {} messages",
+            crate::context::estimate_tokens(&initial_state),
+            initial_state.messages.len()
+        ),
+        Ok(false) => {}
+        Err(e) => log::warn!("Context compaction failed, proceeding uncompacted: {e}"),
+    }
+
     let executor = Executor::new_from_arc(runtime.graph)
         .max_steps(90)
         .with_step_guard(step_guard);
