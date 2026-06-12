@@ -24,11 +24,12 @@ Every generation is **asynchronous**:
 Never tell the user something is ready before a job reports `completed`.
 
 Result URLs by job type:
-- image -> `result.image_url`
-- video / animate -> `result.video_url`
-- 3D mesh -> `result.model_url` (plus `result.thumbnail_url`)
-- vector -> `result.svg_url`
-- audio / clip conversion -> the URL field in `result`
+- `image:generate` / `image:convert` -> `result.image_url` (or `result.svg_url` for svg)
+- `video:generate` / animate -> `result.video_url`
+- `mesh:generate` (3D mesh) -> `result.model_url` (plus `result.thumbnail_url`)
+- `vector:generate` -> `result.svg_url`
+- `video:convert` (format conversion — mp4 → animated webp / gif / mp4 / webm) -> `result.video_url`
+- `audio:generate`, or `video:convert` with `audio_only` (audio extraction) -> the audio URL field in `result`
 
 Result URLs are presigned and downloadable directly. If one expires, re-fetch fresh
 metadata with `starflask_get_media`.
@@ -37,10 +38,14 @@ metadata with `starflask_get_media`.
 
 - **`starflask_generate_image`** — text-to-image and image editing. Headline tool.
 - **`starflask_generate_video`** — text-to-video and image-to-video (animate a still).
-- **`starflask_generate_3d`** — text-to-3D and image-to-3D meshes (job type `mesh`).
-- **`starflask_generate_speech`** — text-to-speech (job type `audio`).
-- **`starflask_create_job`** — anything else by raw type: `upscale`, `remove_bg`,
-  `vectorize`, `cartoonify`, `clip` (media convert), `image:resize`, `image:crop`,
+- **`starflask_generate_3d`** — text-to-3D and image-to-3D meshes (job type `mesh:generate`).
+- **`starflask_generate_speech`** — text-to-speech (job type `audio:generate`).
+- **`starflask_convert_video`** — convert/transcode a video to another format
+  (job type `video:convert`): **mp4 → animated WebP** (default), animated GIF, mp4, or webm.
+- **`starflask_convert_image`** — convert an image to another format
+  (job type `image:convert`): png, jpeg, webp (default), gif, or svg.
+- **`starflask_create_job`** — anything else by raw type: `image:upscale`, `image:remove_bg`,
+  `image:vectorize`, `image:cartoonify`, `image:resize`, `image:crop`,
   `audio:transcribe`, etc. The general-purpose escape hatch.
 - **`starflask_get_job`** — poll a job's status/result. Use after every create.
 - **`starflask_list_models`** — discover `model_key` values and each model's
@@ -68,9 +73,18 @@ has a sensible default `model_key`, so the only required field is the content.
   (default `meshy-v6`), `topology`, `target_polycount`, `enable_pbr`.
 - **`starflask_generate_speech`**: `text` (required); optional `voice`, `model_key`
   (default `chatterbox-tts`).
+- **`starflask_convert_video`**: `video_url` (required) — the source video, from
+  `starflask_upload_media` or a prior job's `result.video_url`; optional
+  `target_format` (`webp` = animated WebP, the default; `gif`, `mp4`, `webm`), `fps`
+  (default 15), `max_width` (default 640), `start_time`, `duration`. Read the
+  converted file from `result.video_url`.
+- **`starflask_convert_image`**: `image_url` (required) — the source image, from
+  `starflask_upload_media` or a prior job's `result.image_url`; optional
+  `target_format` (`webp` default, `png`, `jpeg`, `gif`, `svg`). Read the result
+  from `result.image_url` (or `result.svg_url` for svg).
 - **`starflask_create_job`**: `type` + `model_key` (required); optional `prompt`,
-  `image_url`. The escape hatch for `upscale`, `remove_bg`, `vectorize`,
-  `cartoonify`, `image:resize`, etc.
+  `image_url`. The escape hatch for `image:upscale`, `image:remove_bg`, `image:vectorize`,
+  `image:cartoonify`, `image:resize`, etc.
 
 Always defer to a model's real `input_schema` from `starflask_list_models` when a
 request is non-trivial — that's the source of truth for which params a model
@@ -85,7 +99,9 @@ accepts and the allowed values (aspect ratios, voices, topology, …).
 - 3D: `meshy-v6`.
 - Speech / audio: `chatterbox-tts` (TTS), `elevenlabs-scribe-v2` (transcription).
 - Utility: `creative-upscaler` (upscale), `birefnet` (background removal),
-  `recraft-vectorize` (vectorize), `cartoonify`.
+  `recraft-vectorize` (vectorize), `cartoonify`, `ffmpeg-convert` (video format
+  conversion, used by `starflask_convert_video`). Image format conversion
+  (`starflask_convert_image`, job type `image:convert`) needs no model_key.
 
 ## Working with source images
 

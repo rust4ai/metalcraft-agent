@@ -1,0 +1,40 @@
+{
+  "name": "starflask_convert_image",
+  "description": "Convert an image to another format via Starflask: png, jpeg, webp (default), gif, or svg (vectorize). Returns a job id immediately — poll with starflask_get_job until status is 'completed', then read result.image_url (or result.svg_url when target_format is \"svg\"). `image_url` is the source image — from starflask_upload_media or a prior job's result.image_url. (Sends job type image:convert for you; no model_key needed.)",
+  "method": "POST",
+  "url": "https://starflask.com/api/v1/jobs",
+  "headers": {
+    "Authorization": "Bearer $STARFLASK_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "image_url": {
+        "type": "string",
+        "description": "URL of the source image to convert (from starflask_upload_media or a prior job's result.image_url)."
+      },
+      "target_format": {
+        "type": "string",
+        "enum": ["png", "jpeg", "webp", "gif", "svg"],
+        "description": "Output format. \"webp\" (default), \"png\", \"jpeg\", \"gif\", or \"svg\" (vectorize)."
+      }
+    },
+    "required": ["image_url"]
+  },
+  "body_mapping": "params_nested",
+  "body_defaults": {
+    "type": "image:convert",
+    "payload": {
+      "structured_data": {
+        "params": {
+          "target_format": "webp"
+        }
+      }
+    }
+  },
+  "param_paths": {
+    "image_url": "payload.structured_data.params.image_url",
+    "target_format": "payload.structured_data.params.target_format"
+  }
+}

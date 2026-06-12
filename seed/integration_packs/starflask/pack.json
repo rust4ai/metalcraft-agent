@@ -1,8 +1,8 @@
 {
   "id": "starflask",
   "name": "Starflask Media Studio",
-  "description": "Persona, skill, and HTTP API tools that let an agent generate media with Starflask (starflask.com) — images, video, 3D meshes, and speech — plus upload source media, list models/styles, poll jobs, and check credits, all via a Starflask API key. Mirrors what the `npx starflask` CLI exposes.",
-  "version": "1.0.3",
+  "description": "Persona, skill, and HTTP API tools that let an agent generate media with Starflask (starflask.com) — images, video, 3D meshes, and speech — convert video (mp4 → animated WebP/GIF) and image formats, plus upload source media, list models/styles, poll jobs, and check credits, all via a Starflask API key. Mirrors what the `npx starflask` CLI exposes.",
+  "version": "1.1.0",
   "requires_env": [
     "STARFLASK_API_KEY"
   ]

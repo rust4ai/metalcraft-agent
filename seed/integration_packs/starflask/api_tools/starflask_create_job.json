@@ -1,6 +1,6 @@
 {
   "name": "starflask_create_job",
-  "description": "Create an arbitrary Starflask job by type — the general-purpose equivalent of `npx starflask jobs create <type>`. Use this for job types without a dedicated tool: \"upscale\", \"remove_bg\", \"vectorize\", \"vector\", \"cartoonify\", and subtypes like \"image:resize\", \"image:crop\". Returns a job id immediately — poll with starflask_get_job until 'completed', then read the relevant URL from result. Set `type`, a `model_key` (see starflask_list_models), and whichever of `prompt` / `image_url` the job needs (most transform jobs take an image_url pointing at media you uploaded via starflask_upload_media). Prefer starflask_generate_image / _video / _3d / _speech for those four common cases.",
+  "description": "Create an arbitrary Starflask job by type — the general-purpose equivalent of `npx starflask jobs create <type>`. Use this for job types without a dedicated tool: \"image:upscale\", \"image:remove_bg\", \"image:vectorize\", \"vector:generate\", \"image:cartoonify\", and subtypes like \"image:resize\", \"image:crop\". Returns a job id immediately — poll with starflask_get_job until 'completed', then read the relevant URL from result. Set `type`, a `model_key` (see starflask_list_models), and whichever of `prompt` / `image_url` the job needs (most transform jobs take an image_url pointing at media you uploaded via starflask_upload_media). Prefer starflask_generate_image / _video / _3d / _speech for those four common cases.",
   "method": "POST",
   "url": "https://starflask.com/api/v1/jobs",
   "headers": {
@@ -12,7 +12,7 @@
     "properties": {
       "type": {
         "type": "string",
-        "description": "The job type, e.g. \"upscale\", \"remove_bg\", \"vectorize\", \"cartoonify\", \"image:resize\", \"image:crop\"."
+        "description": "The job type, e.g. \"image:upscale\", \"image:remove_bg\", \"image:vectorize\", \"image:cartoonify\", \"image:resize\", \"image:crop\"."
       },
       "model_key": {
         "type": "string",
