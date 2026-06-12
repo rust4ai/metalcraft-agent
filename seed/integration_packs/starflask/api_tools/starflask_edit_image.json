@@ -1,0 +1,47 @@
+{
+  "name": "starflask_edit_image",
+  "description": "Edit an existing image with Starflask — change a background, add/remove an object, restyle, fix a detail, extend a scene. Provide `image_url` (the source image, from starflask_upload_media or a prior job's result.image_url) and `prompt` (the edit instruction, e.g. \"replace the sky with a sunset\", \"remove the person on the left\", \"make the jacket red\" — be specific about what changes and what stays). Defaults to the editing-capable model nano-banana-edit, so you don't have to pair a model yourself. Returns a job id immediately ({\"data\":{\"id\":\"<uuid>\"}}) — poll with starflask_get_job until status is 'completed', then read result.image_url (a downloadable presigned URL). To iterate, feed that result.image_url back in as image_url. (This is starflask_generate_image specialized for the image-in/image-out edit case; for text-to-image from scratch use starflask_generate_image.)",
+  "method": "POST",
+  "url": "https://starflask.com/api/v1/jobs",
+  "headers": {
+    "Authorization": "Bearer $STARFLASK_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "image_url": {
+        "type": "string",
+        "description": "URL of the source image to edit (from starflask_upload_media or a prior image job's result.image_url)."
+      },
+      "prompt": {
+        "type": "string",
+        "description": "The edit instruction — what to change, while leaving the rest intact. e.g. \"replace the sky with a sunset\", \"remove the person on the left\", \"make the jacket red\"."
+      },
+      "model_key": {
+        "type": "string",
+        "description": "Optional editing model key. Defaults to nano-banana-edit. Must be an editing-capable model (plain generation models ignore image_url). See starflask_list_models."
+      },
+      "aspect_ratio": {
+        "type": "string",
+        "description": "Optional aspect ratio, e.g. \"16:9\", \"1:1\", \"9:16\", \"4:3\", \"3:4\", \"21:9\", \"3:2\", \"2:3\"."
+      }
+    },
+    "required": ["image_url", "prompt"]
+  },
+  "body_mapping": "params_nested",
+  "body_defaults": {
+    "type": "image:generate",
+    "payload": {
+      "structured_data": {
+        "model_key": "nano-banana-edit"
+      }
+    }
+  },
+  "param_paths": {
+    "image_url": "payload.structured_data.params.image_url",
+    "prompt": "payload.structured_data.params.prompt",
+    "model_key": "payload.structured_data.model_key",
+    "aspect_ratio": "payload.structured_data.params.aspect_ratio"
+  }
+}

@@ -23,6 +23,38 @@ Every generation is **asynchronous**:
 
 Never tell the user something is ready before a job reports `completed`.
 
+## Editing an existing image (one of Starflask's best features)
+
+Starflask doesn't just generate from scratch — it **edits images you already have**:
+change a background, add or remove an object, restyle, fix a detail, extend a scene.
+Use the dedicated **`starflask_edit_image`** tool: it takes the source image as
+`image_url` and your change as `prompt`, and already defaults to an editing-capable
+model (`nano-banana-edit`) so you don't have to pair one yourself.
+
+End-to-end:
+
+1. **Upload the source.** `starflask_upload_media` with the local `file_path` (must
+   be inside the upload root). Take the returned `url`. (Skip this if the image is
+   already a URL — e.g. `result.image_url` from a prior job.)
+2. **Submit the edit.** `starflask_edit_image` with:
+   - `image_url` = the uploaded url
+   - `prompt` = the edit instruction, e.g. *"replace the sky with a sunset"*,
+     *"remove the person on the left"*, *"make the jacket red"*
+   - (optional) `model_key` to override the `nano-banana-edit` default with another
+     editing model from `starflask_list_models`.
+3. **Poll & deliver.** `starflask_get_job` until `completed`, then hand the user
+   `result.image_url`.
+
+Be specific about what changes and what stays. Offer to iterate — feed the returned
+`result.image_url` straight back in as the next edit's `image_url` to refine.
+(`starflask_edit_image` is just `starflask_generate_image` specialized for the
+image-in/image-out case; you can still drive an edit through `starflask_generate_image`
+directly by passing `image_url` + an editing `model_key`.)
+
+For non-prompt transforms (upscale, remove background, vectorize, cartoonify,
+resize, crop) see `starflask_create_job`; for pure format changes see
+`starflask_convert_image` — both below.
+
 Result URLs by job type:
 - `image:generate` / `image:convert` -> `result.image_url` (or `result.svg_url` for svg)
 - `video:generate` / animate -> `result.video_url`
@@ -36,7 +68,10 @@ metadata with `starflask_get_media`.
 
 ## Tools
 
-- **`starflask_generate_image`** — text-to-image and image editing. Headline tool.
+- **`starflask_generate_image`** — text-to-image from a prompt. Headline tool.
+- **`starflask_edit_image`** — **edit an existing image**: pass `image_url` + an
+  edit `prompt`; defaults to the `nano-banana-edit` editing model (see "Editing an
+  existing image" above).
 - **`starflask_generate_video`** — text-to-video and image-to-video (animate a still).
 - **`starflask_generate_3d`** — text-to-3D and image-to-3D meshes (job type `mesh:generate`).
 - **`starflask_generate_speech`** — text-to-speech (job type `audio:generate`).

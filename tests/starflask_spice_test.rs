@@ -48,6 +48,7 @@ const PERSONA_SLUG: &str = "media-studio-agent";
 /// `seed/integration_packs/starflask/personas/media-studio-agent.json`.
 const EXPECTED_TOOLS: &[&str] = &[
     "starflask_generate_image",
+    "starflask_edit_image",
     "starflask_generate_video",
     "starflask_generate_3d",
     "starflask_generate_speech",
