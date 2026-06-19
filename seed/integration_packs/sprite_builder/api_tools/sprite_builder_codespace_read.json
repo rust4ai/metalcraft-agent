@@ -1,0 +1,26 @@
+{
+  "name": "sprite_builder_codespace_read",
+  "description": "Read a file OR list a directory under the codespace workspace (/workspace/app). Omit path for the workspace root. Returns kind ('file'|'dir'), and either entries[] (dir) or content (file; base64 with binary=true for non-text). Codespace must be 'ready'.",
+  "method": "GET",
+  "url": "$SPRITE_BUILDER_BASE_URL/api/codespaces/{codespace_id}/files?path={path}",
+  "headers": {
+    "Authorization": "Bearer $SPRITE_BUILDER_API_KEY"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "codespace_id": {
+        "type": "string",
+        "description": "The codespace's id (UUID, from sprite_builder_create_codespace / sprite_builder_list_codespaces)."
+      },
+      "path": {
+        "type": "string",
+        "description": "Path relative to /workspace/app. Omit for the root."
+      }
+    },
+    "required": [
+      "codespace_id"
+    ]
+  },
+  "body_mapping": "none"
+}

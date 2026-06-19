@@ -1,0 +1,27 @@
+{
+  "name": "sprite_builder_delete_env",
+  "description": "Delete a project environment variable by key.",
+  "method": "DELETE",
+  "url": "$SPRITE_BUILDER_BASE_URL/api/projects/{project_id}/env/{key}",
+  "headers": {
+    "Authorization": "Bearer $SPRITE_BUILDER_API_KEY"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "project_id": {
+        "type": "string",
+        "description": "The project's id (UUID, from sprite_builder_list_projects / sprite_builder_create_project)."
+      },
+      "key": {
+        "type": "string",
+        "description": "Env var name to delete."
+      }
+    },
+    "required": [
+      "project_id",
+      "key"
+    ]
+  },
+  "body_mapping": "none"
+}

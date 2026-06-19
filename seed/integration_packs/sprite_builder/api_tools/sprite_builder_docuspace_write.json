@@ -1,0 +1,41 @@
+{
+  "name": "sprite_builder_docuspace_write",
+  "description": "Write (create or overwrite) a file in a docuspace. encoding 'utf8' (default) or 'base64' (to upload binary files as text). Content-type is inferred from the extension. Max 5 MiB.",
+  "method": "PUT",
+  "url": "$SPRITE_BUILDER_BASE_URL/api/docuspaces/{docuspace_id}/files",
+  "headers": {
+    "Authorization": "Bearer $SPRITE_BUILDER_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "docuspace_id": {
+        "type": "string",
+        "description": "The docuspace's id (UUID, from sprite_builder_create_docuspace / sprite_builder_list_docuspaces)."
+      },
+      "path": {
+        "type": "string",
+        "description": "File path within the docuspace."
+      },
+      "content": {
+        "type": "string",
+        "description": "File contents (utf8 text, or base64 if encoding='base64')."
+      },
+      "encoding": {
+        "type": "string",
+        "description": "Content encoding.",
+        "enum": [
+          "utf8",
+          "base64"
+        ]
+      }
+    },
+    "required": [
+      "docuspace_id",
+      "path",
+      "content"
+    ]
+  },
+  "body_mapping": "params"
+}

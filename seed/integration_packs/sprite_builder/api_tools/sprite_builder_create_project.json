@@ -1,0 +1,44 @@
+{
+  "name": "sprite_builder_create_project",
+  "description": "Create a project for a GitHub repo. Requires name and repo_full_name (owner/repo, must be reachable by the key owner's GitHub token). Optional: default_branch (default main), dockerfile_path (default Dockerfile), container_port (default 8080, the port the container listens on), repo_id (GitHub numeric id). Returns the new project with its id.",
+  "method": "POST",
+  "url": "$SPRITE_BUILDER_BASE_URL/api/projects",
+  "headers": {
+    "Authorization": "Bearer $SPRITE_BUILDER_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Display name for the project."
+      },
+      "repo_full_name": {
+        "type": "string",
+        "description": "GitHub repo as owner/repo."
+      },
+      "default_branch": {
+        "type": "string",
+        "description": "Branch whose HEAD builds when no commit is given. Default 'main'."
+      },
+      "dockerfile_path": {
+        "type": "string",
+        "description": "Path to the Dockerfile within the repo. Default 'Dockerfile'."
+      },
+      "container_port": {
+        "type": "integer",
+        "description": "Port the built container listens on; mapped to the public URL. Default 8080."
+      },
+      "repo_id": {
+        "type": "integer",
+        "description": "Optional GitHub numeric repo id."
+      }
+    },
+    "required": [
+      "name",
+      "repo_full_name"
+    ]
+  },
+  "body_mapping": "params"
+}

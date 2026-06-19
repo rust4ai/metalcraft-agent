@@ -1,0 +1,22 @@
+{
+  "name": "sprite_builder_get_runtime_logs",
+  "description": "Fetch the runtime (container) logs of a deployed build's live sprite \u2014 distinct from the build logs. Useful to debug a running deployment.",
+  "method": "GET",
+  "url": "$SPRITE_BUILDER_BASE_URL/api/builds/{build_id}/runtime-logs",
+  "headers": {
+    "Authorization": "Bearer $SPRITE_BUILDER_API_KEY"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "build_id": {
+        "type": "string",
+        "description": "The build's id (UUID, from sprite_builder_create_build / sprite_builder_list_builds)."
+      }
+    },
+    "required": [
+      "build_id"
+    ]
+  },
+  "body_mapping": "none"
+}

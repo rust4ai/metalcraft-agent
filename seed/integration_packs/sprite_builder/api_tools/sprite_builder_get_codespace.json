@@ -1,0 +1,23 @@
+{
+  "name": "sprite_builder_get_codespace",
+  "description": "Get a codespace by id and check its status. Lifecycle: queued -> provisioning -> ready | failed. All file/exec/git/clone ops require status 'ready'; otherwise they 400. Poll this after creating one.",
+  "method": "GET",
+  "url": "$SPRITE_BUILDER_BASE_URL/api/codespaces/{codespace_id}",
+  "headers": {
+    "Authorization": "Bearer $SPRITE_BUILDER_API_KEY"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "codespace_id": {
+        "type": "string",
+        "description": "The codespace's id (UUID, from sprite_builder_create_codespace / sprite_builder_list_codespaces)."
+      }
+    },
+    "required": [
+      "codespace_id"
+    ]
+  },
+  "body_mapping": "none",
+  "poll": true
+}

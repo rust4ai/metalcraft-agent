@@ -1,0 +1,27 @@
+{
+  "name": "sprite_builder_create_codespace",
+  "description": "Create a Codespace: a long-lived sprites.dev sprite holding a git working tree at /workspace/app, for interactive coding (read/write files, run bash, run git). Provisioning is async. Returns the codespace in status 'queued'; poll sprite_builder_get_codespace until 'ready' before any file/exec/git/clone op. Optional name (defaults to a random adjective-noun).",
+  "method": "POST",
+  "url": "$SPRITE_BUILDER_BASE_URL/api/projects/{project_id}/codespaces",
+  "headers": {
+    "Authorization": "Bearer $SPRITE_BUILDER_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "project_id": {
+        "type": "string",
+        "description": "The project's id (UUID, from sprite_builder_list_projects / sprite_builder_create_project)."
+      },
+      "name": {
+        "type": "string",
+        "description": "Optional friendly name."
+      }
+    },
+    "required": [
+      "project_id"
+    ]
+  },
+  "body_mapping": "params"
+}

@@ -1,0 +1,31 @@
+{
+  "name": "sprite_builder_codespace_clone",
+  "description": "Clone a repo into the codespace's /workspace/app using the owner's GitHub token. REPLACES whatever is there. Defaults to the codespace's project repo + branch; override with repo_full_name and/or branch. Codespace must be 'ready'.",
+  "method": "POST",
+  "url": "$SPRITE_BUILDER_BASE_URL/api/codespaces/{codespace_id}/clone",
+  "headers": {
+    "Authorization": "Bearer $SPRITE_BUILDER_API_KEY",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "codespace_id": {
+        "type": "string",
+        "description": "The codespace's id (UUID, from sprite_builder_create_codespace / sprite_builder_list_codespaces)."
+      },
+      "repo_full_name": {
+        "type": "string",
+        "description": "Optional repo to clone (owner/repo). Defaults to the project's repo."
+      },
+      "branch": {
+        "type": "string",
+        "description": "Optional branch to check out. Defaults to the codespace's branch."
+      }
+    },
+    "required": [
+      "codespace_id"
+    ]
+  },
+  "body_mapping": "params"
+}
