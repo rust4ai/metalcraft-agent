@@ -1,59 +1,34 @@
-services:
-  gateway:
-    build:
-      context: ../metalcraft-agent-gateway
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    environment:
-      PORT: "3000"
-      AGENT_GATEWAY_API_KEY: ${AGENT_GATEWAY_API_KEY}
-      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN}
-      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
-      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
-      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
-      GATEWAY_DB_PATH: /data/gateway.db
-      RUST_LOG: info
-    volumes:
-      - gateway-data:/data
-    restart: unless-stopped
+# Single-daemon compose with no reverse proxy — the Workshop API is published
+# directly on the host. Good for local runs and private/trusted networks.
+#
+# For public HTTPS, use docker-compose.caddy.yml instead (Caddy + Let's Encrypt).
+#
+# Setup:
+#   1. Copy .env.example to .env and set at least OPENAI_API_KEY.
+#      Set WORKSHOP_API_KEY to enable the HTTP API + webhooks.
+#   2. docker compose up -d        # pulls the prebuilt GHCR image
+#      docker compose up -d --build # or build from source locally
+#   3. Verify:  curl http://localhost:3002/health
 
+services:
   daemon:
-    # On the VPS: `docker compose pull && up -d` pulls this prebuilt image
-    # from GHCR. Locally, `up --build` still builds from source via `build:`.
+    # On a host: `docker compose pull && up -d` pulls this prebuilt image from
+    # GHCR. Locally, `up --build` builds from source via `build:`.
     image: ghcr.io/rust4ai/metalcraft-agent:${TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "3001:3001"
+      - "3002:3002"
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      AGENT_GATEWAY_URL: http://gateway:3000
-      AGENT_GATEWAY_API_KEY: ${AGENT_GATEWAY_API_KEY}
-      EVENTD_HOST: daemon
-      EVENTD_PORT: "3001"
-      EVENTD_WEBHOOK_SECRET: ${EVENTD_WEBHOOK_SECRET}
-      EVENTD_ADMIN_USER_IDS: ${EVENTD_ADMIN_USER_IDS}
+      WORKSHOP_API_KEY: ${WORKSHOP_API_KEY}   # enables the Workshop API + /api/v1 auth
+      PORT: "3002"                            # Workshop API binds 0.0.0.0:3002
       METALCRAFT_DATA_DIR: /data
       RUST_LOG: info
-    command:
-      - metalcraft-daemon
-      - --persona
-      - discord-agent
-      - --auto-approve
-      - --event-port
-      - "3001"
-      - --events
-      - message_create
-      - --platforms
-      - discord
     volumes:
       - daemon-data:/data
-    depends_on:
-      - gateway
     restart: unless-stopped
 
 volumes:
-  gateway-data:
   daemon-data:

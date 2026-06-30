@@ -27,6 +27,41 @@ Metalcraft Agent is a Rust application leveraging the Metalcraft framework to cr
 - **skills/**: Descriptions of various skills and methodologies employed by the agent.
 - **tests/**: Contains unit and integration tests for different modules.
 
+## Setup
+
+The daemon loads a `.env` file on startup (via `dotenvy`). Copy the template and
+fill it in:
+
+```bash
+cp .env.example .env
+```
+
+**The only required variable is `OPENAI_API_KEY`** — with just that set you can
+run the CLI or the flow scheduler. Everything else has a sensible default.
+
+| Variable | Needed for | Default |
+|----------|------------|---------|
+| `OPENAI_API_KEY` | **everything** (required) | — |
+| `WORKSHOP_API_KEY` | enabling the Workshop HTTP API + webhooks; also the Bearer token for `/api/v1/*`. Unset = no HTTP server. | unset |
+| `PORT` / `WORKSHOP_API_PORT` | the port the Workshop API binds on `0.0.0.0` | `3002` |
+| `OPENAI_MODEL` / `STARKBOT_MODEL` | overriding the LLM model | `gpt-5.4` |
+| `STARKBOT_PERSONA` | default persona for daemon flow tasks | `coding-agent` |
+| `STARKBOT_POLL_SECONDS` | flow scheduler poll interval | `30` |
+| `METALCRAFT_DATA_DIR` | where personas/skills/flows/chats/keys are stored | OS data dir |
+| `RUST_LOG` | log level | `info` |
+
+Simplest possible setup (interactive CLI):
+
+```bash
+echo "OPENAI_API_KEY=sk-..." > .env
+cargo run --bin metalcraft-agent
+```
+
+To run the daemon with the HTTP API enabled, also set `WORKSHOP_API_KEY`. Gateway
+channel credentials (e.g. `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`) are **not**
+env vars — they're stored at runtime via the key store API. See [devops.md](devops.md)
+for full deployment details.
+
 ## Agent Usage
 
 ```bash
@@ -128,18 +163,19 @@ The daemon can also serve the workshop admin API (used by the workshop desktop a
 - **`--api <KEY>`**: Enable the workshop admin API, authenticated with Bearer `<KEY>`. Can also be set via the `WORKSHOP_API_KEY` env var (so Railway/Docker can enable it without flag wiring).
 - **`--api-port <n>`**: Port for the workshop API. Defaults to `3002`. Can also be set via `WORKSHOP_API_PORT`, or `PORT`.
 
-#### Event listener flags
+#### Inbound gateway webhooks
 
-Active only when `AGENT_GATEWAY_URL` is set; the daemon then listens for inbound webhooks (e.g. Discord `message_create`) and runs them as agent tasks.
+When the Workshop API is enabled, it also serves inbound gateway webhooks at
+`/webhook/<adapter>` (e.g. `/webhook/twilio`, `/webhook/pipestreamr`). Channels
+are configured at runtime via `/api/v1/gateway/channels` rather than env vars or
+flags; each adapter verifies its own request signature. See [devops.md](devops.md)
+for setup.
 
-- **`--event-port <n>`**: Webhook listener port. Defaults to `3001` (env: `EVENTD_PORT`).
-- **`--event-host <host>`**: Host for the gateway callback URL. Defaults to `localhost` (env: `EVENTD_HOST`).
-- **`--event-persona <slug>`**: Persona for event-triggered tasks. Defaults to the same value as `--persona`.
-- **`--events <list>`**: Comma-separated event types to handle. Defaults to `message_create`.
-- **`--platforms <list>`**: Comma-separated platforms to accept. Defaults to all.
-- **`--admin-user-ids <list>`**: Comma-separated platform user IDs allowed to trigger the agent (env: `EVENTD_ADMIN_USER_IDS`). Required when `AGENT_GATEWAY_URL` is set.
-
-When the event listener is enabled, `AGENT_GATEWAY_API_KEY` and `EVENTD_WEBHOOK_SECRET` are also required.
+> **Note:** the old external-gateway flags (`--event-port`, `--event-host`,
+> `--event-persona`, `--events`, `--platforms`, `--admin-user-ids`) are
+> deprecated no-ops — the separate gateway service was replaced by in-process
+> gateway channels. They are still accepted (and ignored) so old start commands
+> don't crash on upgrade.
 
 ### Supported schedules and nodes
 

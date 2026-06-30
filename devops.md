@@ -1,191 +1,206 @@
-# Railway Deployment Guide
+# Deployment Guide
 
-This guide covers deploying **metalcraft-agent-gateway** and **metalcraft-agent** (daemon) as two Railway services that communicate over Railway's private network.
+This guide covers deploying **metalcraft-agent** as a single self-contained daemon.
+
+> **Architecture note (read this first if you remember the old setup).** Earlier
+> versions ran two services — a public `metalcraft-agent-gateway` and a private
+> daemon that talked to it over an internal network. **That external gateway was
+> removed.** Everything now lives in one process: the daemon runs the flow
+> scheduler *and* hosts the Workshop API, which also serves inbound gateway
+> webhooks. There is no second service, no `EVENTD_*`/`AGENT_GATEWAY_*` env vars,
+> and the old `--event-port/--events/--platforms` flags are deprecated no-ops.
 
 ## Architecture
 
 ```
 Internet
   │
-  ▼
-┌──────────────────────────────────────┐
-│  Railway Project                     │
-│                                      │
-│  ┌──────────────┐   private net    ┌────────────────┐
-│  │   gateway     │◄───────────────►│     daemon      │
-│  │   (public)    │                 │   (private)     │
-│  │   port 3000   │   events ──────►│   port 3001     │
-│  └──────┬───────┘                 └────────────────┘
-│         │                                │
-│         │ Discord websocket              │ OpenAI API
-│         │ Slack/GitHub webhooks           │ (outbound)
-│         ▼                                ▼
-└──────────────────────────────────────┘
+  ▼  HTTPS (via Caddy or platform TLS)
+┌─────────────────────────────────────────────┐
+│  metalcraft-daemon (single process)          │
+│                                              │
+│   Workshop API  (0.0.0.0:$PORT, default 3002)│
+│     ├─ /health                  (public)     │
+│     ├─ /webhook/<adapter>       (signed)     │
+│     └─ /api/v1/*                (Bearer auth) │
+│                                              │
+│   Flow scheduler (polls every N seconds)     │
+│                                              │
+│   └─► OpenAI API (outbound LLM calls)        │
+└─────────────────────────────────────────────┘
 ```
 
-- **gateway** is the only public-facing service. It receives Discord events via websocket, Slack/GitHub webhooks via HTTP, and serves the outbound messaging API.
-- **daemon** is private. It receives normalized events from the gateway over the internal network, runs LLM-powered agent tasks, and calls back to the gateway to send messages.
+- The **Workshop API** is the only network surface. It binds `0.0.0.0:$PORT` and
+  is enabled whenever `WORKSHOP_API_KEY` is set (without it, the daemon runs the
+  flow scheduler only — no HTTP server).
+- `/health` is unauthenticated (for platform health checks).
+- `/api/v1/*` requires `Authorization: Bearer $WORKSHOP_API_KEY`.
+- `/webhook/<adapter>` (e.g. `/webhook/twilio`, `/webhook/pipestreamr`) is
+  unauthenticated at the router level but each adapter verifies its own
+  signature on the request.
+- **Gateway channels** (Twilio, pipestreamr, …) are configured at runtime via
+  `/api/v1/gateway/channels`, not via env vars. Account-level secrets such as
+  `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` are stored in the key store
+  (`/api/v1/keys`), never in the deploy config.
 
-## Step 1: Create a Railway Project
+## Environment Variables
 
-1. Go to [railway.app](https://railway.app) and create a new project.
-2. You'll add two services to this project.
+The **only required variable is `OPENAI_API_KEY`**. Everything else has a
+sensible default. Set `WORKSHOP_API_KEY` if you want the HTTP API/webhooks.
 
-## Step 2: Deploy the Gateway
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OPENAI_API_KEY` | OpenAI API key for LLM calls. **Required.** | — |
+| `WORKSHOP_API_KEY` | Enables the Workshop API and is the Bearer token for `/api/v1/*`. If unset, no HTTP server starts. | unset (API off) |
+| `PORT` / `WORKSHOP_API_PORT` | Port the Workshop API binds (`0.0.0.0`). `WORKSHOP_API_PORT` wins if both are set. | `3002` |
+| `OPENAI_MODEL` / `STARKBOT_MODEL` | LLM model name. | `gpt-5.4` |
+| `STARKBOT_PERSONA` | Persona slug used for flow tasks. | `coding-agent` |
+| `STARKBOT_POLL_SECONDS` | Flow scheduler poll interval. | `30` |
+| `STARKBOT_FLOWS_DIR` | Flows directory. | `<data dir>/flows` |
+| `STARKBOT_AUTO_APPROVE` | Skip tool-approval prompts (`true`/`1`). Equivalent to `--auto-approve`. | `false` |
+| `STARKBOT_ONCE` | Run one poll cycle and exit. Equivalent to `--once`. | `false` |
+| `METALCRAFT_DATA_DIR` | Data dir for personas/skills/flows/chats/keys. | `~/.local/share/metalcraft-agent` |
+| `RUST_LOG` | Log level. | `info` |
+| `TZ` | Process timezone (affects cron-scheduled flows). | system |
+| `SPRITE_BUILDER_BASE_URL` / `SPRITE_BUILDER_API_KEY` | Only needed if you use the sprite_builder integration pack. | — |
 
-1. Click **"New Service"** → **"GitHub Repo"** → select `metalcraft-agent-gateway`.
-2. Railway will detect the `Dockerfile` and `railway.toml` automatically.
-3. Add a **volume** mounted at `/data` (for SQLite persistence).
-4. Set environment variables (Settings → Variables):
+CLI flags (`--persona`, `--model`, `--poll-seconds`, `--once`, `--auto-approve`,
+`--api`, `--api-port`) override the matching env vars. A containerised daemon
+needs **no flags** — it reads everything from the environment.
 
-| Variable | Value | Required |
-|----------|-------|----------|
-| `PORT` | `3000` | Yes |
-| `AGENT_GATEWAY_API_KEY` | (generate a strong random string) | Yes |
-| `DISCORD_BOT_TOKEN` | (from Discord Developer Portal) | Yes (for Discord) |
-| `GATEWAY_DB_PATH` | `/data/gateway.db` | Yes |
-| `RUST_LOG` | `info` | No |
-| `SLACK_BOT_TOKEN` | (from Slack app settings) | No |
-| `SLACK_SIGNING_SECRET` | (from Slack app settings) | No |
-| `GITHUB_WEBHOOK_SECRET` | (your chosen secret) | No |
+## Deployment Options
 
-5. In Settings → Networking, **generate a public domain** (e.g. `gateway-xxx.up.railway.app`). This is needed for Slack/GitHub webhooks.
-6. Note the **internal hostname** shown in the Networking tab (e.g. `gateway.railway.internal`). You'll need this for the daemon service.
-7. Deploy.
+### Option A — VPS / Droplet behind Caddy (recommended, persistent state)
 
-## Step 3: Deploy the Agent (daemon)
+`docker-compose.caddy.yml` runs the daemon behind Caddy with automatic HTTPS and
+a persistent `/data` volume.
 
-1. Click **"New Service"** → **"GitHub Repo"** → select `metalcraft-agent`.
-2. Railway will detect the `Dockerfile` and `railway.toml`.
-3. Set environment variables:
+Prereqs: a domain with an A record → host IP, and ports 80/443 open
+(Let's Encrypt validates over `:80`).
 
-| Variable | Value | Required |
-|----------|-------|----------|
-| `OPENAI_API_KEY` | (your OpenAI API key) | Yes |
-| `AGENT_GATEWAY_URL` | `http://gateway.railway.internal:3000` | Yes |
-| `AGENT_GATEWAY_API_KEY` | (same value as gateway) | Yes |
-| `EVENTD_WEBHOOK_SECRET` | (generate a strong random string) | Yes |
-| `EVENTD_ADMIN_USER_IDS` | (your Discord user ID) | Yes |
-| `EVENTD_HOST` | (daemon's internal hostname, e.g. `daemon.railway.internal`) | Yes |
-| `EVENTD_PORT` | `3001` | Yes |
-| `METALCRAFT_DATA_DIR` | `/data` | Recommended |
-| `RUST_LOG` | `info` | No |
-
-4. Override the **start command** in Settings → Deploy:
+1. Create a `.env` next to the compose file (copy `.env.example`):
    ```
-   metalcraft-daemon --persona discord-agent --auto-approve --event-port 3001 --events message_create --platforms discord
+   DOMAIN=agent.example.com
+   TLS_EMAIL=you@example.com
+   OPENAI_API_KEY=sk-...
+   WORKSHOP_API_KEY=<a long random secret>
    ```
-5. In Settings → Networking, do **NOT** generate a public domain. This service should only be reachable via Railway's private network. Just ensure the internal port `3001` is set.
-6. Optionally add a **volume** at `/data` for persistent personas/skills/flows.
-7. Deploy.
+2. Bring it up (pulls the prebuilt GHCR image, or `--build` to compile locally):
+   ```bash
+   docker compose -f docker-compose.caddy.yml up -d
+   ```
+3. Verify:
+   ```bash
+   curl https://$DOMAIN/health
+   ```
 
-## Step 4: Get Your Discord User ID
+The daemon is **not** published on the host — only Caddy is exposed; daemon
+traffic stays on the internal compose network. Certs persist in the `caddy-data`
+volume; runtime state persists in `daemon-data` (`/data`).
 
-The `EVENTD_ADMIN_USER_IDS` variable controls who can trigger the agent via Discord messages. To find your Discord user ID:
+### Option B — DigitalOcean App Platform (`.do/app.yaml`)
 
-1. Open Discord → Settings → Advanced → Enable **Developer Mode**.
-2. Right-click your username → **Copy User ID**.
-3. Set the env var: `EVENTD_ADMIN_USER_IDS=123456789012345678`
-4. For multiple admins: `EVENTD_ADMIN_USER_IDS=123456789,987654321`
+Single public HTTP service, TLS handled by the platform.
 
-## Step 5: Configure External Webhooks (Optional)
-
-### Slack
-
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) → your app → **Event Subscriptions**.
-2. Set the Request URL to: `https://gateway-xxx.up.railway.app/api/v1/webhooks/slack`
-3. Slack will send a challenge request — the gateway handles this automatically.
-4. Subscribe to events: `message.channels`, `app_mention`, etc.
-5. Set `SLACK_SIGNING_SECRET` on the gateway to the value from **Basic Information → Signing Secret**.
-
-### GitHub
-
-1. Go to your repo → **Settings → Webhooks → Add webhook**.
-2. Set Payload URL to: `https://gateway-xxx.up.railway.app/api/v1/webhooks/github`
-3. Content type: `application/json`
-4. Set a secret and use the same value for `GITHUB_WEBHOOK_SECRET` on the gateway.
-5. Select events: Pushes, Pull requests, Issue comments, etc.
-
-## Step 6: Verify
-
-### Check gateway is running
 ```bash
-curl https://gateway-xxx.up.railway.app/api/v1/subscribers \
-  -H "Authorization: Bearer YOUR_API_KEY"
+doctl apps create --spec .do/app.yaml          # first deploy
+doctl apps update <APP_ID> --spec .do/app.yaml # subsequent updates
 ```
-Should return `[]` (empty list) or a list of subscribers.
 
-### Check daemon registered itself
-After daemon starts, repeat the above — you should see a subscriber entry with `url` pointing to daemon's internal address.
+Set `WORKSHOP_API_KEY` and `OPENAI_API_KEY` as encrypted secrets in the DO
+dashboard (or via `doctl`). `deploy_on_push: true` redeploys on push to `master`.
 
-### Test Discord
-Send a message in a Discord channel where the bot is present. If you are an admin user, the agent should respond.
+> ⚠️ **App Platform has an ephemeral filesystem — no persistent volume.** Seeded
+> personas/skills load fine (they're embedded in the binary), but anything
+> created at runtime — chats, new personas/skills/flows, stored keys — is **lost
+> on every deploy/restart.** For durable state, use Option A (Droplet + volume),
+> or back the daemon with DO Spaces / a managed DB.
 
-### Check logs
-Railway → Service → **Logs** tab. Look for:
-- Gateway: `Discord listener connected as BotName`
-- daemon: `Registered as gateway subscriber (id: ..., url: http://daemon.railway.internal:3001/webhook/events)`
-- daemon: `Processing message_create event from username in channel 123456`
+### Option C — Plain Docker
 
-## Environment Variables Reference
+```bash
+docker build -t metalcraft-agent .
+docker run -d --name metalcraft-agent \
+  -p 3002:3002 \
+  -e OPENAI_API_KEY=sk-... \
+  -e WORKSHOP_API_KEY=<secret> \
+  -v metalcraft-data:/data -e METALCRAFT_DATA_DIR=/data \
+  metalcraft-agent
+```
 
-### Gateway (`metalcraft-agent-gateway`)
+The image's default command is `metalcraft-daemon --auto-approve`. The Workshop
+API binds `$PORT` (default 3002).
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PORT` | HTTP server port | `3000` |
-| `AGENT_GATEWAY_API_KEY` | Bearer token for API auth (required) | — |
-| `DISCORD_BOT_TOKEN` | Discord bot token (enables Discord) | — |
-| `SLACK_BOT_TOKEN` | Slack bot token (enables Slack) | — |
-| `SLACK_SIGNING_SECRET` | HMAC secret for Slack webhook verification | — |
-| `GITHUB_WEBHOOK_SECRET` | HMAC secret for GitHub webhook verification | — |
-| `GATEWAY_DB_PATH` | SQLite database file path | `./gateway.db` |
-| `RUST_LOG` | Log level | `info` |
+## Configuring Gateway Channels (Twilio, pipestreamr, …)
 
-### Agent/daemon (`metalcraft-agent`)
+Channels are created at runtime over the API — not in the deploy config:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENAI_API_KEY` | OpenAI API key for LLM calls | — (required) |
-| `AGENT_GATEWAY_URL` | Gateway base URL (enables event listener) | — |
-| `AGENT_GATEWAY_API_KEY` | Gateway auth token | — |
-| `EVENTD_WEBHOOK_SECRET` | Secret for inbound webhook auth (required with gateway) | — |
-| `EVENTD_ADMIN_USER_IDS` | Comma-separated admin user IDs (required with gateway) | — |
-| `EVENTD_HOST` | Hostname for gateway callback URL | `localhost` |
-| `EVENTD_PORT` | Event listener port | `3001` |
-| `METALCRAFT_DATA_DIR` | Data directory for personas/skills/flows | `~/.local/share/metalcraft-agent` |
-| `RUST_LOG` | Log level | `info` |
+1. Store account secrets in the key store:
+   ```bash
+   curl -X PUT https://$DOMAIN/api/v1/keys/TWILIO_ACCOUNT_SID \
+     -H "Authorization: Bearer $WORKSHOP_API_KEY" \
+     -H 'Content-Type: application/json' -d '{"value":"AC..."}'
+   curl -X PUT https://$DOMAIN/api/v1/keys/TWILIO_AUTH_TOKEN \
+     -H "Authorization: Bearer $WORKSHOP_API_KEY" \
+     -H 'Content-Type: application/json' -d '{"value":"..."}'
+   ```
+2. Create a channel (see `/api/v1/gateway/types` for available adapters):
+   ```bash
+   curl -X POST https://$DOMAIN/api/v1/gateway/channels \
+     -H "Authorization: Bearer $WORKSHOP_API_KEY" \
+     -H 'Content-Type: application/json' \
+     -d '{"type_id":"twilio","name":"Support line","settings":{...}}'
+   ```
+3. Point the provider's webhook at `https://$DOMAIN/webhook/<adapter>`
+   (e.g. `/webhook/twilio`). Each adapter verifies the request signature.
 
 ## Scheduled Flows (e.g. Daily Commit Summary)
 
-Flows run alongside the event listener in the same daemon process. To set up the daily commit summary flow:
+Flows run inside the daemon's poll loop (every `STARKBOT_POLL_SECONDS`). Flow
+templates ship in the seed data (e.g.
+`seed/integration_packs/discord/flow_templates/daily-commit-summary.json`).
 
-1. SSH into the daemon service or use a Railway volume.
-2. Copy and edit the flow template:
-   ```
-   /data/flows/daily-commit-summary.json
-   ```
-3. Replace `OWNER/REPO` with the actual GitHub repo (e.g. `rust4ai/metalcraft-agent`).
-4. Replace `CHANNEL_ID` with the Discord channel ID to post in.
-5. Set `"enabled": true`.
-6. Restart daemon (or wait for the next poll cycle).
+1. Copy a template into your flows dir (`<data dir>/flows/` or `STARKBOT_FLOWS_DIR`).
+2. Fill in the repo/channel placeholders and set `"enabled": true`.
+3. The daemon picks it up on the next poll cycle.
 
-The flow runs as the `discord-reporter-agent` persona because its entry node sets
-`"data": { ..., "persona": "discord-reporter-agent" }`. Per-flow persona is resolved
-independently of the daemon's `--persona` flag, so a single daemon can run flows under
-different personas while still serving events under whatever `--persona`/`--event-persona`
-you choose. To run a flow on a fixed wall-clock time instead of an interval, use a cron
-schedule on the entry node, e.g. `"schedule_type": "cron", "cron": "0 0 0 * * *"` (daily
-at 00:00). Cron times use the process's local timezone — set `TZ=UTC` for UTC scheduling.
+Per-flow persona is resolved from the flow's entry node (`"data": { "persona": ... }`),
+independently of `STARKBOT_PERSONA` — one daemon can run flows under different
+personas. For wall-clock scheduling use a cron entry node, e.g.
+`"schedule_type": "cron", "cron": "0 0 0 * * *"` (daily at 00:00). Cron uses the
+process timezone — set `TZ=UTC` for UTC.
+
+## Verify
+
+```bash
+# Health (unauthenticated)
+curl https://$DOMAIN/health
+
+# Authenticated API
+curl https://$DOMAIN/api/v1/snapshot -H "Authorization: Bearer $WORKSHOP_API_KEY"
+
+# Gateway channel types
+curl https://$DOMAIN/api/v1/gateway/types -H "Authorization: Bearer $WORKSHOP_API_KEY"
+```
+
+Logs to look for on startup:
+- `Workshop API listening on http://0.0.0.0:<port>`
 
 ## Troubleshooting
 
-**daemon can't reach gateway**: Check that `AGENT_GATEWAY_URL` uses the Railway internal hostname (e.g. `http://gateway.railway.internal:3000`), not the public URL.
+**No HTTP server / connection refused** — `WORKSHOP_API_KEY` is unset, so the API
+is disabled and only the flow scheduler runs. Set it to enable the server.
 
-**Gateway can't reach daemon**: Check that `EVENTD_HOST` matches daemon's Railway internal hostname and that port 3001 is exposed internally.
+**`/api/v1/*` returns 401** — missing or wrong `Authorization: Bearer
+$WORKSHOP_API_KEY` header.
 
-**Agent doesn't respond to messages**: Check `EVENTD_ADMIN_USER_IDS` — only messages from listed user IDs are processed. Check the daemon logs for "Ignoring event from non-admin user".
+**State resets on every deploy** — you're on an ephemeral filesystem (DO App
+Platform). Mount a persistent volume at `/data` and set `METALCRAFT_DATA_DIR=/data`,
+or move to a Droplet (Option A).
 
-**"Missing required env var" on startup**: daemon validates `EVENTD_WEBHOOK_SECRET`, `EVENTD_ADMIN_USER_IDS`, and `AGENT_GATEWAY_API_KEY` at boot. All three are required when `AGENT_GATEWAY_URL` is set.
+**Webhook rejected** — the adapter's signature check failed. Confirm the
+provider's signing secret / account credentials are in the key store and the
+webhook URL matches `/webhook/<adapter>`.
 
-**SQLite errors on gateway**: Ensure a Railway volume is mounted at `/data` and `GATEWAY_DB_PATH` is set to `/data/gateway.db`. Without a volume, the database resets on every deploy.
+**`OPENAI_API_KEY` missing** — the daemon fails to start LLM calls. It is the one
+hard requirement.
