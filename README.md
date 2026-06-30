@@ -384,6 +384,11 @@ persists in the `daemon-data` volume.
 **Local testing without a domain:** set `DOMAIN=localhost` — Caddy serves an
 internal self-signed cert instead of calling Let's Encrypt.
 
+**Deploying to a cloud host?** [devops.md](devops.md) has a step-by-step
+**Getting Started with DigitalOcean** walkthrough (provision a Droplet with
+`doctl`, point DNS, deploy behind Caddy), plus App Platform and plain-Docker
+options.
+
 ## Building and Testing
 
 To build the project:

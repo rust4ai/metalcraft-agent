@@ -68,6 +68,124 @@ CLI flags (`--persona`, `--model`, `--poll-seconds`, `--once`, `--auto-approve`,
 `--api`, `--api-port`) override the matching env vars. A containerised daemon
 needs **no flags** — it reads everything from the environment.
 
+## Getting Started with DigitalOcean
+
+End-to-end walkthrough for running the agent on a **DigitalOcean Droplet**,
+provisioned and managed with the [`doctl`](https://docs.digitalocean.com/reference/doctl/)
+CLI. This gives you a real VM with a **persistent disk** (unlike App Platform —
+see Option B) and HTTPS via Caddy.
+
+> Prefer a fully managed, build-on-push service over a VM you maintain? Skip to
+> [Option B — App Platform](#option-b--digitalocean-app-platform-doappyaml). The
+> tradeoff is App Platform's ephemeral filesystem.
+
+### 1. Install and authenticate doctl
+
+```bash
+brew install doctl                 # macOS (or see DO docs for other platforms)
+doctl auth init                    # paste a personal access token from the DO dashboard
+doctl account get                  # verify it works
+```
+
+### 2. Add your SSH key
+
+```bash
+# Upload a public key so you can SSH into the droplet (skip if already added):
+doctl compute ssh-key import metalcraft-key --public-key-file ~/.ssh/id_ed25519.pub
+
+# Note the fingerprint — you pass it to `droplet create`:
+doctl compute ssh-key list
+```
+
+### 3. Create the droplet
+
+Use the Marketplace **Docker on Ubuntu** image so Docker + Compose are
+preinstalled:
+
+```bash
+doctl compute droplet create metalcraft-agent \
+  --image docker-20-04 \
+  --size s-1vcpu-1gb \
+  --region nyc1 \
+  --ssh-keys <your-key-fingerprint> \
+  --wait
+```
+
+> `s-1vcpu-1gb` is the cheapest size that comfortably runs the daemon. If
+> `docker-20-04` is unavailable in your region, list options with
+> `doctl compute image list --public | grep -i docker`, or create a plain
+> `ubuntu-24-04-x64` droplet and install Docker with
+> `curl -fsSL https://get.docker.com | sh`.
+
+Get the public IP:
+
+```bash
+doctl compute droplet list metalcraft-agent --format Name,PublicIPv4
+```
+
+### 4. Point your domain at the droplet
+
+Create an `A` record for your domain (e.g. `agent.example.com`) pointing at that
+IP. If your DNS is managed by DigitalOcean you can do it from the CLI:
+
+```bash
+doctl compute domain records create example.com \
+  --record-type A --record-name agent --record-data <droplet-ip> --record-ttl 300
+```
+
+Caddy needs ports **80 and 443** reachable to obtain a Let's Encrypt cert. The
+Marketplace Docker image leaves the firewall open by default; if you've enabled
+`ufw`/cloud firewalls, allow 80 and 443.
+
+### 5. Deploy on the droplet
+
+```bash
+ssh root@<droplet-ip>
+
+# Get the deploy files (clone the repo, or just scp the two compose/Caddy files):
+git clone https://github.com/rust4ai/metalcraft-agent.git
+cd metalcraft-agent
+
+# Create the .env Caddy + the daemon need:
+cat > .env <<'ENV'
+DOMAIN=agent.example.com
+TLS_EMAIL=you@example.com
+OPENAI_API_KEY=sk-...
+WORKSHOP_API_KEY=<a long random secret>
+ENV
+
+# Pull the prebuilt image from GHCR and start (Caddy handles HTTPS):
+docker compose -f docker-compose.caddy.yml up -d
+```
+
+### 6. Verify
+
+```bash
+curl https://agent.example.com/health          # from your laptop
+docker compose -f docker-compose.caddy.yml logs -f daemon   # on the droplet
+```
+
+You should see `Workshop API listening on http://0.0.0.0:8080` in the logs and a
+`200` from `/health`. Runtime state persists in the `daemon-data` Docker volume
+and TLS certs in `caddy-data`, so both survive `docker compose` restarts and
+reboots.
+
+### Updating
+
+```bash
+ssh root@<droplet-ip>
+cd metalcraft-agent
+git pull
+docker compose -f docker-compose.caddy.yml pull   # fetch the latest GHCR image
+docker compose -f docker-compose.caddy.yml up -d   # recreate with the new image
+```
+
+### Tearing down
+
+```bash
+doctl compute droplet delete metalcraft-agent
+```
+
 ## Deployment Options
 
 ### Option A — VPS / Droplet behind Caddy (recommended, persistent state)
