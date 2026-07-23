@@ -1,0 +1,23 @@
+{
+  "name": "discord_delete_webhook",
+  "description": "Delete a webhook by id. Provide `webhook_id`. Requires MANAGE_WEBHOOKS.",
+  "method": "DELETE",
+  "url": "https://discord.com/api/v10/webhooks/{webhook_id}",
+  "headers": {
+    "Authorization": "Bot $DISCORD_BOT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "webhook_id": {
+        "type": "string",
+        "description": "The webhook ID (snowflake)."
+      }
+    },
+    "required": [
+      "webhook_id"
+    ]
+  },
+  "body_mapping": "none"
+}

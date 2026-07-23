@@ -1,0 +1,28 @@
+{
+  "name": "discord_pin_message",
+  "description": "Pin a message in a channel (max 50 pins per channel). Provide `channel_id` and `message_id`. Requires MANAGE_MESSAGES.",
+  "method": "PUT",
+  "url": "https://discord.com/api/v10/channels/{channel_id}/pins/{message_id}",
+  "headers": {
+    "Authorization": "Bot $DISCORD_BOT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "channel_id": {
+        "type": "string",
+        "description": "The channel ID (snowflake)."
+      },
+      "message_id": {
+        "type": "string",
+        "description": "The message ID (snowflake)."
+      }
+    },
+    "required": [
+      "channel_id",
+      "message_id"
+    ]
+  },
+  "body_mapping": "params"
+}

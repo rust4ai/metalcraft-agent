@@ -1,0 +1,9 @@
+{
+  "id": "discord_admin",
+  "name": "Discord Admin",
+  "description": "Administer a Discord server via the REST API with a bot token: manage channels, roles, and permission overwrites; manage members (nickname, roles, kick, ban, timeout); moderate messages (delete, bulk-delete, pin); manage invites and webhooks; and read the audit log. Authenticated by a single DISCORD_BOT_TOKEN.",
+  "version": "1.0.0",
+  "requires_env": [
+    "DISCORD_BOT_TOKEN"
+  ]
+}

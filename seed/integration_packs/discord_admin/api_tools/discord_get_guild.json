@@ -1,0 +1,23 @@
+{
+  "name": "discord_get_guild",
+  "description": "Fetch a guild (server) with approximate member/presence counts: name, owner_id, verification_level, features, etc. Provide `guild_id`.",
+  "method": "GET",
+  "url": "https://discord.com/api/v10/guilds/{guild_id}?with_counts=true",
+  "headers": {
+    "Authorization": "Bot $DISCORD_BOT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "guild_id": {
+        "type": "string",
+        "description": "The guild (server) ID (snowflake)."
+      }
+    },
+    "required": [
+      "guild_id"
+    ]
+  },
+  "body_mapping": "none"
+}

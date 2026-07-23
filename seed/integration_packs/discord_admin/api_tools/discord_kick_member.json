@@ -1,0 +1,28 @@
+{
+  "name": "discord_kick_member",
+  "description": "Kick (remove) a member from the guild. They can rejoin with a new invite. Provide `guild_id` and `user_id`. Requires KICK_MEMBERS.",
+  "method": "DELETE",
+  "url": "https://discord.com/api/v10/guilds/{guild_id}/members/{user_id}",
+  "headers": {
+    "Authorization": "Bot $DISCORD_BOT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "guild_id": {
+        "type": "string",
+        "description": "The guild (server) ID (snowflake)."
+      },
+      "user_id": {
+        "type": "string",
+        "description": "The user ID (snowflake)."
+      }
+    },
+    "required": [
+      "guild_id",
+      "user_id"
+    ]
+  },
+  "body_mapping": "none"
+}

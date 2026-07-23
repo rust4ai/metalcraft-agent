@@ -1,0 +1,55 @@
+{
+  "name": "discord_modify_guild",
+  "description": "Modify a guild's settings. Provide `guild_id` and any of: `name`, `verification_level` (0-4), `default_message_notifications` (0-1), `explicit_content_filter` (0-2), `afk_channel_id`, `afk_timeout`, `system_channel_id`, `description`. Requires MANAGE_GUILD.",
+  "method": "PATCH",
+  "url": "https://discord.com/api/v10/guilds/{guild_id}",
+  "headers": {
+    "Authorization": "Bot $DISCORD_BOT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "guild_id": {
+        "type": "string",
+        "description": "The guild (server) ID (snowflake)."
+      },
+      "name": {
+        "type": "string",
+        "description": "New server name."
+      },
+      "verification_level": {
+        "type": "integer",
+        "description": "Verification level 0 (none) to 4 (very high)."
+      },
+      "default_message_notifications": {
+        "type": "integer",
+        "description": "0 = all messages, 1 = only mentions."
+      },
+      "explicit_content_filter": {
+        "type": "integer",
+        "description": "0 = disabled, 1 = members without roles, 2 = all members."
+      },
+      "afk_channel_id": {
+        "type": "string",
+        "description": "Voice channel ID to use as AFK channel."
+      },
+      "afk_timeout": {
+        "type": "integer",
+        "description": "AFK timeout in seconds (60, 300, 900, 1800, 3600)."
+      },
+      "system_channel_id": {
+        "type": "string",
+        "description": "Channel ID for system messages."
+      },
+      "description": {
+        "type": "string",
+        "description": "Guild description."
+      }
+    },
+    "required": [
+      "guild_id"
+    ]
+  },
+  "body_mapping": "params"
+}

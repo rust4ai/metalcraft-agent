@@ -1,0 +1,35 @@
+{
+  "name": "discord_get_audit_log",
+  "description": "Read a guild's audit log (who did what). Provide `guild_id`; optional `limit` (1-100, default 50), `action_type` (numeric audit event, e.g. 22 = MEMBER_BAN_ADD, 20 = MEMBER_KICK, 10 = CHANNEL_CREATE), and `user_id` (filter to one actor). Requires VIEW_AUDIT_LOG.",
+  "method": "GET",
+  "url": "https://discord.com/api/v10/guilds/{guild_id}/audit-logs?limit={limit}&action_type={action_type}&user_id={user_id}",
+  "headers": {
+    "Authorization": "Bot $DISCORD_BOT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "guild_id": {
+        "type": "string",
+        "description": "The guild (server) ID (snowflake)."
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Max entries, 1-100. Defaults to 50."
+      },
+      "action_type": {
+        "type": "integer",
+        "description": "Numeric audit log event type to filter by (optional)."
+      },
+      "user_id": {
+        "type": "string",
+        "description": "Filter to actions performed by this user id (optional)."
+      }
+    },
+    "required": [
+      "guild_id"
+    ]
+  },
+  "body_mapping": "none"
+}

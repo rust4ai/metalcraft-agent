@@ -1,0 +1,23 @@
+{
+  "name": "discord_list_channel_webhooks",
+  "description": "List the webhooks configured on a channel. Provide `channel_id`. Requires MANAGE_WEBHOOKS.",
+  "method": "GET",
+  "url": "https://discord.com/api/v10/channels/{channel_id}/webhooks",
+  "headers": {
+    "Authorization": "Bot $DISCORD_BOT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "channel_id": {
+        "type": "string",
+        "description": "The channel ID (snowflake)."
+      }
+    },
+    "required": [
+      "channel_id"
+    ]
+  },
+  "body_mapping": "none"
+}

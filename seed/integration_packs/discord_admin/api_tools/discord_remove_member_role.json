@@ -1,0 +1,33 @@
+{
+  "name": "discord_remove_member_role",
+  "description": "Remove a role from a member. Provide `guild_id`, `user_id`, and `role_id`. Requires MANAGE_ROLES.",
+  "method": "DELETE",
+  "url": "https://discord.com/api/v10/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
+  "headers": {
+    "Authorization": "Bot $DISCORD_BOT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "guild_id": {
+        "type": "string",
+        "description": "The guild (server) ID (snowflake)."
+      },
+      "user_id": {
+        "type": "string",
+        "description": "The user ID (snowflake)."
+      },
+      "role_id": {
+        "type": "string",
+        "description": "The role ID (snowflake)."
+      }
+    },
+    "required": [
+      "guild_id",
+      "user_id",
+      "role_id"
+    ]
+  },
+  "body_mapping": "none"
+}

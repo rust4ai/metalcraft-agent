@@ -1,0 +1,23 @@
+{
+  "name": "discord_delete_channel",
+  "description": "Delete a channel (or category). This cannot be undone. Provide `channel_id`. Requires MANAGE_CHANNELS.",
+  "method": "DELETE",
+  "url": "https://discord.com/api/v10/channels/{channel_id}",
+  "headers": {
+    "Authorization": "Bot $DISCORD_BOT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "channel_id": {
+        "type": "string",
+        "description": "The channel ID (snowflake)."
+      }
+    },
+    "required": [
+      "channel_id"
+    ]
+  },
+  "body_mapping": "none"
+}

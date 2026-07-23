@@ -60,13 +60,24 @@ impl OperationKind {
             "load_skill" => Self::LoadSkill,
             "discord_send_message" | "discord_edit_message" | "discord_add_reaction" => Self::DiscordAction,
             "discord_get_messages" | "discord_get_channel_info" => Self::ReadFile,
+            // Discord admin pack (bot-token REST tools). The chat tools above are
+            // matched by their exact names first; everything else prefixed
+            // `discord_` is an admin tool: read-only lookups (list/get/search)
+            // auto-approve, while create/modify/delete/ban/kick/etc. are gated
+            // like a DiscordAction.
+            n if n.starts_with("discord_")
+                && (n.contains("_list") || n.contains("_get") || n.contains("_search")) =>
+            {
+                Self::ReadFile
+            }
+            n if n.starts_with("discord_") => Self::DiscordAction,
             // Meta tools — managing the project's own personas/skills/flows.
             // Read-only ones auto-approve; mutating ones require approval.
             "persona_list" | "persona_read" | "skill_list" | "skill_read" | "flow_list"
             | "flow_read" | "flow_validate" | "flow_templates_list" | "flow_template_read"
-            | "diagnostics_list" | "diagnostics_read" => Self::MetaRead,
+            | "diagnostics_list" | "diagnostics_read" | "pack_list" | "pack_read" => Self::MetaRead,
             "persona_write" | "persona_delete" | "skill_write" | "skill_delete" | "flow_write"
-            | "flow_delete" => Self::MetaWrite,
+            | "flow_delete" | "pack_enable" => Self::MetaWrite,
             // flow_run spawns agent runs that may use any tool — treat it like
             // a sub-agent (requires approval).
             "flow_run" => Self::SubAgent,
@@ -584,6 +595,40 @@ mod tests {
         }
         // flow_run spawns agent work — gated like a sub-agent.
         assert_eq!(OperationKind::classify("flow_run", &args), OperationKind::SubAgent);
+    }
+
+    #[test]
+    fn test_classify_discord_admin_tools() {
+        let args = serde_json::json!({});
+        // Read-only admin lookups auto-approve.
+        for t in [
+            "discord_list_roles",
+            "discord_list_members",
+            "discord_get_guild",
+            "discord_get_member",
+            "discord_get_audit_log",
+            "discord_search_members",
+        ] {
+            assert_eq!(OperationKind::classify(t, &args), OperationKind::ReadFile, "{t}");
+            assert_eq!(OperationKind::ReadFile.default_permission(), PermissionLevel::AutoApprove);
+        }
+        // Mutating admin actions are gated like a DiscordAction.
+        for t in [
+            "discord_create_channel",
+            "discord_delete_channel",
+            "discord_modify_role",
+            "discord_create_ban",
+            "discord_kick_member",
+            "discord_add_member_role",
+            "discord_bulk_delete_messages",
+            "discord_edit_channel_permissions",
+        ] {
+            assert_eq!(OperationKind::classify(t, &args), OperationKind::DiscordAction, "{t}");
+            assert_eq!(OperationKind::DiscordAction.default_permission(), PermissionLevel::RequiresApproval);
+        }
+        // The existing chat tools keep their exact-match classification.
+        assert_eq!(OperationKind::classify("discord_send_message", &args), OperationKind::DiscordAction);
+        assert_eq!(OperationKind::classify("discord_get_messages", &args), OperationKind::ReadFile);
     }
 
     #[test]

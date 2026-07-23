@@ -61,6 +61,38 @@ impl Pack {
     pub fn skills_dir(&self) -> PathBuf { self.root.join("skills") }
     pub fn api_tools_dir(&self) -> PathBuf { self.root.join("api_tools") }
     pub fn flow_templates_dir(&self) -> PathBuf { self.root.join("flow_templates") }
+
+    /// Human-facing setup guide shipped at the pack root (`README.md`), if any.
+    /// This is documentation for the operator — how to obtain the pack's API
+    /// key/credential and any provider-side setup — surfaced to the agent by
+    /// the `pack_read` tool so it can walk a user through installing the pack.
+    pub fn readme(&self) -> Option<String> {
+        std::fs::read_to_string(self.root.join("README.md")).ok()
+    }
+
+    /// Sorted file stems (slugs) of the items this pack provides under `subdir`
+    /// with extension `ext` (e.g. `("personas", "json")`). Used to report what a
+    /// pack contains without loading each file.
+    pub fn item_slugs(&self, subdir: &str, ext: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(self.root.join(subdir)) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.extension().and_then(|x| x.to_str()) == Some(ext) {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        out.push(stem.to_string());
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+}
+
+/// The installed pack with this id, if any.
+pub fn find_installed(id: &str) -> Option<Pack> {
+    list_installed().into_iter().find(|p| p.manifest.id == id)
 }
 
 /// Read every `pack.json` under `<data>/integration_packs/*/pack.json` into

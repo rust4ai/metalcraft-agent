@@ -16,6 +16,7 @@
     "skill_write",
     "skill_delete",
     "pack_list",
+    "pack_read",
     "pack_enable",
     "key_list",
     "key_set",

@@ -66,6 +66,43 @@ impl metalcraft::Tool for PackListTool {
     }
 }
 
+pub struct PackReadTool;
+
+#[async_trait]
+impl metalcraft::Tool for PackReadTool {
+    fn name(&self) -> &str {
+        "pack_read"
+    }
+    fn description(&self) -> &str {
+        "Read one integration pack's full details by id: its manifest, enabled state, the env keys it requires (each flagged configured/missing), the personas/skills/tools/flow-templates it provides, and its README — the setup guide covering which credential to get, how to obtain it, and any provider-side steps. Use this before enabling a pack to walk the user through what it needs and how to set it up."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Integration pack id (e.g. \"discord_admin\", \"github\")" }
+            },
+            "required": ["id"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = id_arg(&args, "pack_read")?;
+        let Some(pack) = crate::integration_packs::find_installed(&id) else {
+            return Ok(serde_json::json!({ "error": format!("pack '{id}' not installed") }));
+        };
+        let mut summary = pack_summary(&pack);
+        summary["personas"] = serde_json::json!(pack.item_slugs("personas", "json"));
+        summary["skills"] = serde_json::json!(pack.item_slugs("skills", "md"));
+        summary["tools"] = serde_json::json!(pack.item_slugs("api_tools", "json"));
+        summary["flow_templates"] = serde_json::json!(pack.item_slugs("flow_templates", "json"));
+        summary["readme"] = match pack.readme() {
+            Some(text) => serde_json::Value::String(text),
+            None => serde_json::Value::Null,
+        };
+        Ok(summary)
+    }
+}
+
 pub struct PackEnableTool;
 
 #[async_trait]

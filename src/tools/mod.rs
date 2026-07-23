@@ -103,6 +103,7 @@ pub fn create_registry_for_with_config(
             // Integration packs: install (enable/disable) capabilities for the
             // agent itself, and inspect what's available + which keys they need.
             "pack_list" => registry.register(meta_integration::PackListTool),
+            "pack_read" => registry.register(meta_integration::PackReadTool),
             "pack_enable" => registry.register(meta_integration::PackEnableTool),
             // API key / secret store: the secrets HTTP-API tools reference via
             // `$NAME`. Setting a key here is what lets an enabled pack authenticate.
