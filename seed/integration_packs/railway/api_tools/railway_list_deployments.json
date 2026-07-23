@@ -1,0 +1,28 @@
+{
+  "name": "railway_list_deployments",
+  "description": "INSPECT a service's recent deployments and their status. Requires `serviceId` and `environmentId` (both from railway_get_project); `projectId` optional to narrow. Returns up to 5 deployments newest-first: each node has `id`, `status` (e.g. SUCCESS, BUILDING, DEPLOYING, FAILED, CRASHED, REMOVED), `createdAt`, `url`/`staticUrl` (the live deployment URL), and `canRedeploy`. Use this to answer 'is the service up / did the last deploy succeed / what's the current URL', and to find a deployment `id` before rolling back. Read-only.",
+  "method": "POST",
+  "url": "https://backboard.railway.com/graphql/v2",
+  "headers": {
+    "Authorization": "Bearer $RAILWAY_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "serviceId": { "type": "string", "description": "The service id (from railway_get_project)." },
+      "environmentId": { "type": "string", "description": "The environment id (from railway_get_project)." },
+      "projectId": { "type": "string", "description": "Optional project id (from railway_list_projects) to scope the query." }
+    },
+    "required": ["serviceId", "environmentId"]
+  },
+  "body_mapping": "params_nested",
+  "body_defaults": {
+    "query": "query deployments($input: DeploymentListInput!) { deployments(first: 5, input: $input) { edges { node { id status createdAt url staticUrl canRedeploy } } } }"
+  },
+  "param_paths": {
+    "serviceId": "variables.input.serviceId",
+    "environmentId": "variables.input.environmentId",
+    "projectId": "variables.input.projectId"
+  }
+}

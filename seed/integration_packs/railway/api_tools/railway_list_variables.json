@@ -1,0 +1,28 @@
+{
+  "name": "railway_list_variables",
+  "description": "INSPECT the environment variables for a service in an environment. Requires `projectId` and `environmentId`; `serviceId` optional (omit to read the environment's shared/project-level variables instead of a service's). Returns `variables` as a JSON object of name -> value. SECURITY: these values are secrets — use them to confirm which keys are set or spot a missing/misconfigured var, but never echo raw secret values back to the user; refer to them by name. Read-only.",
+  "method": "POST",
+  "url": "https://backboard.railway.com/graphql/v2",
+  "headers": {
+    "Authorization": "Bearer $RAILWAY_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "projectId": { "type": "string", "description": "The project id (from railway_list_projects)." },
+      "environmentId": { "type": "string", "description": "The environment id (from railway_get_project)." },
+      "serviceId": { "type": "string", "description": "Optional service id (from railway_get_project). Omit to read the environment's shared variables." }
+    },
+    "required": ["projectId", "environmentId"]
+  },
+  "body_mapping": "params_nested",
+  "body_defaults": {
+    "query": "query variables($projectId: String!, $environmentId: String!, $serviceId: String) { variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }"
+  },
+  "param_paths": {
+    "projectId": "variables.projectId",
+    "environmentId": "variables.environmentId",
+    "serviceId": "variables.serviceId"
+  }
+}

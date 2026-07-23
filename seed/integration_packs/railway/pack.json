@@ -1,0 +1,9 @@
+{
+  "id": "railway",
+  "name": "Railway",
+  "description": "Persona, skill, and HTTP API tools that let an agent inspect and manage Railway deployments through the Railway public GraphQL API — verify the token, list projects and their services/environments, inspect a service's recent deployments/status and its environment variables, create a new service from a repo or image, redeploy a service, upsert environment variables, list a service's domains, add a custom domain, and read back the exact DNS records the user must set. Authenticated by a single RAILWAY_API_TOKEN (an account or workspace token; sent as Authorization: Bearer).",
+  "version": "1.1.0",
+  "requires_env": [
+    "RAILWAY_API_TOKEN"
+  ]
+}

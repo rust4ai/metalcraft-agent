@@ -1,0 +1,21 @@
+{
+  "name": "render_create_custom_domain",
+  "description": "Add a custom domain to a service (HTTP POST, body {\"name\": <domain>}). Requires `serviceId` (in the URL) and `name` (the domain to add, e.g. 'app.example.com'). Returns the new custom-domain object with `id`, `domainType` ('apex' or 'subdomain'), and `verificationStatus` ('unverified' at first). IMPORTANT: the response does NOT include the DNS target the user must set — after creating, follow the render-domains skill to derive it (subdomain -> CNAME to the service's serviceDetails.url; apex -> A record to Render's fixed IP 216.24.57.1), then have the user create that record. This attaches a live domain — confirm the exact service and domain first.",
+  "method": "POST",
+  "url": "https://api.render.com/v1/services/{serviceId}/custom-domains",
+  "headers": {
+    "Authorization": "Bearer $RENDER_API_KEY",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "serviceId": { "type": "string", "description": "The service id to attach the domain to (e.g. 'srv-...', from render_list_services)." },
+      "name": { "type": "string", "description": "The custom domain hostname to add, e.g. 'app.example.com' or 'example.com'." }
+    },
+    "required": ["serviceId", "name"]
+  },
+  "body_mapping": "template",
+  "body_template": "{\"name\": \"{name}\"}"
+}

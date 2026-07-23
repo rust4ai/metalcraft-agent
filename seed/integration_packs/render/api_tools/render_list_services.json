@@ -1,0 +1,20 @@
+{
+  "name": "render_list_services",
+  "description": "List services in a Render workspace. Returns an array of wrapped items; each service has `id` (e.g. 'srv-...', the serviceId every custom-domain tool needs), `name`, `type` (web_service, static_site, ...), and `serviceDetails` — whose `url` is the service's own onrender.com hostname (needed to build the CNAME target for subdomain custom domains). Optional `ownerId` to scope to one workspace (from render_list_owners; required only if the key has multiple workspaces), `name` to filter by service name, `limit` (1-100, default 20), and `cursor` for the next page (cursor pagination).",
+  "method": "GET",
+  "url": "https://api.render.com/v1/services?ownerId={ownerId}&name={name}&limit={limit}&cursor={cursor}",
+  "headers": {
+    "Authorization": "Bearer $RENDER_API_KEY",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "ownerId": { "type": "string", "description": "Workspace id to scope to (from render_list_owners). Omit if the key has a single workspace." },
+      "name": { "type": "string", "description": "Filter to services whose name matches. Omit to list all." },
+      "limit": { "type": "integer", "description": "Results per page, 1-100 (default 20)." },
+      "cursor": { "type": "string", "description": "Pagination cursor from a previous page's response. Omit for the first page." }
+    }
+  },
+  "body_mapping": "none"
+}

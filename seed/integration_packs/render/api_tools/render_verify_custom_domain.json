@@ -1,0 +1,19 @@
+{
+  "name": "render_verify_custom_domain",
+  "description": "Ask Render to re-check a custom domain's DNS configuration (HTTP POST, no body) — returns 202 Accepted. Call this after the user has created the required DNS record, to trigger verification. Render also verifies automatically after a domain is added, so you don't strictly need this on first setup; it's for re-checking after a later DNS change. To read the result, re-GET the domain with render_get_custom_domain and inspect `verificationStatus`. Requires `serviceId` and `customDomainIdOrName`.",
+  "method": "POST",
+  "url": "https://api.render.com/v1/services/{serviceId}/custom-domains/{customDomainIdOrName}/verify",
+  "headers": {
+    "Authorization": "Bearer $RENDER_API_KEY",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "serviceId": { "type": "string", "description": "The service id (e.g. 'srv-...')." },
+      "customDomainIdOrName": { "type": "string", "description": "The custom domain's id or its domain name." }
+    },
+    "required": ["serviceId", "customDomainIdOrName"]
+  },
+  "body_mapping": "none"
+}

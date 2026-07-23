@@ -1,0 +1,15 @@
+{
+  "name": "render_list_owners",
+  "description": "List the Render workspaces (owners) the RENDER_API_KEY can access: each has an `id` (the ownerId), `name`, and `email`/`type`. The cheapest way to confirm the key is valid and to find the `ownerId` you may pass to render_list_services when the key belongs to more than one workspace. Takes no parameters.",
+  "method": "GET",
+  "url": "https://api.render.com/v1/owners?limit=100",
+  "headers": {
+    "Authorization": "Bearer $RENDER_API_KEY",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "none"
+}

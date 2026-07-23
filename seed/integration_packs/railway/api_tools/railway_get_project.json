@@ -1,0 +1,27 @@
+{
+  "name": "railway_get_project",
+  "description": "Get one project's services and environments by project `id`. Returns { project { id name services { edges { node { id name } } } environments { edges { node { id name } } } } }. This is how you LIST SERVICES: each service node `id` is the `serviceId`, and each environment node `id` is the `environmentId` — you need both (plus the projectId) to add or read a custom domain. Requires `id` (the project id from railway_list_projects).",
+  "method": "POST",
+  "url": "https://backboard.railway.com/graphql/v2",
+  "headers": {
+    "Authorization": "Bearer $RAILWAY_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "The project id (from railway_list_projects)."
+      }
+    },
+    "required": ["id"]
+  },
+  "body_mapping": "params_nested",
+  "body_defaults": {
+    "query": "query project($id: String!) { project(id: $id) { id name services { edges { node { id name } } } environments { edges { node { id name } } } } }"
+  },
+  "param_paths": {
+    "id": "variables.id"
+  }
+}

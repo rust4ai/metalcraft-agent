@@ -15,6 +15,7 @@ pub mod meta_persona;
 pub mod meta_skill;
 pub mod read_file;
 pub mod say_to_user;
+pub mod email_imap;
 pub mod spaces;
 pub mod sub_agent;
 pub mod twilio;
@@ -117,6 +118,14 @@ pub fn create_registry_for_with_config(
             "spaces_get_object" => registry.register(spaces::SpacesGetObjectTool),
             "spaces_put_object" => registry.register(spaces::SpacesPutObjectTool),
             "spaces_delete_object" => registry.register(spaces::SpacesDeleteObjectTool),
+            // Read-only IMAP email — native tools because IMAP is not HTTP, so
+            // the declarative HTTP-API tool can't speak it. Shipped by the
+            // `email` pack; read IMAP_HOST/IMAP_USER/IMAP_PASSWORD(/IMAP_PORT)
+            // from the key store. Every session uses EXAMINE (read-only).
+            "email_list_mailboxes" => registry.register(email_imap::EmailListMailboxesTool),
+            "email_search" => registry.register(email_imap::EmailSearchTool),
+            "email_list_recent" => registry.register(email_imap::EmailListRecentTool),
+            "email_get_message" => registry.register(email_imap::EmailGetMessageTool),
             // Generic gateway send — replies on any gateway channel (WhatsApp
             // today). Native (not a declarative HTTP-API tool) because the
             // adapters use auth schemes `$VAR` header substitution can't express
@@ -177,6 +186,12 @@ pub fn native_pack_tool_names(pack_id: &str) -> Vec<String> {
             "spaces_get_object",
             "spaces_put_object",
             "spaces_delete_object",
+        ],
+        "email" => &[
+            "email_list_mailboxes",
+            "email_search",
+            "email_list_recent",
+            "email_get_message",
         ],
         _ => &[],
     };

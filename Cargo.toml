@@ -38,6 +38,9 @@ axum = { version = "0.8", features = ["macros"] }
 uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"
 tokio-stream = "0.1"
+imap = "2"
+mail-parser = "0.11"
+native-tls = "0.2"
 
 [[bin]]
 name = "metalcraft-agent"

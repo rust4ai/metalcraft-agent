@@ -1,0 +1,18 @@
+{
+  "name": "railway_list_projects",
+  "description": "List the Railway projects the token can access: projects { edges { node { id name } } }. The project `id` is what railway_get_project and railway_create_custom_domain need. Use this first to resolve a project name to its id. Takes no parameters. (If this returns empty for a workspace token, the project may live under `me { projects }` — see the railway-domains skill.)",
+  "method": "POST",
+  "url": "https://backboard.railway.com/graphql/v2",
+  "headers": {
+    "Authorization": "Bearer $RAILWAY_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "params",
+  "body_defaults": {
+    "query": "query { projects { edges { node { id name } } } }"
+  }
+}

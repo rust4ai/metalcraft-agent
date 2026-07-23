@@ -1,0 +1,26 @@
+{
+  "name": "railway_get_custom_domain",
+  "description": "Read an existing custom domain's required DNS records and verification/certificate status by custom-domain `id`. Returns status.dnsRecords[] where each record has: `recordType` (e.g. CNAME), `hostlabel`/`fqdn` (the record name to create), `requiredValue` (the value to point it at — the Railway target the user must enter), `currentValue` (what DNS currently resolves to, if anything), and `status` (whether it matches yet). Also returns status.verificationToken (TXT ownership record) and status.certificateStatus (TLS provisioning). Use this to tell the user exactly what DNS to set, and to check whether the domain has verified. Requires `id` (custom domain id, from railway_create_custom_domain or railway_list_domains) and `projectId`.",
+  "method": "POST",
+  "url": "https://backboard.railway.com/graphql/v2",
+  "headers": {
+    "Authorization": "Bearer $RAILWAY_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": { "type": "string", "description": "The custom domain id (from railway_create_custom_domain or railway_list_domains)." },
+      "projectId": { "type": "string", "description": "The project id the domain belongs to." }
+    },
+    "required": ["id", "projectId"]
+  },
+  "body_mapping": "params_nested",
+  "body_defaults": {
+    "query": "query customDomain($id: String!, $projectId: String!) { customDomain(id: $id, projectId: $projectId) { id domain status { verificationToken certificateStatus dnsRecords { hostlabel fqdn recordType requiredValue currentValue status zone purpose } } } }"
+  },
+  "param_paths": {
+    "id": "variables.id",
+    "projectId": "variables.projectId"
+  }
+}

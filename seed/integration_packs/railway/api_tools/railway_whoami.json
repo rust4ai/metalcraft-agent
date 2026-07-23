@@ -1,0 +1,18 @@
+{
+  "name": "railway_whoami",
+  "description": "Return the Railway account the RAILWAY_API_TOKEN belongs to: { me { name email } }. The cheapest way to confirm the token is valid and see who you are acting as, before doing any project/domain work. Takes no parameters. NOTE: this only works for account/workspace tokens (the kind this pack uses); it is not meaningful for project-scoped tokens.",
+  "method": "POST",
+  "url": "https://backboard.railway.com/graphql/v2",
+  "headers": {
+    "Authorization": "Bearer $RAILWAY_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "params",
+  "body_defaults": {
+    "query": "query { me { name email } }"
+  }
+}

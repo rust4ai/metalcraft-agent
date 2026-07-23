@@ -1,0 +1,26 @@
+{
+  "name": "railway_redeploy",
+  "description": "REDEPLOY a service's current build in an environment (serviceInstanceRedeploy) — re-runs the latest deployment, e.g. to pick up new variables or recover from a crash. Requires `serviceId` and `environmentId` (both from railway_get_project). Returns a boolean. This restarts live infrastructure and causes a brief redeploy — confirm the exact service and environment first. (To roll back to a specific older build instead, find its deployment id with railway_list_deployments; this pack redeploys the current one only.)",
+  "method": "POST",
+  "url": "https://backboard.railway.com/graphql/v2",
+  "headers": {
+    "Authorization": "Bearer $RAILWAY_API_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "serviceId": { "type": "string", "description": "The service id (from railway_get_project)." },
+      "environmentId": { "type": "string", "description": "The environment id (from railway_get_project)." }
+    },
+    "required": ["serviceId", "environmentId"]
+  },
+  "body_mapping": "params_nested",
+  "body_defaults": {
+    "query": "mutation serviceInstanceRedeploy($serviceId: String!, $environmentId: String!) { serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId) }"
+  },
+  "param_paths": {
+    "serviceId": "variables.serviceId",
+    "environmentId": "variables.environmentId"
+  }
+}
