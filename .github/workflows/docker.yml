@@ -4,6 +4,10 @@ name: build-and-push
 # never has to compile Rust. Triggers:
 #   - push to master       -> tags `latest` + the git sha
 #   - push of a v* tag      -> tags the semver (e.g. 0.5.1, 0.5, plus latest)
+#
+# On a v* tag it ALSO publishes the crate to crates.io (so `cargo install
+# metalcraft-agent` stays in step with releases). That step needs a
+# CARGO_REGISTRY_TOKEN repo secret; it self-skips if the version is already up.
 on:
   push:
     branches: [master]
@@ -54,3 +58,37 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  publish-crate:
+    # Publish to crates.io on version tags only, after the image builds — keeps
+    # `cargo install metalcraft-agent` in step with releases. Needs the
+    # CARGO_REGISTRY_TOKEN repo secret (a crates.io API token with publish
+    # scope). Idempotent: self-skips if this version is already published, so a
+    # re-run of the tag can't fail here.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Skip if version already on crates.io
+        id: check
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if curl -sf "https://crates.io/api/v1/crates/metalcraft-agent/$VERSION" >/dev/null; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "metalcraft-agent $VERSION already on crates.io — skipping publish"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to crates.io
+        if: steps.check.outputs.already == 'false'
+        run: cargo publish --token "$CARGO_REGISTRY_TOKEN"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
