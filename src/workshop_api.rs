@@ -44,6 +44,45 @@ pub struct WorkshopApiConfig {
 /// the lifetime of the daemon process.
 type ChatStore = Arc<Mutex<HashMap<String, Arc<Mutex<ChatSession>>>>>;
 
+/// Process-global chat store, shared by the HTTP handlers and the daemon's
+/// scheduled-follow-up runner (which lives outside any request but must reach
+/// the same sessions to deliver a fired follow-up into its chat). Rehydrated
+/// from disk on first access.
+fn chat_store() -> ChatStore {
+    static STORE: std::sync::OnceLock<ChatStore> = std::sync::OnceLock::new();
+    STORE
+        .get_or_init(|| {
+            let persisted = load_persisted_chats();
+            if !persisted.is_empty() {
+                log::info!("Loaded {} persisted chat(s) from disk", persisted.len());
+            }
+            Arc::new(Mutex::new(persisted))
+        })
+        .clone()
+}
+
+/// Per-chat live event bus. A subscriber (`GET /chats/{id}/events`) receives
+/// events from *agent-initiated* turns — today, scheduled follow-ups the daemon
+/// fires — so an open chat surfaces them without the user sending a message.
+/// Normal user-initiated turns still stream over their own `POST .../turn`
+/// response and don't need this.
+type ChatBroadcasters = Arc<Mutex<HashMap<String, tokio::sync::broadcast::Sender<ChatEvent>>>>;
+
+fn chat_broadcasters() -> ChatBroadcasters {
+    static B: std::sync::OnceLock<ChatBroadcasters> = std::sync::OnceLock::new();
+    B.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone()
+}
+
+/// Get (or create) the broadcast sender for a chat. Kept alive in the registry
+/// so a subscriber that connects before a follow-up fires still receives it.
+async fn chat_event_sender(chat_id: &str) -> tokio::sync::broadcast::Sender<ChatEvent> {
+    let reg = chat_broadcasters();
+    let mut map = reg.lock().await;
+    map.entry(chat_id.to_string())
+        .or_insert_with(|| tokio::sync::broadcast::channel(64).0)
+        .clone()
+}
+
 struct ChatSession {
     id: String,
     persona_slug: String,
@@ -180,14 +219,12 @@ pub fn build_router(api_key: String) -> Router {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".into());
-    // Rehydrate chats from disk so they survive restarts.
-    let persisted = load_persisted_chats();
-    if !persisted.is_empty() {
-        log::info!("Loaded {} persisted chat(s) from disk", persisted.len());
-    }
+    // Use the process-global chat store (rehydrated from disk on first access)
+    // so the daemon's scheduled-follow-up runner and these handlers operate on
+    // the same sessions.
     let state = Arc::new(ApiState {
         api_key,
-        chats: Arc::new(Mutex::new(persisted)),
+        chats: chat_store(),
         cwd,
     });
 
@@ -219,6 +256,9 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/chats", get(list_chats).post(post_create_chat))
         .route("/api/v1/chats/{id}", get(get_chat).delete(delete_chat))
         .route("/api/v1/chats/{id}/turn", post(post_chat_turn))
+        .route("/api/v1/chats/{id}/events", get(get_chat_events))
+        .route("/api/v1/scheduled-tasks", get(list_scheduled_tasks))
+        .route("/api/v1/scheduled-tasks/{id}", delete(delete_scheduled_task))
         .route("/api/v1/integration-packs", get(list_integration_packs))
         .route("/api/v1/integration-packs/{id}", get(get_integration_pack))
         .route("/api/v1/integration-packs/{id}/enabled", put(put_pack_enabled))
@@ -1213,7 +1253,7 @@ struct ChatTurnRequest {
 ///                   → `tool_started`* → `tool_completed`*)+
 ///                   → `done`
 /// (`tool_started` and `tool_completed` can repeat per LLM step.)
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ChatEvent {
     /// Marks the start of a turn — emitted once at the top of `post_chat_turn`
@@ -1680,6 +1720,164 @@ async fn post_chat_turn(
     Sse::new(stream)
         .keep_alive(KeepAlive::new())
         .into_response()
+}
+
+/// Live subscription to a chat's *agent-initiated* turns (scheduled follow-ups).
+/// The workshop opens this when a chat is on screen so a follow-up that fires
+/// while the user is idle streams in without a page refresh. Normal
+/// user-initiated turns still come back on their own `POST .../turn` response.
+async fn get_chat_events(State(_state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    let sender = chat_event_sender(&id).await;
+    let rx = sender.subscribe();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|res| async move {
+        match res {
+            Ok(ev) => Some(Ok::<Event, Infallible>(
+                Event::default().json_data(&ev).unwrap_or_else(|_| {
+                    Event::default().data("{\"kind\":\"done\",\"status\":\"failed\",\"reason\":\"serialize\"}")
+                }),
+            )),
+            // A lagged subscriber just skips missed events rather than erroring.
+            Err(_) => None,
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::new()).into_response()
+}
+
+/// List scheduled follow-ups (pending + recently completed), newest first.
+async fn list_scheduled_tasks(State(_state): State<Arc<ApiState>>) -> Response {
+    Json(crate::scheduled_tasks::list()).into_response()
+}
+
+/// Cancel a pending scheduled follow-up.
+async fn delete_scheduled_task(
+    State(_state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+) -> Response {
+    match crate::scheduled_tasks::cancel(&id) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "cancelled": true }))).into_response(),
+        Ok(false) => err_json(StatusCode::NOT_FOUND, "no pending follow-up with that id"),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Outcome of trying to deliver a fired follow-up into its chat.
+pub enum FollowupDelivery {
+    /// The follow-up ran and its reply was delivered/persisted.
+    Delivered,
+    /// The chat was mid-turn — the caller should requeue and retry shortly.
+    ChatBusy,
+    /// No such chat (deleted, or never existed in this process).
+    ChatMissing,
+}
+
+/// Run a fired follow-up as a real turn on its Workshop chat, then persist it
+/// and publish the reply on the chat's live event bus. Reuses the same
+/// `run_chat_turn` machinery as a user turn, so the follow-up continues the
+/// conversation (same persona + accumulated state) and its `say_to_user` reply
+/// is recorded in the chat like any other assistant message — visible on reopen
+/// and streamed live to any open subscriber.
+pub async fn deliver_followup_to_chat(
+    context: &AgentRuntimeContext,
+    chat_id: &str,
+    task: &str,
+) -> FollowupDelivery {
+    let store = chat_store();
+    let session = { store.lock().await.get(chat_id).cloned() };
+    let Some(session) = session else {
+        return FollowupDelivery::ChatMissing;
+    };
+
+    // Snapshot what we need and stamp the session busy, refusing to run
+    // concurrently with a user turn.
+    let (persona_slug, model_name, cwd, agent_state, diagnostics) = {
+        let mut s = session.lock().await;
+        if s.busy {
+            return FollowupDelivery::ChatBusy;
+        }
+        s.busy = true;
+        let next_state = match s.state.take() {
+            Some(prev) => prev.continue_with(task.to_string()),
+            None => AgentState::new(task.to_string()),
+        };
+        (
+            s.persona_slug.clone(),
+            s.model_name.clone(),
+            s.cwd.clone(),
+            next_state,
+            s.diagnostics.clone(),
+        )
+    };
+
+    // Reply sink: publish the agent's say_to_user text to the chat's live bus.
+    let sender = chat_event_sender(chat_id).await;
+    let reply_sink: crate::tools::ReplySink = {
+        let sender = sender.clone();
+        Arc::new(move |content: String| {
+            let sender = sender.clone();
+            Box::pin(async move {
+                // A send error just means no live subscriber; the reply is still
+                // persisted below, so that's not a failure.
+                let _ = sender.send(ChatEvent::Reply { content });
+                Ok(())
+            })
+        })
+    };
+
+    let step_guard =
+        crate::guard::build_agent_guard(crate::guard::GuardConfig::default(), diagnostics.clone());
+    let llm_call_hook: Option<metalcraft::LlmCallHook> = diagnostics.as_ref().map(|d| {
+        let logger = d.clone();
+        Arc::new(move |snapshot: &metalcraft::LlmCallSnapshot| {
+            logger.log_llm_request(snapshot);
+        }) as metalcraft::LlmCallHook
+    });
+
+    let _ = sender.send(ChatEvent::TurnStarted {
+        turn_index: 0,
+        user_message: format!("⏰ scheduled follow-up: {task}"),
+        session_id: None,
+    });
+
+    let outcome = run_chat_turn(
+        context,
+        &persona_slug,
+        &cwd,
+        &model_name,
+        agent_state,
+        step_guard,
+        llm_call_hook,
+        None,
+        RuntimeOptions {
+            reply_sink: Some(reply_sink),
+            tool_choice: metalcraft::ToolChoice::Required,
+            terminal_tools: vec!["say_to_user".to_string()],
+            session_binding: Some(crate::scheduled_tasks::IoBinding::WorkshopChat {
+                chat_id: chat_id.to_string(),
+            }),
+            // A follow-up may schedule one more; the tool caps the chain depth.
+            reschedule_depth: 0,
+        },
+    )
+    .await;
+
+    // Write the resulting state back and clear busy, then persist + signal done.
+    {
+        let mut s = session.lock().await;
+        match outcome {
+            Ok(RunOutcome::Completed(state)) => s.state = Some(state),
+            // On a non-completion, keep whatever partial state came back if any;
+            // otherwise the pre-turn state was already taken, so leave None.
+            _ => {}
+        }
+        s.busy = false;
+    }
+    persist_chat(&session).await;
+    let _ = sender.send(ChatEvent::Done {
+        status: "completed".into(),
+        reason: None,
+    });
+
+    FollowupDelivery::Delivered
 }
 
 async fn run_chat_turn(

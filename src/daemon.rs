@@ -316,64 +316,75 @@ async fn run_due_scheduled_tasks(
 ) {
     use crate::scheduled_tasks::{self, TaskStatus};
 
+    use crate::scheduled_tasks::IoBinding;
+    use crate::workshop_api::FollowupDelivery;
+
     let due = scheduled_tasks::claim_due(chrono::Utc::now());
     for task in due {
-        let persona = task.persona.as_deref().unwrap_or(default_persona);
-        log::info!(
-            "Running scheduled follow-up {} (persona: {}): {}",
-            task.id,
-            persona,
-            task.task
-        );
+        log::info!("Running scheduled follow-up {}: {}", task.id, task.task);
 
-        let logger = DiagnosticsLogger::new().ok().map(Arc::new);
-        let outcome = runtime::run_one_shot_task(
-            context,
-            RunOneShotRequest {
-                persona_slug: persona,
-                cwd,
-                model_name,
-                task: &task.task,
-                approval_mode: approval_mode.clone(),
-                diagnostics: logger,
-            },
-        )
-        .await;
-
-        match outcome {
-            Ok(metalcraft::RunOutcome::Completed(state)) => {
-                let answer = state.final_answer().unwrap_or("(no answer)").to_string();
-                deliver_scheduled_result(&task, &answer).await;
-                scheduled_tasks::mark(&task.id, TaskStatus::Done);
+        match &task.io_binding {
+            // Workshop chat: run the follow-up as a real turn on that chat so
+            // the reply is persisted and streamed to any open subscriber.
+            IoBinding::WorkshopChat { chat_id } => {
+                match workshop_api::deliver_followup_to_chat(context, chat_id, &task.task).await {
+                    FollowupDelivery::Delivered => {
+                        scheduled_tasks::mark(&task.id, TaskStatus::Done);
+                    }
+                    FollowupDelivery::ChatBusy => {
+                        // Retry shortly rather than dropping it.
+                        log::info!("Chat {chat_id} busy; requeuing follow-up {}", task.id);
+                        scheduled_tasks::requeue(
+                            &task.id,
+                            chrono::Utc::now() + chrono::Duration::seconds(30),
+                        );
+                    }
+                    FollowupDelivery::ChatMissing => {
+                        log::warn!("Chat {chat_id} gone; dropping follow-up {}", task.id);
+                        scheduled_tasks::mark(&task.id, TaskStatus::Failed);
+                    }
+                }
             }
-            Ok(metalcraft::RunOutcome::Interrupted { reason, .. }) => {
-                log::warn!("Scheduled follow-up {} interrupted: {reason}", task.id);
-                scheduled_tasks::mark(&task.id, TaskStatus::Failed);
-            }
-            Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
-                log::error!("Scheduled follow-up {} failed at {node}: {error}", task.id);
-                scheduled_tasks::mark(&task.id, TaskStatus::Failed);
-            }
-            Err(e) => {
-                log::error!("Scheduled follow-up {} errored: {e}", task.id);
-                scheduled_tasks::mark(&task.id, TaskStatus::Failed);
+            // Gateway / unbound: run as a one-shot under the requested persona.
+            // (Gateway adapter delivery is wired in a later pass; for now the
+            // result is logged so a completed follow-up isn't lost.)
+            _ => {
+                let persona = task.persona.as_deref().unwrap_or(default_persona);
+                let logger = DiagnosticsLogger::new().ok().map(Arc::new);
+                let outcome = runtime::run_one_shot_task(
+                    context,
+                    RunOneShotRequest {
+                        persona_slug: persona,
+                        cwd,
+                        model_name,
+                        task: &task.task,
+                        approval_mode: approval_mode.clone(),
+                        diagnostics: logger,
+                    },
+                )
+                .await;
+                match outcome {
+                    Ok(metalcraft::RunOutcome::Completed(state)) => {
+                        let answer = state.final_answer().unwrap_or("(no answer)");
+                        log::info!(
+                            "Scheduled follow-up {} result [{:?}]: {answer}",
+                            task.id,
+                            task.io_binding
+                        );
+                        scheduled_tasks::mark(&task.id, TaskStatus::Done);
+                    }
+                    Ok(other) => {
+                        log::warn!("Scheduled follow-up {} did not complete: {other:?}", task.id);
+                        scheduled_tasks::mark(&task.id, TaskStatus::Failed);
+                    }
+                    Err(e) => {
+                        log::error!("Scheduled follow-up {} errored: {e}", task.id);
+                        scheduled_tasks::mark(&task.id, TaskStatus::Failed);
+                    }
+                }
             }
         }
     }
-}
-
-/// Deliver a fired follow-up's result back to the session that armed it.
-///
-/// Live delivery into a Workshop chat's SSE stream / out a gateway adapter is
-/// the next pass (it needs a handle to the running API's chat store); for now
-/// the result is recorded so a completed follow-up is never silently lost.
-async fn deliver_scheduled_result(task: &crate::scheduled_tasks::ScheduledTask, answer: &str) {
-    log::info!(
-        "Scheduled follow-up {} result [{:?}]: {}",
-        task.id,
-        task.io_binding,
-        answer
-    );
 }
 
 struct FlowRunState {

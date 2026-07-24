@@ -255,6 +255,21 @@ pub fn cancel(id: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Put a claimed (Running) task back to Pending with a new run time — used when
+/// a follow-up fires but its chat is momentarily busy with a user turn, so it
+/// retries shortly instead of being lost.
+pub fn requeue(id: &str, run_at: DateTime<Utc>) {
+    let _g = lock().lock().unwrap();
+    let mut all = load_unlocked();
+    if let Some(t) = all.iter_mut().find(|t| t.id == id) {
+        t.status = TaskStatus::Pending;
+        t.run_at = run_at;
+        if let Err(e) = save_unlocked(&all) {
+            log::warn!("failed to persist requeue for {id}: {e}");
+        }
+    }
+}
+
 /// Set a task's status (used by the daemon as a job moves running → done/failed).
 pub fn mark(id: &str, status: TaskStatus) {
     let _g = lock().lock().unwrap();
