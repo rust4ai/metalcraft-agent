@@ -26,5 +26,14 @@ docker compose -f "$COMPOSE_FILE" up -d
 echo "==> Done. Running image:"
 docker compose -f "$COMPOSE_FILE" images daemon || true
 
+# Health hint, matched to the compose file (Caddy=HTTPS on your DOMAIN, else localhost).
+if [[ "$COMPOSE_FILE" == *caddy* ]]; then
+  DOMAIN="$(grep -E '^DOMAIN=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | xargs || true)"
+  echo "==> Verify:  curl https://${DOMAIN:-<your-domain>}/health"
+else
+  PORT="$(grep -E '^PORT=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | xargs || true)"
+  echo "==> Verify:  curl http://localhost:${PORT:-3002}/health"
+fi
+
 echo "==> Recent daemon logs (Ctrl-C to stop following):"
 docker compose -f "$COMPOSE_FILE" logs --tail=20 -f daemon
