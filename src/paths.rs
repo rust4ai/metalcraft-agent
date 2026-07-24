@@ -95,6 +95,13 @@ pub fn keys_file() -> PathBuf {
     data_dir().join("keys.json")
 }
 
+/// Persisted scheduled follow-up tasks — deferred subagent jobs the agent
+/// arms via `schedule_followup`, fired by the daemon when due. A JSON array at
+/// `<data>/scheduled_tasks.json`. See [`crate::scheduled_tasks`].
+pub fn scheduled_tasks_file() -> PathBuf {
+    data_dir().join("scheduled_tasks.json")
+}
+
 /// Root directory that document-upload tools (multipart HTTP-API tools) may
 /// read local files from. The multipart body builder refuses any path that
 /// resolves outside this tree, so a tool-calling model can't be steered into

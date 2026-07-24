@@ -14,6 +14,7 @@ pub mod key_store;
 pub mod paths;
 pub mod persona;
 pub mod runtime;
+pub mod scheduled_tasks;
 pub mod seed;
 pub mod session_io;
 pub mod skill;

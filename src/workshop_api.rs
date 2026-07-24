@@ -1586,6 +1586,12 @@ async fn post_chat_turn(
                 reply_sink: Some(reply_sink),
                 tool_choice: metalcraft::ToolChoice::Required,
                 terminal_tools: vec!["say_to_user".to_string()],
+                // A follow-up armed during this turn is delivered back to this
+                // chat when it fires.
+                session_binding: Some(crate::scheduled_tasks::IoBinding::WorkshopChat {
+                    chat_id: id.clone(),
+                }),
+                reschedule_depth: 0,
             },
         )
         .await;
@@ -2465,6 +2471,11 @@ async fn run_one_gateway_turn(
             reply_sink: Some(sink),
             tool_choice: metalcraft::ToolChoice::Required,
             terminal_tools: vec!["say_to_user".to_string()],
+            // Gateway follow-up delivery (rebuilding the adapter sink at fire
+            // time from the channel binding) is wired in the delivery pass; for
+            // now a follow-up armed in a gateway turn is unbound (logged).
+            session_binding: None,
+            reschedule_depth: 0,
         },
     )
     .await;

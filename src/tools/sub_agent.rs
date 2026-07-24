@@ -85,6 +85,10 @@ impl metalcraft::Tool for SubAgentTool {
                 // A sub-agent has no user-facing channel of its own; its result
                 // is returned to the parent, not delivered via say_to_user.
                 reply_sink: None,
+                // Nor does it inherit a scheduling binding — a follow-up armed
+                // from inside a sub-agent is unbound.
+                session_binding: None,
+                reschedule_depth: 0,
             };
             let registry = crate::tools::create_registry_for_with_config(
                 &persona.resolved_tool_names(),

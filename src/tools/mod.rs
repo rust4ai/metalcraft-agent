@@ -15,6 +15,7 @@ pub mod meta_persona;
 pub mod meta_skill;
 pub mod read_file;
 pub mod say_to_user;
+pub mod schedule_followup;
 pub mod email_imap;
 pub mod spaces;
 pub mod sub_agent;
@@ -45,6 +46,14 @@ pub struct ToolConfig {
     /// Delivery sink for the `say_to_user` tool. `None` outside a session
     /// context (e.g. one-shot/flow runs), where `say_to_user` just acks.
     pub reply_sink: Option<ReplySink>,
+    /// Where a follow-up armed by `schedule_followup` in this session should be
+    /// delivered when it later fires. `None` ⇒ the tool arms an unbound job
+    /// (result logged only).
+    pub session_binding: Option<crate::scheduled_tasks::IoBinding>,
+    /// Reschedule-depth this session already carries — a follow-up scheduled
+    /// here is armed at `reschedule_depth + 1` so self-rearming chains are
+    /// bounded. 0 for a normal user-initiated turn.
+    pub reschedule_depth: u32,
 }
 
 /// Register only the tools listed by name.
@@ -136,6 +145,17 @@ pub fn create_registry_for_with_config(
             "say_to_user" => registry.register(say_to_user::SayToUserTool::new(
                 config.and_then(|c| c.reply_sink.clone()),
             )),
+            "schedule_followup" => {
+                if let Some(cfg) = config {
+                    registry.register(schedule_followup::ScheduleFollowupTool::new(
+                        cfg.session_binding.clone(),
+                        cfg.reschedule_depth,
+                    ))
+                } else {
+                    log::warn!("schedule_followup tool requires ToolConfig, skipping");
+                    registry
+                }
+            }
             "sub_agent" => {
                 if let Some(cfg) = config {
                     registry.register(sub_agent::SubAgentTool::new(

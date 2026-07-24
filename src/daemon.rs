@@ -273,6 +273,11 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                     state.is_running = false;
                 }
             }
+
+            // Fire any scheduled follow-ups whose time has come (see
+            // `crate::scheduled_tasks`). Runs in the same tick as flow polling.
+            run_due_scheduled_tasks(&context, &cwd, &persona_slug, &model_name, &approval_mode)
+                .await;
         };
 
         tokio::select! {
@@ -297,6 +302,78 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     }
 
     Ok(())
+}
+
+/// Run every scheduled follow-up that is now due: claim it (so a later tick
+/// can't double-fire it), run its stored task as a one-shot agent under the
+/// requested persona, deliver the result, and record the terminal status.
+async fn run_due_scheduled_tasks(
+    context: &AgentRuntimeContext,
+    cwd: &str,
+    default_persona: &str,
+    model_name: &str,
+    approval_mode: &ApprovalMode,
+) {
+    use crate::scheduled_tasks::{self, TaskStatus};
+
+    let due = scheduled_tasks::claim_due(chrono::Utc::now());
+    for task in due {
+        let persona = task.persona.as_deref().unwrap_or(default_persona);
+        log::info!(
+            "Running scheduled follow-up {} (persona: {}): {}",
+            task.id,
+            persona,
+            task.task
+        );
+
+        let logger = DiagnosticsLogger::new().ok().map(Arc::new);
+        let outcome = runtime::run_one_shot_task(
+            context,
+            RunOneShotRequest {
+                persona_slug: persona,
+                cwd,
+                model_name,
+                task: &task.task,
+                approval_mode: approval_mode.clone(),
+                diagnostics: logger,
+            },
+        )
+        .await;
+
+        match outcome {
+            Ok(metalcraft::RunOutcome::Completed(state)) => {
+                let answer = state.final_answer().unwrap_or("(no answer)").to_string();
+                deliver_scheduled_result(&task, &answer).await;
+                scheduled_tasks::mark(&task.id, TaskStatus::Done);
+            }
+            Ok(metalcraft::RunOutcome::Interrupted { reason, .. }) => {
+                log::warn!("Scheduled follow-up {} interrupted: {reason}", task.id);
+                scheduled_tasks::mark(&task.id, TaskStatus::Failed);
+            }
+            Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
+                log::error!("Scheduled follow-up {} failed at {node}: {error}", task.id);
+                scheduled_tasks::mark(&task.id, TaskStatus::Failed);
+            }
+            Err(e) => {
+                log::error!("Scheduled follow-up {} errored: {e}", task.id);
+                scheduled_tasks::mark(&task.id, TaskStatus::Failed);
+            }
+        }
+    }
+}
+
+/// Deliver a fired follow-up's result back to the session that armed it.
+///
+/// Live delivery into a Workshop chat's SSE stream / out a gateway adapter is
+/// the next pass (it needs a handle to the running API's chat store); for now
+/// the result is recorded so a completed follow-up is never silently lost.
+async fn deliver_scheduled_result(task: &crate::scheduled_tasks::ScheduledTask, answer: &str) {
+    log::info!(
+        "Scheduled follow-up {} result [{:?}]: {}",
+        task.id,
+        task.io_binding,
+        answer
+    );
 }
 
 struct FlowRunState {

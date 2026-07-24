@@ -74,6 +74,11 @@ pub struct RuntimeOptions {
     /// `["say_to_user"]`; the tool is auto-injected into the registry if the
     /// persona doesn't already list it.
     pub terminal_tools: Vec<String>,
+    /// Delivery binding for follow-ups armed via `schedule_followup` in this
+    /// session (workshop chat / gateway). `None` ⇒ unbound (result logged).
+    pub session_binding: Option<crate::scheduled_tasks::IoBinding>,
+    /// Reschedule depth this session already carries (see [`crate::tools::ToolConfig`]).
+    pub reschedule_depth: u32,
 }
 
 pub fn build_agent_runtime<M>(
@@ -98,6 +103,8 @@ where
         skills_dir: context.skills_dir.clone(),
         available_skills: persona.skills.clone(),
         reply_sink: options.reply_sink,
+        session_binding: options.session_binding,
+        reschedule_depth: options.reschedule_depth,
     };
 
     // Resolve the persona's full tool set (explicit tools + any pack-scoped
