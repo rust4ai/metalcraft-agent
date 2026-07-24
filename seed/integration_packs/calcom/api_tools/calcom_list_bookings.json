@@ -1,0 +1,34 @@
+{
+  "name": "calcom_list_bookings",
+  "description": "List bookings. Optional filters: `status` (upcoming, past, cancelled, unconfirmed), `attendeeEmail`, and `afterStart`/`beforeEnd` (UTC ISO-8601). Returns each booking with its `uid`, title, times, status, and attendees.",
+  "method": "GET",
+  "url": "https://api.cal.com/v2/bookings?status={status}&attendeeEmail={attendeeEmail}&afterStart={afterStart}&beforeEnd={beforeEnd}",
+  "headers": {
+    "Authorization": "Bearer $CALCOM_API_KEY",
+    "Content-Type": "application/json",
+    "cal-api-version": "2024-08-13"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "status": {
+        "type": "string",
+        "description": "Filter by status: upcoming, past, cancelled, or unconfirmed (optional)."
+      },
+      "attendeeEmail": {
+        "type": "string",
+        "description": "Filter to bookings for this attendee email (optional)."
+      },
+      "afterStart": {
+        "type": "string",
+        "description": "Only bookings starting after this UTC ISO-8601 time (optional)."
+      },
+      "beforeEnd": {
+        "type": "string",
+        "description": "Only bookings ending before this UTC ISO-8601 time (optional)."
+      }
+    },
+    "required": []
+  },
+  "body_mapping": "none"
+}

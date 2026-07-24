@@ -1,0 +1,38 @@
+{
+  "name": "calcom_get_available_slots",
+  "description": "Get open time slots for an event type in a date range. Provide `eventTypeId`, `start` and `end` (UTC ISO-8601, e.g. 2026-07-25T00:00:00Z), and optional `timeZone` (default UTC). Availability already excludes busy times from any calendar connected to cal.com (e.g. the user's Google Calendar). Returns slots grouped by date.",
+  "method": "GET",
+  "url": "https://api.cal.com/v2/slots?eventTypeId={eventTypeId}&start={start}&end={end}&timeZone={timeZone}",
+  "headers": {
+    "Authorization": "Bearer $CALCOM_API_KEY",
+    "Content-Type": "application/json",
+    "cal-api-version": "2024-09-04"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "eventTypeId": {
+        "type": "integer",
+        "description": "The event type's numeric id (from calcom_list_event_types)."
+      },
+      "start": {
+        "type": "string",
+        "description": "Range start, UTC ISO-8601 (e.g. 2026-07-25T00:00:00Z)."
+      },
+      "end": {
+        "type": "string",
+        "description": "Range end, UTC ISO-8601 (e.g. 2026-07-26T00:00:00Z)."
+      },
+      "timeZone": {
+        "type": "string",
+        "description": "IANA time zone for the returned slots (e.g. America/New_York). Defaults to UTC."
+      }
+    },
+    "required": [
+      "eventTypeId",
+      "start",
+      "end"
+    ]
+  },
+  "body_mapping": "none"
+}

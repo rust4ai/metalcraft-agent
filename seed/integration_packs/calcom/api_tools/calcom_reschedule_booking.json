@@ -1,0 +1,33 @@
+{
+  "name": "calcom_reschedule_booking",
+  "description": "Reschedule a booking by its `uid` to a new `start` time (UTC ISO-8601 \u2014 use calcom_get_available_slots to pick an open one). Optional `reschedulingReason`. Updates the synced calendar event and notifies attendees.",
+  "method": "POST",
+  "url": "https://api.cal.com/v2/bookings/{uid}/reschedule",
+  "headers": {
+    "Authorization": "Bearer $CALCOM_API_KEY",
+    "Content-Type": "application/json",
+    "cal-api-version": "2024-08-13"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "uid": {
+        "type": "string",
+        "description": "The booking's unique id (uid) to reschedule."
+      },
+      "start": {
+        "type": "string",
+        "description": "New start time, UTC ISO-8601 (an open slot)."
+      },
+      "reschedulingReason": {
+        "type": "string",
+        "description": "Why the booking is being moved (shown to attendees) (optional)."
+      }
+    },
+    "required": [
+      "uid",
+      "start"
+    ]
+  },
+  "body_mapping": "params"
+}

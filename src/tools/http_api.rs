@@ -207,25 +207,51 @@ impl HttpApiTool {
         }
     }
 
-    /// Build the request body based on body_mapping config.
+    /// Names of `{placeholder}` tokens in the configured URL. An argument with
+    /// one of these names is consumed by URL expansion ([`Self::expand_url`]),
+    /// so it must not *also* be written into the request body — strict body
+    /// validators (e.g. cal.com v2) reject the unexpected field. Callers use
+    /// this to drop URL-consumed args when building the JSON body.
+    fn url_placeholder_names(&self) -> std::collections::HashSet<String> {
+        let url = &self.config.url;
+        let mut out = std::collections::HashSet::new();
+        let mut rest = url.as_str();
+        while let Some(open) = rest.find('{') {
+            rest = &rest[open + 1..];
+            if let Some(close) = rest.find('}') {
+                let name = &rest[..close];
+                if !name.is_empty() {
+                    out.insert(name.to_string());
+                }
+                rest = &rest[close + 1..];
+            } else {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Build the request body based on body_mapping config. Arguments consumed
+    /// as `{placeholder}` values in the URL are never included in the body (see
+    /// [`Self::url_placeholder_names`]).
     fn build_body(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
+        let url_params = self.url_placeholder_names();
         match self.config.body_mapping.as_str() {
             "none" => None,
             "params" => {
-                if self.config.body_defaults.is_empty() {
-                    Some(args.clone())
-                } else {
-                    let mut merged = serde_json::Map::new();
-                    for (k, v) in &self.config.body_defaults {
+                let mut merged = serde_json::Map::new();
+                for (k, v) in &self.config.body_defaults {
+                    merged.insert(k.clone(), v.clone());
+                }
+                if let Some(obj) = args.as_object() {
+                    for (k, v) in obj {
+                        if url_params.contains(k) {
+                            continue;
+                        }
                         merged.insert(k.clone(), v.clone());
                     }
-                    if let Some(obj) = args.as_object() {
-                        for (k, v) in obj {
-                            merged.insert(k.clone(), v.clone());
-                        }
-                    }
-                    Some(serde_json::Value::Object(merged))
                 }
+                Some(serde_json::Value::Object(merged))
             }
             "params_nested" => {
                 // Start from the (possibly nested) defaults as the base tree,
@@ -238,6 +264,10 @@ impl HttpApiTool {
                 }
                 if let Some(obj) = args.as_object() {
                     for (key, value) in obj {
+                        // Args consumed as URL placeholders never go in the body.
+                        if url_params.contains(key) {
+                            continue;
+                        }
                         // Skip absent optionals. Models routinely emit `null` or
                         // `""` for omitted optional params; writing those would
                         // clobber the nested defaults (e.g. blank out model_key)
@@ -545,6 +575,35 @@ mod tests {
         let args = json!({"platform": "slack", "content": "hello"});
         let body = tool.build_body(&args).unwrap();
         assert_eq!(body["platform"], "slack");
+    }
+
+    #[test]
+    fn build_body_omits_url_path_params() {
+        // A `{uid}` path param (plus a `{status}` query placeholder) must not
+        // leak into the JSON body — strict validators (cal.com v2) reject them.
+        let mut cfg = base_config();
+        cfg.url = "https://api.cal.com/v2/bookings/{uid}/cancel?status={status}".into();
+        let tool = make_tool(cfg);
+        let args = json!({"uid": "bk_123", "status": "accepted", "cancellationReason": "conflict"});
+        let body = tool.build_body(&args).unwrap();
+        assert_eq!(body, json!({"cancellationReason": "conflict"}));
+        assert!(body.get("uid").is_none());
+        assert!(body.get("status").is_none());
+    }
+
+    #[test]
+    fn build_body_params_nested_omits_url_path_params() {
+        let mut cfg = base_config();
+        cfg.url = "https://api.cal.com/v2/grants/{grant_id}/events".into();
+        cfg.body_mapping = "params_nested".into();
+        cfg.param_paths.insert("name".into(), "attendee.name".into());
+        let tool = make_tool(cfg);
+        let body = tool
+            .build_body(&json!({"grant_id": "g_1", "start": "2026-01-01T09:00:00Z", "name": "Alex"}))
+            .unwrap();
+        assert!(body.get("grant_id").is_none());
+        assert_eq!(body["start"], "2026-01-01T09:00:00Z");
+        assert_eq!(body["attendee"]["name"], "Alex");
     }
 
     // -- build_body params_nested + insert_at_path --

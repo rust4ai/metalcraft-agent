@@ -71,6 +71,13 @@ impl OperationKind {
                 Self::ReadFile
             }
             n if n.starts_with("discord_") => Self::DiscordAction,
+            // cal.com scheduling pack: read-only lookups (get/list, incl.
+            // get_available_slots) auto-approve; create/cancel/reschedule
+            // bookings fall through to the default Execute arm (require
+            // approval) since they send real emails and create real events.
+            n if n.starts_with("calcom_") && (n.contains("_get") || n.contains("_list")) => {
+                Self::ReadFile
+            }
             // Meta tools — managing the project's own personas/skills/flows.
             // Read-only ones auto-approve; mutating ones require approval.
             "persona_list" | "persona_read" | "skill_list" | "skill_read" | "flow_list"
@@ -629,6 +636,27 @@ mod tests {
         // The existing chat tools keep their exact-match classification.
         assert_eq!(OperationKind::classify("discord_send_message", &args), OperationKind::DiscordAction);
         assert_eq!(OperationKind::classify("discord_get_messages", &args), OperationKind::ReadFile);
+    }
+
+    #[test]
+    fn test_classify_calcom_tools() {
+        let args = serde_json::json!({});
+        // Read-only scheduling lookups auto-approve.
+        for t in [
+            "calcom_get_me",
+            "calcom_list_event_types",
+            "calcom_get_available_slots",
+            "calcom_list_bookings",
+            "calcom_get_booking",
+        ] {
+            assert_eq!(OperationKind::classify(t, &args), OperationKind::ReadFile, "{t}");
+            assert_eq!(OperationKind::ReadFile.default_permission(), PermissionLevel::AutoApprove);
+        }
+        // Booking mutations require approval (they send emails / create events).
+        for t in ["calcom_create_booking", "calcom_cancel_booking", "calcom_reschedule_booking"] {
+            assert_eq!(OperationKind::classify(t, &args), OperationKind::Execute, "{t}");
+            assert_eq!(OperationKind::Execute.default_permission(), PermissionLevel::RequiresApproval);
+        }
     }
 
     #[test]

@@ -1,0 +1,29 @@
+{
+  "name": "calcom_cancel_booking",
+  "description": "Cancel a booking by its `uid`. Provide a `cancellationReason`. Cancelling removes the event from the connected calendar (e.g. Google Calendar) and notifies attendees. This cannot be undone (re-book instead).",
+  "method": "POST",
+  "url": "https://api.cal.com/v2/bookings/{uid}/cancel",
+  "headers": {
+    "Authorization": "Bearer $CALCOM_API_KEY",
+    "Content-Type": "application/json",
+    "cal-api-version": "2024-08-13"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "uid": {
+        "type": "string",
+        "description": "The booking's unique id (uid) to cancel."
+      },
+      "cancellationReason": {
+        "type": "string",
+        "description": "Why the booking is being cancelled (shown to attendees)."
+      }
+    },
+    "required": [
+      "uid",
+      "cancellationReason"
+    ]
+  },
+  "body_mapping": "params"
+}

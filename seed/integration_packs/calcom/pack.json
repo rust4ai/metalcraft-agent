@@ -1,0 +1,9 @@
+{
+  "id": "calcom",
+  "name": "Cal.com",
+  "description": "Persona, skill, and HTTP API tools that let an agent schedule meetings through cal.com's v2 API — list event types, check available slots, and create, list, get, cancel, and reschedule bookings. Because cal.com syncs with a connected destination calendar, bookings the agent creates appear in the user's Google Calendar (and availability respects Google busy-times). Authenticated by a single CALCOM_API_KEY.",
+  "version": "1.0.0",
+  "requires_env": [
+    "CALCOM_API_KEY"
+  ]
+}
