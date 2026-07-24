@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Update the running daemon to a newer prebuilt image from GHCR.
+# (First-time bring-up? Use ./start-agent.sh instead.)
 #
 # Pulls the image CI already built (no compiling on the host) and recreates
 # the container. State in the daemon-data / caddy-data volumes is preserved.
 #
 # Usage:
-#   ./update.sh                 # update to :latest using the caddy compose file
-#   TAG=0.6.0 ./update.sh       # pin to a specific release tag
-#   COMPOSE_FILE=docker-compose.yml ./update.sh   # use the no-proxy compose file
+#   ./update-agent.sh                 # update to :latest using the caddy compose file
+#   TAG=0.6.0 ./update-agent.sh       # pin to a specific release tag
+#   COMPOSE_FILE=docker-compose.yml ./update-agent.sh   # use the no-proxy compose file
 #
-# Roll back the same way:  TAG=0.5.2 ./update.sh
+# Roll back the same way:  TAG=0.5.2 ./update-agent.sh
 set -euo pipefail
 cd "$(dirname "$0")"
 
