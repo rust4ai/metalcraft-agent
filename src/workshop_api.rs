@@ -299,13 +299,19 @@ async fn health() -> impl IntoResponse {
     )
 }
 
-/// Agent identity/version, behind the auth middleware. The Workshop's Settings
-/// tab calls this to display the connected agent's version so you can tell
-/// whether a deploy/update actually landed.
+/// Agent identity/version + config the Workshop reads. `version` drives the
+/// Settings tab's "which build is live" check; `default_persona` is the persona
+/// the Workshop's New Chat modal defaults to (set `METALCRAFT_DEFAULT_PERSONA`
+/// to override; falls back to the orchestrator, which delegates to specialists).
 async fn agent_info() -> impl IntoResponse {
+    let default_persona = std::env::var("METALCRAFT_DEFAULT_PERSONA")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "orchestrator-agent".to_string());
     Json(serde_json::json!({
         "name": env!("CARGO_PKG_NAME"),
         "version": env!("CARGO_PKG_VERSION"),
+        "default_persona": default_persona,
     }))
 }
 
