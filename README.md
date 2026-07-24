@@ -365,10 +365,10 @@ open (Let's Encrypt validates over `:80`).
 
 2. Point the A record for your `DOMAIN` at the host, and open ports 80 + 443.
 
-3. Build and start:
+3. Pull and start (the prebuilt GHCR image — no local compile):
 
    ```bash
-   docker compose -f docker-compose.caddy.yml up -d --build
+   docker compose -f docker-compose.caddy.yml up -d
    ```
 
 4. Verify:
