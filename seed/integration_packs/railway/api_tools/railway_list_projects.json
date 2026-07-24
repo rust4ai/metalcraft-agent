@@ -1,6 +1,6 @@
 {
   "name": "railway_list_projects",
-  "description": "List the Railway projects the token can access: projects { edges { node { id name } } }. The project `id` is what railway_get_project and railway_create_custom_domain need. Use this first to resolve a project name to its id. Takes no parameters. (If this returns empty for a workspace token, the project may live under `me { projects }` — see the railway-domains skill.)",
+  "description": "List the Railway projects the token can access, grouped by workspace: me { workspaces { id name projects { edges { node { id name } } } } }. Railway nests every project under a workspace, so projects live at data.me.workspaces[].projects.edges[].node — NOT at a top-level `projects` field (that returns empty for modern accounts). Each project `node.id` is what railway_get_project and the domain tools need; resolve a project name to its id here first. If a name is ambiguous across workspaces, use the id from the workspace the user means. Takes no parameters.",
   "method": "POST",
   "url": "https://backboard.railway.com/graphql/v2",
   "headers": {
@@ -13,6 +13,6 @@
   },
   "body_mapping": "params",
   "body_defaults": {
-    "query": "query { projects { edges { node { id name } } } }"
+    "query": "query { me { workspaces { id name projects { edges { node { id name } } } } } }"
   }
 }

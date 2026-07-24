@@ -29,6 +29,12 @@ in order:
 
 1. `railway_whoami` — confirm the token works (`me { name email }`).
 2. `railway_list_projects` — map a project name to its `id` (the `projectId`).
+   Railway nests projects under **workspaces**, so this returns
+   `me.workspaces[].projects.edges[].node` — iterate every workspace, not a
+   single flat list. (A modern account's top-level `projects` field and even
+   `me.projects` come back **empty** — the projects only appear under
+   `me.workspaces[].projects`. If `whoami` succeeds but you see no projects,
+   this workspace nesting is why.)
 3. `railway_get_project` — pass that `projectId`; get the **services**
    (`services.edges[].node.id` → `serviceId`) and **environments**
    (`environments.edges[].node.id` → `environmentId`). This is how you "list
@@ -112,7 +118,7 @@ the user wants to delete something, point them to the Railway dashboard.
 | Tool | What it does |
 |------|--------------|
 | `railway_whoami` | Verify the token; returns `me { name email }`. No params. |
-| `railway_list_projects` | List accessible projects (`id`, `name`). No params. |
+| `railway_list_projects` | List accessible projects (`id`, `name`) grouped by workspace (`me.workspaces[].projects`). No params. |
 | `railway_get_project` | List a project's services + environments. Requires `id`. |
 | `railway_list_deployments` | Inspect a service's recent deployments + status. Requires `serviceId`, `environmentId`. |
 | `railway_list_variables` | Read a service/environment's variables (secrets). Requires `projectId`, `environmentId`. |
