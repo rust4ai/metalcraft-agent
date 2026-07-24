@@ -192,6 +192,7 @@ pub fn build_router(api_key: String) -> Router {
     });
 
     Router::new()
+        .route("/api/v1/info", get(agent_info))
         .route("/api/v1/snapshot", get(get_snapshot))
         .route("/api/v1/personas/{slug}", get(get_persona))
         .route("/api/v1/personas/{slug}", put(put_persona))
@@ -244,9 +245,28 @@ pub fn build_router(api_key: String) -> Router {
 }
 
 /// Liveness/readiness probe. Returns 200 with a small JSON body. Not behind
-/// the auth middleware so platform health checks succeed without a key.
+/// the auth middleware so platform health checks succeed without a key. The
+/// `version` field lets an operator confirm which build is live with a bare
+/// `curl <host>/health` — the same value the Workshop's Settings tab shows.
 async fn health() -> impl IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "name": env!("CARGO_PKG_NAME"),
+            "version": env!("CARGO_PKG_VERSION"),
+        })),
+    )
+}
+
+/// Agent identity/version, behind the auth middleware. The Workshop's Settings
+/// tab calls this to display the connected agent's version so you can tell
+/// whether a deploy/update actually landed.
+async fn agent_info() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "name": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 /// Bind and serve the router on the given port. Blocks until ctrl-c.
