@@ -41,12 +41,10 @@ run the CLI or the flow scheduler. Everything else has a sensible default.
 
 | Variable | Needed for | Default |
 |----------|------------|---------|
-| `OPENAI_API_KEY` | **everything** (required) | — |
+| `OPENAI_API_KEY` | **inference** (required) | — |
 | `WORKSHOP_API_KEY` | enabling the Workshop HTTP API + webhooks; also the Bearer token for `/api/v1/*`. Unset = no HTTP server. | unset |
 | `PORT` / `WORKSHOP_API_PORT` | the port the Workshop API binds on `0.0.0.0` | `3002` |
-| `OPENAI_MODEL` / `STARKBOT_MODEL` | overriding the LLM model | `gpt-5.4` |
-| `STARKBOT_PERSONA` | default persona for daemon flow tasks | `coding-agent` |
-| `STARKBOT_POLL_SECONDS` | flow scheduler poll interval | `30` |
+| `OPENAI_MODEL` | overriding the LLM model | `gpt-5.4` |
 | `METALCRAFT_DATA_DIR` | where personas/skills/flows/chats/keys are stored | OS data dir |
 | `RUST_LOG` | log level | `info` |
 
