@@ -1,0 +1,44 @@
+# Render Blueprint — one-click deploy of metalcraft-agent.
+#
+#   https://render.com/deploy?repo=https://github.com/rust4ai/metalcraft-agent
+#
+# Runs the public prebuilt image as an always-on web service with a PERSISTENT
+# DISK mounted at /data. All agent state — personas, skills, flows, chats, keys —
+# lives there, so it survives redeploys and restarts.
+#
+# IMPORTANT: a persistent disk requires a PAID instance type (Starter or higher).
+# Render's free tier has an ephemeral filesystem and spins down when idle, which
+# would wipe the agent's state — not suitable for a stateful, always-on agent.
+#
+# Render terminates TLS and gives the service an https://<name>.onrender.com URL,
+# so no reverse proxy is needed here (unlike the Caddy compose file). The daemon
+# binds the port Render injects via $PORT automatically.
+#
+# After deploy: grab the generated WORKSHOP_API_KEY from the service's Environment
+# tab to connect the Metalcraft Workshop or call the /api/v1/* HTTP API.
+services:
+  - type: web
+    name: metalcraft-agent
+    runtime: image
+    image:
+      url: ghcr.io/rust4ai/metalcraft-agent:latest
+    plan: starter # disks require a paid plan; free is ephemeral
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      # Required — you enter this at deploy time (never stored in the repo).
+      - key: OPENAI_API_KEY
+        sync: false
+      # Enables the HTTP API + Workshop connection; Render generates a strong
+      # secret. Read it from the Environment tab after deploy.
+      - key: WORKSHOP_API_KEY
+        generateValue: true
+      # Point the agent's data dir at the persistent disk below.
+      - key: METALCRAFT_DATA_DIR
+        value: /data
+      - key: RUST_LOG
+        value: info
+    disk:
+      name: metalcraft-data
+      mountPath: /data
+      sizeGB: 1

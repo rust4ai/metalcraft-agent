@@ -178,6 +178,30 @@ back it up by backing up a volume.
   `./data`. It holds `personas/ skills/ flows/ api_tools/ integration_packs/
   keys.json chats/ logs/ traces/`.
 
+### One-click: Deploy on Render
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/rust4ai/metalcraft-agent)
+
+The repo ships a [`render.yaml`](render.yaml) Blueprint that stands the agent up
+as an always-on web service with a **persistent disk at `/data`** (so personas,
+skills, flows, chats, and keys survive redeploys). Render terminates TLS and
+gives you an `https://<name>.onrender.com` URL — no reverse proxy needed.
+
+1. Click the button above (or in Render: **New → Blueprint**, point it at this repo).
+2. Render reads `render.yaml`: a web service from the public image
+   (`ghcr.io/rust4ai/metalcraft-agent`) with a 1 GB disk mounted at `/data`.
+3. Enter your **`OPENAI_API_KEY`** when prompted; **`WORKSHOP_API_KEY`** is
+   generated for you (it enables the HTTP API + Workshop connection).
+4. Pick a **paid instance** — a persistent disk requires Starter or higher.
+   Render's free tier is ephemeral and would lose the agent's state.
+5. Deploy, then check `https://<name>.onrender.com/health`. Grab the generated
+   `WORKSHOP_API_KEY` from the service's **Environment** tab to connect the
+   [Workshop](https://github.com/rust4ai/metalcraft-workshop) or call `/api/v1/*`.
+
+> **Railway** works too (its **Volumes** persist `/data` on any plan, often the
+> simpler option) — deploy the same public image with a volume mounted at `/data`
+> and `METALCRAFT_DATA_DIR=/data`.
+
 Full walkthroughs (DigitalOcean droplet, App Platform, plain Docker) are in
 [devops.md](devops.md) and at [metalcraftai.com/docs/deployment](https://metalcraftai.com/docs/deployment).
 
