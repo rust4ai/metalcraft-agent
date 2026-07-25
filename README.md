@@ -190,13 +190,16 @@ gives you an `https://<name>.onrender.com` URL — no reverse proxy needed.
 1. Click the button above (or in Render: **New → Blueprint**, point it at this repo).
 2. Render reads `render.yaml`: a web service from the public image
    (`ghcr.io/rust4ai/metalcraft-agent`) with a 1 GB disk mounted at `/data`.
-3. Enter your **`OPENAI_API_KEY`** when prompted; **`WORKSHOP_API_KEY`** is
-   generated for you (it enables the HTTP API + Workshop connection).
+3. Render prompts you for two secrets:
+   - **`OPENAI_API_KEY`** — your OpenAI key.
+   - **`WORKSHOP_API_KEY`** — a long random secret *you choose* (e.g.
+     `openssl rand -hex 24`). **Keep it** — it's the Bearer token you'll use to
+     connect the [Workshop](https://github.com/rust4ai/metalcraft-workshop) and
+     call `/api/v1/*`, so you connect with a key you already have in hand.
 4. Pick a **paid instance** — a persistent disk requires Starter or higher.
    Render's free tier is ephemeral and would lose the agent's state.
-5. Deploy, then check `https://<name>.onrender.com/health`. Grab the generated
-   `WORKSHOP_API_KEY` from the service's **Environment** tab to connect the
-   [Workshop](https://github.com/rust4ai/metalcraft-workshop) or call `/api/v1/*`.
+5. Deploy, then check `https://<name>.onrender.com/health`. Connect the Workshop
+   to that URL using the `WORKSHOP_API_KEY` you set.
 
 > **Railway** works too (its **Volumes** persist `/data` on any plan, often the
 > simpler option) — deploy the same public image with a volume mounted at `/data`

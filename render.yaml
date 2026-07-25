@@ -29,10 +29,12 @@ services:
       # Required — you enter this at deploy time (never stored in the repo).
       - key: OPENAI_API_KEY
         sync: false
-      # Enables the HTTP API + Workshop connection; Render generates a strong
-      # secret. Read it from the Environment tab after deploy.
+      # Enables the HTTP API + Workshop connection. Render prompts you for it at
+      # deploy time — paste a long random secret (e.g. `openssl rand -hex 24`).
+      # You'll use this SAME value to connect the Workshop / call /api/v1/*, so
+      # set one you have on hand.
       - key: WORKSHOP_API_KEY
-        generateValue: true
+        sync: false
       # Point the agent's data dir at the persistent disk below.
       - key: METALCRAFT_DATA_DIR
         value: /data
