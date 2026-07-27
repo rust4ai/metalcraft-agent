@@ -241,6 +241,9 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/flows/{id}", put(put_flow))
         .route("/api/v1/flows/{id}", delete(delete_flow))
         .route("/api/v1/flows/{id}/run", post(post_run_flow))
+        .route("/api/v1/flow-runs", get(list_flow_runs))
+        .route("/api/v1/flow-runs/{run_id}", get(get_flow_run))
+        .route("/api/v1/flow-runs/{run_id}/resume", post(post_resume_flow_run))
         .route("/api/v1/flow-templates", get(list_flow_templates))
         .route("/api/v1/flow-templates/{slug}", get(get_flow_template))
         .route("/api/v1/diagnostics", get(list_diagnostics))
@@ -892,6 +895,58 @@ async fn post_run_flow(
         })
         .into_response(),
         // A missing flow yields 404; an unrunnable graph yields 400.
+        Err(e) if e.contains("not found") => err_json(StatusCode::NOT_FOUND, e),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+// ── Flow-run (v2 pause/resume) handlers ─────────────────────────────────
+
+/// List persisted flow runs, optionally filtered by `?flow_id=`.
+async fn list_flow_runs(
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let mut runs = crate::flow_runs::list_runs(&paths::runs_dir());
+    if let Some(f) = q.get("flow_id") {
+        runs.retain(|r| &r.flow_id == f);
+    }
+    runs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Json(runs).into_response()
+}
+
+/// Get one flow run by id.
+async fn get_flow_run(Path(run_id): Path<String>) -> Response {
+    match crate::flow_runs::load_run(&paths::runs_dir(), &run_id) {
+        Some(run) => Json(run).into_response(),
+        None => err_json(StatusCode::NOT_FOUND, format!("run '{run_id}' not found")),
+    }
+}
+
+#[derive(Deserialize)]
+struct ResumeFlowRunRequest {
+    /// Handle to take (an approval decision, or `"after"` for a wait).
+    handle: String,
+    /// Optional value to set as the resumed node's `_last` input.
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+}
+
+/// Resume a paused flow run.
+async fn post_resume_flow_run(
+    Path(run_id): Path<String>,
+    Json(req): Json<ResumeFlowRunRequest>,
+) -> Response {
+    let context = match AgentRuntimeContext::from_environment().map_err(|e| e.to_string()) {
+        Ok(c) => c,
+        Err(msg) => {
+            return err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("runtime not available: {msg}"),
+            );
+        }
+    };
+    match crate::flow_exec::resume_flow(&context, &run_id, &req.handle, req.data).await {
+        Ok(summary) => Json(summary).into_response(),
         Err(e) if e.contains("not found") => err_json(StatusCode::NOT_FOUND, e),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }

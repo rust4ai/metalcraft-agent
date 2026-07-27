@@ -159,6 +159,12 @@ conformance tests). Approach:
 4. **C + D + E Phase-3** (run store, approval/wait, resume tools, daemon resume scan, workshop endpoints). → *Ships durability / human-in-the-loop.*
 5. **Phase-4** (foreach/join; port vix's React-Flow editor into `metalcraft-workshop`). Separate initiative.
 
+> **`foreach` DEFERRED (2026-07-27).** Explicitly skipped for now — every other
+> node type ships. `foreach` remains a `CoreNodeType` in the wire format
+> (parses/validates) but the executor returns "not implemented yet" for it. The
+> agent still emits a clear error if a flow uses it. Revisit when a real fan-out
+> use case appears. Workshop integration (below) proceeds without it.
+
 ---
 
 ## Risks / watch-items
