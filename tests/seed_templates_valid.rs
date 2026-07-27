@@ -39,5 +39,14 @@ fn all_seed_flow_templates_parse_and_validate() {
         let raw = std::fs::read_to_string(f).unwrap();
         let flow: SavedFlow = serde_json::from_str(&raw).unwrap();
         assert_eq!(flow.spec_version, "2", "{} is not spec_version 2", f.display());
+
+        // Templates may legitimately leave `error` handles unwired, but every
+        // `{{ref}}` / condition variable must resolve — a dangling-reference
+        // warning means the template is broken.
+        let dangling: Vec<_> = metalcraft_agent::flow_exec::lint_flow(&flow)
+            .into_iter()
+            .filter(|w| w.contains("no known source") || w.contains("no upstream node produces"))
+            .collect();
+        assert!(dangling.is_empty(), "{} has dangling references: {:?}", f.display(), dangling);
     }
 }

@@ -251,6 +251,23 @@ impl<'a> FlowExecutor<'a> {
                     match next {
                         Some(n) => current = n,
                         None => {
+                            // A node signals failure by routing to `error`. If
+                            // no `error` edge (and no unlabeled fallback) exists,
+                            // the failure is unhandled — fail the run loudly
+                            // rather than silently reporting success.
+                            if handle.as_deref() == Some("error") {
+                                let detail = self
+                                    .variables
+                                    .get("_last")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string);
+                                if let Some(last) = self.steps.last_mut() {
+                                    last.outcome = "failed".into();
+                                    last.detail = detail;
+                                }
+                                self.mark_terminal("failed");
+                                return Ok(self.into_summary("failed".into()));
+                            }
                             self.mark_terminal("completed");
                             return Ok(self.into_summary("completed".into()));
                         }
@@ -454,17 +471,35 @@ impl<'a> FlowExecutor<'a> {
         match outcome {
             Ok(RunOutcome::Completed(state)) => {
                 let answer = state.final_answer().unwrap_or("").to_string();
-                // If a schema is declared, try to parse the answer as JSON.
-                let value = if data.output_schema.is_some() {
-                    serde_json::from_str::<Value>(&answer).unwrap_or(Value::String(answer.clone()))
+                // With a declared schema, the answer must be structured. Extract
+                // JSON even if the model wrapped it in ``` fences or prose; if
+                // none is found, route `error` rather than smuggle a raw string
+                // forward (which would silently break downstream field access).
+                if data.output_schema.is_some() {
+                    match extract_json(&answer) {
+                        Some(value) => {
+                            if let Some(var) = &data.output_var {
+                                self.variables.set(var, value.clone());
+                            }
+                            self.variables.set_last(value);
+                            Ok(Route::Handle(Some("ok".into())))
+                        }
+                        None => {
+                            self.variables.set_last(Value::String(format!(
+                                "prompt output did not contain JSON matching output_schema: {}",
+                                truncate(&answer, 200)
+                            )));
+                            Ok(Route::Handle(Some("error".into())))
+                        }
+                    }
                 } else {
-                    Value::String(answer.clone())
-                };
-                if let Some(var) = &data.output_var {
-                    self.variables.set(var, value.clone());
+                    let value = Value::String(answer.clone());
+                    if let Some(var) = &data.output_var {
+                        self.variables.set(var, value.clone());
+                    }
+                    self.variables.set_last(value);
+                    Ok(Route::Handle(Some("ok".into())))
                 }
-                self.variables.set_last(value);
-                Ok(Route::Handle(Some("ok".into())))
             }
             Ok(RunOutcome::Interrupted { reason, .. }) => {
                 self.variables.set_last(Value::String(reason.clone()));
@@ -940,6 +975,224 @@ fn entry_node(flow: &SavedFlow) -> Result<&FlowNode, String> {
         .ok_or_else(|| format!("flow '{}' has no entry node", flow.id))
 }
 
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() > n {
+        format!("{}…", s.chars().take(n).collect::<String>())
+    } else {
+        s.to_string()
+    }
+}
+
+/// Best-effort extraction of a JSON value from an LLM answer: tries the whole
+/// string, then strips a ``` code fence, then scans for the first balanced
+/// `{…}`/`[…]` (string-literal aware). Returns `None` if nothing parses.
+fn extract_json(text: &str) -> Option<Value> {
+    let trimmed = text.trim();
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+        return Some(v);
+    }
+    let unfenced = strip_code_fence(trimmed);
+    if unfenced != trimmed
+        && let Ok(v) = serde_json::from_str::<Value>(unfenced.trim())
+    {
+        return Some(v);
+    }
+    first_json_value(unfenced).or_else(|| first_json_value(trimmed))
+}
+
+/// Strip a leading ```lang fence and its trailing ```, if present.
+fn strip_code_fence(s: &str) -> &str {
+    let t = s.trim();
+    if let Some(rest) = t.strip_prefix("```") {
+        let after_lang = match rest.find('\n') {
+            Some(n) => &rest[n + 1..],
+            None => rest,
+        };
+        if let Some(end) = after_lang.rfind("```") {
+            return after_lang[..end].trim();
+        }
+        return after_lang.trim();
+    }
+    s
+}
+
+/// Find and parse the first balanced JSON object/array in `s`, tracking string
+/// literals so braces inside strings don't confuse the depth counter.
+fn first_json_value(s: &str) -> Option<Value> {
+    let bytes = s.as_bytes();
+    let start = bytes.iter().position(|&b| b == b'{' || b == b'[')?;
+    let open = bytes[start];
+    let close = if open == b'{' { b'}' } else { b']' };
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    for i in start..bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+        } else if b == b'"' {
+            in_str = true;
+        } else if b == open {
+            depth += 1;
+        } else if b == close {
+            depth -= 1;
+            if depth == 0 {
+                return serde_json::from_str::<Value>(&s[start..=i]).ok();
+            }
+        }
+    }
+    None
+}
+
+/// Advisory (non-blocking) lint of a flow, beyond the crate's hard `validate`.
+/// Surfaced by the `flow_validate` tool as warnings. Catches the quiet
+/// authoring hazards: unhandled errors, dead nodes, and dangling variable
+/// references.
+pub fn lint_flow(flow: &SavedFlow) -> Vec<String> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    let mut warnings = Vec::new();
+    let def = &flow.flow;
+
+    let has_edge = |node: &str, handle: Option<&str>| -> bool {
+        def.edges
+            .iter()
+            .any(|e| e.source == node && e.source_handle.as_deref() == handle)
+    };
+    let has_any_out = |node: &str| -> bool { def.edges.iter().any(|e| e.source == node) };
+
+    // 1. Nodes that emit `ok`/`error` but wire neither an `error` edge nor an
+    //    unlabeled fallback: a failure there will fail the whole run.
+    for n in &def.nodes {
+        // Nodes that route to an `error` handle on failure. (`branch` is
+        // excluded: it routes to its typed outputs / default_handle, never
+        // `error`.)
+        let emits_error = matches!(
+            &n.node_type,
+            FlowNodeType::Core(
+                CoreNodeType::Prompt
+                    | CoreNodeType::Tool
+                    | CoreNodeType::Http
+                    | CoreNodeType::SubAgent
+            )
+        );
+        if emits_error
+            && has_any_out(&n.id)
+            && !has_edge(&n.id, Some("error"))
+            && !has_edge(&n.id, None)
+        {
+            warnings.push(format!(
+                "node '{}' ({}) has no 'error' edge (and no unlabeled fallback): a failure here will fail the whole run",
+                n.id,
+                n.node_type.as_wire()
+            ));
+        }
+    }
+
+    // 2. Unreachable nodes (not reachable from entry).
+    if let Some(entry) = def
+        .nodes
+        .iter()
+        .find(|n| matches!(n.node_type, FlowNodeType::Core(CoreNodeType::Entry)))
+    {
+        let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+        for e in &def.edges {
+            adj.entry(e.source.as_str()).or_default().push(e.target.as_str());
+        }
+        let mut seen = HashSet::new();
+        let mut q = VecDeque::from([entry.id.as_str()]);
+        seen.insert(entry.id.as_str());
+        while let Some(cur) = q.pop_front() {
+            if let Some(ts) = adj.get(cur) {
+                for &t in ts {
+                    if seen.insert(t) {
+                        q.push_back(t);
+                    }
+                }
+            }
+        }
+        for n in &def.nodes {
+            if !seen.contains(n.id.as_str()) {
+                warnings.push(format!("node '{}' is unreachable from the entry node", n.id));
+            }
+        }
+    }
+
+    // 3. `{{var}}` and conditional `variable` references to names that are never
+    //    produced (entry inputs, any node's output_var/var, or reserved keys).
+    let mut known: HashSet<String> =
+        ["_last", "_inputs", "_run"].iter().map(|s| s.to_string()).collect();
+    for n in &def.nodes {
+        for key in ["output_var", "variable", "var"] {
+            if let Some(v) = n.data.get(key).and_then(|v| v.as_str()) {
+                known.insert(v.to_string());
+            }
+        }
+        if let Some(inputs) = n.data.get("inputs").and_then(|v| v.as_object()) {
+            for k in inputs.keys() {
+                known.insert(k.clone());
+            }
+        }
+        if let Some(outs) = n.data.get("outputs").and_then(|v| v.as_array()) {
+            for o in outs {
+                if let Some(v) = o.get("var").and_then(|v| v.as_str()) {
+                    known.insert(v.to_string());
+                }
+            }
+        }
+    }
+    let root = |name: &str| name.split('.').next().unwrap_or(name).trim().to_string();
+    let mut seen_refs = HashSet::new();
+    let data_str = serde_json::to_string(&def.nodes).unwrap_or_default();
+    for cap in extract_template_refs(&data_str) {
+        let r = root(&cap);
+        if !r.is_empty() && !known.contains(&r) && seen_refs.insert(format!("t:{r}")) {
+            warnings.push(format!("template reference '{{{{{cap}}}}}' has no known source variable"));
+        }
+    }
+    for n in &def.nodes {
+        if let Some(conds) = n.data.get("conditions").and_then(|v| v.as_array()) {
+            for c in conds {
+                if let Some(var) = c.get("variable").and_then(|v| v.as_str()) {
+                    let r = root(var);
+                    if !r.is_empty() && !known.contains(&r) && seen_refs.insert(format!("c:{}:{r}", n.id)) {
+                        warnings.push(format!(
+                            "node '{}' condition reads variable '{}' which no upstream node produces",
+                            n.id, var
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    warnings
+}
+
+/// Pull `{{ … }}` reference bodies out of a string.
+fn extract_template_refs(s: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'{'
+            && bytes[i + 1] == b'{'
+            && let Some(end) = s[i + 2..].find("}}")
+        {
+            refs.push(s[i + 2..i + 2 + end].trim().to_string());
+            i = i + 2 + end + 2;
+            continue;
+        }
+        i += 1;
+    }
+    refs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1118,5 +1371,59 @@ mod tests {
         );
         let summary = run_pure(flow, json!({})).await;
         assert_eq!(summary.variables["the_id"], json!(7));
+    }
+
+    #[tokio::test]
+    async fn unhandled_tool_error_fails_the_run() {
+        // A tool node that errors (unknown tool) with only an `ok` edge wired —
+        // no `error` edge, no unlabeled fallback — must FAIL the run, not
+        // silently complete.
+        let flow = saved(
+            vec![
+                node("entry", "entry", json!({ "schedule_type": "manual" })),
+                node("t", "tool", json!({ "tool_name": "definitely_not_a_real_tool", "args": {} })),
+                node("done", "end", json!({})),
+            ],
+            vec![
+                edge("e0", "entry", "t", None),
+                edge("e1", "t", "done", Some("ok")),
+            ],
+        );
+        let summary = run_pure(flow, json!({})).await;
+        assert_eq!(summary.status, "failed", "trace: {:?}", summary.steps);
+        assert_eq!(summary.steps.last().unwrap().node_id, "t");
+    }
+
+    #[test]
+    fn extract_json_handles_fences_and_prose() {
+        assert_eq!(extract_json(r#"{"a":1}"#), Some(json!({"a":1})));
+        assert_eq!(extract_json("```json\n{\"a\":1}\n```"), Some(json!({"a":1})));
+        assert_eq!(extract_json("Here you go: {\"a\": 1} — done"), Some(json!({"a":1})));
+        assert_eq!(extract_json("```\n[1,2,3]\n```"), Some(json!([1, 2, 3])));
+        assert_eq!(extract_json("no json at all"), None);
+        // Braces inside string literals don't break depth tracking.
+        assert_eq!(extract_json(r#"prefix {"msg":"a } b"} suffix"#), Some(json!({"msg":"a } b"})));
+    }
+
+    #[test]
+    fn lint_flags_unwired_error_unreachable_and_dangling_ref() {
+        let flow = saved(
+            vec![
+                node("entry", "entry", json!({ "schedule_type": "manual", "inputs": { "topic": { "type": "string" } } })),
+                node("p", "prompt", json!({ "prompt": "do {{topic}} and {{missing}}" })),
+                node("done", "end", json!({})),
+                node("orphan", "prompt", json!({ "prompt": "never runs" })),
+            ],
+            vec![
+                edge("e0", "entry", "p", None),
+                edge("e1", "p", "done", Some("ok")),
+            ],
+        );
+        let w = lint_flow(&flow);
+        assert!(w.iter().any(|x| x.contains("no 'error' edge")), "want error warning: {w:?}");
+        assert!(w.iter().any(|x| x.contains("unreachable")), "want unreachable: {w:?}");
+        assert!(w.iter().any(|x| x.contains("missing")), "want dangling ref: {w:?}");
+        // `topic` is a declared input, so it must NOT be flagged.
+        assert!(!w.iter().any(|x| x.contains("{{topic}}")), "topic is known: {w:?}");
     }
 }

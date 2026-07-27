@@ -63,6 +63,12 @@
         "node_type": "prompt",
         "data": { "prompt": "File this normally and note next steps:\n\n{{triage.summary}}" },
         "position": [780.0, 120.0]
+      },
+      {
+        "id": "unparsed",
+        "node_type": "end",
+        "data": { "status": "triage_unparsed" },
+        "position": [520.0, 160.0]
       }
     ],
     "edges": [
@@ -71,7 +77,8 @@
       { "id": "e2", "source": "route", "target": "approve", "source_handle": "high" },
       { "id": "e3", "source": "route", "target": "filed", "source_handle": "normal" },
       { "id": "e4", "source": "approve", "target": "escalated", "source_handle": "escalate" },
-      { "id": "e5", "source": "approve", "target": "dismissed", "source_handle": "dismiss" }
+      { "id": "e5", "source": "approve", "target": "dismissed", "source_handle": "dismiss" },
+      { "id": "e6", "source": "triage", "target": "unparsed", "source_handle": "error" }
     ]
   }
 }

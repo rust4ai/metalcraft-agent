@@ -109,7 +109,14 @@ impl metalcraft::Tool for FlowValidateTool {
             Err(e) => return Ok(e),
         };
         let errors = validation_errors(&flow);
-        Ok(serde_json::json!({ "valid": errors.is_empty(), "errors": errors }))
+        // Advisory warnings (non-blocking): unhandled errors, dead nodes,
+        // dangling variable references. Fix these even when `valid` is true.
+        let warnings = crate::flow_exec::lint_flow(&flow);
+        Ok(serde_json::json!({
+            "valid": errors.is_empty(),
+            "errors": errors,
+            "warnings": warnings,
+        }))
     }
 }
 
