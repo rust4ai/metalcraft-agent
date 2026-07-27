@@ -1,0 +1,57 @@
+{
+  "spec_version": "2",
+  "id": "http-health-check",
+  "name": "HTTP health check with status routing",
+  "created_at": "2026-07-27T00:00:00Z",
+  "updated_at": "2026-07-27T00:00:00Z",
+  "enabled": false,
+  "flow": {
+    "nodes": [
+      {
+        "id": "entry",
+        "node_type": "entry",
+        "data": {
+          "schedule_type": "manual",
+          "inputs": { "url": { "type": "string", "required": false, "default": "https://api.github.com/zen" } }
+        },
+        "position": [0.0, 0.0]
+      },
+      {
+        "id": "check",
+        "node_type": "http",
+        "data": { "method": "GET", "url": "{{url}}", "output_var": "resp" },
+        "position": [260.0, 0.0]
+      },
+      {
+        "id": "route",
+        "node_type": "conditional",
+        "data": {
+          "conditions": [
+            { "handle": "up", "variable": "resp.status", "operator": "lt", "value": 400 }
+          ],
+          "default_handle": "down"
+        },
+        "position": [520.0, 0.0]
+      },
+      {
+        "id": "report_up",
+        "node_type": "prompt",
+        "data": { "prompt": "Report that {{url}} is healthy (HTTP {{resp.status}}). Response body:\n\n{{resp.body}}" },
+        "position": [780.0, -100.0]
+      },
+      {
+        "id": "report_down",
+        "node_type": "prompt",
+        "data": { "prompt": "Report that {{url}} is DOWN or erroring (HTTP {{resp.status}})." },
+        "position": [780.0, 100.0]
+      }
+    ],
+    "edges": [
+      { "id": "e0", "source": "entry", "target": "check" },
+      { "id": "e1", "source": "check", "target": "route", "source_handle": "ok" },
+      { "id": "e2", "source": "check", "target": "report_down", "source_handle": "error" },
+      { "id": "e3", "source": "route", "target": "report_up", "source_handle": "up" },
+      { "id": "e4", "source": "route", "target": "report_down", "source_handle": "down" }
+    ]
+  }
+}
