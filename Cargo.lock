@@ -4958,7 +4958,7 @@ dependencies = [
 
 [[package]]
 name = "metalcraft-agent"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "atty",
@@ -4999,9 +4999,9 @@ dependencies = [
 
 [[package]]
 name = "metalcraft-flows"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36cdf98a9f48fa852b98e8bfa868b1d51d1c03c1c2bb220dd3f45506633fa87e"
+checksum = "2c31f664688cd4fecfa6c2695eecbe486d11b3a5808943267f37743d286c1a35"
 dependencies = [
  "regex",
  "serde",

@@ -1431,6 +1431,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_labeled_entry_edge_routes_past_entry() {
+        // The visual editor serializes entry's unlabeled edge as source_handle
+        // "default"; the run must still advance past entry rather than halt after
+        // one step (regression for the editor↔runtime round-trip bug).
+        let flow = saved(
+            vec![
+                node("entry", "entry", json!({ "schedule_type": "manual" })),
+                node("seed", "set_variable", json!({ "variable": "x", "value": 1 })),
+                node("done", "end", json!({})),
+            ],
+            vec![
+                edge("e0", "entry", "seed", Some("default")),
+                edge("e1", "seed", "done", Some("default")),
+            ],
+        );
+        let summary = run_pure(flow, json!({})).await;
+        assert_eq!(summary.status, "completed");
+        assert_eq!(summary.steps.len(), 3, "should run entry+seed+done, not halt: {:?}", summary.steps);
+        assert_eq!(summary.steps.last().unwrap().node_id, "done");
+    }
+
+    #[tokio::test]
     async fn unhandled_tool_error_fails_the_run() {
         // A tool node that errors (unknown tool) with only an `ok` edge wired —
         // no `error` edge, no unlabeled fallback — must FAIL the run, not
