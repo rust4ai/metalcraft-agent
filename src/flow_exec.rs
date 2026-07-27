@@ -13,17 +13,26 @@
 use metalcraft_flows::{
     evaluate,
     next_by_handle,
-    nodes::{ConditionalData, EntryData, PromptData, SetVariableData, ToolData},
+    nodes::{BranchData, ConditionalData, EntryData, PromptData, SetVariableData, ToolData},
     resolve_template, CoreNodeType, FlowNode, FlowNodeType, Operator, SavedFlow, Variables,
 };
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::approval::ApprovalMode;
+use async_trait::async_trait;
+use metalcraft::{
+    create_react_agent_with_options, AgentMessage, AgentOptions, AgentState, Executor, RunOutcome,
+    Tool, ToolChoice,
+};
+use rig::client::CompletionClient;
+use rig::providers::openai;
+
+use crate::approval::{self, ApprovalMode};
 use crate::diagnostics::DiagnosticsLogger;
+use crate::persona::Persona;
 use crate::runtime::{self, AgentRuntimeContext, RunOneShotRequest};
-use metalcraft::RunOutcome;
 
 /// Default cap on node visits, so a cyclic graph can't run forever.
 const DEFAULT_STEP_BUDGET: u32 = 100;
@@ -75,6 +84,10 @@ pub struct FlowExecutor<'a> {
     logger: Option<Arc<DiagnosticsLogger>>,
     step_budget: u32,
     steps: Vec<FlowStep>,
+    /// Tools injected into every `branch` node's registry, in addition to the
+    /// node persona's own tools. Used by tests to supply a mock (e.g. a fake
+    /// weather tool) without a real integration; empty in production.
+    extra_tools: Vec<Arc<dyn Tool>>,
 }
 
 impl<'a> FlowExecutor<'a> {
@@ -120,7 +133,15 @@ impl<'a> FlowExecutor<'a> {
             logger,
             step_budget: DEFAULT_STEP_BUDGET,
             steps: Vec::new(),
+            extra_tools: Vec::new(),
         })
+    }
+
+    /// Inject extra tools into every `branch` node's registry (for testing with a
+    /// mock tool). Returns `self` for chaining.
+    pub fn with_extra_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
+        self.extra_tools = tools;
+        self
     }
 
     /// Run the flow from its entry node until it terminates or the step budget is
@@ -207,6 +228,7 @@ impl<'a> FlowExecutor<'a> {
             FlowNodeType::Core(CoreNodeType::Conditional) => self.run_conditional(node),
             FlowNodeType::Core(CoreNodeType::Prompt) => self.run_prompt(node).await,
             FlowNodeType::Core(CoreNodeType::Tool) => self.run_tool(node).await,
+            FlowNodeType::Core(CoreNodeType::Branch) => self.run_branch(node).await,
             FlowNodeType::Core(other) => Err(format!(
                 "node type '{}' is not implemented yet (node '{}')",
                 other.as_str(),
@@ -320,6 +342,189 @@ impl<'a> FlowExecutor<'a> {
                 Ok(Route::Handle(Some("error".into())))
             }
         }
+    }
+
+    /// The LLM classifier. Presents each `output` as a tool (typed by its
+    /// `schema`), forces tool-only output, and terminates when the model calls
+    /// exactly one of them. The chosen handle routes the edge; the tool call's
+    /// arguments become the edge payload (`_last`, and the output's `var`).
+    async fn run_branch(&mut self, node: &FlowNode) -> Result<Route, String> {
+        let data: BranchData = parse_data(node)?;
+        if data.outputs.is_empty() {
+            return Err(format!("branch node '{}' declares no outputs", node.id));
+        }
+        let query = resolve_template(&data.query, self.variables.as_value());
+        let model_name = data.model.clone().unwrap_or_else(|| self.model_name.clone());
+
+        // System prompt + persona tools (or a minimal default with no persona).
+        let (system_prompt, persona_tools) = match data.persona.as_deref() {
+            Some(slug) => {
+                let persona = Persona::load(slug, &self.context.personas_dir).map_err(|e| {
+                    format!("branch node '{}': failed to load persona '{slug}': {e}", node.id)
+                })?;
+                (
+                    persona.build_system_prompt(&self.context.skills_dir, &self.cwd),
+                    persona.resolved_tool_names(),
+                )
+            }
+            None => (
+                "You are a decision step in a workflow. Use the available tools to \
+                 gather any information you need, then call exactly one of the output \
+                 tools to record your result. Never answer in free text."
+                    .to_string(),
+                Vec::new(),
+            ),
+        };
+
+        // Registry = persona tools + injected extras + one HandleTool per output.
+        let tool_config = crate::tools::ToolConfig {
+            api_key: self.context.api_key.clone(),
+            model_name: model_name.clone(),
+            system_prompt: system_prompt.clone(),
+            skills_dir: self.context.skills_dir.clone(),
+            available_skills: Vec::new(),
+            reply_sink: None,
+            session_binding: None,
+            reschedule_depth: 0,
+        };
+        let mut registry =
+            crate::tools::create_registry_for_with_config(&persona_tools, Some(&tool_config));
+        for t in &self.extra_tools {
+            registry = registry.register(SharedTool(t.clone()));
+        }
+        let mut wrapped: HashMap<String, bool> = HashMap::new();
+        let handle_names: Vec<String> = data.outputs.iter().map(|o| o.handle.clone()).collect();
+        for out in &data.outputs {
+            let (schema, is_wrapped) = adapt_schema(out.schema.as_ref());
+            wrapped.insert(out.handle.clone(), is_wrapped);
+            registry = registry.register(HandleTool {
+                handle: out.handle.clone(),
+                description: out
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("Select the '{}' outcome", out.handle)),
+                schema,
+            });
+        }
+
+        // A tool-only agent that must terminate by choosing exactly one handle.
+        let client = openai::Client::new(&self.context.api_key)
+            .map_err(|e| format!("branch node '{}': openai client: {e}", node.id))?;
+        let model = client.completion_model(&model_name);
+        let hook = approval::build_hook(ApprovalMode::AutoApprove);
+        let graph = create_react_agent_with_options(
+            model,
+            registry,
+            &system_prompt,
+            AgentOptions {
+                before_tool_call: hook,
+                llm_call_hook: None,
+                llm_response_hook: None,
+                tool_choice: ToolChoice::Required,
+                terminal_tools: handle_names.clone(),
+            },
+        )
+        .map_err(|e| format!("branch node '{}': build agent: {e}", node.id))?
+        .into_arc();
+
+        let executor = Executor::new_from_arc(graph).max_steps(30);
+        let outcome = executor.run(AgentState::new(query), "flow-branch").await;
+
+        let chosen = match outcome {
+            Ok(RunOutcome::Completed(state)) => find_last_handle_call(&state, &handle_names),
+            _ => None,
+        };
+
+        match chosen {
+            Some((handle, args)) => {
+                let payload = if wrapped.get(&handle).copied().unwrap_or(false) {
+                    args.get("value").cloned().unwrap_or(Value::Null)
+                } else {
+                    args
+                };
+                if let Some(out) = data.outputs.iter().find(|o| o.handle == handle)
+                    && let Some(var) = &out.var
+                {
+                    self.variables.set(var, payload.clone());
+                }
+                self.variables.set_last(payload);
+                Ok(Route::Handle(Some(handle)))
+            }
+            // No valid choice (timeout / model error) → fall back.
+            None => Ok(Route::Handle(data.default_handle.clone())),
+        }
+    }
+}
+
+/// Adapt an output handle's declared `schema` into a function-parameters object
+/// schema (LLM tool parameters MUST be an object). Returns `(schema, wrapped)`;
+/// when `wrapped` is true the scalar payload lives under a `"value"` property and
+/// must be unwrapped from the tool-call args.
+fn adapt_schema(schema: Option<&Value>) -> (Value, bool) {
+    match schema {
+        Some(s) if s.get("type").and_then(|t| t.as_str()) == Some("object") => (s.clone(), false),
+        Some(s) => (
+            json!({ "type": "object", "properties": { "value": s }, "required": ["value"] }),
+            true,
+        ),
+        None => (json!({ "type": "object", "properties": {} }), false),
+    }
+}
+
+/// Find the most recent tool call whose name is one of `handles` (the terminal
+/// handle selection), returning `(handle, args)`.
+fn find_last_handle_call(state: &AgentState, handles: &[String]) -> Option<(String, Value)> {
+    state.messages.iter().rev().find_map(|m| match m {
+        AgentMessage::ToolCall { name, args, .. } if handles.iter().any(|h| h == name) => {
+            Some((name.clone(), args.clone()))
+        }
+        _ => None,
+    })
+}
+
+/// A synthetic tool representing one `branch` output handle. Its parameters are
+/// the handle's schema; calling it just echoes the args (the executor reads the
+/// selection + payload from the terminal tool call, not this return value).
+struct HandleTool {
+    handle: String,
+    description: String,
+    schema: Value,
+}
+
+#[async_trait]
+impl Tool for HandleTool {
+    fn name(&self) -> &str {
+        &self.handle
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn parameters_schema(&self) -> Value {
+        self.schema.clone()
+    }
+    async fn call(&self, args: Value) -> metalcraft::Result<Value> {
+        Ok(args)
+    }
+}
+
+/// Adapts an `Arc<dyn Tool>` back into a concrete `Tool` so it can be registered
+/// (the registry's `register` takes a tool by value). Lets the executor inject
+/// runtime-supplied tools into a branch registry.
+struct SharedTool(Arc<dyn Tool>);
+
+#[async_trait]
+impl Tool for SharedTool {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn description(&self) -> &str {
+        self.0.description()
+    }
+    fn parameters_schema(&self) -> Value {
+        self.0.parameters_schema()
+    }
+    async fn call(&self, args: Value) -> metalcraft::Result<Value> {
+        self.0.call(args).await
     }
 }
 
