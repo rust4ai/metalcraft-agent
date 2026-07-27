@@ -26,14 +26,32 @@ docker compose -f "$COMPOSE_FILE" up -d
 echo "==> Done. Running image:"
 docker compose -f "$COMPOSE_FILE" images daemon || true
 
-# Health hint, matched to the compose file (Caddy=HTTPS on your DOMAIN, else localhost).
+# Resolve the /health URL from the compose file (Caddy=HTTPS on your DOMAIN,
+# else localhost). Used both to report the version and as the verify hint.
 if [[ "$COMPOSE_FILE" == *caddy* ]]; then
   DOMAIN="$(grep -E '^DOMAIN=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | xargs || true)"
-  echo "==> Verify:  curl https://${DOMAIN:-<your-domain>}/health"
+  HEALTH_URL="https://${DOMAIN:-<your-domain>}/health"
 else
   PORT="$(grep -E '^PORT=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | xargs || true)"
-  echo "==> Verify:  curl http://localhost:${PORT:-3002}/health"
+  HEALTH_URL="http://localhost:${PORT:-3002}/health"
 fi
+
+# The `latest` tag hides the real version — read it from /health once the API is
+# up (the image reports its own CARGO_PKG_VERSION). Retries while it boots.
+printf '==> Agent version: '
+VERSION=""
+for _ in $(seq 1 12); do
+  VERSION="$(curl -fsS --max-time 2 "$HEALTH_URL" 2>/dev/null | grep -o '"version":"[^"]*"' | cut -d'"' -f4 || true)"
+  [ -n "$VERSION" ] && break
+  sleep 1
+done
+if [ -n "$VERSION" ]; then
+  echo "$VERSION"
+else
+  echo "(API not ready yet — check:  curl $HEALTH_URL)"
+fi
+
+echo "==> Verify:  curl $HEALTH_URL"
 
 echo "==> Recent daemon logs (Ctrl-C to stop following):"
 docker compose -f "$COMPOSE_FILE" logs --tail=20 -f daemon
