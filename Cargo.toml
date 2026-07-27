@@ -1,6 +1,6 @@
 [package]
 name = "metalcraft-agent"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2024"
 default-run = "metalcraft-agent"
 description = "Interactive AI coding agent with personas, skills, and tool approval"
@@ -9,8 +9,7 @@ repository = "https://github.com/rust4ai/metalcraft-agent"
 
 [dependencies]
 metalcraft = { version = "0.8.0", features = ["rig"] }
-# Local flows-v2 crate during Workstream B; switch back to a version once 0.2.0 publishes.
-metalcraft-flows = { path = "../metalcraft-flows" }
+metalcraft-flows = "0.2.0"
 rig = "0.37"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
