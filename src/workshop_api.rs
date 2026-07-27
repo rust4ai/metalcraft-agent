@@ -863,6 +863,28 @@ async fn post_run_flow(
         .unwrap_or_else(|| "coding-agent".to_string());
     let model_name = req.model_name.unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
+    let Some(flow) = metalcraft_flows::load_flow(&crate::paths::flows_dir(), &id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
+    };
+
+    // v2 flows run on the stateful executor and return a run summary; v1 flows
+    // keep the legacy per-prompt response.
+    if crate::flow_exec::is_v2_flow(&flow) {
+        return match crate::flow_exec::run_flow_v2(
+            &context,
+            flow,
+            &state.cwd,
+            &persona_slug,
+            &model_name,
+            &serde_json::json!({}),
+        )
+        .await
+        {
+            Ok(summary) => Json(summary).into_response(),
+            Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+        };
+    }
+
     match flows::run_flow(&context, &id, &state.cwd, &persona_slug, &model_name).await {
         Ok(results) => Json(RunFlowResponse {
             flow_id: id,

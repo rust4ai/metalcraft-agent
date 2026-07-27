@@ -528,6 +528,69 @@ impl Tool for SharedTool {
     }
 }
 
+/// Whether a flow should run on the v2 [`FlowExecutor`] rather than the legacy
+/// linear runner. True if it declares `spec_version = "2"` or uses any v2 core
+/// node type — so existing v1 `entry`+`prompt` flows keep their exact
+/// legacy semantics for back-compat.
+pub fn is_v2_flow(flow: &SavedFlow) -> bool {
+    flow.spec_version == "2"
+        || flow
+            .flow
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.node_type, FlowNodeType::Core(c) if c.is_v2()))
+}
+
+/// Validate `flow`, open a flow-tagged diagnostics session, and run it on the
+/// executor. The v2 analog of [`crate::flows::run_flow`]: shared by the
+/// `flow_run` tool, the daemon scheduler, and the workshop run-flow endpoint so
+/// all three behave identically.
+pub async fn run_flow_v2(
+    context: &AgentRuntimeContext,
+    flow: SavedFlow,
+    cwd: &str,
+    persona_slug: &str,
+    model_name: &str,
+    args: &Value,
+) -> Result<FlowRunSummary, String> {
+    let errors = metalcraft_flows::validate(&flow);
+    if !errors.is_empty() {
+        return Err(format!(
+            "invalid flow: {}",
+            errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
+        ));
+    }
+
+    // One flow-tagged session so the run shows up in the Sessions list; the
+    // executor's prompt/branch runners log their turns into it.
+    let logger = match DiagnosticsLogger::new() {
+        Ok(l) => {
+            if let Ok(persona) = Persona::load(persona_slug, &context.personas_dir) {
+                let system_prompt = persona.build_system_prompt(&context.skills_dir, cwd);
+                l.log_session_info(
+                    &persona.name,
+                    persona_slug,
+                    model_name,
+                    cwd,
+                    &system_prompt,
+                    &persona.resolved_tool_names(),
+                    &persona.skills,
+                    true,
+                    Some(&flow.id),
+                );
+            }
+            Some(Arc::new(l))
+        }
+        Err(e) => {
+            eprintln!("flow run: failed to create session logger: {e}");
+            None
+        }
+    };
+
+    let exec = FlowExecutor::new(context, flow, cwd, persona_slug, model_name, args, logger)?;
+    exec.run().await
+}
+
 /// Recursively resolve `{{…}}` placeholders in every string within a JSON value.
 fn interpolate_value(v: &Value, vars: &Value) -> Value {
     match v {
@@ -661,6 +724,34 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("city"), "{err}");
+    }
+
+    #[test]
+    fn v2_dispatch_detection() {
+        // A legacy v1 entry+prompt flow stays on the legacy runner.
+        let v1 = saved(
+            vec![node("e", "entry", json!({})), node("p", "prompt", json!({ "prompt": "hi" }))],
+            vec![edge("x", "e", "p", None)],
+        );
+        let mut v1 = v1;
+        v1.spec_version = "1".into();
+        assert!(!is_v2_flow(&v1));
+
+        // A flow using a v2 node type routes to the executor even at "1"…
+        let mut with_cond = saved(
+            vec![
+                node("e", "entry", json!({})),
+                node("c", "conditional", json!({ "conditions": [] })),
+            ],
+            vec![edge("x", "e", "c", None)],
+        );
+        with_cond.spec_version = "1".into();
+        assert!(is_v2_flow(&with_cond));
+
+        // …and declaring spec_version "2" is enough on its own.
+        let mut v2 = saved(vec![node("e", "entry", json!({}))], vec![]);
+        v2.spec_version = "2".into();
+        assert!(is_v2_flow(&v2));
     }
 
     #[tokio::test]

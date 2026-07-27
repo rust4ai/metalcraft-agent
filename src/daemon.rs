@@ -194,6 +194,32 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
 
                 log::info!("Running flow '{}' ({})", flow.saved.id, flow.saved.name);
 
+                if crate::flow_exec::is_v2_flow(&flow.saved) {
+                    // v2 flows run on the stateful state-machine executor.
+                    match crate::flow_exec::run_flow_v2(
+                        &context,
+                        flow.saved.clone(),
+                        &cwd,
+                        &persona_slug,
+                        &model_name,
+                        &serde_json::json!({}),
+                    )
+                    .await
+                    {
+                        Ok(summary) => log::info!(
+                            "Flow '{}' finished: {} ({} steps)",
+                            flow.saved.id,
+                            summary.status,
+                            summary.steps.len()
+                        ),
+                        Err(e) => log::error!("Flow '{}' failed: {}", flow.saved.id, e),
+                    }
+                    if let Some(state) = state_by_flow.get_mut(&flow_id) {
+                        state.is_running = false;
+                    }
+                    continue;
+                }
+
                 match flows::collect_reachable_prompts(&flow.saved) {
                     Ok(prompts) => {
                         if prompts.is_empty() {

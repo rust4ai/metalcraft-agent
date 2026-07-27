@@ -181,15 +181,16 @@ impl metalcraft::Tool for FlowRunTool {
         "flow_run"
     }
     fn description(&self) -> &str {
-        "Run a saved flow now: every reachable prompt node executes as a one-shot task (tools auto-approved), logged to a single flow-tagged diagnostics session. Optionally set `persona` (default coding-agent) and `model`. Returns per-prompt results."
+        "Run a saved flow now (tools auto-approved), logged to a single flow-tagged diagnostics session. v2 flows run on the stateful state-machine executor and return `{ status, steps, variables }`; legacy v1 flows run every reachable prompt and return per-prompt results. Optionally set `persona` (default coding-agent), `model`, and `inputs` (a JSON object seeding the entry node's inputs for v2 flows)."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
                 "id": { "type": "string", "description": "Flow id to run" },
-                "persona": { "type": "string", "description": "Persona to run prompts as (default: coding-agent). A prompt node may override this." },
-                "model": { "type": "string", "description": "Model to use (default: the runtime default)" }
+                "persona": { "type": "string", "description": "Persona to run prompts as (default: coding-agent). A node may override this." },
+                "model": { "type": "string", "description": "Model to use (default: the runtime default)" },
+                "inputs": { "type": "string", "description": "Optional JSON object (as a string) seeding a v2 flow's entry inputs" }
             },
             "required": ["id"]
         })
@@ -198,6 +199,11 @@ impl metalcraft::Tool for FlowRunTool {
         let id = id_arg(&args, "flow_run")?;
         let persona = args["persona"].as_str().unwrap_or("coding-agent");
         let model = args["model"].as_str().unwrap_or(DEFAULT_MODEL);
+        let inputs: serde_json::Value = match args["inputs"].as_str() {
+            Some(s) => serde_json::from_str(s)
+                .unwrap_or_else(|_| serde_json::json!({})),
+            None => serde_json::json!({}),
+        };
 
         let context = match AgentRuntimeContext::from_environment() {
             Ok(c) => c,
@@ -207,9 +213,20 @@ impl metalcraft::Tool for FlowRunTool {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".to_string());
 
-        match crate::flows::run_flow(&context, &id, &cwd, persona, model).await {
-            Ok(results) => Ok(serde_json::json!({ "flow_id": id, "prompts": results })),
-            Err(e) => Ok(serde_json::json!({ "error": e })),
+        let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
+            return Ok(serde_json::json!({ "error": format!("flow '{id}' not found") }));
+        };
+
+        if crate::flow_exec::is_v2_flow(&flow) {
+            match crate::flow_exec::run_flow_v2(&context, flow, &cwd, persona, model, &inputs).await {
+                Ok(summary) => Ok(serde_json::to_value(summary).unwrap_or(serde_json::Value::Null)),
+                Err(e) => Ok(serde_json::json!({ "error": e })),
+            }
+        } else {
+            match crate::flows::run_flow(&context, &id, &cwd, persona, model).await {
+                Ok(results) => Ok(serde_json::json!({ "flow_id": id, "prompts": results })),
+                Err(e) => Ok(serde_json::json!({ "error": e })),
+            }
         }
     }
 }
