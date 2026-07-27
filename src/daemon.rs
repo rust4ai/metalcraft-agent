@@ -300,6 +300,31 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                 }
             }
 
+            // Resume any paused `wait` runs whose wake time has arrived.
+            for run in crate::flow_runs::list_runs(&crate::paths::runs_dir()) {
+                if run.status != "paused" {
+                    continue;
+                }
+                let Some(pause) = &run.pause else { continue };
+                if pause.reason != "wait" {
+                    continue;
+                }
+                let due = pause
+                    .wake_at
+                    .as_deref()
+                    .and_then(|w| chrono::DateTime::parse_from_rfc3339(w).ok())
+                    .map(|t| t.with_timezone(&chrono::Utc) <= chrono::Utc::now())
+                    .unwrap_or(false);
+                if !due {
+                    continue;
+                }
+                log::info!("Resuming waited flow run '{}' (flow '{}')", run.id, run.flow_id);
+                match crate::flow_exec::resume_flow(&context, &run.id, "after", None).await {
+                    Ok(summary) => log::info!("Run '{}' resumed: {}", run.id, summary.status),
+                    Err(e) => log::error!("Failed to resume run '{}': {}", run.id, e),
+                }
+            }
+
             // Fire any scheduled follow-ups whose time has come (see
             // `crate::scheduled_tasks`). Runs in the same tick as flow polling.
             run_due_scheduled_tasks(&context, &cwd, &persona_slug, &model_name, &approval_mode)

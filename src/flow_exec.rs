@@ -14,21 +14,24 @@ use metalcraft_flows::{
     evaluate,
     next_by_handle,
     nodes::{
-        BranchData, ConditionalData, EntryData, HttpData, PromptData, SetVariableData,
-        SubAgentData, ToolData,
+        ApprovalData, BranchData, ConditionalData, EntryData, HttpData, PromptData,
+        SetVariableData, SubAgentData, ToolData, WaitData,
     },
     resolve_template, CoreNodeType, FlowNode, FlowNodeType, Operator, SavedFlow, Variables,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use metalcraft::{
     create_react_agent_with_options, AgentMessage, AgentOptions, AgentState, Executor, RunOutcome,
     Tool, ToolChoice,
 };
+
+use crate::flow_runs::{FlowRun, PauseInfo};
 use rig::client::CompletionClient;
 use rig::providers::openai;
 
@@ -47,10 +50,21 @@ enum Route {
     Handle(Option<String>),
     /// Terminate the run with this status.
     End(String),
+    /// Suspend the run at this node (human approval or durable wait), persisting
+    /// a checkpoint. Resumed later via [`resume_flow`].
+    Pause(PauseSpec),
+}
+
+/// Details of a pause returned by an `approval` / `wait` runner.
+struct PauseSpec {
+    reason: String,
+    resume_handles: Vec<String>,
+    message: Option<String>,
+    wake_at: Option<String>,
 }
 
 /// One node's contribution to the run trace.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowStep {
     /// The node that ran.
     pub node_id: String,
@@ -62,16 +76,18 @@ pub struct FlowStep {
     pub detail: Option<String>,
 }
 
-/// The result of running a flow to completion (or failure).
+/// The result of running (or pausing) a flow.
 #[derive(Debug, Clone, Serialize)]
 pub struct FlowRunSummary {
+    /// The run id (matches the `runs/{id}.json` record when the run paused).
+    pub run_id: String,
     /// The flow that ran.
     pub flow_id: String,
-    /// `completed` | `failed`.
+    /// `completed` | `failed` | `paused`.
     pub status: String,
     /// Per-node trace, in execution order.
     pub steps: Vec<FlowStep>,
-    /// Final state (the `variables` object).
+    /// Final (or checkpointed) state — the `variables` object.
     pub variables: Value,
 }
 
@@ -91,6 +107,10 @@ pub struct FlowExecutor<'a> {
     /// node persona's own tools. Used by tests to supply a mock (e.g. a fake
     /// weather tool) without a real integration; empty in production.
     extra_tools: Vec<Arc<dyn Tool>>,
+    /// Stable id for this run; the `runs/{id}.json` filename when it pauses.
+    run_id: String,
+    /// Preserved creation timestamp across pause/resume (set when resumed).
+    created_at: Option<String>,
 }
 
 impl<'a> FlowExecutor<'a> {
@@ -137,7 +157,32 @@ impl<'a> FlowExecutor<'a> {
             step_budget: DEFAULT_STEP_BUDGET,
             steps: Vec::new(),
             extra_tools: Vec::new(),
+            run_id: uuid::Uuid::new_v4().to_string(),
+            created_at: None,
         })
+    }
+
+    /// Rebuild an executor from a persisted, paused [`FlowRun`] so it can resume.
+    fn resumed(
+        context: &'a AgentRuntimeContext,
+        flow: SavedFlow,
+        run: &FlowRun,
+        logger: Option<Arc<DiagnosticsLogger>>,
+    ) -> Self {
+        Self {
+            context,
+            flow,
+            cwd: run.cwd.clone(),
+            default_persona: run.persona.clone(),
+            model_name: run.model.clone(),
+            variables: Variables::from_value(run.variables.clone()),
+            logger,
+            step_budget: DEFAULT_STEP_BUDGET,
+            steps: run.steps.clone(),
+            extra_tools: Vec::new(),
+            run_id: run.id.clone(),
+            created_at: Some(run.created_at.clone()),
+        }
     }
 
     /// Inject extra tools into every `branch` node's registry (for testing with a
@@ -147,15 +192,22 @@ impl<'a> FlowExecutor<'a> {
         self
     }
 
-    /// Run the flow from its entry node until it terminates or the step budget is
-    /// exhausted.
-    pub async fn run(mut self) -> Result<FlowRunSummary, String> {
-        let mut current = entry_node(&self.flow)?.id.clone();
+    /// Run the flow from its entry node until it terminates, pauses, or the step
+    /// budget is exhausted.
+    pub async fn run(self) -> Result<FlowRunSummary, String> {
+        let start = entry_node(&self.flow)?.id.clone();
+        self.drive(start).await
+    }
+
+    /// The core loop: advance from `current` node to node until a terminal or
+    /// pause outcome. Shared by [`Self::run`] and resume.
+    async fn drive(mut self, mut current: String) -> Result<FlowRunSummary, String> {
         let mut visits = 0u32;
 
         loop {
             visits += 1;
             if visits > self.step_budget {
+                self.mark_terminal("failed");
                 return Err(format!(
                     "flow '{}' exceeded step budget ({})",
                     self.flow.id, self.step_budget
@@ -182,6 +234,7 @@ impl<'a> FlowExecutor<'a> {
                         outcome: "completed".into(),
                         detail: None,
                     });
+                    self.mark_terminal(&status);
                     return Ok(self.into_summary(status));
                 }
                 Ok(Route::Handle(handle)) => {
@@ -197,8 +250,21 @@ impl<'a> FlowExecutor<'a> {
                     });
                     match next {
                         Some(n) => current = n,
-                        None => return Ok(self.into_summary("completed".into())),
+                        None => {
+                            self.mark_terminal("completed");
+                            return Ok(self.into_summary("completed".into()));
+                        }
                     }
+                }
+                Ok(Route::Pause(spec)) => {
+                    self.steps.push(FlowStep {
+                        node_id: current.clone(),
+                        node_type,
+                        outcome: format!("paused:{}", spec.reason),
+                        detail: spec.message.clone(),
+                    });
+                    self.persist_paused(&current, &spec);
+                    return Ok(self.into_summary("paused".into()));
                 }
                 Err(e) => {
                     self.steps.push(FlowStep {
@@ -207,6 +273,7 @@ impl<'a> FlowExecutor<'a> {
                         outcome: "failed".into(),
                         detail: Some(e.clone()),
                     });
+                    self.mark_terminal("failed");
                     return Ok(self.into_summary("failed".into()));
                 }
             }
@@ -215,10 +282,59 @@ impl<'a> FlowExecutor<'a> {
 
     fn into_summary(self, status: String) -> FlowRunSummary {
         FlowRunSummary {
+            run_id: self.run_id,
             flow_id: self.flow.id,
             status,
             steps: self.steps,
             variables: self.variables.into_value(),
+        }
+    }
+
+    /// Write (or overwrite) this run's `runs/{id}.json` in the paused state.
+    fn persist_paused(&self, node_id: &str, spec: &PauseSpec) {
+        let dir = crate::paths::runs_dir();
+        let now = Utc::now().to_rfc3339();
+        // Preserve the original created_at across pause/resume cycles.
+        let created_at = self
+            .created_at
+            .clone()
+            .or_else(|| crate::flow_runs::load_run(&dir, &self.run_id).map(|r| r.created_at))
+            .unwrap_or_else(|| now.clone());
+        let run = FlowRun {
+            id: self.run_id.clone(),
+            flow_id: self.flow.id.clone(),
+            status: "paused".into(),
+            current_node_id: node_id.to_string(),
+            variables: self.variables.as_value().clone(),
+            pause: Some(PauseInfo {
+                reason: spec.reason.clone(),
+                resume_handles: spec.resume_handles.clone(),
+                message: spec.message.clone(),
+                wake_at: spec.wake_at.clone(),
+            }),
+            persona: self.default_persona.clone(),
+            model: self.model_name.clone(),
+            cwd: self.cwd.clone(),
+            steps: self.steps.clone(),
+            created_at,
+            updated_at: now,
+        };
+        if let Err(e) = crate::flow_runs::save_run(&dir, &run) {
+            eprintln!("flow run: failed to persist paused run '{}': {e}", self.run_id);
+        }
+    }
+
+    /// If this run has a persisted record (i.e. it paused at least once), update
+    /// it to a terminal status so `flow_run_status` reflects completion.
+    fn mark_terminal(&self, status: &str) {
+        let dir = crate::paths::runs_dir();
+        if let Some(mut run) = crate::flow_runs::load_run(&dir, &self.run_id) {
+            run.status = status.to_string();
+            run.pause = None;
+            run.variables = self.variables.as_value().clone();
+            run.steps = self.steps.clone();
+            run.updated_at = Utc::now().to_rfc3339();
+            let _ = crate::flow_runs::save_run(&dir, &run);
         }
     }
 
@@ -234,6 +350,8 @@ impl<'a> FlowExecutor<'a> {
             FlowNodeType::Core(CoreNodeType::Http) => self.run_http(node).await,
             FlowNodeType::Core(CoreNodeType::SubAgent) => self.run_sub_agent(node).await,
             FlowNodeType::Core(CoreNodeType::Branch) => self.run_branch(node).await,
+            FlowNodeType::Core(CoreNodeType::Approval) => self.run_approval(node),
+            FlowNodeType::Core(CoreNodeType::Wait) => self.run_wait(node),
             FlowNodeType::Core(other) => Err(format!(
                 "node type '{}' is not implemented yet (node '{}')",
                 other.as_str(),
@@ -274,6 +392,42 @@ impl<'a> FlowExecutor<'a> {
             }
         }
         Ok(Route::Handle(data.default_handle.clone()))
+    }
+
+    // --- pause runners (checkpoint + resume) --------------------------------
+
+    fn run_approval(&mut self, node: &FlowNode) -> Result<Route, String> {
+        let data: ApprovalData = parse_data(node)?;
+        let message = resolve_template(&data.message, self.variables.as_value());
+        let choices = data
+            .choices
+            .clone()
+            .unwrap_or_else(|| vec!["approve".into(), "reject".into()]);
+        Ok(Route::Pause(PauseSpec {
+            reason: "approval".into(),
+            resume_handles: choices,
+            message: Some(message),
+            wake_at: None,
+        }))
+    }
+
+    fn run_wait(&mut self, node: &FlowNode) -> Result<Route, String> {
+        let data: WaitData = parse_data(node)?;
+        let wake_at = if let Some(until) = &data.until {
+            until.clone()
+        } else if let Some(dur) = &data.duration {
+            let secs = parse_duration_secs(dur)
+                .ok_or_else(|| format!("wait node '{}': invalid duration '{dur}'", node.id))?;
+            (Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339()
+        } else {
+            return Err(format!("wait node '{}' needs `duration` or `until`", node.id));
+        };
+        Ok(Route::Pause(PauseSpec {
+            reason: "wait".into(),
+            resume_handles: vec!["after".into()],
+            message: None,
+            wake_at: Some(wake_at),
+        }))
     }
 
     // --- runtime-backed runners ---------------------------------------------
@@ -686,6 +840,76 @@ pub async fn run_flow_v2(
 
     let exec = FlowExecutor::new(context, flow, cwd, persona_slug, model_name, args, logger)?;
     exec.run().await
+}
+
+/// Resume a paused run by supplying the chosen handle — an `approval` decision,
+/// or `"after"` for a `wait`. Optional `data` becomes the resumed node's `_last`
+/// input. Loads the checkpoint from `runs/{run_id}.json`, routes away from the
+/// pause node via `handle`, and drives to the next terminal or pause.
+pub async fn resume_flow(
+    context: &AgentRuntimeContext,
+    run_id: &str,
+    handle: &str,
+    data: Option<Value>,
+) -> Result<FlowRunSummary, String> {
+    let dir = crate::paths::runs_dir();
+    let run = crate::flow_runs::load_run(&dir, run_id)
+        .ok_or_else(|| format!("run '{run_id}' not found"))?;
+    if run.status != "paused" {
+        return Err(format!("run '{run_id}' is '{}', not paused", run.status));
+    }
+    let flow = metalcraft_flows::load_flow(&crate::paths::flows_dir(), &run.flow_id)
+        .ok_or_else(|| format!("flow '{}' not found", run.flow_id))?;
+
+    let logger = match DiagnosticsLogger::new() {
+        Ok(l) => {
+            if let Ok(persona) = Persona::load(&run.persona, &context.personas_dir) {
+                let system_prompt = persona.build_system_prompt(&context.skills_dir, &run.cwd);
+                l.log_session_info(
+                    &persona.name,
+                    &run.persona,
+                    &run.model,
+                    &run.cwd,
+                    &system_prompt,
+                    &persona.resolved_tool_names(),
+                    &persona.skills,
+                    true,
+                    Some(&run.flow_id),
+                );
+            }
+            Some(Arc::new(l))
+        }
+        Err(_) => None,
+    };
+
+    let pause_node = run.current_node_id.clone();
+    let mut exec = FlowExecutor::resumed(context, flow, &run, logger);
+    if let Some(d) = data {
+        exec.variables.set_last(d);
+    }
+
+    match next_by_handle(&exec.flow.flow, &pause_node, Some(handle)) {
+        Some(next) => exec.drive(next).await,
+        None => {
+            exec.mark_terminal("completed");
+            Ok(exec.into_summary("completed".into()))
+        }
+    }
+}
+
+/// Parse a simple duration (`"45s"`, `"30m"`, `"2h"`, `"1d"`) into seconds.
+fn parse_duration_secs(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    let n: i64 = num.trim().parse().ok()?;
+    let mult = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        _ => return None,
+    };
+    Some(n * mult)
 }
 
 /// Recursively resolve `{{…}}` placeholders in every string within a JSON value.

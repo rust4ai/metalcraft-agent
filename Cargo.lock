@@ -4991,6 +4991,7 @@ dependencies = [
  "sha2 0.10.9",
  "spice-framework",
  "syntect",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "uuid",

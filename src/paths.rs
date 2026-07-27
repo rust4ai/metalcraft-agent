@@ -44,6 +44,12 @@ pub fn flows_dir() -> PathBuf {
     data_dir().join("flows")
 }
 
+/// Directory holding in-flight and finished flow runs (one JSON per run),
+/// used by the v2 executor for pause/resume checkpointing.
+pub fn runs_dir() -> PathBuf {
+    data_dir().join("runs")
+}
+
 pub fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }

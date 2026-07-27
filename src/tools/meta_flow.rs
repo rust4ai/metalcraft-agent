@@ -231,6 +231,112 @@ impl metalcraft::Tool for FlowRunTool {
     }
 }
 
+pub struct FlowResumeTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowResumeTool {
+    fn name(&self) -> &str {
+        "flow_resume"
+    }
+    fn description(&self) -> &str {
+        "Resume a paused flow run. Provide the `run_id` and the `handle` to take — for an approval node the decision (e.g. \"approve\"/\"reject\"), for a wait node \"after\". Optional `data` (JSON string) becomes the resumed node's `_last` input. Returns the run summary (which may pause again)."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "run_id": { "type": "string", "description": "Paused run id" },
+                "handle": { "type": "string", "description": "Handle to take (approval decision, or 'after')" },
+                "data": { "type": "string", "description": "Optional JSON value to set as the resumed node's _last input" }
+            },
+            "required": ["run_id", "handle"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let run_id = args["run_id"].as_str().ok_or_else(|| missing_param("flow_resume", "run_id"))?;
+        let handle = args["handle"].as_str().ok_or_else(|| missing_param("flow_resume", "handle"))?;
+        let data: Option<serde_json::Value> = args["data"]
+            .as_str()
+            .and_then(|s| serde_json::from_str(s).ok());
+
+        let context = match AgentRuntimeContext::from_environment() {
+            Ok(c) => c,
+            Err(e) => return Ok(serde_json::json!({ "error": format!("runtime not available: {e}") })),
+        };
+        match crate::flow_exec::resume_flow(&context, run_id, handle, data).await {
+            Ok(summary) => Ok(serde_json::to_value(summary).unwrap_or(serde_json::Value::Null)),
+            Err(e) => Ok(serde_json::json!({ "error": e })),
+        }
+    }
+}
+
+pub struct FlowRunStatusTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowRunStatusTool {
+    fn name(&self) -> &str {
+        "flow_run_status"
+    }
+    fn description(&self) -> &str {
+        "Get the status of a flow run by id: status (running/paused/completed/failed), the node it's paused at, pause details, current variables, and step trace."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "run_id": { "type": "string", "description": "Run id" } },
+            "required": ["run_id"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let run_id = args["run_id"].as_str().ok_or_else(|| missing_param("flow_run_status", "run_id"))?;
+        match crate::flow_runs::load_run(&paths::runs_dir(), run_id) {
+            Some(run) => Ok(serde_json::to_value(run).unwrap_or(serde_json::Value::Null)),
+            None => Ok(serde_json::json!({ "error": format!("run '{run_id}' not found") })),
+        }
+    }
+}
+
+pub struct FlowRunsListTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowRunsListTool {
+    fn name(&self) -> &str {
+        "flow_runs_list"
+    }
+    fn description(&self) -> &str {
+        "List persisted flow runs (paused and finished), newest activity first. Optionally filter by `flow_id`."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "flow_id": { "type": "string", "description": "Optional flow id filter" } },
+            "required": []
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let filter = args["flow_id"].as_str();
+        let mut runs = crate::flow_runs::list_runs(&paths::runs_dir());
+        if let Some(f) = filter {
+            runs.retain(|r| r.flow_id == f);
+        }
+        runs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let summaries: Vec<serde_json::Value> = runs
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "run_id": r.id,
+                    "flow_id": r.flow_id,
+                    "status": r.status,
+                    "current_node_id": r.current_node_id,
+                    "pause": r.pause,
+                    "updated_at": r.updated_at,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "runs": summaries }))
+    }
+}
+
 pub struct FlowTemplatesListTool;
 
 #[async_trait]
