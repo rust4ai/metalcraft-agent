@@ -94,6 +94,25 @@ async fn pause_and_resume_approval_and_wait() {
     assert!(run.flow.is_some(), "pause must snapshot the flow definition");
     assert_eq!(run.pause.unwrap().resume_handles, vec!["approve", "reject"]);
 
+    // The run logged node-level `flow_step` events into a diagnostics session,
+    // so the session viewer isn't blank for pure-logic flows (no LLM turns).
+    let logged_flow_steps = std::fs::read_dir(paths::sessions_dir())
+        .ok()
+        .map(|sessions| {
+            sessions.filter_map(|s| s.ok()).any(|s| {
+                std::fs::read_dir(s.path())
+                    .ok()
+                    .map(|files| {
+                        files.filter_map(|f| f.ok()).any(|f| {
+                            f.file_name().to_string_lossy().starts_with("flow_step_")
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    assert!(logged_flow_steps, "flow run should log flow_step events into a session");
+
     let approved = resume_flow(&ctx, &paused.run_id, "approve", None).await.unwrap();
     assert_eq!(approved.status, "completed");
     assert_eq!(approved.steps.last().unwrap().node_id, "approved");

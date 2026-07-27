@@ -230,28 +230,21 @@ impl<'a> FlowExecutor<'a> {
 
             match route {
                 Ok(Route::End(status)) => {
-                    self.steps.push(FlowStep {
-                        node_id: current.clone(),
-                        node_type,
-                        outcome: "completed".into(),
-                        detail: None,
-                    });
+                    self.record_step(&current, &node_type, "completed".into(), None);
                     self.mark_terminal(&status);
                     return Ok(self.into_summary(status));
                 }
                 Ok(Route::Handle(handle)) => {
                     let next = next_by_handle(&self.flow.flow, &current, handle.as_deref());
-                    self.steps.push(FlowStep {
-                        node_id: current.clone(),
-                        node_type,
-                        outcome: match &handle {
-                            Some(h) => format!("routed:{h}"),
-                            None => "advanced".into(),
-                        },
-                        detail: None,
-                    });
+                    let outcome = match &handle {
+                        Some(h) => format!("routed:{h}"),
+                        None => "advanced".into(),
+                    };
                     match next {
-                        Some(n) => current = n,
+                        Some(n) => {
+                            self.record_step(&current, &node_type, outcome, None);
+                            current = n;
+                        }
                         None => {
                             // A node signals failure by routing to `error`. If
                             // no `error` edge (and no unlabeled fallback) exists,
@@ -263,35 +256,28 @@ impl<'a> FlowExecutor<'a> {
                                     .get("_last")
                                     .and_then(|v| v.as_str())
                                     .map(str::to_string);
-                                if let Some(last) = self.steps.last_mut() {
-                                    last.outcome = "failed".into();
-                                    last.detail = detail;
-                                }
+                                self.record_step(&current, &node_type, "failed".into(), detail);
                                 self.mark_terminal("failed");
                                 return Ok(self.into_summary("failed".into()));
                             }
+                            self.record_step(&current, &node_type, outcome, None);
                             self.mark_terminal("completed");
                             return Ok(self.into_summary("completed".into()));
                         }
                     }
                 }
                 Ok(Route::Pause(spec)) => {
-                    self.steps.push(FlowStep {
-                        node_id: current.clone(),
-                        node_type,
-                        outcome: format!("paused:{}", spec.reason),
-                        detail: spec.message.clone(),
-                    });
+                    self.record_step(
+                        &current,
+                        &node_type,
+                        format!("paused:{}", spec.reason),
+                        spec.message.clone(),
+                    );
                     self.persist_paused(&current, &spec);
                     return Ok(self.into_summary("paused".into()));
                 }
                 Err(e) => {
-                    self.steps.push(FlowStep {
-                        node_id: current.clone(),
-                        node_type,
-                        outcome: "failed".into(),
-                        detail: Some(e.clone()),
-                    });
+                    self.record_step(&current, &node_type, "failed".into(), Some(e.clone()));
                     self.mark_terminal("failed");
                     return Ok(self.into_summary("failed".into()));
                 }
@@ -347,6 +333,11 @@ impl<'a> FlowExecutor<'a> {
     /// If this run has a persisted record (i.e. it paused at least once), update
     /// it to a terminal status so `flow_run_status` reflects completion.
     fn mark_terminal(&self, status: &str) {
+        // Mirror the terminal status into the diagnostics session so the viewer
+        // shows how the run ended even for pure-logic flows (no LLM events).
+        if let Some(l) = &self.logger {
+            l.log_config_change("flow_result", serde_json::json!({ "status": status }));
+        }
         let dir = crate::paths::runs_dir();
         if let Some(mut run) = crate::flow_runs::load_run(&dir, &self.run_id) {
             run.status = status.to_string();
@@ -356,6 +347,29 @@ impl<'a> FlowExecutor<'a> {
             run.updated_at = Utc::now().to_rfc3339();
             let _ = crate::flow_runs::save_run(&dir, &run);
         }
+    }
+
+    /// Append a step to the trace and mirror it into the diagnostics session as a
+    /// `flow_step` event, so the session viewer shows the node-by-node run even
+    /// when no LLM call happened.
+    fn record_step(&mut self, node_id: &str, node_type: &str, outcome: String, detail: Option<String>) {
+        if let Some(l) = &self.logger {
+            l.log_config_change(
+                "flow_step",
+                serde_json::json!({
+                    "node_id": node_id,
+                    "node_type": node_type,
+                    "outcome": outcome,
+                    "detail": detail,
+                }),
+            );
+        }
+        self.steps.push(FlowStep {
+            node_id: node_id.to_string(),
+            node_type: node_type.to_string(),
+            outcome,
+            detail,
+        });
     }
 
     /// Dispatch one node to its runner.
