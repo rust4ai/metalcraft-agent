@@ -13,7 +13,10 @@
 use metalcraft_flows::{
     evaluate,
     next_by_handle,
-    nodes::{BranchData, ConditionalData, EntryData, PromptData, SetVariableData, ToolData},
+    nodes::{
+        BranchData, ConditionalData, EntryData, HttpData, PromptData, SetVariableData,
+        SubAgentData, ToolData,
+    },
     resolve_template, CoreNodeType, FlowNode, FlowNodeType, Operator, SavedFlow, Variables,
 };
 use serde::Serialize;
@@ -228,6 +231,8 @@ impl<'a> FlowExecutor<'a> {
             FlowNodeType::Core(CoreNodeType::Conditional) => self.run_conditional(node),
             FlowNodeType::Core(CoreNodeType::Prompt) => self.run_prompt(node).await,
             FlowNodeType::Core(CoreNodeType::Tool) => self.run_tool(node).await,
+            FlowNodeType::Core(CoreNodeType::Http) => self.run_http(node).await,
+            FlowNodeType::Core(CoreNodeType::SubAgent) => self.run_sub_agent(node).await,
             FlowNodeType::Core(CoreNodeType::Branch) => self.run_branch(node).await,
             FlowNodeType::Core(other) => Err(format!(
                 "node type '{}' is not implemented yet (node '{}')",
@@ -336,6 +341,98 @@ impl<'a> FlowExecutor<'a> {
                 }
                 self.variables.set_last(result);
                 Ok(Route::Handle(Some("ok".into())))
+            }
+            Err(e) => {
+                self.variables.set_last(Value::String(e.to_string()));
+                Ok(Route::Handle(Some("error".into())))
+            }
+        }
+    }
+
+    async fn run_http(&mut self, node: &FlowNode) -> Result<Route, String> {
+        let data: HttpData = parse_data(node)?;
+        let url = resolve_template(&data.url, self.variables.as_value());
+        // Only http/https; the codebase itself calls http://localhost gateways,
+        // so private hosts are intentionally not blocked here.
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            self.variables
+                .set_last(Value::String(format!("unsupported url scheme: {url}")));
+            return Ok(Route::Handle(Some("error".into())));
+        }
+        let method = reqwest::Method::from_bytes(data.method.to_uppercase().as_bytes())
+            .unwrap_or(reqwest::Method::GET);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent("metalcraft-agent (flow http node)")
+            .build()
+            .map_err(|e| format!("http node '{}': client: {e}", node.id))?;
+
+        let mut req = client.request(method, &url);
+        if let Some(Value::Object(headers)) = &data.headers {
+            for (k, v) in headers {
+                if let Some(vs) = v.as_str() {
+                    req = req.header(k, resolve_template(vs, self.variables.as_value()));
+                }
+            }
+        }
+        if let Some(body) = &data.body {
+            req = req.json(&interpolate_value(body, self.variables.as_value()));
+        }
+
+        match req.send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
+                let result = json!({ "status": status, "body": body });
+                if let Some(var) = &data.output_var {
+                    self.variables.set(var, result.clone());
+                }
+                self.variables.set_last(result);
+                if (200..300).contains(&status) {
+                    Ok(Route::Handle(Some("ok".into())))
+                } else {
+                    Ok(Route::Handle(Some("error".into())))
+                }
+            }
+            Err(e) => {
+                self.variables.set_last(Value::String(e.to_string()));
+                Ok(Route::Handle(Some("error".into())))
+            }
+        }
+    }
+
+    async fn run_sub_agent(&mut self, node: &FlowNode) -> Result<Route, String> {
+        let data: SubAgentData = parse_data(node)?;
+        let task = resolve_template(&data.task, self.variables.as_value());
+
+        // Reuse the sub_agent tool: it builds a scoped child agent (by persona or
+        // tool_set/pack) and returns its result.
+        let tool = crate::tools::sub_agent::SubAgentTool::new(
+            self.context.api_key.clone(),
+            self.model_name.clone(),
+            "You are a helpful assistant.".to_string(),
+        );
+        let mut call_args = json!({ "task": task });
+        if let Some(p) = &data.persona {
+            call_args["persona"] = json!(p);
+        }
+        if let Some(ts) = &data.tool_set {
+            call_args["tool_set"] = json!(ts);
+        }
+        if let Some(pk) = &data.pack {
+            call_args["pack"] = json!(pk);
+        }
+
+        match tool.call(call_args).await {
+            Ok(result) => {
+                let is_err = result.get("error").and_then(|v| v.as_bool()).unwrap_or(false);
+                let answer = result.get("result").cloned().unwrap_or(Value::Null);
+                if let Some(var) = &data.output_var {
+                    self.variables.set(var, answer.clone());
+                }
+                self.variables.set_last(answer);
+                Ok(Route::Handle(Some(if is_err { "error" } else { "ok" }.into())))
             }
             Err(e) => {
                 self.variables.set_last(Value::String(e.to_string()));
@@ -752,6 +849,31 @@ mod tests {
         let mut v2 = saved(vec![node("e", "entry", json!({}))], vec![]);
         v2.spec_version = "2".into();
         assert!(is_v2_flow(&v2));
+    }
+
+    #[tokio::test]
+    async fn http_bad_scheme_routes_error() {
+        // entry -> http(non-http url) -> error handle -> err end; ok -> ok end.
+        let flow = saved(
+            vec![
+                node("entry", "entry", json!({ "schedule_type": "manual" })),
+                node("call", "http", json!({ "method": "GET", "url": "ftp://nope/x" })),
+                node("ok", "end", json!({ "status": "ok" })),
+                node("err", "end", json!({ "status": "err" })),
+            ],
+            vec![
+                edge("e0", "entry", "call", None),
+                edge("e1", "call", "ok", Some("ok")),
+                edge("e2", "call", "err", Some("error")),
+            ],
+        );
+        let summary = run_pure(flow, json!({})).await;
+        assert_eq!(summary.steps.last().unwrap().node_id, "err");
+        assert!(
+            summary.variables["_last"].as_str().unwrap_or("").contains("scheme"),
+            "_last = {}",
+            summary.variables["_last"]
+        );
     }
 
     #[tokio::test]
