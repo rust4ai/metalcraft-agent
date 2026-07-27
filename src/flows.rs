@@ -145,11 +145,15 @@ pub fn collect_reachable_prompts(flow: &SavedFlow) -> Result<Vec<FlowPrompt>, St
                     persona,
                 });
             }
-            FlowNodeType::Core(CoreNodeType::Branch) => {
-                return Err(format!("flow '{}' uses unsupported node type 'branch' at '{}'", flow.id, node.id));
-            }
-            FlowNodeType::Core(CoreNodeType::BranchTool) => {
-                return Err(format!("flow '{}' uses unsupported node type 'branch_tool' at '{}'", flow.id, node.id));
+            // The legacy linear runner only understands entry+prompt chains.
+            // Every other node type (v2 conditional/branch/effectors, or the
+            // deprecated branch_tool, or custom vendor nodes) is handled by the
+            // v2 `flow_exec::FlowExecutor`, not here.
+            FlowNodeType::Core(other) => {
+                return Err(format!(
+                    "flow '{}' uses node type '{}' at '{}' — run it with the v2 executor",
+                    flow.id, other.as_str(), node.id
+                ));
             }
             FlowNodeType::Custom(custom) => {
                 return Err(format!("flow '{}' uses unsupported custom node type '{}' at '{}'", flow.id, custom, node.id));

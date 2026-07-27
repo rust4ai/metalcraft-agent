@@ -9,7 +9,8 @@ repository = "https://github.com/rust4ai/metalcraft-agent"
 
 [dependencies]
 metalcraft = { version = "0.8.0", features = ["rig"] }
-metalcraft-flows = "0.1.0"
+# Local flows-v2 crate during Workstream B; switch back to a version once 0.2.0 publishes.
+metalcraft-flows = { path = "../metalcraft-flows" }
 rig = "0.37"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod diagnostics;
 pub mod diagnostics_browse;
 pub mod diff_preview;
+pub mod flow_exec;
 pub mod flows;
 pub mod gateway_activity;
 pub mod gateway_channels;
