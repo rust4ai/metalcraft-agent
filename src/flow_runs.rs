@@ -51,6 +51,12 @@ pub struct FlowRun {
     pub cwd: String,
     /// The trace accumulated so far.
     pub steps: Vec<FlowStep>,
+    /// Snapshot of the flow definition at pause time, so resume routes against
+    /// the graph the run actually paused in — not a since-edited on-disk flow.
+    /// Absent (`None`) on legacy records; resume then falls back to loading the
+    /// current flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<metalcraft_flows::SavedFlow>,
     /// RFC-3339 creation timestamp.
     pub created_at: String,
     /// RFC-3339 last-update timestamp.
@@ -114,6 +120,7 @@ mod tests {
             model: "m".into(),
             cwd: ".".into(),
             steps: vec![],
+            flow: None,
             created_at: "2026-07-27T00:00:00Z".into(),
             updated_at: "2026-07-27T00:00:00Z".into(),
         }

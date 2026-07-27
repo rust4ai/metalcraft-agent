@@ -91,6 +91,7 @@ async fn pause_and_resume_approval_and_wait() {
     assert_eq!(run.status, "paused");
     assert_eq!(run.current_node_id, "gate");
     assert_eq!(run.pause.as_ref().unwrap().reason, "approval");
+    assert!(run.flow.is_some(), "pause must snapshot the flow definition");
     assert_eq!(run.pause.unwrap().resume_handles, vec!["approve", "reject"]);
 
     let approved = resume_flow(&ctx, &paused.run_id, "approve", None).await.unwrap();
@@ -119,4 +120,50 @@ async fn pause_and_resume_approval_and_wait() {
     let resumed = resume_flow(&ctx, &waited.run_id, "after", None).await.unwrap();
     assert_eq!(resumed.status, "completed");
     assert_eq!(resumed.steps.last().unwrap().node_id, "done");
+
+    // --- snapshot: resume works even after the on-disk flow is deleted -------
+    let paused3 = run_flow_v2(&ctx, approval_flow(), ".", "coding-agent", "m", &json!({}))
+        .await
+        .unwrap();
+    assert!(metalcraft_flows::delete_flow(&paths::flows_dir(), "approval-test"));
+    let after = resume_flow(&ctx, &paused3.run_id, "approve", None).await.unwrap();
+    assert_eq!(after.status, "completed");
+    assert_eq!(after.steps.last().unwrap().node_id, "approved");
+
+    // --- approval timeout persists a wake_at and resumes via `timeout` -------
+    save_flow(&paths::flows_dir(), &timeout_flow()).unwrap();
+    let tpaused = run_flow_v2(&ctx, timeout_flow(), ".", "coding-agent", "m", &json!({}))
+        .await
+        .unwrap();
+    let trun = metalcraft_agent::flow_runs::load_run(&paths::runs_dir(), &tpaused.run_id).unwrap();
+    let tpause = trun.pause.unwrap();
+    assert_eq!(tpause.reason, "approval");
+    assert!(tpause.wake_at.is_some(), "timed approval must set a wake_at");
+    let timed = resume_flow(&ctx, &tpaused.run_id, "timeout", None).await.unwrap();
+    assert_eq!(timed.steps.last().unwrap().node_id, "timed_out");
+}
+
+fn timeout_flow() -> SavedFlow {
+    serde_json::from_value(json!({
+        "spec_version": "2",
+        "id": "timeout-test",
+        "name": "Timeout",
+        "created_at": "2026-07-27T00:00:00Z",
+        "updated_at": "2026-07-27T00:00:00Z",
+        "enabled": false,
+        "flow": {
+            "nodes": [
+                { "id": "entry", "node_type": "entry", "data": { "schedule_type": "manual" } },
+                { "id": "gate", "node_type": "approval", "data": { "message": "Proceed?", "choices": ["approve", "reject"], "timeout": 3600 } },
+                { "id": "approved", "node_type": "end", "data": { "status": "approved" } },
+                { "id": "timed_out", "node_type": "end", "data": { "status": "timed_out" } }
+            ],
+            "edges": [
+                { "id": "e0", "source": "entry", "target": "gate" },
+                { "id": "e1", "source": "gate", "target": "approved", "source_handle": "approve" },
+                { "id": "e2", "source": "gate", "target": "timed_out", "source_handle": "timeout" }
+            ]
+        }
+    }))
+    .unwrap()
 }

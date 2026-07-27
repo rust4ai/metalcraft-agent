@@ -300,15 +300,14 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                 }
             }
 
-            // Resume any paused `wait` runs whose wake time has arrived.
+            // Auto-resume any paused run whose wake time has arrived: `wait`
+            // nodes (via the `after` handle) and `approval` nodes that timed out
+            // (via the `timeout` handle).
             for run in crate::flow_runs::list_runs(&crate::paths::runs_dir()) {
                 if run.status != "paused" {
                     continue;
                 }
                 let Some(pause) = &run.pause else { continue };
-                if pause.reason != "wait" {
-                    continue;
-                }
                 let due = pause
                     .wake_at
                     .as_deref()
@@ -318,8 +317,14 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                 if !due {
                     continue;
                 }
-                log::info!("Resuming waited flow run '{}' (flow '{}')", run.id, run.flow_id);
-                match crate::flow_exec::resume_flow(&context, &run.id, "after", None).await {
+                let handle = if pause.reason == "wait" { "after" } else { "timeout" };
+                log::info!(
+                    "Auto-resuming flow run '{}' (flow '{}', {} → {handle})",
+                    run.id,
+                    run.flow_id,
+                    pause.reason
+                );
+                match crate::flow_exec::resume_flow(&context, &run.id, handle, None).await {
                     Ok(summary) => log::info!("Run '{}' resumed: {}", run.id, summary.status),
                     Err(e) => log::error!("Failed to resume run '{}': {}", run.id, e),
                 }

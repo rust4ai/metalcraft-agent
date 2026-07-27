@@ -146,6 +146,7 @@ impl<'a> FlowExecutor<'a> {
             _ => Variables::from_value(if args.is_object() { args.clone() } else { Value::Object(Default::default()) }),
         };
 
+        let step_budget = step_budget_for(&flow);
         Ok(Self {
             context,
             flow,
@@ -154,7 +155,7 @@ impl<'a> FlowExecutor<'a> {
             model_name: model_name.to_string(),
             variables,
             logger,
-            step_budget: DEFAULT_STEP_BUDGET,
+            step_budget,
             steps: Vec::new(),
             extra_tools: Vec::new(),
             run_id: uuid::Uuid::new_v4().to_string(),
@@ -169,6 +170,7 @@ impl<'a> FlowExecutor<'a> {
         run: &FlowRun,
         logger: Option<Arc<DiagnosticsLogger>>,
     ) -> Self {
+        let step_budget = step_budget_for(&flow);
         Self {
             context,
             flow,
@@ -177,7 +179,7 @@ impl<'a> FlowExecutor<'a> {
             model_name: run.model.clone(),
             variables: Variables::from_value(run.variables.clone()),
             logger,
-            step_budget: DEFAULT_STEP_BUDGET,
+            step_budget,
             steps: run.steps.clone(),
             extra_tools: Vec::new(),
             run_id: run.id.clone(),
@@ -333,6 +335,7 @@ impl<'a> FlowExecutor<'a> {
             model: self.model_name.clone(),
             cwd: self.cwd.clone(),
             steps: self.steps.clone(),
+            flow: Some(self.flow.clone()),
             created_at,
             updated_at: now,
         };
@@ -420,11 +423,17 @@ impl<'a> FlowExecutor<'a> {
             .choices
             .clone()
             .unwrap_or_else(|| vec!["approve".into(), "reject".into()]);
+        // With a `timeout`, the daemon auto-resumes via the `timeout` handle once
+        // the deadline passes (wire a `timeout` edge to handle it; unwired = the
+        // run just ends).
+        let wake_at = data
+            .timeout
+            .map(|secs| (Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339());
         Ok(Route::Pause(PauseSpec {
             reason: "approval".into(),
             resume_handles: choices,
             message: Some(message),
-            wake_at: None,
+            wake_at,
         }))
     }
 
@@ -893,8 +902,13 @@ pub async fn resume_flow(
     if run.status != "paused" {
         return Err(format!("run '{run_id}' is '{}', not paused", run.status));
     }
-    let flow = metalcraft_flows::load_flow(&crate::paths::flows_dir(), &run.flow_id)
-        .ok_or_else(|| format!("flow '{}' not found", run.flow_id))?;
+    // Prefer the snapshot taken at pause time; fall back to the current on-disk
+    // flow for legacy records that predate snapshots.
+    let flow = match run.flow.clone() {
+        Some(f) => f,
+        None => metalcraft_flows::load_flow(&crate::paths::flows_dir(), &run.flow_id)
+            .ok_or_else(|| format!("flow '{}' not found", run.flow_id))?,
+    };
 
     let logger = match DiagnosticsLogger::new() {
         Ok(l) => {
@@ -950,13 +964,31 @@ fn parse_duration_secs(s: &str) -> Option<i64> {
 /// Recursively resolve `{{…}}` placeholders in every string within a JSON value.
 fn interpolate_value(v: &Value, vars: &Value) -> Value {
     match v {
-        Value::String(s) => Value::String(resolve_template(s, vars)),
+        // A string that is *exactly* one `{{path}}` adopts the referenced JSON
+        // value's type (so `{"count": "{{n}}"}` sends the number 5, not "5").
+        // Anything with surrounding text or multiple refs stays a string.
+        Value::String(s) => match whole_ref(s) {
+            Some(path) => metalcraft_flows::state::lookup_path(vars, path)
+                .cloned()
+                .unwrap_or(Value::Null),
+            None => Value::String(resolve_template(s, vars)),
+        },
         Value::Array(a) => Value::Array(a.iter().map(|x| interpolate_value(x, vars)).collect()),
         Value::Object(o) => {
             Value::Object(o.iter().map(|(k, x)| (k.clone(), interpolate_value(x, vars))).collect())
         }
         other => other.clone(),
     }
+}
+
+/// If `s` (trimmed) is exactly a single `{{path}}` with no other text, return the
+/// inner path; otherwise `None`.
+fn whole_ref(s: &str) -> Option<&str> {
+    let inner = s.trim().strip_prefix("{{")?.strip_suffix("}}")?;
+    if inner.contains("{{") || inner.contains("}}") {
+        return None;
+    }
+    Some(inner.trim())
 }
 
 /// Deserialize a node's `data` into its typed view, mapping errors to a
@@ -973,6 +1005,17 @@ fn entry_node(flow: &SavedFlow) -> Result<&FlowNode, String> {
         .iter()
         .find(|n| matches!(n.node_type, FlowNodeType::Core(CoreNodeType::Entry)))
         .ok_or_else(|| format!("flow '{}' has no entry node", flow.id))
+}
+
+/// The node-visit budget for a run: the entry node's `data.max_steps` if set
+/// (bounded to a sane ceiling), else [`DEFAULT_STEP_BUDGET`].
+fn step_budget_for(flow: &SavedFlow) -> u32 {
+    entry_node(flow)
+        .ok()
+        .and_then(|e| e.data.get("max_steps"))
+        .and_then(|v| v.as_u64())
+        .map(|n| (n as u32).clamp(1, 100_000))
+        .unwrap_or(DEFAULT_STEP_BUDGET)
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -1403,6 +1446,30 @@ mod tests {
         assert_eq!(extract_json("no json at all"), None);
         // Braces inside string literals don't break depth tracking.
         assert_eq!(extract_json(r#"prefix {"msg":"a } b"} suffix"#), Some(json!({"msg":"a } b"})));
+    }
+
+    #[test]
+    fn interpolate_preserves_type_for_whole_ref() {
+        let vars = json!({ "n": 5, "name": "ada", "obj": { "a": 1 } });
+        assert_eq!(interpolate_value(&json!("{{n}}"), &vars), json!(5)); // number, not "5"
+        assert_eq!(interpolate_value(&json!("count is {{n}}"), &vars), json!("count is 5"));
+        assert_eq!(interpolate_value(&json!("{{obj}}"), &vars), json!({ "a": 1 }));
+        assert_eq!(
+            interpolate_value(&json!({ "count": "{{n}}", "who": "{{name}}" }), &vars),
+            json!({ "count": 5, "who": "ada" })
+        );
+        assert_eq!(interpolate_value(&json!("{{missing}}"), &vars), json!(null));
+    }
+
+    #[test]
+    fn step_budget_reads_entry_max_steps() {
+        let f = saved(
+            vec![node("entry", "entry", json!({ "schedule_type": "manual", "max_steps": 7 }))],
+            vec![],
+        );
+        assert_eq!(step_budget_for(&f), 7);
+        let f2 = saved(vec![node("entry", "entry", json!({ "schedule_type": "manual" }))], vec![]);
+        assert_eq!(step_budget_for(&f2), DEFAULT_STEP_BUDGET);
     }
 
     #[test]
