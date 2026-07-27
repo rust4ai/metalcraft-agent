@@ -837,6 +837,10 @@ struct RunFlowRequest {
     persona_slug: Option<String>,
     #[serde(default)]
     model_name: Option<String>,
+    /// Values for the flow's declared entry `inputs`. Object of `{ name: value }`;
+    /// missing inputs fall back to their declared defaults. Ignored by v1 flows.
+    #[serde(default)]
+    inputs: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -873,13 +877,14 @@ async fn post_run_flow(
     // v2 flows run on the stateful executor and return a run summary; v1 flows
     // keep the legacy per-prompt response.
     if crate::flow_exec::is_v2_flow(&flow) {
+        let inputs = req.inputs.clone().unwrap_or_else(|| serde_json::json!({}));
         return match crate::flow_exec::run_flow_v2(
             &context,
             flow,
             &state.cwd,
             &persona_slug,
             &model_name,
-            &serde_json::json!({}),
+            &inputs,
         )
         .await
         {
