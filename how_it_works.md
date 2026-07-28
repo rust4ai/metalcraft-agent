@@ -29,9 +29,11 @@ On top of those, this repo adds:
 - **Tools** — Rust implementations of file/shell/search/network operations, plus a
   generic JSON-configured HTTP tool.
 - **Skills** — markdown methodology files loaded on demand.
-- **A flow runtime** — loads local workflow JSON and runs reachable prompt nodes.
+- **A flow runtime** — a stateful v2 flow state machine (with a legacy v1 prompt-collection
+  path) that runs local workflow JSON.
 - **Supporting subsystems** — tool approval, context compaction, a safety step-guard,
-  diagnostics logging, an event listener (webhook-driven), and a "workshop" admin REST API.
+  diagnostics logging, gateway channels (inbound messaging webhooks), scheduled follow-ups,
+  and a "workshop" admin REST API.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -47,10 +49,10 @@ On top of those, this repo adds:
 │  tools   → ToolRegistry           │                      │
 │  model   → rig CompletionModel    │                      │
 │  approval hook + llm hook         │                      │
-│  = create_react_agent_with_hooks  │                      │
+│  = create_react_agent_with_options│                      │
 │  ⇒ CompiledGraph<AgentState>      │                      │
 └───────────────┬──────────────────┘                      │
-                │ Executor::run(state, "agent")            │
+                │ TurnRunner::run → Executor::run(...)     │
                 ▼                                          │
         ┌───────────────┐                                 │
         │  Agent loop    │  think → call tool → observe →… │
@@ -59,8 +61,9 @@ On top of those, this repo adds:
                                                            ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                      metalcraft-daemon (bin)                       │
-│  poll flows/ dir → due? → BFS prompt nodes → run_one_shot_task()   │
-│  optional: event listener (webhooks) + workshop API (shared)       │
+│  poll flows/ → due? → v2 state machine (or v1 one-shot prompts)    │
+│  + fire scheduled follow-ups                                       │
+│  optional: workshop API (hosts gateway-channel webhooks)           │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -71,20 +74,26 @@ On top of those, this repo adds:
 | File | Responsibility |
 |------|----------------|
 | `src/main.rs` | Entry point for the CLI: arg parsing, REPL, slash commands, one-shot mode, `--api` dispatch. |
-| `src/bin/metalcraft-daemon.rs` | Scheduler daemon: poll loop, schedule due-checks, optional event listener + workshop API. |
-| `src/runtime.rs` | Shared agent construction (`build_agent_runtime`, `run_one_shot_task`) used by both binaries. |
-| `src/persona.rs` | Persona load/save/list and system-prompt assembly; frontmatter parsing for skills. |
-| `src/flows.rs` | Flow loading, schedule parsing, BFS traversal to collect reachable prompt texts. |
-| `src/tools/` | Tool implementations + the registry builder. |
+| `src/cli.rs` | CLI invocation parsing (persona/flags/positional task). |
+| `src/bin/metalcraft-daemon.rs` | Thin daemon wrapper; delegates to `daemon::run`. |
+| `src/daemon.rs` | Scheduler poll loop: flow due-checks, scheduled-follow-up firing, workshop API startup. |
+| `src/runtime.rs` | Shared agent construction (`build_agent_runtime`) and `TurnRunner` — the single per-turn primitive (compact → executor) used by the CLI, daemon chat, and `run_one_shot_task`. |
+| `src/persona.rs` | Persona load/save/list and templated system-prompt assembly; frontmatter parsing for skills. |
+| `src/skill.rs` | Skill-file CRUD shared by the workshop API and `skill_*` meta tools. |
+| `src/flows.rs` | Legacy v1 flow loading, schedule parsing, BFS traversal to collect reachable prompt texts. |
+| `src/flow_exec.rs`, `src/flow_runs.rs` | v2 stateful flow executor (conditional/branch/tool/http/… nodes) with pause/resume and run persistence. |
+| `src/tools/` | Tool implementations (core built-ins, HTTP-API tool, meta/integration tools) + the registry builder. |
 | `src/approval.rs` | Tool-call classification + interactive approval prompts (incl. scrollable diff viewer). |
 | `src/context.rs` | Token estimation + automatic conversation compaction. |
-| `src/guard.rs` | Step guard: error-spiral and loop detection; verbose tool-call printing. |
+| `src/guard.rs` | Step guard: error-spiral and loop/poll detection; verbose tool-call printing. |
 | `src/diagnostics.rs` | Optional per-session JSON logging of LLM calls, turns, and config changes. |
-| `src/seed.rs` | Writes bundled default personas/skills/flows/api_tools into the data dir on startup. |
+| `src/scheduled_tasks.rs` | Persisted scheduled follow-ups armed by `schedule_followup`, fired each daemon tick. |
+| `src/integration_packs.rs` | Pack manifest, loading, and enable/disable state. |
+| `src/key_store.rs` | Plaintext secret store referenced by `$NAME` placeholders. |
+| `src/seed.rs` | Writes bundled personas/skills/flows/api_tools/flow_templates/integration_packs/gateway_channels into the data dir on startup. |
 | `src/paths.rs` | Resolves the data directory and its subdirectories. |
-| `src/workshop_api.rs` | Axum REST API for editing personas/skills/flows/api-tools and reading diagnostics. |
-| `src/event_listener.rs` | Webhook listener that turns gateway events (e.g. Discord messages) into agent tasks. |
-| `src/events.rs` | Gateway event types. |
+| `src/workshop_api.rs` | Axum REST API for personas/skills/flows/tools/packs/keys; live chat (`run_chat_turn`) + SSE; gateway webhook ingress. |
+| `src/gateway_channels.rs`, `src/gateway_activity.rs` | Gateway channel types/instances (inbound `/webhook/<adapter>`) + append-only traffic log. |
 | `src/diff_preview.rs`, `src/ui.rs` | Diff rendering for approvals; terminal styling helpers. |
 
 ---
@@ -95,7 +104,8 @@ Both binaries do the same first two things in `main()`:
 
 1. `env_logger::init()` — log level via `RUST_LOG`.
 2. `metalcraft_agent::seed::ensure_defaults()` — creates the data directory and writes
-   any bundled seed files that don't already exist (it never overwrites existing files).
+   bundled seed files. It won't clobber files you've edited, except that a bundled persona
+   with a newer `version` force-upgrades its installed copy (`write_versioned_seeds`).
 
 ### Where data lives (`src/paths.rs`)
 
@@ -105,13 +115,16 @@ The data root is resolved in priority order:
 2. the OS app-data dir (`~/.local/share/metalcraft-agent` on Linux),
 3. `./data` as a container-friendly fallback.
 
-Subdirectories: `personas/`, `skills/`, `flows/`, `logs/`, `api_tools/`.
+Subdirectories include `personas/`, `skills/`, `flows/`, `flow_templates/`, `api_tools/`,
+`integration_packs/`, `gateway_channels/`, `chats/`, `runs/`, `traces/`, `uploads/`, and
+`sessions/` (diagnostics — there is no `logs/`).
 
 ### Seeding (`src/seed.rs`)
 
-Default personas, skills, api-tools, and one example flow are compiled into the binary
-with `include_str!` from the `seed/` directory and written out on first run. This means
-a fresh install is immediately usable, and users can then edit the files in their data dir.
+Default personas, skills, api-tools, flow templates, integration packs, gateway channels, and
+one example flow are compiled into the binary with `include_str!` from the `seed/` directory
+and written out on first run. This means a fresh install is immediately usable, and users can
+then edit the files in their data dir.
 
 ### Environment / API key (`src/runtime.rs`)
 
@@ -125,44 +138,66 @@ personas/skills dirs, and requires `OPENAI_API_KEY`. The model defaults to `gpt-
 ## 4. How the agent is built
 
 Everything funnels through `runtime::build_agent_runtime(...)`. Given a persona, cwd,
-model name, approval mode, and optional LLM-call hook, it:
+model name, approval mode, optional LLM-call and LLM-response hooks, a `RuntimeOptions`
+struct (reply sink, tool-choice, terminal tools, session binding, reschedule depth), and a
+`make_compaction_model` closure, it:
 
-1. **Builds the system prompt** — `persona.build_system_prompt(skills_dir, cwd)`
-   concatenates the persona's `system_prompt`, appends the working directory, and (if
-   the persona lists skills) appends an "Available Skills" section listing each skill
-   name + its frontmatter `description`, instructing the model to call `load_skill`.
-2. **Builds the tool registry** — `tools::create_registry_for_with_config(&persona.tools, cfg)`
-   registers exactly the tools the persona names (see §6).
-3. **Creates the model** — `openai::Client::new(api_key).completion_model(model_name)`.
+1. **Builds the system prompt** — `persona.build_system_prompt(skills_dir, cwd)` renders a
+   mustache-style template. Placeholders like `{{cwd}}`, `{{available_skills}}`,
+   `{{available_personas}}`, and `{{installed_packs}}` are substituted; for any the persona
+   author didn't use, the corresponding section (working directory, an "Available Skills"
+   list instructing the model to call `load_skill`, sub-agent personas, installed packs) is
+   appended as a fallback.
+2. **Builds the tool registry** — `tools::create_registry_for_with_config(&resolved, cfg)`,
+   where `resolved = persona.resolved_tool_names()` (the persona's explicit tools plus any
+   pack-provided tools), with terminal tools such as `say_to_user` injected if the session
+   needs them (see §6).
+3. **Creates the model** — `openai::Client::new(api_key).completion_model(model_name)`, and a
+   separate `compaction_model` from `make_compaction_model` (see §8).
 4. **Builds the approval hook** — `approval::build_hook(approval_mode)` (see §7).
-5. **Compiles the graph** — `create_react_agent_with_hooks(model, registry, system_prompt,
-   before_tool_hook, llm_call_hook)` and stores it as an `Arc<CompiledGraph<AgentState>>`
-   so it can be cheaply cloned/shared across turns.
+5. **Compiles the graph** — `create_react_agent_with_options(model, registry, &system_prompt,
+   AgentOptions { before_tool_call, llm_call_hook, llm_response_hook, tool_choice,
+   terminal_tools })` and stores it as an `Arc<CompiledGraph<AgentState>>` so it can be
+   cheaply cloned/shared across turns.
 
-It also returns a separate `compaction_model` (a second `CompletionModel` handle) used for
-summarizing context (see §8).
+### Running a turn (`runtime::TurnRunner`)
 
-### Running the graph
-
-An `Executor` drives the compiled graph:
+`build_agent_runtime` only *builds* the runtime; every turn is executed through the shared
+`TurnRunner`, which owns the one turn operation — **compact context, then run the executor**:
 
 ```rust
-let executor = Executor::new_from_arc(graph.clone())
-    .max_steps(90)
-    .with_step_guard(step_guard.clone());
-let outcome = executor.run(turn_state, "agent").await;
+let (compacted, outcome) = TurnRunner::new(runtime).run(turn_state, step_guard).await;
 ```
+
+`TurnRunner::run` first calls `context::compact_if_needed` (see §8), then:
+
+```rust
+Executor::new_from_arc(graph.clone())
+    .max_steps(MAX_TURN_STEPS)   // = 90, one shared constant
+    .with_step_guard(step_guard)
+    .run(state, "agent").await
+```
+
+All three turn paths funnel through this: the CLI (`src/main.rs`, which builds one
+`TurnRunner` and reuses it across REPL turns), the daemon chat path `run_chat_turn`
+(`src/workshop_api.rs`), and one-shot tasks `run_one_shot_task` (`src/runtime.rs`, which
+builds a `TurnRunner` per call). The step guard is passed to `run` rather than held by the
+`TurnRunner`, because its lifetime differs per caller (session-long in the CLI; per-turn in
+the daemon, where it also emits SSE tool events). Keeping compaction + `max_steps` + executor
+wiring in this single place is what prevents a behaviour from being present in one turn path
+and silently missing from another.
 
 `run` returns a `RunOutcome`:
 
 - `Completed(state)` — the agent produced a final answer (`state.final_answer()`).
 - `Interrupted { state, reason, .. }` — stopped early (e.g. step guard tripped, or
   approval was denied), but the conversation state is preserved.
+- `Failed { state, node, error }` — a node errored; the partial state is preserved.
 
 The agent itself is a **ReAct loop** provided by `metalcraft`: the model thinks, optionally
 emits a tool call, the framework executes the tool (subject to the before-tool-call hook),
 appends the `ToolResult` to the message list, and repeats until the model returns a final
-answer or `max_steps` (90) is hit.
+answer or `MAX_TURN_STEPS` (90) is hit.
 
 `AgentState.messages` is a vector of `AgentMessage`:
 `User`, `Assistant`, `ToolCall { name, args }`, `ToolResult { name, result }`.
@@ -192,9 +227,10 @@ final answer or interruption reason, and exits.
 
 **Interactive mode** (no task): a `rustyline` REPL. Each non-command line becomes a turn.
 Conversation state persists across turns via `state.continue_with(input)` (or
-`AgentState::new(input)` for the first turn). Before each turn, `context::compact_if_needed`
-may summarize old history. Then the executor runs and the resulting state is stored for the
-next turn.
+`AgentState::new(input)` for the first turn). Each turn runs through the session's reused
+`TurnRunner` (`turn_runner.run(...)`), which compacts old history if needed and then runs the
+executor; the resulting state is stored for the next turn. The REPL prints a brief
+`(context compacted)` notice on the turns where compaction fired.
 
 ### Slash commands
 
@@ -232,22 +268,33 @@ The persona's `tools` array selects which tools are registered, by name, in
 | `load_skill` | Load a skill markdown body on demand (enum-restricted to the persona's skills). |
 | `sub_agent` | Spawn a nested agent for a delegated subtask. |
 
-Two tools need extra runtime config (`ToolConfig`: api_key, model name, system prompt,
-skills dir, available skills):
+Beyond these core built-ins, the registry also natively provides delivery tools
+(`say_to_user`, `gateway_send_message`, `schedule_followup`), meta tools that manage the
+agent's own files (`persona_*`, `skill_*`, `flow_*`, `pack_*`, `key_*`, `diagnostics_*`), and
+integration tools (`spaces_*` for S3/Spaces, `email_*` for IMAP). See `src/tools/mod.rs`.
+
+Four tools need extra runtime config (`ToolConfig`: api_key, model name, system prompt,
+skills dir, available skills, plus `reply_sink`, `session_binding`, and `reschedule_depth`):
 
 - **`load_skill`** — needs the skills dir + the persona's allowed skill list, so its
   parameter schema can restrict `skill` to a known `enum`. It reads
   `<skills_dir>/<skill>.md`, strips YAML frontmatter, and returns the body.
 - **`sub_agent`** — needs the api key/model/system prompt to build a child agent. It accepts
-  a `task` and a `tool_set` (`read_only` default, or `full`), builds its own registry and
-  ReAct graph, runs it with a **120-second timeout** and `max_steps(90)`, and returns the
-  child's final answer plus which tools it used and how many turns it took.
+  a `task`, a `tool_set` (`read_only` default, `full`, or `all`, with an optional `pack`
+  scope and a `persona` mode), builds its own registry and ReAct graph, runs it with a
+  **120-second timeout** and `max_steps(90)`, and returns the child's final answer plus which
+  tools it used and how many turns it took.
+- **`say_to_user`** — routes a reply through the session's `reply_sink` (SSE for workshop
+  chat, adapter send for gateway); it's the terminal tool for tool-only sessions.
+- **`schedule_followup`** — arms a persisted follow-up bound to the session (`session_binding`,
+  `reschedule_depth`); the daemon fires it later (see §10).
 
 ### User-defined HTTP tools (`src/tools/http_api.rs`)
 
 If a persona names a tool that isn't one of the built-ins, the registry tries to load it as
-an **HTTP API tool** from `<data_dir>/api_tools/<name>.json`. This is how the Discord tools
-work without any hardcoded Rust. The JSON config defines:
+an **HTTP API tool** from `<data_dir>/api_tools/<name>.json`. This is how most pack tools
+(GitHub, Linear, Cloudflare, Sentry, …) work without any hardcoded Rust. The JSON config
+defines:
 
 - `name`, `description`, `method`, `url`,
 - `headers` (values support `$ENV_VAR` expansion),
@@ -261,8 +308,9 @@ unexpanded optional `{param}` query segments, expands `$ENV_VAR` references, bui
 body per `body_mapping`, sends the request (30s timeout), and returns
 `{status, data}` (JSON) or `{status, body}` (text, truncated to 50k chars).
 
-Example: `discord_send_message.json` POSTs to `$AGENT_GATEWAY_URL/api/v1/messages` with a
-`Bearer $AGENT_GATEWAY_API_KEY` header and `body_defaults: { "platform": "discord" }`.
+Example: `github_get_authenticated_user.json` GETs `https://api.github.com/user` with an
+`Authorization: Bearer $GITHUB_TOKEN` header, where `$GITHUB_TOKEN` is resolved from the key
+store at call time.
 
 ---
 
@@ -287,10 +335,17 @@ Default policy:
 | Execute | bash, **and any unknown tool** | prompt |
 | NetworkFetch | web_fetch | prompt |
 | SubAgent | sub_agent | prompt |
+| MetaRead | read-only meta tools (`persona_get`, `flow_list`, `diagnostics_*`, …) | **auto** |
+| MetaWrite | mutating meta tools (`persona_save`, `key_set`, `pack_enable`, …) | prompt |
 | DiscordAction | discord_send/edit/add_reaction | prompt |
 
-Note two safety details: read-only Discord tools (`discord_get_*`) classify as `ReadFile`
-(auto), and **unknown tools default to `Execute`** (prompt) — fail safe.
+Classification is partly prefix-driven: read-only calls for the calendar/scheduling packs
+(`calcom_`, `vestaloop_`, `mcal_`) and read-only Discord-admin calls (`discord_*` list/get/
+search) auto-approve, while their mutating counterparts prompt. Two safety details: read-only
+Discord chat tools (`discord_get_*`) classify as `ReadFile` (auto), and **unknown tools
+default to `Execute`** (prompt) — fail safe. Approvals are also **remembered per session**:
+once you approve an overwrite/edit to a given path, later writes to that same path in the
+session skip the re-prompt.
 
 When approval is required, the terminal prompt:
 
@@ -299,7 +354,8 @@ When approval is required, the terminal prompt:
   (PgUp/PgDn/Home/End to scroll, ↑/↓ or y/n/Enter to decide).
 - For `bash`, shows the command; for others, the JSON args.
 - The prompt runs on a dedicated OS thread (so it doesn't block the tokio runtime or fight
-  with rustyline's terminal state) and times out to a denial after inactivity.
+  with rustyline's terminal state) and **waits indefinitely** for the user's decision rather
+  than auto-denying.
 
 A denial returns `BeforeToolCallAction::Deny(reason)`, which the framework feeds back to the
 model as the tool result so it can adapt.
@@ -313,7 +369,9 @@ Long conversations are summarized to stay under the context window.
 10 most recent messages intact.
 
 `estimate_tokens` is a cheap heuristic (~4 chars per token across all message content).
-Before each interactive turn, `compact_if_needed`:
+Compaction runs inside `TurnRunner::run`, so it applies to **every** turn path — CLI,
+workshop/gateway chat, and one-shot/flow tasks alike (previously one-shot runs skipped it).
+`compact_if_needed`:
 
 1. Returns early if under threshold or if there aren't more messages than `keep_recent`.
 2. Otherwise takes all-but-the-last-10 messages, renders them into a transcript, and asks
@@ -332,11 +390,19 @@ Before each interactive turn, `compact_if_needed`:
    agent runs (bash results print parsed stdout/stderr and exit code). If diagnostics are
    on, it also logs the full turn.
 2. **Safety stops** (returns `GuardAction::Stop`, which surfaces as an `Interrupted`
-   outcome):
-   - **Error spiral** — 3 consecutive tool turns where *every* result starts with `ERROR:`.
-   - **Loop detection** — the newest tool call is byte-for-byte identical (name + args) to
-     the immediately preceding one. (Identical-but-spaced calls like repeated `cargo check`
-     between edits are allowed; only back-to-back repeats trip it.)
+   outcome). `GuardConfig` tunes the thresholds (`max_consecutive_errors`,
+   `max_identical_repeats`, `max_poll_repeats`, and the `poll_tools` set):
+   - **Error spiral** — `max_consecutive_errors` (default 3) consecutive tool turns where
+     *every* result starts with `ERROR:`.
+   - **Loop detection** — an ordinary tool repeated byte-for-byte (name + args) more than
+     `max_identical_repeats` (default 4) times **in a row** trips the guard; a few spaced
+     repeats (e.g. `cargo check` between edits) are fine.
+   - **Poll budget** — tools flagged as status **polls** (`poll_tools`) are exempt from the
+     ordinary repeat limit and instead governed by the much higher `max_poll_repeats`
+     (default 60), so polling an async job isn't mistaken for a runaway loop. One-shot runs
+     seed `poll_tools` from the persona's HTTP poll tools.
+   - Denied/interrupted calls are **retracted** from both the loop and error-spiral tallies,
+     so a call the user rejected doesn't count toward a stop.
 
 ---
 
@@ -379,13 +445,19 @@ the single `entry` node's `data.schedule_type`:
   shorthands. **It runs** — see the poll loop below — and is evaluated in the daemon's
   **local timezone** (`chrono::Local`); use `TZ=UTC` for UTC scheduling.
 
-`collect_reachable_prompts` does a **BFS from the single entry node** over the edges and
-collects each reachable `prompt` node (its `data.prompt`) in traversal order, along with the
-persona it should run as. **Persona resolution** per prompt: the prompt node's `data.persona`,
-else the entry node's `data.persona` (flow-wide default), else `None` (meaning the daemon's
-`--persona` flag is used). It explicitly **errors** on `branch`, `branch_tool`, or custom node
-types — these are recognized but not yet executed. Constraints: exactly one entry node, prompts
-must have `data.prompt`, only reachable prompts run, and they run sequentially.
+There are **two execution models**, selected per flow by `flow_exec::is_v2_flow`:
+
+- **v2 (stateful state machine, `src/flow_exec.rs`)** — the daemon calls `run_flow_v2`, which
+  walks the graph one node at a time, threading a shared `variables` object and routing by
+  output handle. Node types: `entry`, `prompt`, `set_variable`, `tool`, `conditional` (with
+  `branch`, `http`, `sub_agent`, `approval`, `wait`, `foreach` staged). Runs persist to
+  `<data>/runs/` (`src/flow_runs.rs`) so an `approval`/`wait` node can pause and later resume
+  (`resume_flow`).
+- **v1 (legacy, `src/flows.rs`)** — `collect_reachable_prompts` does a **BFS from the single
+  entry node** and runs each reachable `prompt` node as a one-shot task, in traversal order.
+  **Persona resolution** per prompt: the prompt node's `data.persona`, else the entry node's
+  `data.persona` (flow-wide default), else the daemon's `--persona` flag. This older path
+  handles only `entry`/`prompt` nodes.
 
 ### The poll loop (`src/bin/metalcraft-daemon.rs`)
 
@@ -402,58 +474,67 @@ Each cycle:
    - `EveryMinutes`/`EveryHours` → due if never run, or if enough wall-clock time elapsed
      since `last_started_at`.
    - `Cron` → due if the next scheduled time after the last start is ≤ now.
-3. If due and not already marked running, mark it running, set `last_started_at`, collect
-   the reachable prompts, and run each one via `runtime::run_one_shot_task`. Each prompt uses
-   its resolved persona (flow/node `data.persona`, falling back to `--persona`); model and
-   approval settings come from the daemon. Results are logged.
-4. Run state is kept **in-memory only** (a `HashMap<flow_id, FlowRunState>`) — restarting the
-   daemon forgets history, so interval flows run again on next start.
-5. With `--once`, exit after one pass; otherwise sleep `poll-seconds` and repeat.
+3. If due and not already marked running, mark it running, set `last_started_at`, and run it:
+   v2 flows go through `run_flow_v2`; v1 flows collect reachable prompts and run each via
+   `runtime::run_one_shot_task`. Model and approval settings come from the daemon. Results are
+   logged.
+4. Separately each tick, `run_due_scheduled_tasks` fires any due **scheduled follow-ups**
+   (`src/scheduled_tasks.rs`, armed by the `schedule_followup` tool) — delivering them back to
+   their bound session (e.g. a workshop chat).
+5. The v1 interval scheduler keeps run state **in-memory only** (a `HashMap<flow_id,
+   FlowRunState>`) — restarting the daemon forgets history, so interval flows run again on next
+   start. (v2 flow *runs* are persisted to `<data>/runs/` for resume, which is separate.)
+6. With `--once`, exit after one pass; otherwise sleep `poll-seconds` and repeat.
 
 Daemon flags: `--flows-dir`, `--persona` (default `coding-agent`), `--model`,
-`--poll-seconds` (default 30), `--once`, `--auto-approve`, plus the event-listener and
-workshop-API flags below.
+`--poll-seconds` (default 30), `--once`, `--auto-approve`, and the workshop-API flags
+(`--api`, `--api-port`) below. The former `--event-*` / `--events` flags are deprecated
+no-ops.
 
 ---
 
 ## 11. The workshop REST API (`src/workshop_api.rs`)
 
-An optional Axum server for a desktop "workshop" app to manage the agent's files. Enabled by
-`--api <KEY>` (or `WORKSHOP_API_KEY`) on **either** binary — `metalcraft-agent --api` runs it
-standalone; `metalcraft-daemon --api` spawns it alongside the scheduler so one process does
-both. Port defaults to 3002 (`--api-port` / `WORKSHOP_API_PORT` / `PORT`). All routes require
-a `Bearer <KEY>` header.
+An optional Axum server for a desktop "workshop" app to manage the agent's files **and** run
+it live. Enabled by `--api <KEY>` (or `WORKSHOP_API_KEY`) on **either** binary —
+`metalcraft-agent --api` runs it standalone; `metalcraft-daemon --api` spawns it alongside the
+scheduler so one process does both. Port defaults to 3002 (`--api-port` / `WORKSHOP_API_PORT`
+/ `PORT`). `/health` and `/info` are open; the rest require a `Bearer <KEY>` header.
 
-Routes (all under `/api/v1`):
+Route families (all under `/api/v1` unless noted):
 
-- `GET /snapshot` — personas, skills, flows, diagnostics sessions, api-tools, and the dir layout.
-- `GET|PUT|DELETE /personas/{slug}`
-- `GET|PUT|DELETE /skills/{slug}`
-- `GET|PUT|DELETE /flows/{id}`
-- `GET /diagnostics`, `GET /diagnostics/{id}`
-- `GET /api-tools`, `GET|PUT|DELETE /api-tools/{name}`
+- **Files** — `GET /snapshot`; `GET|PUT|DELETE /personas/{slug}`, `/skills/{slug}`,
+  `/flows/{id}`, `/api-tools/{name}`; `GET /diagnostics`, `GET /diagnostics/{id}`.
+- **Flows & runs** — `POST /flows/{id}/run`; `/flow-runs`, `/flow-runs/{id}`,
+  `POST /flow-runs/{id}/resume`; `/flow-templates*`.
+- **Keys & packs** — `/keys*` (incl. `GET /keys/recommended`); `/integration-packs*`.
+- **Live chat** — `/chats*`, including `POST /chats/{id}/turn` (a real agent turn via
+  `run_chat_turn`) and an SSE stream at `/chats/{id}/events`.
+- **Scheduling & gateway** — `/scheduled-tasks*`; `/gateway/*`; inbound webhooks at
+  `/webhook/pipestreamr` and `/webhook/twilio` (see §12).
 
-These read and write the same files in the data dir that the agent and daemon use, so edits
-made through the API take effect on the next agent build / flow poll.
+File routes read and write the same data-dir files the agent and daemon use, so edits take
+effect on the next agent build / flow poll. The full contract lives in
+`openapi/workshop-api.yaml`.
 
 ---
 
-## 12. The event listener (`src/event_listener.rs`)
+## 12. Gateway channels (`src/gateway_channels.rs`)
 
-When `AGENT_GATEWAY_URL` is set, `metalcraft-daemon` spawns a webhook listener that turns
-inbound platform events (e.g. Discord messages, via an external "agent gateway") into
-one-shot agent tasks. It requires `EVENTD_WEBHOOK_SECRET`, `AGENT_GATEWAY_API_KEY`, and a
-non-empty admin allow-list (`EVENTD_ADMIN_USER_IDS` / `--admin-user-ids`) — it refuses to
-start without them. It registers itself as a subscriber with the gateway, authenticates
-inbound webhooks against the secret, only acts on events from allowed admin user IDs, and
-caps concurrent agent runs with a semaphore (`MAX_CONCURRENT_TASKS = 4`). This is what lets
-the agent run "reactively" — replying in Discord — combined with the Discord HTTP tools.
+The old standalone event listener was removed. Inbound messaging now arrives through
+**gateway channels** hosted inside the workshop API. A **channel type** is a JSON manifest
+(WhatsApp via PipeStreamr/Twilio ships today); a **channel instance** is a user-created
+binding persisted in `<data>/gateway_channels.json`. Inbound webhooks land at
+`/webhook/<adapter>` on the workshop API, get turned into agent turns (`run_chat_turn`), and
+the agent replies via `gateway_send_message` / `say_to_user`. All inbound/outbound traffic is
+appended to `<data>/gateway_activity.jsonl` (`src/gateway_activity.rs`). This is what lets the
+agent run "reactively" — e.g. answering WhatsApp messages.
 
 ---
 
 ## 13. Diagnostics (`src/diagnostics.rs`)
 
-With each CLI run (and for flow runs), a timestamped session directory is created under `logs/` containing:
+With each CLI run (and for flow runs), a timestamped session directory is created under `sessions/` containing:
 
 - `session_info.json` — startup config (persona, model, tools, skills, system prompt, cwd, mode).
 - `turn_NNN.json` — the full message array after each step (logged by the step guard).
@@ -470,8 +551,10 @@ and the **step guard** (logs each turn). The workshop API can read these session
 1. You type a line at the `[coding-agent metalcraft-agent]>` prompt.
 2. If it's a slash command, it's handled directly (possibly rebuilding the agent).
 3. Otherwise the input is appended to the conversation (`continue_with`) or starts a new one.
-4. `compact_if_needed` may summarize old history.
-5. The `Executor` runs the ReAct graph: the model thinks and may emit tool calls.
+4. The turn runs through `TurnRunner::run`, which first calls `compact_if_needed` to summarize
+   old history if the context is over threshold.
+5. Inside the same call, the `Executor` runs the ReAct graph: the model thinks and may emit
+   tool calls.
 6. Each tool call passes through the **approval hook** (auto or prompt), then executes.
 7. The **step guard** prints the call/result, watches for error spirals and loops, and (if
    on) logs the turn to diagnostics.

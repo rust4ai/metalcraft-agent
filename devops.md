@@ -53,8 +53,9 @@ sensible default. Set `WORKSHOP_API_KEY` if you want the HTTP API/webhooks.
 | `OPENAI_API_KEY` | OpenAI API key for LLM calls. **Required.** | — |
 | `WORKSHOP_API_KEY` | Enables the Workshop API and is the Bearer token for `/api/v1/*`. If unset, no HTTP server starts. | unset (API off) |
 | `PORT` / `WORKSHOP_API_PORT` | Port the Workshop API binds (`0.0.0.0`). `WORKSHOP_API_PORT` wins if both are set. | `3002` |
-| `OPENAI_MODEL` / `STARKBOT_MODEL` | LLM model name. | `gpt-5.4` |
+| `STARKBOT_MODEL` | LLM model name for the **daemon** (flow/scheduled tasks). (`OPENAI_MODEL` is the interactive CLI's model var and has no effect on the daemon.) | `gpt-5.4` |
 | `STARKBOT_PERSONA` | Persona slug used for flow tasks. | `coding-agent` |
+| `METALCRAFT_DEFAULT_PERSONA` | Default persona the Workshop surfaces for new chats. | `orchestrator-agent` |
 | `STARKBOT_POLL_SECONDS` | Flow scheduler poll interval. | `30` |
 | `STARKBOT_FLOWS_DIR` | Flows directory. | `<data dir>/flows` |
 | `STARKBOT_AUTO_APPROVE` | Skip tool-approval prompts (`true`/`1`). Equivalent to `--auto-approve`. | `false` |
@@ -62,11 +63,16 @@ sensible default. Set `WORKSHOP_API_KEY` if you want the HTTP API/webhooks.
 | `METALCRAFT_DATA_DIR` | Data dir for personas/skills/flows/chats/keys. | `~/.local/share/metalcraft-agent` |
 | `RUST_LOG` | Log level. | `info` |
 | `TZ` | Process timezone (affects cron-scheduled flows). | system |
-| `SPRITE_BUILDER_BASE_URL` / `SPRITE_BUILDER_API_KEY` | Only needed if you use the sprite_builder integration pack. | — |
 
 CLI flags (`--persona`, `--model`, `--poll-seconds`, `--once`, `--auto-approve`,
 `--api`, `--api-port`) override the matching env vars. A containerised daemon
 needs **no flags** — it reads everything from the environment.
+
+> **Pack secrets are not env vars.** Credentials for integration packs (e.g.
+> `SOLARABASE_API_KEY`, `SPRITE_BUILDER_API_KEY`) live in the **key store** (`keys.json`) and
+> are injected into HTTP tools via `$NAME` placeholders — set them through
+> `PUT /api/v1/keys/{name}`, guided by `GET /api/v1/keys/recommended`, not the process
+> environment.
 
 ## Getting Started with DigitalOcean
 
@@ -248,6 +254,24 @@ docker run -d --name metalcraft-agent \
 
 The image's default command is `metalcraft-daemon --auto-approve`. The Workshop
 API binds `$PORT` (default 3002).
+
+### Option D — Render (`render.yaml`)
+
+The repo ships a Render Blueprint (`render.yaml`): a web service built from the GHCR image
+with a **persistent 1 GB disk mounted at `/data`**, `healthCheckPath: /health`, and the
+`starter` plan. Render injects `PORT`, which the daemon honors. Create the service from the
+blueprint, set `OPENAI_API_KEY` and `WORKSHOP_API_KEY` as environment variables in the Render
+dashboard, and you get managed TLS at `https://<name>.onrender.com`. State survives restarts
+via the mounted disk.
+
+### Option E — Railway (`railway.toml`)
+
+`railway.toml` configures a Dockerfile-built Railway deploy (`builder = "dockerfile"`,
+`restartPolicyType = "on_failure"`). It sets **no start command or health-check path** — it
+relies on the image's `CMD` (`metalcraft-daemon --auto-approve`) and Railway's injected `PORT`
+(honored via `WORKSHOP_API_PORT`/`PORT`). Set `OPENAI_API_KEY` and `WORKSHOP_API_KEY` as
+Railway variables. Note that Railway's default filesystem is ephemeral — attach a **volume**
+at your `METALCRAFT_DATA_DIR` for durable state, the same caveat as App Platform (Option B).
 
 ## Configuring Gateway Channels (Twilio, pipestreamr, …)
 

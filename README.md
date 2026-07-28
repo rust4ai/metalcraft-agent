@@ -27,7 +27,7 @@ docker run -d --name metalcraft \
   -p 3002:3002 \
   ghcr.io/rust4ai/metalcraft-agent
 
-curl localhost:3002/health          # {"status":"ok","version":"0.8.2"}
+curl localhost:3002/health          # {"status":"ok","version":"0.9.7"}
 ```
 
 It's now live on `:3002` — connect the [Metalcraft Workshop](https://github.com/rust4ai/metalcraft-workshop)
@@ -38,7 +38,7 @@ all (they create `.env`, validate required vars, pull, and start):
 
 ```bash
 ./start-agent.sh          # first-time bring-up (Caddy/HTTPS by default)
-./update-agent.sh         # pull a newer release later (TAG=0.8.2 to pin)
+./update-agent.sh         # pull a newer release later (TAG=0.9.7 to pin)
 ```
 
 **Other ways to run it**
@@ -154,8 +154,9 @@ the data dir on startup and enabled at runtime (`pack_enable`, or the Workshop's
 Packs tab). Shipped packs:
 
 `calcom` · `cloudflare` · `digitalocean_spaces` · `discord` · `discord_admin` ·
-`email` (IMAP, read-only) · `github` · `linear` · `railway` · `render` ·
-`sentry` · `solarabase` (RAG) · `sprite_builder` · `starflask` (media)
+`email` (IMAP, read-only) · `github` · `linear` · `metalcraft-calendar` ·
+`railway` · `render` · `sentry` · `solarabase` (RAG) · `sprite_builder` ·
+`starflask` (media) · `vestaloop`
 
 Most tools are declarative JSON (HTTP-API tools with `$SECRET` substitution); a
 few that need non-HTTP protocols or request signing ship as native Rust tools.
@@ -176,7 +177,7 @@ back it up by backing up a volume.
   Caddy compose file and honor `COMPOSE_FILE=` / `TAG=`.
 - **Data directory** resolves in order: `METALCRAFT_DATA_DIR` → OS data dir →
   `./data`. It holds `personas/ skills/ flows/ api_tools/ integration_packs/
-  keys.json chats/ logs/ traces/`.
+  keys.json chats/ sessions/ traces/`.
 
 ### One-click: Deploy on Render
 

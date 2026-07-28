@@ -10,7 +10,7 @@ The same codebase ships two binaries:
 | Binary | Source | Role |
 | --- | --- | --- |
 | `metalcraft-agent` | `src/main.rs` | Interactive REPL and one-shot task runner |
-| `metalcraft-daemon` | `src/bin/metalcraft-daemon.rs` | Flow scheduler, Workshop API server, and event webhook listener |
+| `metalcraft-daemon` | `src/bin/metalcraft-daemon.rs` | Flow + scheduled-follow-up scheduler and Workshop API server (which also hosts gateway channels for inbound messaging webhooks) |
 
 ## What it does
 
@@ -27,8 +27,10 @@ calling external HTTP APIs, and delegating to sub-agents. Sensitive actions pass
 2. **One-shot task** — `metalcraft-agent "refactor the auth module"` runs a single request and
    exits. Persona is selected with `--persona <slug>`; every positional arg is the task.
 3. **Flow scheduler daemon** — `metalcraft-daemon` polls the `flows/` directory and runs
-   enabled workflows on a schedule (interval or cron). It can additionally serve the
-   Workshop API and listen for inbound events (Discord/Slack/GitHub-style webhooks).
+   enabled workflows on a schedule (interval or cron), and fires due scheduled follow-ups. It
+   can additionally serve the Workshop API, which hosts **gateway channels** that receive
+   inbound messaging webhooks (e.g. WhatsApp via PipeStreamr/Twilio) and turn them into agent
+   turns.
 
 ## Core concepts
 
@@ -36,13 +38,13 @@ calling external HTTP APIs, and delegating to sub-agents. Sensitive actions pass
 | --- | --- |
 | **Persona** | A JSON config (`personas/*.json`) defining an agent's name, description, system prompt, allowed tools, and skills. Personas are the unit of agent identity and capability. |
 | **Skill** | A Markdown file (`skills/*.md`) holding reusable methodology (e.g. how to review code, how to debug). Loaded on demand via the `load_skill` tool, or attached to a persona. |
-| **Tool** | A capability the agent can call. Built-ins: `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `find_files`, `list_files`, `load_skill`, `web_fetch`, `sub_agent`. Additional tools come from JSON-configured HTTP API definitions. |
-| **Flow** | A workflow graph (JSON) of nodes (entry / prompt / branch) and edges, with a schedule. The daemon traverses from the entry node and runs each reachable prompt node as a one-shot task. |
+| **Tool** | A capability the agent can call. Core built-ins: `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `find_files`, `list_files`, `load_skill`, `web_fetch`, `sub_agent`. The registry also ships native meta tools (`persona_*`, `skill_*`, `flow_*`, `pack_*`, `key_*`, `diagnostics_*`), delivery tools (`say_to_user`, `gateway_send_message`, `schedule_followup`), and integration tools (`spaces_*` S3, `email_*` IMAP). Further tools come from JSON-configured HTTP API definitions. |
+| **Flow** | A workflow graph (JSON) of nodes and edges, with a schedule. v2 flows run as a stateful state machine (`entry / prompt / set_variable / tool / conditional` nodes, plus staged `branch / http / sub_agent / approval / wait / foreach`) threading a shared `variables` object and routing by output handle; legacy v1 flows use the older path that runs each reachable `prompt` node as a one-shot task. |
 | **Integration Pack** | A bundle of personas, skills, HTTP tools, and flow templates that can be enabled or disabled as a unit (e.g. the Discord pack, the Solarabase RAG pack). User files always shadow pack files. |
 | **Key Store** | A JSON file (`keys.json`) mapping secret names to values. HTTP tools reference secrets with `$NAME` placeholders so credentials never live in tool configs. |
 | **Workshop** | The admin REST API (and companion app) for editing personas, skills, flows, tools, packs, and keys, and for running chats and flows. |
 | **Approval** | The interactive gate that classifies each tool call and asks the user before destructive operations run (auto-approved for read-only tools or with `--auto-approve`). |
-| **Diagnostics** | Optional per-session JSON logging of every LLM call, turn, and config change, under `logs/<timestamp>/`. |
+| **Diagnostics** | Optional per-session JSON logging of every LLM call, turn, and config change, under `sessions/<timestamp>/`. |
 
 ## Tech stack
 
@@ -50,7 +52,7 @@ calling external HTTP APIs, and delegating to sub-agents. Sensitive actions pass
 - **Agent framework:** `metalcraft` (ReAct loop), `metalcraft-flows` (flow data model)
 - **LLM client:** `rig` (OpenAI-compatible) — defaults to GPT-class models, configurable via env
 - **Async runtime:** Tokio
-- **HTTP server:** Axum (Workshop API + event listener)
+- **HTTP server:** Axum (Workshop API, incl. gateway webhook ingress)
 - **Scheduling:** `cron` crate (interval and cron expressions)
 - **Terminal UI:** Rustyline, Crossterm, Syntect (diff/syntax highlighting)
 
@@ -73,12 +75,17 @@ directory, resolved in this order:
 ├── integration_packs/        # pack directories (read-only contents)
 ├── integration_packs.json    # per-pack enabled/disabled state
 ├── keys.json                 # API key store (secret name -> value)
+├── gateway_channels/         # gateway channel types + user channel instances
+├── chats/                    # persisted Workshop chat sessions
 ├── uploads/                  # upload root for multipart HTTP tools
-└── logs/<timestamp>/         # diagnostics sessions
+├── runs/                     # v2 flow run state (for pause/resume)
+├── traces/                   # OTLP-style turn traces
+└── sessions/<timestamp>/     # diagnostics sessions
 ```
 
-On first run, bundled default personas, skills, and packs are seeded to disk
-(`src/seed.rs`). Seeding never overwrites files a user has edited.
+On first run, bundled default personas, skills, packs, flow templates, and gateway channels are
+seeded to disk (`src/seed.rs`). Seeding won't clobber files you've edited, except that a bundled
+persona with a newer `version` force-upgrades its installed copy.
 
 ## Where to go next
 

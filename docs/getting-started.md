@@ -29,9 +29,6 @@ Configuration is read from the environment and a `.env` file.
 | `OPENAI_MODEL` | Model override (defaults to a built-in GPT-class model) |
 | `METALCRAFT_DATA_DIR` | Explicit data-directory path (otherwise OS app-data dir, then `./data`) |
 | `WORKSHOP_API_KEY` / `WORKSHOP_API_PORT` | Workshop API auth key and port |
-| `AGENT_GATEWAY_URL` / `AGENT_GATEWAY_API_KEY` | Gateway used by the Discord pack and event relay |
-| `EVENTD_WEBHOOK_SECRET` | Shared secret for verifying inbound event webhooks |
-| `SOLARABASE_API_KEY` | Credential for the Solarabase RAG pack |
 | `RUST_LOG` | Log verbosity |
 | `TZ` | Timezone used for cron schedule evaluation (e.g. `TZ=UTC`) |
 
@@ -48,7 +45,7 @@ metalcraft-agent [--auto-approve] [--persona <slug>] [task]
 - `--persona <slug>` / `-p <slug>` — persona to use (defaults to the Orchestrator, `orchestrator-agent`; also `METALCRAFT_PERSONA`).
 - `[task]` — a single request (all positional args); omit it to enter the interactive REPL.
 - `--auto-approve` — skip all approval prompts (required for non-interactive use).
-- Sessions are always logged to `logs/<timestamp>/`.
+- Sessions are always logged to `sessions/<timestamp>/`.
 
 Examples:
 
@@ -74,15 +71,18 @@ cargo run -- "refactor the auth module"
 
 ## Running the daemon
 
-The daemon polls `<data>/flows/`, runs due flows, and optionally serves the Workshop API and
-event listener.
+The daemon polls `<data>/flows/`, runs due flows and scheduled follow-ups, and optionally serves
+the Workshop API (which also hosts the gateway channels that receive inbound messaging webhooks).
 
 ```bash
 metalcraft-daemon [--persona P] [--model M] [--poll-seconds N] [--once]
-                  [--api KEY] [--api-port PORT]
-                  [--event-port PORT] [--event-host HOST] [--events E1,E2]
+                  [--flows-dir PATH] [--api KEY] [--api-port PORT]
                   [--auto-approve]
 ```
+
+> The former `--event-port` / `--event-host` / `--events` flags are deprecated no-ops — the
+> standalone event listener was removed; inbound events now arrive via gateway channels hosted
+> in the Workshop API.
 
 Examples:
 
@@ -118,8 +118,11 @@ Packs bundle personas, skills, HTTP tools, and flow templates. They are disabled
   (`GET /api/v1/integration-packs`, `PUT /api/v1/integration-packs/{id}/enabled`).
 - After enabling a pack, store its required secrets in the key store
   (`PUT /api/v1/keys/{name}`), guided by `GET /api/v1/keys/recommended`.
-- Shipped packs: **Discord** (needs `AGENT_GATEWAY_URL` + `AGENT_GATEWAY_API_KEY`) and
-  **Solarabase** RAG (needs `SOLARABASE_API_KEY`).
+- Sixteen packs ship today: `calcom`, `cloudflare`, `digitalocean_spaces`, `discord`,
+  `discord_admin`, `email` (IMAP), `github`, `linear`, `metalcraft-calendar`, `railway`,
+  `render`, `sentry`, `solarabase` (RAG), `sprite_builder`, `starflask`, `vestaloop`. Each
+  pack's required secrets (e.g. `SOLARABASE_API_KEY`) are key-store entries surfaced by
+  `GET /api/v1/keys/recommended`, not process environment variables.
 
 ## Defining custom HTTP tools
 
@@ -139,19 +142,19 @@ available to personas that list it.
   docker-compose up -d
   ```
 
-- **Railway:** `railway.toml` is preconfigured. Set `OPENAI_API_KEY`, `WORKSHOP_API_KEY`,
-  `AGENT_GATEWAY_URL`, `TZ`, and any pack secrets as service variables.
+- **Railway:** `railway.toml` is preconfigured. Set `OPENAI_API_KEY`, `WORKSHOP_API_KEY`, and
+  `TZ` as service variables; pack secrets go in the key store, not the environment.
 
 See `devops.md` at the repo root for the full operations guide.
 
 ## Diagnostics
 
-The CLI always creates a timestamped session directory under `logs/<timestamp>/`, and flow runs do the same:
+The CLI always creates a timestamped session directory under `sessions/<timestamp>/`, and flow runs do the same:
 
 - `session_info.json` — session metadata
 - `turn_NNN.json` — each LLM turn (request + response)
-- `compaction_after_NNN.json` — context-compaction events
-- `persona_switch_after_NNN.json` — persona changes
+- `compaction_after_turn_NNN.json` — context-compaction events
+- `persona_switch_after_turn_NNN.json` — persona changes
 
 Sessions are also served through the Workshop API at
 `GET /api/v1/diagnostics` and `GET /api/v1/diagnostics/{id}`.
