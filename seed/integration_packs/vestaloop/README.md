@@ -6,14 +6,14 @@ keys, so this is a clean declarative HTTP-API pack — no OAuth, no native code.
 
 ## Connects with
 
-- **`VESTALOOP_BASE_URL`** — the deployed portal origin, e.g.
-  `https://vestaloop.com` or `https://<app>.up.railway.app` (no trailing slash).
 - **`VESTALOOP_API_KEY`** — an `hk_…` key minted in the portal (a home's **API keys**
-  tab), scoped to one workspace (home) + member, `read` or `read/write`.
+  tab), scoped to one workspace (home) + member, `read` or `read/write`. This is the
+  **only** setting the pack needs.
 
-Every tool sends `Authorization: Bearer $VESTALOOP_API_KEY` and targets
-`$VESTALOOP_BASE_URL/api/v1/…`. The workspace and member are **implied by the key**,
-so no ids are ever passed.
+The API base is **fixed to `https://vestaloop.com`** (baked into the tool URLs), so
+there is no base-URL to configure. Every tool sends `Authorization: Bearer
+$VESTALOOP_API_KEY` and targets `https://vestaloop.com/api/v1/…`. The workspace and
+member are **implied by the key**, so no ids are ever passed.
 
 ## Tools
 

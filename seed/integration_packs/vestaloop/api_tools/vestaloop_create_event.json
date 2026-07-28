@@ -2,7 +2,7 @@
   "name": "vestaloop_create_event",
   "description": "Create a calendar event in the household. Times are UTC ISO-8601 (e.g. 2026-07-28T07:00:00Z) — convert the user's local time to UTC first. `scope` is 'personal' (default) or 'shared' (a cosmetic household-wide tag; it does NOT change which Google calendar the event syncs to). `all_day` defaults to false. Requires a read/write key — a read-only key returns 403. If the member has a linked Google calendar, the event is also pushed there. Returns the created event including its new `id`.",
   "method": "POST",
-  "url": "$VESTALOOP_BASE_URL/api/v1/events",
+  "url": "https://vestaloop.com/api/v1/events",
   "headers": {
     "Authorization": "Bearer $VESTALOOP_API_KEY",
     "Content-Type": "application/json",

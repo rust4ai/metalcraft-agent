@@ -2,7 +2,7 @@
   "name": "vestaloop_list_events",
   "description": "List calendar events in the household (home), newest first. Optional `from` and `to` bounds (UTC ISO-8601, e.g. 2026-07-28T00:00:00Z) restrict the time window; omit both to list everything. Each event has: id (UUID), title, description, location, starts_at, ends_at, all_day, scope ('personal'|'shared'), source ('portal'|'google'), status. Use this to discover an event's `id` before vestaloop_get_event / vestaloop_update_event / vestaloop_delete_event.",
   "method": "GET",
-  "url": "$VESTALOOP_BASE_URL/api/v1/events?from={from}&to={to}",
+  "url": "https://vestaloop.com/api/v1/events?from={from}&to={to}",
   "headers": {
     "Authorization": "Bearer $VESTALOOP_API_KEY",
     "Accept": "application/json"

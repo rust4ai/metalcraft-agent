@@ -1,10 +1,9 @@
 {
   "id": "vestaloop",
   "name": "VestaLoop",
-  "description": "Persona, skill, and HTTP API tools to read and manage a household calendar through the VestaLoop portal's API-key REST API (vestaloop.com). Verify the key and its scope, list/search events by time window, get an event, create/update/delete events (a read/write key is required for writes), and pull the latest from the member's linked Google calendar. The workspace (home) and member are implied by the key, so no ids are ever passed. Authenticated by VESTALOOP_API_KEY (Authorization: Bearer) against VESTALOOP_BASE_URL.",
-  "version": "1.0.0",
+  "description": "Persona, skill, and HTTP API tools to read and manage a household calendar through the VestaLoop portal (vestaloop.com) API-key REST API. Verify the key and its scope, list/search events by time window, get an event, create/update/delete events (a read/write key is required for writes), and pull the latest from the member's linked Google calendar. The workspace (home) and member are implied by the key, so no ids are ever passed. The API base is fixed to https://vestaloop.com; the only setting is VESTALOOP_API_KEY (sent as Authorization: Bearer).",
+  "version": "1.1.0",
   "requires_env": [
-    "VESTALOOP_BASE_URL",
     "VESTALOOP_API_KEY"
   ]
 }

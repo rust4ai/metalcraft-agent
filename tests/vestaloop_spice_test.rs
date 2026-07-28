@@ -99,8 +99,8 @@ fn vestaloop_pack_wires_up() {
         assert!(
             cfg["url"]
                 .as_str()
-                .is_some_and(|u| u.contains("$VESTALOOP_BASE_URL/api/v1")),
-            "api tool `{tool}` should target $VESTALOOP_BASE_URL/api/v1"
+                .is_some_and(|u| u.contains("https://vestaloop.com/api/v1")),
+            "api tool `{tool}` should target the fixed https://vestaloop.com/api/v1 base"
         );
         assert!(
             cfg["headers"]["Authorization"]
@@ -123,23 +123,25 @@ fn vestaloop_pack_wires_up() {
     let pack = integration_packs::find_installed(PACK_ID).expect("vestaloop pack installed");
     let readme = pack.readme().expect("vestaloop pack should ship a README");
     assert!(
-        readme.contains("VESTALOOP_API_KEY") && readme.contains("VESTALOOP_BASE_URL"),
-        "README should explain both env vars"
+        readme.contains("VESTALOOP_API_KEY") && readme.contains("vestaloop.com"),
+        "README should explain the API key and the fixed vestaloop.com base"
     );
     assert_eq!(pack.item_slugs("api_tools", "json").len(), EXPECTED_TOOLS.len());
     assert!(pack.item_slugs("personas", "json").iter().any(|s| s == PERSONA_SLUG));
     assert!(pack.item_slugs("skills", "md").iter().any(|s| s == "vestaloop-calendar"));
 
-    // The pack recommends both env vars in the key-store UI once enabled.
+    // The pack recommends its one env var (the API key) in the key-store UI.
     let recommended = integration_packs::recommended_env();
-    for var in ["VESTALOOP_BASE_URL", "VESTALOOP_API_KEY"] {
-        assert!(
-            recommended
-                .iter()
-                .any(|(v, packs)| v == var && packs.iter().any(|p| p == PACK_ID)),
-            "vestaloop pack should recommend {var}"
-        );
-    }
+    assert!(
+        recommended
+            .iter()
+            .any(|(v, packs)| v == "VESTALOOP_API_KEY" && packs.iter().any(|p| p == PACK_ID)),
+        "vestaloop pack should recommend VESTALOOP_API_KEY"
+    );
+    assert!(
+        !recommended.iter().any(|(v, _)| v == "VESTALOOP_BASE_URL"),
+        "base URL is fixed, so VESTALOOP_BASE_URL should NOT be a required env var"
+    );
 
     // Approval gating: reads/refresh auto-approve, event mutations require approval.
     let args = serde_json::json!({});

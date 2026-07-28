@@ -4,8 +4,9 @@ description: How to read and manage a VestaLoop household calendar over its API-
 
 # VestaLoop Household Calendar
 
-These tools call the VestaLoop REST API at `$VESTALOOP_BASE_URL/api/v1` using the
+These tools call the VestaLoop REST API at `https://vestaloop.com/api/v1` using the
 configured `VESTALOOP_API_KEY`, sent as `Authorization: Bearer $VESTALOOP_API_KEY`.
+The base URL is fixed — the only thing to configure is the API key.
 
 **The key implies the scope.** A VestaLoop key is minted for one home (workspace)
 and one member, so you never pass workspace or user ids — they're resolved from the

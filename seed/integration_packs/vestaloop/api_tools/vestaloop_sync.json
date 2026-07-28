@@ -2,7 +2,7 @@
   "name": "vestaloop_sync",
   "description": "Pull the key-holder member's linked Google calendar into VestaLoop, reconciling recent changes so that a subsequent vestaloop_list_events reflects the latest. Call this before answering 'what's on the calendar?' when freshness matters (e.g. events may have been added in Google directly). Returns { synced: <count of events reconciled> }. Works with a read or write key. Takes no parameters. No-op if the member hasn't linked a Google calendar.",
   "method": "POST",
-  "url": "$VESTALOOP_BASE_URL/api/v1/sync",
+  "url": "https://vestaloop.com/api/v1/sync",
   "headers": {
     "Authorization": "Bearer $VESTALOOP_API_KEY",
     "Accept": "application/json"

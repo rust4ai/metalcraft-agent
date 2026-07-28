@@ -2,7 +2,7 @@
   "name": "vestaloop_update_event",
   "description": "Update an existing event by `id`. This REPLACES the event's fields, so pass the complete intended state — title, starts_at and ends_at are always required, not just the fields you're changing. To change one field, first call vestaloop_get_event and resend the other values unchanged. Times are UTC ISO-8601. `scope` is 'personal' or 'shared'. Requires a read/write key (403 otherwise). The change is pushed to the linked Google calendar. Returns the updated event.",
   "method": "PATCH",
-  "url": "$VESTALOOP_BASE_URL/api/v1/events/{id}",
+  "url": "https://vestaloop.com/api/v1/events/{id}",
   "headers": {
     "Authorization": "Bearer $VESTALOOP_API_KEY",
     "Content-Type": "application/json",
