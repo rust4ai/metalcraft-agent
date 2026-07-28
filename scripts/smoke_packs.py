@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only smoke test for the Railway and Render integration packs.
+"""Read-only smoke test for the Railway, Render, and VestaLoop integration packs.
 
 Loads each tool's real URL / GraphQL query straight from its
 `seed/integration_packs/<pack>/api_tools/*.json` file and runs it against the
@@ -13,6 +13,7 @@ Usage:
     RAILWAY_API_TOKEN=... RENDER_API_KEY=... python3 scripts/smoke_packs.py
     RAILWAY_API_TOKEN=...                    python3 scripts/smoke_packs.py  # railway only
     RENDER_API_KEY=...                       python3 scripts/smoke_packs.py  # render only
+    VESTALOOP_BASE_URL=... VESTALOOP_API_KEY=... python3 scripts/smoke_packs.py  # vestaloop only
 
 A pack section is skipped when its token env var is unset. Exit code is
 non-zero if any executed check fails, so this is CI/pre-release friendly.
@@ -193,12 +194,46 @@ def smoke_render(key):
     (ok if st == 200 else bad)(f"list_custom_domains on {sid} (status={st})")
 
 
+# ── VestaLoop (REST, this app's own API-key API) ──────────────────────────────
+def smoke_vestaloop(base, key):
+    print("\n\033[1mVestaLoop\033[0m")
+    base = base.rstrip("/")
+    headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
+
+    def url_of(name):
+        # Load the real URL the tool ships, substitute the base, and strip the
+        # unfilled {from}/{to} query params (mirrors the http_api runner).
+        u = tool("vestaloop", name)["url"].replace("$VESTALOOP_BASE_URL", base)
+        return fill_url(u, {})
+
+    # whoami — confirms the key + its scope
+    st, data = http("GET", url_of("vestaloop_whoami"), headers)
+    if st == 200 and isinstance(data, dict) and "access" in data:
+        ok(f"whoami -> access={data['access']}")
+    else:
+        bad(f"whoami (status={st})")
+        return  # nothing else works without a valid key
+
+    # list_events — pure read
+    st, data = http("GET", url_of("vestaloop_list_events"), headers)
+    if st == 200 and isinstance(data, list):
+        ok(f"list_events -> {len(data)} event(s)")
+    else:
+        bad(f"list_events (status={st})")
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 def main():
     rw = os.environ.get("RAILWAY_API_TOKEN")
     rn = os.environ.get("RENDER_API_KEY")
-    if not rw and not rn:
-        print("Set RAILWAY_API_TOKEN and/or RENDER_API_KEY to run.", file=sys.stderr)
+    vl_base = os.environ.get("VESTALOOP_BASE_URL")
+    vl_key = os.environ.get("VESTALOOP_API_KEY")
+    if not rw and not rn and not (vl_base and vl_key):
+        print(
+            "Set RAILWAY_API_TOKEN and/or RENDER_API_KEY and/or "
+            "VESTALOOP_BASE_URL+VESTALOOP_API_KEY to run.",
+            file=sys.stderr,
+        )
         return 2
     if rw:
         smoke_railway(rw)
@@ -208,6 +243,10 @@ def main():
         smoke_render(rn)
     else:
         print("\n\033[1mRender\033[0m\n  skipped (RENDER_API_KEY unset)")
+    if vl_base and vl_key:
+        smoke_vestaloop(vl_base, vl_key)
+    else:
+        print("\n\033[1mVestaLoop\033[0m\n  skipped (VESTALOOP_BASE_URL/VESTALOOP_API_KEY unset)")
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

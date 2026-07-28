@@ -1,0 +1,15 @@
+{
+  "name": "vestaloop_whoami",
+  "description": "Verify the VESTALOOP_API_KEY and see its scope. Returns { workspace_id, user_id, access } where access is 'read' or 'write'. This is the cheapest call to confirm the key is valid and whether it can create/update/delete (write) or only read. Takes no parameters.",
+  "method": "GET",
+  "url": "$VESTALOOP_BASE_URL/api/v1/whoami",
+  "headers": {
+    "Authorization": "Bearer $VESTALOOP_API_KEY",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "none"
+}

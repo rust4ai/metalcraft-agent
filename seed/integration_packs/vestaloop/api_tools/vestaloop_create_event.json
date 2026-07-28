@@ -1,0 +1,25 @@
+{
+  "name": "vestaloop_create_event",
+  "description": "Create a calendar event in the household. Times are UTC ISO-8601 (e.g. 2026-07-28T07:00:00Z) — convert the user's local time to UTC first. `scope` is 'personal' (default) or 'shared' (a cosmetic household-wide tag; it does NOT change which Google calendar the event syncs to). `all_day` defaults to false. Requires a read/write key — a read-only key returns 403. If the member has a linked Google calendar, the event is also pushed there. Returns the created event including its new `id`.",
+  "method": "POST",
+  "url": "$VESTALOOP_BASE_URL/api/v1/events",
+  "headers": {
+    "Authorization": "Bearer $VESTALOOP_API_KEY",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "title": { "type": "string", "description": "Event title." },
+      "starts_at": { "type": "string", "description": "Start time, UTC ISO-8601." },
+      "ends_at": { "type": "string", "description": "End time, UTC ISO-8601." },
+      "all_day": { "type": "boolean", "description": "Whether this is an all-day event (default false)." },
+      "scope": { "type": "string", "enum": ["personal", "shared"], "description": "Cosmetic tag; default 'personal'." },
+      "description": { "type": "string", "description": "Optional longer description / notes." },
+      "location": { "type": "string", "description": "Optional location." }
+    },
+    "required": ["title", "starts_at", "ends_at"]
+  },
+  "body_mapping": "params"
+}

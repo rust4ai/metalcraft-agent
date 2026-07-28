@@ -1,0 +1,26 @@
+{
+  "name": "vestaloop_update_event",
+  "description": "Update an existing event by `id`. This REPLACES the event's fields, so pass the complete intended state — title, starts_at and ends_at are always required, not just the fields you're changing. To change one field, first call vestaloop_get_event and resend the other values unchanged. Times are UTC ISO-8601. `scope` is 'personal' or 'shared'. Requires a read/write key (403 otherwise). The change is pushed to the linked Google calendar. Returns the updated event.",
+  "method": "PATCH",
+  "url": "$VESTALOOP_BASE_URL/api/v1/events/{id}",
+  "headers": {
+    "Authorization": "Bearer $VESTALOOP_API_KEY",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": { "type": "string", "description": "Event id (UUID) to update." },
+      "title": { "type": "string", "description": "Event title (required — resend to keep)." },
+      "starts_at": { "type": "string", "description": "Start time, UTC ISO-8601 (required)." },
+      "ends_at": { "type": "string", "description": "End time, UTC ISO-8601 (required)." },
+      "all_day": { "type": "boolean", "description": "All-day flag (default false)." },
+      "scope": { "type": "string", "enum": ["personal", "shared"], "description": "Cosmetic tag." },
+      "description": { "type": "string", "description": "Optional description / notes." },
+      "location": { "type": "string", "description": "Optional location." }
+    },
+    "required": ["id", "title", "starts_at", "ends_at"]
+  },
+  "body_mapping": "params"
+}
