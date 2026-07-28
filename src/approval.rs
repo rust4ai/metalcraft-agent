@@ -90,6 +90,18 @@ impl OperationKind {
             {
                 Self::ReadFile
             }
+            // Metalcraft Calendar pack (ecosystem, `mcal_` tools): reads and the
+            // idempotent sync (whoami/list/get/sync) auto-approve; create/update/
+            // delete change real events (and push to Google), so they fall through
+            // to the default Execute arm and require approval.
+            n if n.starts_with("mcal_")
+                && (n.contains("_list")
+                    || n.contains("_get")
+                    || n == "mcal_whoami"
+                    || n == "mcal_sync") =>
+            {
+                Self::ReadFile
+            }
             // Meta tools — managing the project's own personas/skills/flows.
             // Read-only ones auto-approve; mutating ones require approval.
             "persona_list" | "persona_read" | "skill_list" | "skill_read" | "flow_list"

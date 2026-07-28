@@ -1,0 +1,18 @@
+{
+  "name": "mcal_sync",
+  "description": "Pull a calendar's linked Google calendar into Metalcraft Calendar (`calendar` slug), reconciling recent changes so a subsequent mcal_list_events reflects the latest. Call before answering 'what's on my calendar?' when freshness matters (events may have been added in Google directly). Returns { synced: <count reconciled> }. No-op if the calendar has no linked Google calendar. Works with a read or write token.",
+  "method": "POST",
+  "url": "https://calendar.metalcraftai.com/api/v1/calendars/{calendar}/sync",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "calendar": { "type": "string", "description": "Calendar slug to sync." }
+    },
+    "required": ["calendar"]
+  },
+  "body_mapping": "none"
+}

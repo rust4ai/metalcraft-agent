@@ -1,0 +1,20 @@
+{
+  "name": "mcal_list_events",
+  "description": "List events in one calendar (by `calendar` slug), soonest first. Optional `from` and `to` bounds (UTC ISO-8601, e.g. 2026-07-28T00:00:00Z) restrict the time window; omit both to list everything. Each event has: id (UUID), title, description, location, starts_at, ends_at, all_day, source ('portal'|'google'), status. Use this to find an event's `id` before mcal_get_event / mcal_update_event / mcal_delete_event.",
+  "method": "GET",
+  "url": "https://calendar.metalcraftai.com/api/v1/calendars/{calendar}/events?from={from}&to={to}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "calendar": { "type": "string", "description": "Calendar slug (from mcal_list_calendars)." },
+      "from": { "type": "string", "description": "Optional lower bound on the window, UTC ISO-8601. Omit for none." },
+      "to": { "type": "string", "description": "Optional upper bound on the window, UTC ISO-8601. Omit for none." }
+    },
+    "required": ["calendar"]
+  },
+  "body_mapping": "none"
+}

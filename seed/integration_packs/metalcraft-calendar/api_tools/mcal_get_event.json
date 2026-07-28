@@ -1,0 +1,19 @@
+{
+  "name": "mcal_get_event",
+  "description": "Get one event by `id` from a calendar (`calendar` slug). Returns the full event (title, description, location, starts_at, ends_at, all_day, source, status). Fetch the current event with this before a partial update, since mcal_update_event replaces all fields.",
+  "method": "GET",
+  "url": "https://calendar.metalcraftai.com/api/v1/calendars/{calendar}/events/{id}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "calendar": { "type": "string", "description": "Calendar slug." },
+      "id": { "type": "string", "description": "Event id (UUID) from mcal_list_events." }
+    },
+    "required": ["calendar", "id"]
+  },
+  "body_mapping": "none"
+}

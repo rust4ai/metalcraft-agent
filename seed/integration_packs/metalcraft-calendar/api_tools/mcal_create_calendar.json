@@ -1,0 +1,20 @@
+{
+  "name": "mcal_create_calendar",
+  "description": "Create a new calendar for the account. `name` is the human label; `slug` is an optional URL-safe id (lowercase letters, digits, dashes) — if omitted it is derived from the name. Slugs must be unique within the account (409 if taken). Requires the calendar:write scope (403 otherwise). Returns the created calendar including its `slug`.",
+  "method": "POST",
+  "url": "https://calendar.metalcraftai.com/api/v1/calendars",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": { "type": "string", "description": "Human-readable calendar name (e.g. 'Family')." },
+      "slug": { "type": "string", "description": "Optional URL-safe id (lowercase, digits, dashes). Derived from name if omitted." }
+    },
+    "required": ["name"]
+  },
+  "body_mapping": "params"
+}
