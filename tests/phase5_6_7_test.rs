@@ -82,6 +82,8 @@ fn sub_agent_registered_with_config() {
         skills_dir: std::path::PathBuf::from("skills"),
         available_skills: vec![],
         reply_sink: None,
+        session_binding: None,
+        reschedule_depth: 0,
     };
 
     let tools: Vec<String> = vec!["read_file", "sub_agent"]

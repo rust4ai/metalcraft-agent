@@ -32,7 +32,7 @@ use crate::diagnostics_browse::{
 };
 use crate::skill::{list_skill_summaries, load_skill, save_skill, Skill, SkillSummary};
 use crate::tools::http_api::HttpApiToolConfig;
-use metalcraft::{AgentMessage, AgentState, Executor, GuardAction, RunOutcome, StepGuard};
+use metalcraft::{AgentMessage, AgentState, GuardAction, RunOutcome, StepGuard};
 
 /// Configuration for the workshop API server.
 pub struct WorkshopApiConfig {
@@ -1973,7 +1973,7 @@ async fn run_chat_turn(
     persona_slug: &str,
     cwd: &str,
     model_name: &str,
-    mut initial_state: AgentState,
+    initial_state: AgentState,
     step_guard: StepGuard<AgentState>,
     llm_call_hook: Option<metalcraft::LlmCallHook>,
     llm_response_hook: Option<metalcraft::LlmResponseHook>,
@@ -1996,40 +1996,20 @@ async fn run_chat_turn(
     )
     .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
 
-    // Keep the conversation inside the model's context window before running the
-    // turn. Workshop and gateway sessions accumulate history indefinitely
-    // (`AgentState::continue_with` only appends), so without this a long-running
-    // chat — e.g. someone who keeps messaging the WhatsApp gateway — would
-    // eventually exceed the provider's context limit and every further turn would
-    // fail. The CLI does this in its loop; both daemon entry points funnel
-    // through here. Best-effort: a compaction failure logs and proceeds with the
-    // uncompacted state rather than dropping the turn.
-    let compaction_config = crate::context::CompactionConfig::default();
-    match crate::context::compact_if_needed(
-        &mut initial_state,
-        &runtime.compaction_model,
-        &compaction_config,
-    )
-    .await
-    {
-        Ok(true) => log::info!(
-            "Context compacted before turn -> ~{} tokens, {} messages",
-            crate::context::estimate_tokens(&initial_state),
-            initial_state.messages.len()
-        ),
-        Ok(false) => {}
-        Err(e) => log::warn!("Context compaction failed, proceeding uncompacted: {e}"),
-    }
-
-    let executor = Executor::new_from_arc(runtime.graph)
-        .max_steps(90)
-        .with_step_guard(step_guard);
+    // Run the turn through the shared [`TurnRunner`], which compacts the context
+    // to fit the window before executing. Workshop and gateway sessions
+    // accumulate history indefinitely (`AgentState::continue_with` only appends),
+    // so without compaction a long-running chat — e.g. someone who keeps
+    // messaging the WhatsApp gateway — would eventually exceed the provider's
+    // context limit and every further turn would fail. Both daemon entry points
+    // funnel through here; the CLI and one-shot paths share the same primitive.
+    // The daemon ignores the "did it compact" flag and relies on the log line.
+    let (_compacted, outcome) = crate::runtime::TurnRunner::new(runtime)
+        .run(initial_state, step_guard)
+        .await;
     // Box the real error rather than stringifying it, so its `source()` chain
     // survives for `error_chain` to walk when building the failed-turn reason.
-    executor
-        .run(initial_state, "agent")
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+    outcome.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
 }
 
 /// Render an error with its full `source()` chain (see the same helper in

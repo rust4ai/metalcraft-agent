@@ -1,7 +1,7 @@
-use metalcraft::{AgentState, Executor, LlmCallHook, RunOutcome};
+use metalcraft::{AgentState, LlmCallHook, RunOutcome};
 use metalcraft_agent::approval::ApprovalMode;
 use metalcraft_agent::cli;
-use metalcraft_agent::context::{self, CompactionConfig};
+use metalcraft_agent::context;
 use metalcraft_agent::diagnostics::DiagnosticsLogger;
 use metalcraft_agent::guard;
 use metalcraft_agent::persona::Persona;
@@ -193,8 +193,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ApprovalMode::default_interactive()
     };
 
-    let compaction_config = CompactionConfig::default();
-
     print_persona_banner(&persona, persona_slug, &model_name, &cwd, auto_approve);
 
     let diagnostics: Arc<DiagnosticsLogger> = match DiagnosticsLogger::new() {
@@ -226,10 +224,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }) as LlmCallHook
     };
 
-    let runtime::BuiltAgentRuntime {
-        mut graph,
-        mut compaction_model,
-    } = runtime::build_agent_runtime(
+    // Build the turn runner once and reuse it for the whole session (cheap: no
+    // per-turn graph/client rebuild). It's rebuilt only when /cd, /persona, or
+    // /model change what the runtime must be.
+    let mut turn_runner = runtime::TurnRunner::new(runtime::build_agent_runtime(
         &runtime_context,
         &persona,
         &cwd,
@@ -239,7 +237,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None, // CLI runs don't emit OTLP traces
         runtime::RuntimeOptions::default(),
         |client, model_name| client.completion_model(model_name),
-    )?;
+    )?);
+    // One session-long step guard (loop/error-spiral tracker), reused across
+    // persona/model switches so its history survives them.
     let step_guard = guard::build_agent_guard(guard::GuardConfig::default(), Some(diagnostics.clone()));
     let mut current_persona_slug = persona_slug.to_string();
 
@@ -346,12 +346,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         runtime::RuntimeOptions::default(),
                         |client, model_name| client.completion_model(model_name),
                     ) {
-                        Ok(runtime::BuiltAgentRuntime {
-                            graph: new_graph,
-                            compaction_model: new_compaction_model,
-                        }) => {
-                            graph = new_graph;
-                            compaction_model = new_compaction_model;
+                        Ok(built) => {
+                            turn_runner = runtime::TurnRunner::new(built);
                             prompt_str = build_prompt_str(&current_persona_slug, &cwd);
                             println!("{} {}\n", ui::success("Working directory:"), ui::path(display_cwd(&cwd)));
                         }
@@ -397,12 +393,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         runtime::RuntimeOptions::default(),
                         |client, model_name| client.completion_model(model_name),
                     ) {
-                        Ok(runtime::BuiltAgentRuntime {
-                            graph: new_graph,
-                            compaction_model: new_compaction_model,
-                        }) => {
-                            graph = new_graph;
-                            compaction_model = new_compaction_model;
+                        Ok(built) => {
+                            turn_runner = runtime::TurnRunner::new(built);
                             current_persona_slug = new_slug.to_string();
                             prompt_str = build_prompt_str(&current_persona_slug, &cwd);
                             state = None;
@@ -455,13 +447,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 runtime::RuntimeOptions::default(),
                 |client, model_name| client.completion_model(model_name),
             ) {
-                Ok(runtime::BuiltAgentRuntime {
-                    graph: new_graph,
-                    compaction_model: new_compaction_model,
-                }) => {
+                Ok(built) => {
+                    turn_runner = runtime::TurnRunner::new(built);
                     model_name = new_model.to_string();
-                    graph = new_graph;
-                    compaction_model = new_compaction_model;
                     state = None;
                     println!();
                     print_persona_banner(&current_persona, &current_persona_slug, &model_name, &cwd, auto_approve);
@@ -480,23 +468,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let _ = rl.add_history_entry(input);
 
-        let mut turn_state = match state.take() {
+        let turn_state = match state.take() {
             Some(prev) => prev.continue_with(input),
             None => AgentState::new(input),
         };
 
-        match context::compact_if_needed(&mut turn_state, &compaction_model, &compaction_config).await {
-            Ok(true) => {
-                println!("{} ~{} tokens", ui::dim("(context compacted to"), context::estimate_tokens(&turn_state));
-            }
-            Ok(false) => {}
-            Err(e) => {
-                eprintln!("{} {}", ui::warning("Warning: compaction failed:"), e);
-            }
+        // The runner compacts the context (if needed) then runs the turn; a
+        // compaction failure is logged inside and the turn proceeds uncompacted.
+        let (compacted, outcome) = turn_runner.run(turn_state, step_guard.clone()).await;
+        if compacted {
+            println!("{}", ui::dim("(context compacted)"));
         }
-
-        let executor = Executor::new_from_arc(graph.clone()).max_steps(90).with_step_guard(step_guard.clone());
-        let outcome = executor.run(turn_state, "agent").await;
 
         match outcome {
             Ok(RunOutcome::Completed(completed_state)) => {

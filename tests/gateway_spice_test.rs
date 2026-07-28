@@ -165,6 +165,8 @@ impl AgentUnderTest for GatewayPersonaAgent {
             reply_sink: Some(capturing_sink(delivered.clone())),
             tool_choice: ToolChoice::Required,
             terminal_tools: vec!["say_to_user".to_string()],
+            session_binding: None,
+            reschedule_depth: 0,
         };
 
         let persona = Persona::load(&self.persona_slug, &self.context.personas_dir)

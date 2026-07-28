@@ -1,7 +1,9 @@
 use metalcraft::{
-    create_react_agent_with_options, AgentOptions, AgentState, Executor, LlmCallHook,
-    LlmResponseHook, RunOutcome, ToolChoice,
+    create_react_agent_with_options, AgentOptions, AgentState, Executor, GraphError, LlmCallHook,
+    LlmResponseHook, RunOutcome, StepGuard, ToolChoice,
 };
+
+use crate::context::{self, CompactionConfig};
 
 use crate::tools::ReplySink;
 use rig::client::CompletionClient;
@@ -19,6 +21,11 @@ use std::sync::Arc;
 pub const DEFAULT_MODEL: &str = "gpt-5.4";
 pub const AVAILABLE_MODELS: &[&str] = &["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"];
 
+/// Maximum executor steps for a single agent turn. Single source of truth so no
+/// call site (CLI, workshop, gateway, one-shot) can silently diverge — the exact
+/// class of bug [`TurnRunner`] exists to prevent.
+pub const MAX_TURN_STEPS: usize = 90;
+
 pub struct AgentRuntimeContext {
     pub personas_dir: PathBuf,
     pub skills_dir: PathBuf,
@@ -30,6 +37,90 @@ pub type SharedAgentGraph = Arc<metalcraft::CompiledGraph<AgentState>>;
 pub struct BuiltAgentRuntime<M: CompletionModel + 'static> {
     pub graph: SharedAgentGraph,
     pub compaction_model: M,
+}
+
+/// Owns the one operation every agent turn performs: **compact the context to
+/// fit the window, then run the executor** (with a single, shared `max_steps`
+/// and the caller's step guard).
+///
+/// Wraps an already-[built](build_agent_runtime) runtime so the turn body lives
+/// in exactly one place. Historically the CLI, workshop, gateway, and one-shot
+/// paths each hand-wired this sequence inline, and a behaviour present in one
+/// (context compaction) went missing from another — the bug this type prevents.
+///
+/// Construction supports both runtime lifetimes the callers need:
+/// - **build once, reuse** — the CLI builds a `TurnRunner` and calls
+///   [`run`](TurnRunner::run) each turn, rebuilding only on persona/model/cwd
+///   switch. No per-turn graph/client rebuild.
+/// - **build per turn** — the daemon constructs a `TurnRunner`, runs one turn,
+///   and drops it, matching its spawn-per-turn session model.
+///
+/// The **step guard is a `run` parameter, not a field**, because guard lifetime
+/// is genuinely caller-specific: the CLI reuses one session-long guard, while
+/// the workshop/gateway guard is per-turn (it captures that turn's SSE/reply
+/// sender to emit tool events). Keeping it out of the struct lets both hold the
+/// runtime the way they need without forcing a guard-lifetime choice on either.
+pub struct TurnRunner<M: CompletionModel + 'static> {
+    graph: SharedAgentGraph,
+    compaction_model: M,
+    compaction_config: CompactionConfig,
+    max_steps: usize,
+}
+
+impl<M: CompletionModel + 'static> TurnRunner<M> {
+    /// Wrap a freshly built runtime with default per-turn knobs
+    /// ([`CompactionConfig::default`], [`MAX_TURN_STEPS`]).
+    pub fn new(runtime: BuiltAgentRuntime<M>) -> Self {
+        Self {
+            graph: runtime.graph,
+            compaction_model: runtime.compaction_model,
+            compaction_config: CompactionConfig::default(),
+            max_steps: MAX_TURN_STEPS,
+        }
+    }
+
+    /// Compact `state` if it exceeds the window, then run one turn to completion
+    /// under `step_guard`.
+    ///
+    /// Compaction is best-effort: a failure is logged and the turn proceeds with
+    /// the uncompacted state rather than being dropped. Returns whether
+    /// compaction ran alongside the outcome so an interactive caller (the CLI)
+    /// can surface it; daemon callers ignore the flag and rely on the log line.
+    pub async fn run(
+        &self,
+        mut state: AgentState,
+        step_guard: StepGuard<AgentState>,
+    ) -> (bool, Result<RunOutcome<AgentState>, GraphError>) {
+        let compacted = match context::compact_if_needed(
+            &mut state,
+            &self.compaction_model,
+            &self.compaction_config,
+        )
+        .await
+        {
+            Ok(true) => {
+                log::info!(
+                    "Context compacted before turn -> ~{} tokens, {} messages",
+                    context::estimate_tokens(&state),
+                    state.messages.len()
+                );
+                true
+            }
+            Ok(false) => false,
+            Err(e) => {
+                log::warn!("Context compaction failed, proceeding uncompacted: {e}");
+                false
+            }
+        };
+
+        let outcome = Executor::new_from_arc(self.graph.clone())
+            .max_steps(self.max_steps)
+            .with_step_guard(step_guard)
+            .run(state, "agent")
+            .await;
+
+        (compacted, outcome)
+    }
 }
 
 impl AgentRuntimeContext {
@@ -174,7 +265,13 @@ pub async fn run_one_shot_task(
         ..guard::GuardConfig::default()
     };
     let step_guard = guard::build_agent_guard(guard_config, request.diagnostics.clone());
-    let executor = Executor::new_from_arc(runtime.graph).max_steps(90).with_step_guard(step_guard);
 
-    executor.run(AgentState::new(request.task), "agent").await.map_err(Into::into)
+    // Route through the shared turn primitive so one-shot runs get the same
+    // compaction + max-steps wiring as every other path (this was previously the
+    // one turn path with no compaction). The compaction flag is irrelevant for a
+    // single-shot task, so it's discarded.
+    let (_compacted, outcome) = TurnRunner::new(runtime)
+        .run(AgentState::new(request.task), step_guard)
+        .await;
+    outcome.map_err(Into::into)
 }

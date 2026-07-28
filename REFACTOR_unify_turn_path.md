@@ -1,8 +1,14 @@
 # Refactor Plan: Collapse all agent-turn execution onto a single call site
 
-**Status:** proposed (not started) — for review.
+**Status:** ✅ implemented (branch `refactor/unify-turn-runner`).
 **Author:** drafted during the gateway-compaction fix.
 **Goal:** Have exactly one place in the codebase that "runs one agent turn" (build/resolve runtime → compact context → run executor → classify outcome), so behaviours like compaction, step limits, and guard config can never again be present in one path and missing in another.
+
+> **Implementation notes (as built).** Two deliberate deviations from the plan below:
+> 1. **The step guard is a `run(state, step_guard)` parameter, not a `TurnRunner` field.** Guard lifetime is genuinely caller-specific — the CLI reuses one session-long guard, while the workshop/gateway guard is rebuilt per turn because it captures that turn's SSE/reply sender to emit tool events. Making it a field would force one lifetime on both. `TurnRunner` owns only the prebuilt runtime + compaction/max-steps config; `run` returns `(compacted: bool, Result<RunOutcome, GraphError>)` so the interactive CLI can print a compaction notice while daemon callers ignore the flag.
+> 2. **`run_one_shot_task` was folded in too** (plan §6 had it out of scope). It was the *one* turn path with no compaction at all, so routing it through `TurnRunner` closes that gap. Behaviour is unchanged for realistic one-shot tasks (compaction only triggers above ~76.8k tokens, which single tasks and tests never reach). `max_steps` is now the shared `runtime::MAX_TURN_STEPS` constant (still 90) everywhere.
+>
+> Not folded in: `sub_agent.rs` (nested tool executor, no guard, `max_steps 90`) and `flow_exec.rs` (`max_steps 30`) — these run structurally different graphs and are intentionally left separate.
 
 ---
 

@@ -1,70 +1,18 @@
 use metalcraft_agent::persona::Persona;
 use std::path::Path;
 
-#[test]
-fn load_coding_agent_persona() {
-    let personas_dir = Path::new("personas");
-    let persona = Persona::load("coding-agent", personas_dir).unwrap();
-
-    assert_eq!(persona.name, "Coding Agent");
-    assert!(persona.tools.contains(&"read_file".to_string()));
-    assert!(persona.tools.contains(&"bash".to_string()));
-    assert!(persona.skills.contains(&"commit-message".to_string()));
-    assert!(!persona.system_prompt.is_empty());
-}
-
-#[test]
-fn load_research_agent_persona() {
-    let personas_dir = Path::new("personas");
-    let persona = Persona::load("research-agent", personas_dir).unwrap();
-
-    assert_eq!(persona.name, "Research Agent");
-    assert!(persona.tools.contains(&"read_file".to_string()));
-    assert!(persona.tools.contains(&"grep".to_string()));
-    // Research agent should NOT have write_file
-    assert!(!persona.tools.contains(&"write_file".to_string()));
-}
-
-#[test]
-fn load_devops_agent_persona() {
-    let personas_dir = Path::new("personas");
-    let persona = Persona::load("devops-agent", personas_dir).unwrap();
-
-    assert_eq!(persona.name, "DevOps Agent");
-    assert!(persona.tools.contains(&"bash".to_string()));
-    assert!(persona.skills.contains(&"dockerfile-best-practices".to_string()));
-}
-
-#[test]
-fn list_available_personas() {
-    let personas_dir = Path::new("personas");
-    let available = Persona::list_available(personas_dir);
-
-    assert!(available.contains(&"coding-agent".to_string()));
-    assert!(available.contains(&"research-agent".to_string()));
-    assert!(available.contains(&"devops-agent".to_string()));
-}
+// NOTE: the persona-loading tests that read a top-level `personas/` directory
+// were removed — personas now live under `seed/personas/` and are seeded into
+// the runtime data dir via integration packs, so that fixture no longer exists.
+// Loading personas by slug is covered end-to-end by the `*_spice_test.rs`
+// harnesses (which seed a temp data dir); the tests below cover the parts of
+// `persona` that don't depend on an on-disk personas directory.
 
 #[test]
 fn load_nonexistent_persona_fails() {
     let personas_dir = Path::new("personas");
     let result = Persona::load("nonexistent", personas_dir);
     assert!(result.is_err());
-}
-
-#[test]
-fn build_system_prompt_includes_skills() {
-    let personas_dir = Path::new("personas");
-    let skills_dir = Path::new("skills");
-    let persona = Persona::load("coding-agent", personas_dir).unwrap();
-
-    let prompt = persona.build_system_prompt(skills_dir, "/tmp/test");
-
-    assert!(prompt.contains("Working directory: /tmp/test"));
-    assert!(prompt.contains("# Available Skills"));
-    assert!(prompt.contains("load_skill"));
-    assert!(prompt.contains("commit-message")); // skill name listed
-    assert!(prompt.contains("code-review"));    // skill name listed
 }
 
 #[test]
