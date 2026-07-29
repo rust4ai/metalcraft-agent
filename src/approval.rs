@@ -102,6 +102,14 @@ impl OperationKind {
             {
                 Self::ReadFile
             }
+            // Metalcraft Notes pack (`mnote_` tools): reads auto-approve; create/
+            // update/delete change the user's notes, so they fall through to the
+            // default Execute arm and require approval.
+            n if n.starts_with("mnote_")
+                && (n.contains("_list") || n.contains("_get") || n == "mnote_whoami") =>
+            {
+                Self::ReadFile
+            }
             // Meta tools — managing the project's own personas/skills/flows.
             // Read-only ones auto-approve; mutating ones require approval.
             "persona_list" | "persona_read" | "skill_list" | "skill_read" | "flow_list"

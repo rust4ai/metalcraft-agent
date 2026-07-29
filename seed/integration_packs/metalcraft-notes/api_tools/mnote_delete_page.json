@@ -1,0 +1,16 @@
+{
+  "name": "mnote_delete_page",
+  "description": "Delete a page by `slug` from a notebook (`notebook` slug). Also deletes its descendant (nested) pages. Requires the notes:write scope (403 otherwise). Irreversible — confirm the exact page (title) with the user before deleting. Returns 204 No Content on success.",
+  "method": "DELETE",
+  "url": "https://notes.metalcraftai.com/api/v1/notebooks/{notebook}/pages/{slug}",
+  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Accept": "application/json" },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "notebook": { "type": "string", "description": "Notebook slug." },
+      "slug": { "type": "string", "description": "Page slug to delete." }
+    },
+    "required": ["notebook", "slug"]
+  },
+  "body_mapping": "none"
+}

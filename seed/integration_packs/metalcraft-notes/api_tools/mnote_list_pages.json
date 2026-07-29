@@ -1,0 +1,15 @@
+{
+  "name": "mnote_list_pages",
+  "description": "List the page tree of one notebook (by `notebook` slug). Returns page summaries (no bodies): id, parent_page_id (null at root), title, slug, position, is_favorite, updated_at. Use the `parent_page_id`/`slug` to understand nesting and to find a page's slug before mnote_get_page / mnote_update_page / mnote_delete_page.",
+  "method": "GET",
+  "url": "https://notes.metalcraftai.com/api/v1/notebooks/{notebook}/pages",
+  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Accept": "application/json" },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "notebook": { "type": "string", "description": "Notebook slug (from mnote_list_notebooks)." }
+    },
+    "required": ["notebook"]
+  },
+  "body_mapping": "none"
+}

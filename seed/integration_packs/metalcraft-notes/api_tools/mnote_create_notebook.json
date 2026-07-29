@@ -1,0 +1,16 @@
+{
+  "name": "mnote_create_notebook",
+  "description": "Create a new notebook (a top-level space, e.g. 'Work'). `name` is the label; `slug` is an optional URL-safe id (lowercase, digits, dashes) derived from name if omitted. Slugs are unique per account (409 if taken). Requires the notes:write scope (403 otherwise). Returns the created notebook including its slug.",
+  "method": "POST",
+  "url": "https://notes.metalcraftai.com/api/v1/notebooks",
+  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Content-Type": "application/json", "Accept": "application/json" },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": { "type": "string", "description": "Notebook name (e.g. 'Work')." },
+      "slug": { "type": "string", "description": "Optional URL-safe id; derived from name if omitted." }
+    },
+    "required": ["name"]
+  },
+  "body_mapping": "params"
+}

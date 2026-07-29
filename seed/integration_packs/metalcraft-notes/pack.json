@@ -1,0 +1,9 @@
+{
+  "id": "metalcraft-notes",
+  "name": "Metalcraft Notes",
+  "description": "Persona, skill, and HTTP API tools to save and manage markdown notes in Metalcraft Notes (notes.metalcraftai.com). Agent-first: the agent writes notes as plain markdown. One account owns many notebooks, each holding a tree of nested pages addressed by slug — list notebooks, create a notebook, list a notebook's page tree, get a page (markdown), create/update/delete pages (needs the notes:write scope). Authenticated by a single Metalcraft account token — METALCRAFT_TOKEN, sent as Authorization: Bearer — the same token that works across every Metalcraft ecosystem app. The API base is fixed to https://notes.metalcraftai.com.",
+  "version": "1.0.0",
+  "requires_env": [
+    "METALCRAFT_TOKEN"
+  ]
+}

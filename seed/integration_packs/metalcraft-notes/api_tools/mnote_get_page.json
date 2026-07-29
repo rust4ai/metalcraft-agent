@@ -1,0 +1,16 @@
+{
+  "name": "mnote_get_page",
+  "description": "Get one page by `slug` from a notebook (`notebook` slug). Returns the full page including its markdown `body` (the source of truth), title, parent_page_id, position, is_favorite. Fetch the current page with this before a partial edit, since mnote_update_page replaces the fields you send.",
+  "method": "GET",
+  "url": "https://notes.metalcraftai.com/api/v1/notebooks/{notebook}/pages/{slug}",
+  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Accept": "application/json" },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "notebook": { "type": "string", "description": "Notebook slug." },
+      "slug": { "type": "string", "description": "Page slug (from mnote_list_pages)." }
+    },
+    "required": ["notebook", "slug"]
+  },
+  "body_mapping": "none"
+}
