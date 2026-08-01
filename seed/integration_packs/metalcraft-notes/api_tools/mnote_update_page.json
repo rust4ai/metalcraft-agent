@@ -1,6 +1,6 @@
 {
   "name": "mnote_update_page",
-  "description": "Update a page by `slug` in a notebook (`notebook` slug). Only the fields you send change: `title`, `body` (markdown — REPLACES the whole body, so fetch with mnote_get_page and resend the full new markdown to append/edit), `parent` (a page slug to re-nest under; empty string \"\" moves it to the root), `position` (order among siblings). Requires the notes:write scope (403 otherwise). Returns the updated page.",
+  "description": "Update a page by `slug` in a notebook (`notebook` slug). Only the fields you send change: `title`, `body` (markdown — REPLACES the whole body, so fetch with mnote_get_page and resend the full new markdown to append/edit), `parent` (a page slug to re-nest under; empty string \"\" moves it to the root), `position` (order among siblings). Requires the write scope (403 otherwise). Returns the updated page.",
   "method": "PATCH",
   "url": "https://notes.metalcraftai.com/api/v1/notebooks/{notebook}/pages/{slug}",
   "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Content-Type": "application/json", "Accept": "application/json" },

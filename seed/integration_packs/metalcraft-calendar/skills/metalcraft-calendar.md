@@ -16,8 +16,8 @@ credential and works across every ecosystem app; there are no per-service keys.
 
 ## Scopes (read vs write)
 `mcal_whoami` returns the token's `scopes`. Creating, updating, or deleting events —
-and creating calendars — requires **`calendar:write`**. Without it those calls return
-403; tell the user to mint a token with `calendar:write` at
+and creating calendars — requires **`write`**. Without it those calls return
+403; tell the user to mint a token with `write` at
 id.metalcraftai.com → Account → Tokens.
 
 ## Times
@@ -30,7 +30,7 @@ UTC before sending; convert back when reporting. Ask for their timezone if unkno
    that doesn't exist, list what's there and ask, or offer `mcal_create_calendar`.
 3. **Read:** optionally `mcal_sync` (calendar slug) to pull the linked Google calendar,
    then `mcal_list_events` with a `from`/`to` window.
-4. **Write (needs `calendar:write`):** `mcal_create_event`, `mcal_update_event`,
+4. **Write (needs `write`):** `mcal_create_event`, `mcal_update_event`,
    `mcal_delete_event` — all scoped to a calendar slug.
 
 ## Lifecycle notes

@@ -7,7 +7,7 @@ the agent writes notes as plain markdown.
 ## Connects with
 
 - **`METALCRAFT_TOKEN`** — a Personal Access Token from the user's Metalcraft account
-  (id.metalcraftai.com → Account → Tokens), scoped `notes:read` and/or `notes:write`.
+  (id.metalcraftai.com → Account → Tokens), scoped `read` and/or `write`.
   The **only** setting, and the **same token works across every Metalcraft ecosystem app**.
 
 The API base is **fixed to `https://notes.metalcraftai.com`**. Every tool sends
@@ -32,7 +32,7 @@ Discover notebooks with `mnote_list_notebooks`, then a notebook's pages with
 | `mnote_delete_page` | DELETE | `/api/v1/notebooks/{notebook}/pages/{slug}` | **write** |
 
 Reads auto-approve; create/update/delete require approval. Writes need a token with the
-`notes:write` scope (403 otherwise). Page bodies are plain markdown. *(Search + share
+`write` scope (403 otherwise). Page bodies are plain markdown. *(Search + share
 tools arrive with the app's N5/N6.)*
 
 ## Ships

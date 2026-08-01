@@ -1,6 +1,6 @@
 {
   "name": "mcal_create_event",
-  "description": "Create an event in a calendar (`calendar` slug). Times are UTC ISO-8601 (e.g. 2026-07-28T07:00:00Z) — convert the user's local time to UTC first. `all_day` defaults to false. Requires the calendar:write scope (403 otherwise). If the calendar has a linked Google calendar, the event is also pushed there. Returns the created event including its new `id`.",
+  "description": "Create an event in a calendar (`calendar` slug). Times are UTC ISO-8601 (e.g. 2026-07-28T07:00:00Z) — convert the user's local time to UTC first. `all_day` defaults to false. Requires the write scope (403 otherwise). If the calendar has a linked Google calendar, the event is also pushed there. Returns the created event including its new `id`.",
   "method": "POST",
   "url": "https://calendar.metalcraftai.com/api/v1/calendars/{calendar}/events",
   "headers": {

@@ -1,6 +1,6 @@
 {
   "name": "mcal_delete_event",
-  "description": "Delete an event by `id` from a calendar (`calendar` slug). Requires the calendar:write scope (403 otherwise). Also removes it from the calendar's linked Google calendar. Irreversible — confirm the exact event (title and time) with the user before deleting. Returns 204 No Content on success.",
+  "description": "Delete an event by `id` from a calendar (`calendar` slug). Requires the write scope (403 otherwise). Also removes it from the calendar's linked Google calendar. Irreversible — confirm the exact event (title and time) with the user before deleting. Returns 204 No Content on success.",
   "method": "DELETE",
   "url": "https://calendar.metalcraftai.com/api/v1/calendars/{calendar}/events/{id}",
   "headers": {

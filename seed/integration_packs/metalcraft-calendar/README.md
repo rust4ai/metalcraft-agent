@@ -7,8 +7,8 @@ Metalcraft ecosystem.
 ## Connects with
 
 - **`METALCRAFT_TOKEN`** — a Personal Access Token from the user's Metalcraft
-  account (id.metalcraftai.com → Account → Tokens), scoped `calendar:read` and/or
-  `calendar:write`. This is the **only** setting, and the **same token works across
+  account (id.metalcraftai.com → Account → Tokens), scoped `read` and/or
+  `write`. This is the **only** setting, and the **same token works across
   every Metalcraft ecosystem app** — no per-service API keys.
 
 The API base is **fixed to `https://calendar.metalcraftai.com`**. Every tool sends
@@ -34,7 +34,7 @@ One account owns **many calendars**, each with a `slug`. Discover them with
 | `mcal_sync` | POST | `/api/v1/calendars/{calendar}/sync` | read |
 
 Reads + `mcal_sync` auto-approve; create/update/delete require approval. Writes need a
-token with the `calendar:write` scope (403 otherwise). Times are UTC ISO-8601.
+token with the `write` scope (403 otherwise). Times are UTC ISO-8601.
 
 ## Ships
 - `personas/metalcraft-calendar-agent.json` — a scheduling assistant scoped to this pack.
