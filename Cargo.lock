@@ -4999,9 +4999,9 @@ dependencies = [
 
 [[package]]
 name = "metalcraft-flows"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c31f664688cd4fecfa6c2695eecbe486d11b3a5808943267f37743d286c1a35"
+checksum = "6b0f2abb1f1ee6e1b11aa7d8fd3cc5d221473d6308eca037647885f452745512"
 dependencies = [
  "regex",
  "serde",

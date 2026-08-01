@@ -9,7 +9,7 @@ repository = "https://github.com/rust4ai/metalcraft-agent"
 
 [dependencies]
 metalcraft = { version = "0.8.0", features = ["rig"] }
-metalcraft-flows = "0.2.1"
+metalcraft-flows = "0.2.2"
 rig = "0.37"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

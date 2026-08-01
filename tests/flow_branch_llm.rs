@@ -136,3 +136,67 @@ async fn madrid_branch_routes_by_reported_temperature() {
         hot.steps
     );
 }
+
+/// A branch that cannot produce an answer must route its `error` rail — not
+/// silently report success. Here the classifier has no tools and is told the
+/// lookup is impossible, so it selects `error`; the edge wired from the `error`
+/// handle carries the run to the error terminal.
+fn unanswerable_flow() -> SavedFlow {
+    let raw = r##"{
+      "spec_version": "2",
+      "id": "branch-error-rail-test",
+      "name": "Branch error rail (test)",
+      "created_at": "2026-07-30T00:00:00Z",
+      "updated_at": "2026-07-30T00:00:00Z",
+      "enabled": false,
+      "flow": {
+        "nodes": [
+          { "id": "entry", "node_type": "entry", "data": { "schedule_type": "manual" } },
+          { "id": "classify", "node_type": "branch", "data": {
+              "query": "You have no tools and cannot look anything up, so the temperature is impossible to determine. Do not guess. Call the error tool with a brief reason.",
+              "outputs": [
+                { "handle": "report_temp", "description": "Report a temperature you actually determined", "schema": { "type": "integer" } },
+                { "handle": "error", "description": "The temperature could not be determined", "schema": { "type": "string" } }
+              ]
+          } },
+          { "id": "say_temp", "node_type": "end", "data": { "status": "ok" } },
+          { "id": "handle_err", "node_type": "end", "data": { "status": "err" } }
+        ],
+        "edges": [
+          { "id": "e0", "source": "entry", "target": "classify" },
+          { "id": "e1", "source": "classify", "target": "say_temp", "source_handle": "report_temp" },
+          { "id": "e2", "source": "classify", "target": "handle_err", "source_handle": "error" }
+        ]
+      }
+    }"##;
+    let flow: SavedFlow = serde_json::from_str(raw).expect("flow parses");
+    assert!(validate(&flow).is_empty(), "flow validates: {:?}", validate(&flow));
+    flow
+}
+
+#[tokio::test]
+async fn branch_routes_error_rail_when_unanswerable() {
+    dotenvy::dotenv().ok();
+    if std::env::var("OPENAI_API_KEY").map(|k| k.is_empty()).unwrap_or(true) {
+        eprintln!("skipping branch_routes_error_rail_when_unanswerable: OPENAI_API_KEY not set");
+        return;
+    }
+    let ctx = AgentRuntimeContext::from_environment().expect("runtime context");
+
+    let summary =
+        FlowExecutor::new(&ctx, unanswerable_flow(), ".", "coding-agent", DEFAULT_MODEL, &json!({}), None)
+            .expect("construct executor")
+            .run()
+            .await
+            .expect("run flow");
+
+    // The run reaches the error terminal — it must NOT reach say_temp, and must
+    // NOT report a non-error terminal as if the branch succeeded.
+    assert_eq!(
+        terminal_node(&summary),
+        "handle_err",
+        "expected error rail; _last={}, trace={:?}",
+        summary.variables.get("_last").cloned().unwrap_or(Value::Null),
+        summary.steps
+    );
+}

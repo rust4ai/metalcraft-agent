@@ -14,10 +14,11 @@ use metalcraft_flows::{
     evaluate,
     next_by_handle,
     nodes::{
-        ApprovalData, BranchData, ConditionalData, EntryData, HttpData, PromptData,
+        ApprovalData, BranchData, BranchOutput, ConditionalData, EntryData, HttpData, PromptData,
         SetVariableData, SubAgentData, ToolData, WaitData,
     },
-    resolve_template, CoreNodeType, FlowNode, FlowNodeType, Operator, SavedFlow, Variables,
+    resolve_template, BRANCH_ERROR_HANDLE, CoreNodeType, FlowNode, FlowNodeType, Operator,
+    SavedFlow, Variables,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -739,18 +740,32 @@ impl<'a> FlowExecutor<'a> {
         let executor = Executor::new_from_arc(graph).max_steps(30);
         let outcome = executor.run(AgentState::new(query), "flow-branch").await;
 
-        let chosen = match outcome {
-            Ok(RunOutcome::Completed(state)) => find_last_handle_call(&state, &handle_names),
-            _ => None,
+        // Extract the terminal handle selection, or a reason describing the
+        // protocol failure that prevented one (LLM/API error, timeout, step
+        // budget exhausted, or a completion with no terminal tool call).
+        let selection = match outcome {
+            Ok(RunOutcome::Completed(state)) => find_last_handle_call(&state, &handle_names)
+                .ok_or_else(|| {
+                    "branch agent finished without selecting an output handle".to_string()
+                }),
+            Ok(RunOutcome::Interrupted { reason, .. }) => {
+                Err(format!("branch agent interrupted: {reason}"))
+            }
+            Ok(RunOutcome::Failed { node: n, error, .. }) => {
+                Err(format!("branch agent failed at {n}: {error}"))
+            }
+            Err(e) => Err(format!("branch agent error: {e}")),
         };
 
-        match chosen {
-            Some((handle, args)) => {
-                let payload = if wrapped.get(&handle).copied().unwrap_or(false) {
-                    args.get("value").cloned().unwrap_or(Value::Null)
-                } else {
-                    args
-                };
+        // Validate the chosen handle's payload against its declared schema. A
+        // malformed payload (a scalar handle selected without its value, or an
+        // object payload missing a required field) is a protocol fault — routed
+        // like any other failure rather than smuggled downstream as success.
+        let selection = selection
+            .and_then(|(handle, args)| validate_branch_payload(handle, args, &wrapped, &data.outputs));
+
+        match selection {
+            Ok((handle, payload)) => {
                 if let Some(out) = data.outputs.iter().find(|o| o.handle == handle)
                     && let Some(var) = &out.var
                 {
@@ -759,10 +774,70 @@ impl<'a> FlowExecutor<'a> {
                 self.variables.set_last(payload);
                 Ok(Route::Handle(Some(handle)))
             }
-            // No valid choice (timeout / model error) → fall back.
-            None => Ok(Route::Handle(data.default_handle.clone())),
+            // Protocol failure: expose the reason as `_last` and route the
+            // reserved `error` rail (or the legacy `default_handle` if the flow
+            // still sets one). When neither is wired, the drive loop fails the
+            // run loudly rather than reporting a false success.
+            Err(reason) => {
+                self.variables.set_last(Value::String(reason));
+                let handle = data
+                    .default_handle
+                    .clone()
+                    .unwrap_or_else(|| BRANCH_ERROR_HANDLE.to_string());
+                Ok(Route::Handle(Some(handle)))
+            }
         }
     }
+}
+
+/// Unwrap and structurally validate a classifier's terminal tool call against
+/// the chosen handle's declared schema. Returns the routed `(handle, payload)`,
+/// or a reason string when the payload is malformed (a scalar handle selected
+/// without its `value`, or an object payload missing a required field) — which
+/// the caller routes down the reserved `error` rail.
+fn validate_branch_payload(
+    handle: String,
+    args: Value,
+    wrapped: &HashMap<String, bool>,
+    outputs: &[BranchOutput],
+) -> Result<(String, Value), String> {
+    let payload = if wrapped.get(&handle).copied().unwrap_or(false) {
+        match args.get("value") {
+            Some(v) => v.clone(),
+            None => {
+                return Err(format!(
+                    "branch handle '{handle}' selected without its required value"
+                ));
+            }
+        }
+    } else {
+        args
+    };
+    if let Some(missing) = outputs
+        .iter()
+        .find(|o| o.handle == handle)
+        .and_then(|o| missing_required_field(o.schema.as_ref(), &payload))
+    {
+        return Err(format!(
+            "branch handle '{handle}' payload missing required field '{missing}'"
+        ));
+    }
+    Ok((handle, payload))
+}
+
+/// If `schema` is an object schema with a `required` array, return the first
+/// required property absent from `payload`. A lightweight structural check — not
+/// full JSON Schema validation — enough to catch a classifier that selected a
+/// handle without filling its mandatory fields.
+fn missing_required_field(schema: Option<&Value>, payload: &Value) -> Option<String> {
+    let required = schema?.get("required")?.as_array()?;
+    let obj = payload.as_object();
+    for key in required.iter().filter_map(|r| r.as_str()) {
+        if !obj.is_some_and(|o| o.contains_key(key)) {
+            return Some(key.to_string());
+        }
+    }
+    None
 }
 
 /// Adapt an output handle's declared `schema` into a function-parameters object
@@ -1123,31 +1198,48 @@ pub fn lint_flow(flow: &SavedFlow) -> Vec<String> {
     };
     let has_any_out = |node: &str| -> bool { def.edges.iter().any(|e| e.source == node) };
 
-    // 1. Nodes that emit `ok`/`error` but wire neither an `error` edge nor an
-    //    unlabeled fallback: a failure there will fail the whole run.
+    // 1. Nodes that route an `error` handle on failure but wire neither an
+    //    `error` edge nor an unlabeled fallback: a failure there fails the run.
     for n in &def.nodes {
-        // Nodes that route to an `error` handle on failure. (`branch` is
-        // excluded: it routes to its typed outputs / default_handle, never
-        // `error`.)
-        let emits_error = matches!(
-            &n.node_type,
+        match &n.node_type {
+            // These emit `ok`/`error`: safe if `error` or an unlabeled edge exists.
             FlowNodeType::Core(
                 CoreNodeType::Prompt
-                    | CoreNodeType::Tool
-                    | CoreNodeType::Http
-                    | CoreNodeType::SubAgent
-            )
-        );
-        if emits_error
-            && has_any_out(&n.id)
-            && !has_edge(&n.id, Some("error"))
-            && !has_edge(&n.id, None)
-        {
-            warnings.push(format!(
-                "node '{}' ({}) has no 'error' edge (and no unlabeled fallback): a failure here will fail the whole run",
-                n.id,
-                n.node_type.as_wire()
-            ));
+                | CoreNodeType::Tool
+                | CoreNodeType::Http
+                | CoreNodeType::SubAgent,
+            ) => {
+                if has_any_out(&n.id)
+                    && !has_edge(&n.id, Some("error"))
+                    && !has_edge(&n.id, None)
+                {
+                    warnings.push(format!(
+                        "node '{}' ({}) has no 'error' edge (and no unlabeled fallback): a failure here will fail the whole run",
+                        n.id,
+                        n.node_type.as_wire()
+                    ));
+                }
+            }
+            // `branch` routes its reserved `error` rail on a protocol failure
+            // unless a `default_handle` absorbs it. Safe if any of those (or an
+            // unlabeled fallback) is wired.
+            FlowNodeType::Core(CoreNodeType::Branch) => {
+                let has_default = serde_json::from_value::<BranchData>(n.data.clone())
+                    .ok()
+                    .and_then(|d| d.default_handle)
+                    .is_some();
+                if has_any_out(&n.id)
+                    && !has_edge(&n.id, Some("error"))
+                    && !has_default
+                    && !has_edge(&n.id, None)
+                {
+                    warnings.push(format!(
+                        "node '{}' (branch) has no 'error' edge or default_handle (and no unlabeled fallback): a protocol failure here will fail the whole run",
+                        n.id
+                    ));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1528,5 +1620,109 @@ mod tests {
         assert!(w.iter().any(|x| x.contains("missing")), "want dangling ref: {w:?}");
         // `topic` is a declared input, so it must NOT be flagged.
         assert!(!w.iter().any(|x| x.contains("{{topic}}")), "topic is known: {w:?}");
+    }
+
+    // ----- branch error-rail helpers (offline) -----
+
+    fn out(handle: &str, schema: Option<Value>) -> BranchOutput {
+        BranchOutput { handle: handle.into(), description: None, schema, var: None }
+    }
+    fn tool_call(name: &str, args: Value) -> AgentMessage {
+        AgentMessage::ToolCall { id: "1".into(), call_id: None, name: name.into(), args }
+    }
+
+    #[test]
+    fn missing_required_field_flags_absent_key() {
+        let schema = json!({ "type": "object", "required": ["city"], "properties": {} });
+        assert_eq!(
+            missing_required_field(Some(&schema), &json!({ "temp": 1 })),
+            Some("city".to_string())
+        );
+        assert_eq!(missing_required_field(Some(&schema), &json!({ "city": "Madrid" })), None);
+        // No schema / no `required` array → nothing to check.
+        assert_eq!(missing_required_field(None, &json!({})), None);
+        assert_eq!(missing_required_field(Some(&json!({ "type": "string" })), &json!("x")), None);
+    }
+
+    #[test]
+    fn validate_branch_payload_unwraps_scalar_and_validates_objects() {
+        let outputs = vec![
+            out("temp", Some(json!({ "type": "integer" }))),
+            out("ticket", Some(json!({ "type": "object", "required": ["id"] }))),
+        ];
+        let wrapped = HashMap::from([("temp".to_string(), true), ("ticket".to_string(), false)]);
+
+        // Wrapped scalar: the `value` field is unwrapped into the bare payload.
+        assert_eq!(
+            validate_branch_payload("temp".into(), json!({ "value": 72 }), &wrapped, &outputs),
+            Ok(("temp".to_string(), json!(72)))
+        );
+        // Wrapped scalar selected without its value → protocol error.
+        assert!(validate_branch_payload("temp".into(), json!({}), &wrapped, &outputs)
+            .unwrap_err()
+            .contains("without its required value"));
+        // Object payload missing a required field → protocol error.
+        assert!(validate_branch_payload("ticket".into(), json!({ "note": "x" }), &wrapped, &outputs)
+            .unwrap_err()
+            .contains("missing required field 'id'"));
+        // Well-formed object passes through verbatim.
+        assert_eq!(
+            validate_branch_payload("ticket".into(), json!({ "id": "T-1" }), &wrapped, &outputs),
+            Ok(("ticket".to_string(), json!({ "id": "T-1" })))
+        );
+    }
+
+    #[test]
+    fn find_last_handle_call_picks_terminal_selection() {
+        let handles = vec!["hot".to_string(), "cold".to_string()];
+        let mut state = AgentState::new("classify");
+        state.messages.push(tool_call("weather", json!({ "city": "Madrid" }))); // a work tool
+        state.messages.push(tool_call("cold", json!({ "value": 18 }))); // the terminal handle
+        assert_eq!(
+            find_last_handle_call(&state, &handles),
+            Some(("cold".to_string(), json!({ "value": 18 })))
+        );
+
+        // No terminal handle call at all → None (a protocol failure upstream).
+        let mut bare = AgentState::new("classify");
+        bare.messages.push(tool_call("weather", json!({})));
+        assert_eq!(find_last_handle_call(&bare, &handles), None);
+    }
+
+    #[test]
+    fn branch_without_error_or_default_is_linted() {
+        // A branch with only its typed outputs wired (no `error`, no default,
+        // no unlabeled fallback) must be flagged: a protocol failure fails the run.
+        let flow = saved(
+            vec![
+                node("entry", "entry", json!({ "schedule_type": "manual" })),
+                node("b", "branch", json!({
+                    "query": "classify",
+                    "outputs": [ { "handle": "hot" }, { "handle": "cold" } ]
+                })),
+                node("h", "end", json!({ "status": "hot" })),
+                node("c", "end", json!({ "status": "cold" })),
+            ],
+            vec![
+                edge("e0", "entry", "b", None),
+                edge("e1", "b", "h", Some("hot")),
+                edge("e2", "b", "c", Some("cold")),
+            ],
+        );
+        let w = lint_flow(&flow);
+        assert!(
+            w.iter().any(|x| x.contains("(branch) has no 'error' edge or default_handle")),
+            "want branch error-rail warning: {w:?}"
+        );
+
+        // Wiring an `error` edge silences it.
+        let mut wired = flow.clone();
+        wired.flow.nodes.push(node("err", "end", json!({ "status": "err" })));
+        wired.flow.edges.push(edge("e3", "b", "err", Some("error")));
+        let w2 = lint_flow(&wired);
+        assert!(
+            !w2.iter().any(|x| x.contains("(branch) has no 'error' edge")),
+            "error edge should silence the warning: {w2:?}"
+        );
     }
 }
