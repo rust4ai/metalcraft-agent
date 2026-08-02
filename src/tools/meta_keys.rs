@@ -47,6 +47,7 @@ impl metalcraft::Tool for KeyListTool {
                     "name": name,
                     "packs": packs,
                     "configured": crate::key_store::lookup(&name).is_some(),
+                    "managed": crate::key_store::is_env_authoritative(&name),
                 })
             })
             .collect();

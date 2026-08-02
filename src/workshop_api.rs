@@ -186,6 +186,10 @@ struct RecommendedKey {
     name: String,
     configured: bool,
     packs: Vec<String>,
+    /// Platform-managed (env-authoritative, e.g. `METALCRAFT_TOKEN` injected into a
+    /// provisioned pod). The UI should show it as provided/read-only rather than
+    /// prompting the user to paste a value.
+    managed: bool,
 }
 
 // ── Auth middleware ─────────────────────────────────────────────────────
@@ -702,6 +706,7 @@ async fn list_recommended_keys() -> Json<Vec<RecommendedKey>> {
         .into_iter()
         .map(|(name, packs)| RecommendedKey {
             configured: crate::key_store::lookup(&name).is_some(),
+            managed: crate::key_store::is_env_authoritative(&name),
             name,
             packs,
         })

@@ -6,6 +6,12 @@
 //! falls back to a process environment variable so existing env-based config
 //! (`OPENAI_API_KEY`, a pack's `$GITHUB_TOKEN`, …) keeps working.
 //!
+//! **Precedence exception:** for a small [`ENV_AUTHORITATIVE`] set (currently
+//! `METALCRAFT_TOKEN`), a non-empty environment value *wins over* keys.json. The
+//! k3s control plane injects `METALCRAFT_TOKEN` into each pod; a stale key a user
+//! once pasted must never shadow the freshly injected one. For every other key,
+//! resolution stays store-first (so a user can override env-based defaults).
+//!
 //! Stored in **plaintext** — protection relies on OS file permissions, the same
 //! as the app's other on-disk state. Never log values; the workshop API only
 //! ever exposes [`mask`]ed previews.
@@ -94,15 +100,40 @@ pub fn mask(value: &str) -> String {
     format!("{first}…{last}")
 }
 
-/// Resolve `name` to a value: **key store first, then process environment**.
-/// This is the single resolution point for `$VAR` expansion in HTTP-API tools.
-/// Returns `None` if set in neither place.
+/// Keys whose value the process **environment is authoritative for** — an injected
+/// env value always wins over anything in keys.json. These are provisioned by the
+/// platform (the k3s control plane injects `METALCRAFT_TOKEN` into the pod), so a
+/// stale stored key can never shadow the freshly minted, injected token.
+pub const ENV_AUTHORITATIVE: &[&str] = &["METALCRAFT_TOKEN"];
+
+/// Whether `name` is platform-managed (env wins, not user-settable via keys.json).
+pub fn is_env_authoritative(name: &str) -> bool {
+    ENV_AUTHORITATIVE.contains(&name)
+}
+
+/// Resolve `name` to a value. **Store-first, then process environment** — except
+/// for [`ENV_AUTHORITATIVE`] keys, where a non-empty env value takes precedence so
+/// a platform-injected token is never shadowed by a stale keys.json entry. This is
+/// the single resolution point for `$VAR` expansion in HTTP-API tools. Returns
+/// `None` if set in neither place.
 pub fn lookup(name: &str) -> Option<String> {
-    let store = KeyStore::load(&paths::keys_file());
-    if let Some(v) = store.get(name) {
-        return Some(v.to_string());
+    let stored = KeyStore::load(&paths::keys_file()).get(name).map(str::to_string);
+    let env = std::env::var(name).ok();
+    resolve(name, stored, env)
+}
+
+/// Pure precedence rule behind [`lookup`], split out so it's unit-testable without
+/// touching global env or the on-disk keys.json. For [`ENV_AUTHORITATIVE`] keys a
+/// non-empty `env` value wins; otherwise `stored` wins, then `env`.
+pub fn resolve(name: &str, stored: Option<String>, env: Option<String>) -> Option<String> {
+    if is_env_authoritative(name) {
+        if let Some(v) = env.as_deref() {
+            if !v.trim().is_empty() {
+                return env;
+            }
+        }
     }
-    std::env::var(name).ok()
+    stored.or(env)
 }
 
 #[cfg(test)]
@@ -172,5 +203,37 @@ mod tests {
         assert_eq!(mask(""), "••••");
         assert_eq!(mask("12345678"), "••••");
         assert_eq!(mask("sb_live_abcd1234"), "sb_l…1234");
+    }
+
+    #[test]
+    fn ordinary_key_is_store_first() {
+        // A normal key: keys.json wins over env (lets a user override env defaults).
+        let got = resolve("OPENAI_API_KEY", Some("stored".into()), Some("from-env".into()));
+        assert_eq!(got.as_deref(), Some("stored"));
+        // …and falls back to env when unstored.
+        let got = resolve("OPENAI_API_KEY", None, Some("from-env".into()));
+        assert_eq!(got.as_deref(), Some("from-env"));
+    }
+
+    #[test]
+    fn metalcraft_token_is_env_authoritative() {
+        assert!(is_env_authoritative("METALCRAFT_TOKEN"));
+        // The platform-injected env token must beat a stale stored one.
+        let got = resolve(
+            "METALCRAFT_TOKEN",
+            Some("mck_stale_stored".into()),
+            Some("mck_injected_by_pod".into()),
+        );
+        assert_eq!(got.as_deref(), Some("mck_injected_by_pod"));
+    }
+
+    #[test]
+    fn metalcraft_token_falls_back_to_store_when_env_absent_or_empty() {
+        // No env → use the stored one (e.g. a self-hosted user who pasted a key).
+        let got = resolve("METALCRAFT_TOKEN", Some("mck_stored".into()), None);
+        assert_eq!(got.as_deref(), Some("mck_stored"));
+        // Empty/blank env must not shadow a real stored token.
+        let got = resolve("METALCRAFT_TOKEN", Some("mck_stored".into()), Some("   ".into()));
+        assert_eq!(got.as_deref(), Some("mck_stored"));
     }
 }
