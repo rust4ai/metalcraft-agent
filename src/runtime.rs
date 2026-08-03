@@ -152,14 +152,18 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
 /// via the injected `METALCRAFT_TOKEN`). `openai::Client::new` ignores the base URL;
 /// this mirrors rig's own `from_env` (builder + optional `base_url`).
 ///
-/// Returns a **completions** client (`.completions_api()`): rig 0.38's default
-/// `openai::Client` targets OpenAI's Responses API and POSTs to `{base}/responses`,
-/// but the Metalcraft Inference gateway is an OpenAI-compatible **chat/completions**
-/// proxy (`POST {base}/chat/completions`) and has no `/responses` route — so the
-/// default client's calls fall through to the gateway's SPA fallback and 405. Using
-/// the completions client makes every `completion_model(...)` here speak
-/// chat/completions, which both the gateway and api.openai.com implement.
-pub fn build_openai_client(api_key: &str) -> Result<openai::CompletionsClient, Box<dyn std::error::Error>> {
+/// Returns rig 0.38's **default** client, which targets OpenAI's **Responses API**
+/// and POSTs to `{base}/responses`. We deliberately do NOT use `.completions_api()`
+/// here: the chat/completions surface strictly requires every assistant
+/// `tool_calls` message to be immediately followed by its tool responses, but the
+/// agent's per-call message layout serializes parallel tool calls as separate
+/// assistant messages (see the note in the `metalcraft` crate,
+/// `docs/PARALLEL_TOOL_CALL_ORPHANS.md`), which chat/completions rejects with a 400
+/// ("tool_call_ids did not have response messages"). The Responses API tolerates
+/// that layout, so the agent works. The gateway implements `POST {base}/responses`
+/// as a passthrough (see metalcraft-inference `controllers::responses`), so routing
+/// through it still bills credits.
+pub fn build_openai_client(api_key: &str) -> Result<openai::Client, Box<dyn std::error::Error>> {
     let mut builder = openai::Client::builder().api_key(api_key);
     if let Ok(base) = std::env::var("OPENAI_BASE_URL") {
         let base = base.trim();
@@ -167,7 +171,7 @@ pub fn build_openai_client(api_key: &str) -> Result<openai::CompletionsClient, B
             builder = builder.base_url(base);
         }
     }
-    Ok(builder.build()?.completions_api())
+    Ok(builder.build()?)
 }
 
 impl AgentRuntimeContext {
@@ -228,7 +232,7 @@ pub fn build_agent_runtime<M>(
     llm_call_hook: Option<LlmCallHook>,
     llm_response_hook: Option<LlmResponseHook>,
     options: RuntimeOptions,
-    make_compaction_model: impl FnOnce(&openai::CompletionsClient, &str) -> M,
+    make_compaction_model: impl FnOnce(&openai::Client, &str) -> M,
 ) -> Result<BuiltAgentRuntime<M>, Box<dyn std::error::Error>>
 where
     M: CompletionModel + 'static,

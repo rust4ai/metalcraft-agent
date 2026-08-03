@@ -74,6 +74,29 @@ impl metalcraft::Tool for SubAgentTool {
                     tool: "sub_agent".into(),
                     message: format!("Failed to load persona '{slug}': {e}"),
                 })?;
+
+            // Fail fast if the persona depends on integration packs that aren't
+            // enabled. Otherwise its pack-scoped tools resolve to nothing, the
+            // model calls a tool that isn't registered, and the dropped call
+            // leaves an orphaned assistant tool_call the OpenAI API rejects with
+            // an opaque 400. A clear, actionable error here is far better.
+            let missing: Vec<String> = persona
+                .packs
+                .iter()
+                .filter(|p| !crate::integration_packs::is_enabled(p))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                return Ok(serde_json::json!({
+                    "error": true,
+                    "result": format!(
+                        "Persona '{slug}' requires integration pack(s) {missing:?} that are not \
+                         enabled, so its tools are unavailable. Enable them first (pack_enable), \
+                         which also installs their resources, then retry."
+                    ),
+                }));
+            }
+
             let base_prompt = persona.build_system_prompt(&crate::paths::skills_dir(), ".");
             let config = crate::tools::ToolConfig {
                 api_key: self.api_key.clone(),
@@ -149,9 +172,10 @@ impl metalcraft::Tool for SubAgentTool {
             (registry, sub_prompt)
         };
 
-        // Route through the same gateway-aware, chat/completions client the main
-        // runtime uses — `openai::Client::new` would ignore OPENAI_BASE_URL (bypass
-        // the Metalcraft Inference gateway) and default to the Responses API.
+        // Route through the same gateway-aware client the main runtime uses — this
+        // honors OPENAI_BASE_URL (so sub-agent inference is billed through the
+        // Metalcraft Inference gateway) and uses the Responses API, which tolerates
+        // the agent's parallel-tool-call message layout (see build_openai_client).
         let client = crate::runtime::build_openai_client(&self.api_key).map_err(|e| {
             metalcraft::GraphError::ToolCallFailed {
                 tool: "sub_agent".into(),
