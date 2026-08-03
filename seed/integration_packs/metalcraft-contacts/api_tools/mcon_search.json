@@ -1,0 +1,15 @@
+{
+  "name": "mcon_search",
+  "description": "Full-text search across the account's contacts (name, organization, nickname, notes, and email/phone values), ranked by relevance. Returns the same summary shape as mcon_list_contacts. Use when a plain name filter isn't enough — e.g. searching by something written in a contact's notes. `q` is required.",
+  "method": "GET",
+  "url": "https://contacts.metalcraftai.com/api/v1/search?q={q}",
+  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Accept": "application/json" },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "q": { "type": "string", "description": "Search query." }
+    },
+    "required": ["q"]
+  },
+  "body_mapping": "none"
+}

@@ -1,0 +1,35 @@
+{
+  "name": "mcon_update_contact",
+  "description": "Update a contact by `slug`. REPLACES the fields you send and leaves the rest untouched. IMPORTANT: the repeatable fields (phones/emails/urls/addresses) and tags are WHOLE arrays — to add or change one entry, call mcon_get_contact first, modify the full array, and resend it complete; a partial array overwrites the list. Set birth_month + birth_day together. Optionally pass `base_version` (from mcon_get_contact) to guard against a stale overwrite — a mismatch returns 409. Requires the write scope. Returns the updated contact.",
+  "method": "PATCH",
+  "url": "https://contacts.metalcraftai.com/api/v1/contacts/{slug}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "slug": { "type": "string", "description": "Contact slug to update." },
+      "display_name": { "type": "string" },
+      "given_name": { "type": "string" },
+      "family_name": { "type": "string" },
+      "nickname": { "type": "string" },
+      "organization": { "type": "string" },
+      "job_title": { "type": "string" },
+      "birth_month": { "type": "integer", "description": "1-12. Set with birth_day." },
+      "birth_day": { "type": "integer", "description": "1-31. Set with birth_month." },
+      "birth_year": { "type": "integer" },
+      "notes": { "type": "string", "description": "Freeform markdown (replaces)." },
+      "tags": { "type": "array", "items": { "type": "string" }, "description": "Whole array (replaces)." },
+      "phones": { "type": "array", "items": { "type": "object" }, "description": "Whole array (replaces)." },
+      "emails": { "type": "array", "items": { "type": "object" }, "description": "Whole array (replaces)." },
+      "urls": { "type": "array", "items": { "type": "object" }, "description": "Whole array (replaces)." },
+      "addresses": { "type": "array", "items": { "type": "object" }, "description": "Whole array (replaces)." },
+      "base_version": { "type": "integer", "description": "Optional optimistic-concurrency guard (from mcon_get_contact.version)." }
+    },
+    "required": ["slug"]
+  },
+  "body_mapping": "params"
+}

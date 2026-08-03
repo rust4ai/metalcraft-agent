@@ -1,0 +1,15 @@
+{
+  "name": "mcon_get_contact",
+  "description": "Get one contact in full by `slug` (from mcon_list_contacts / mcon_search). Returns every field: display_name, given_name, family_name, nickname, organization, job_title, birth_month, birth_day, birth_year, notes (markdown), tags[], and the repeatable arrays phones/emails/urls ([{label,value}]) and addresses ([{label,street,city,region,postal,country}]), plus version and photo_updated_at. Read this before mcon_update_contact so you can resend whole arrays correctly.",
+  "method": "GET",
+  "url": "https://contacts.metalcraftai.com/api/v1/contacts/{slug}",
+  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Accept": "application/json" },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "slug": { "type": "string", "description": "Contact slug." }
+    },
+    "required": ["slug"]
+  },
+  "body_mapping": "none"
+}
