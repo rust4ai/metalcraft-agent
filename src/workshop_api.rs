@@ -2528,6 +2528,8 @@ async fn handle_pipestreamr_webhook(
                     detail: Some("invalid or missing X-PipeStreamr-Signature".into()),
                     ..Default::default()
                 });
+                // A rotated gateway secret is the usual cause — self-heal (rate-limited).
+                crate::metalcraft_gateway::maybe_reactive_resync();
                 return StatusCode::FORBIDDEN;
             }
         }

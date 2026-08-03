@@ -102,6 +102,15 @@ run end-to-end against live infra):
   commands, `provisioner` wire type, and the **inline** Connect panel in `GatewayView.tsx`
   (status → register → show code → poll-verify → Connect). tsc clean.
 
-Remaining (Phase 3): auto-reconnect/heal (re-sync on secret rotation or number
-reassignment) + a persistent status chip. Not built. First real run needs a premium
-account with a pod + the gateway deployed with `POD_PUBLIC_URL` reachable.
+**Phase 3 — BUILT.** Self-heal + status chip:
+- **agent** (v0.10.1): `metalcraft_gateway::resync()` (idempotent re-sync — full `connect`
+  when `POD_PUBLIC_URL` is known, else refresh secret + `integration_id`/`from` from
+  `GET /phone`), a periodic `heal_loop()` (spawned in `daemon.rs`, every
+  `METALCRAFT_GATEWAY_HEAL_SECS`, default 600s), and `maybe_reactive_resync()` fired from
+  the pipestreamr webhook's signature-reject branch (rate-limited 1/30s) so a rotated
+  secret self-heals on the next inbound.
+- **workshop** (tauri v0.5.1): a persistent `MgStatusChip` on the connected channel's row
+  (connected / register / verify / connect / attention), fed by `gateway_metalcraft_status`.
+
+First real run still needs a premium account + a pod + the gateway deployed with
+`POD_PUBLIC_URL` reachable. Nothing left unbuilt in this plan.

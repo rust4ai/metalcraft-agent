@@ -143,6 +143,10 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
         log::info!("Workshop API spawned on port {port}");
     }
 
+    // Self-heal the Metalcraft Gateway connection (rotated secret / reassigned
+    // number) — no-op while nothing is connected.
+    tokio::spawn(async move { crate::metalcraft_gateway::heal_loop().await });
+
     // Always-visible startup banner, printed regardless of RUST_LOG.
     println!("──────────────────────────────────────────────");
     println!("  metalcraft-daemon running");

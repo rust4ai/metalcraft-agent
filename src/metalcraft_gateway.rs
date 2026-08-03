@@ -229,3 +229,120 @@ pub async fn register(phone_number: &str) -> Result<serde_json::Value, String> {
     }
     serde_json::from_str(&text).map_err(|e| format!("failed to parse register response: {e}"))
 }
+
+// ── Self-heal (Phase 3) ──────────────────────────────────────────────────────
+
+/// Re-sync the connection so a **rotated webhook secret** or a **reassigned number**
+/// heals itself. No-op (`Ok`) unless an enabled `metalcraft-gateway` channel exists.
+/// When `POD_PUBLIC_URL` is known it does a full [`connect`] (also re-registering the
+/// webhook); otherwise it refreshes the secret + `integration_id`/`from` from
+/// `GET /api/v1/phone` without touching the webhook.
+pub async fn resync() -> Result<(), String> {
+    let Some(inst) = crate::gateway_channels::load_instances()
+        .into_iter()
+        .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)
+    else {
+        return Ok(()); // nothing connected — stay quiet
+    };
+
+    if webhook_base(None).is_some() {
+        return match connect(None).await {
+            Ok(_) => Ok(()),
+            // A membership lapse mid-life shouldn't spam errors.
+            Err(e) if e == VERIFY_REQUIRED => Ok(()),
+            Err(e) => Err(e),
+        };
+    }
+
+    // No public URL: refresh secret + routing from /phone.
+    #[derive(Deserialize)]
+    struct P {
+        #[serde(default)]
+        verified: bool,
+        #[serde(default)]
+        active_number: Option<String>,
+        #[serde(default)]
+        integration_id: Option<String>,
+        #[serde(default)]
+        signing_secret: Option<String>,
+    }
+    let gw = gateway_url();
+    let tok = token()?;
+    let resp = client()?
+        .get(format!("{gw}/api/v1/phone"))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .map_err(|e| format!("phone fetch failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("gateway /phone returned HTTP {}", resp.status().as_u16()));
+    }
+    let p: P = resp.json().await.map_err(|e| format!("parse /phone: {e}"))?;
+    if !p.verified {
+        return Ok(()); // no longer verified — leave config as-is
+    }
+    if let Some(secret) = p.signing_secret.filter(|s| !s.is_empty()) {
+        let path = crate::paths::keys_file();
+        let mut store = crate::key_store::KeyStore::load(&path);
+        if store.get("PIPESTREAMR_WEBHOOK_SECRET") != Some(secret.as_str()) {
+            store.upsert("PIPESTREAMR_WEBHOOK_SECRET", &secret);
+            store.save(&path).map_err(|e| format!("write keys: {e}"))?;
+        }
+    }
+    if let (Some(iid), Some(from)) = (p.integration_id, p.active_number) {
+        let drifted =
+            inst.settings.get("integration_id") != Some(&iid) || inst.settings.get("from") != Some(&from);
+        if drifted {
+            let mut s = inst.settings.clone();
+            s.insert("integration_id".into(), iid);
+            s.insert("from".into(), from);
+            crate::gateway_channels::update_instance(&inst.id, &inst.name, true, s)?;
+        }
+    }
+    Ok(())
+}
+
+/// Periodic self-heal: re-sync every `METALCRAFT_GATEWAY_HEAL_SECS` (default 600).
+/// Spawned by the daemon; no-op while nothing is connected.
+pub async fn heal_loop() {
+    let secs = std::env::var("METALCRAFT_GATEWAY_HEAL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(600);
+    let interval = std::time::Duration::from_secs(secs);
+    loop {
+        tokio::time::sleep(interval).await;
+        if let Err(e) = resync().await {
+            log::warn!("metalcraft-gateway heal: {e}");
+        }
+    }
+}
+
+fn reactive_gate() -> &'static std::sync::Mutex<Option<std::time::Instant>> {
+    static G: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    G.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Fire-and-forget reactive heal: call this when an inbound webhook signature is
+/// rejected (a rotated secret is the usual cause). Rate-limited to once / 30s.
+pub fn maybe_reactive_resync() {
+    const MIN_GAP: std::time::Duration = std::time::Duration::from_secs(30);
+    {
+        let mut last = reactive_gate().lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        if let Some(t) = *last
+            && now.duration_since(t) < MIN_GAP
+        {
+            return;
+        }
+        *last = Some(now);
+    }
+    tokio::spawn(async move {
+        match resync().await {
+            Ok(()) => log::info!("metalcraft-gateway: reactive re-sync after signature rejection"),
+            Err(e) => log::warn!("metalcraft-gateway reactive re-sync failed: {e}"),
+        }
+    });
+}
