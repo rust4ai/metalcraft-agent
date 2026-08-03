@@ -30,12 +30,14 @@ fn token() -> Result<String, String> {
         .ok_or_else(|| "METALCRAFT_TOKEN is not set — this pod isn't linked to a Metalcraft ID account".to_string())
 }
 
-/// The pod's public base URL for its inbound webhook: an explicit override, else the
-/// injected `POD_PUBLIC_URL`.
+/// The pod's public base URL for its inbound webhook. Prefer the infra-injected
+/// `POD_PUBLIC_URL` (authoritative), falling back to an explicit override supplied by
+/// the caller (e.g. the workshop passing the URL it already uses to reach the pod).
 fn webhook_base(explicit: Option<String>) -> Option<String> {
-    explicit
+    std::env::var("POD_PUBLIC_URL")
+        .ok()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("POD_PUBLIC_URL").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| explicit.filter(|s| !s.trim().is_empty()))
         .map(|s| s.trim().trim_end_matches('/').to_string())
 }
 
