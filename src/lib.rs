@@ -11,6 +11,7 @@ pub mod flows;
 pub mod gateway_activity;
 pub mod gateway_channels;
 pub mod guard;
+pub mod hub_auth;
 pub mod integration_packs;
 pub mod key_store;
 pub mod metalcraft_gateway;

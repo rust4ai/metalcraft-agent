@@ -1,13 +1,10 @@
 {
   "id": "pipestreamr",
   "name": "PipeStreamr",
-  "description": "WhatsApp (and more) via the PipeStreamr passthru. Outbound replies go through PipeStreamr's /api/v1/messages/send; inbound messages arrive as PipeStreamr webhooks. Point your PipeStreamr project webhook at <daemon>/webhook/pipestreamr.",
-  "version": "1.2.0",
+  "description": "WhatsApp (and more) via the PipeStreamr passthru. Outbound replies go through PipeStreamr's /api/v1/messages/send; inbound messages arrive as PipeStreamr webhooks. Point your PipeStreamr project webhook at <daemon>/webhook/pipestreamr. This channel's API key and webhook secret are stored as its own scoped secrets (in the Keys tab, under this channel) — not as account-wide keys.",
+  "version": "2.0.0",
   "adapter": "pipestreamr",
-  "requires_env": [
-    "PIPESTREAMR_API_KEY",
-    "PIPESTREAMR_WEBHOOK_SECRET"
-  ],
+  "requires_env": [],
   "settings": [
     {
       "key": "integration_id",
@@ -24,6 +21,33 @@
       "required": false,
       "placeholder": "+14155238886",
       "help": "Optional — the WhatsApp number behind this integration, shown for reference. Routing uses the integration ID, not this number."
+    },
+    {
+      "key": "API_KEY",
+      "label": "PipeStreamr API key",
+      "input_type": "password",
+      "required": true,
+      "secret": true,
+      "placeholder": "ps_live_…",
+      "help": "Bearer key for PipeStreamr's send API. Stored as this channel's own secret, not an account-wide key."
+    },
+    {
+      "key": "WEBHOOK_SECRET",
+      "label": "Webhook signing secret",
+      "input_type": "password",
+      "required": true,
+      "secret": true,
+      "placeholder": "whsec_…",
+      "help": "HMAC-SHA256 secret used to verify inbound webhooks. Set the same value on your PipeStreamr webhook."
+    },
+    {
+      "key": "BASE_URL",
+      "label": "API base URL (optional)",
+      "input_type": "text",
+      "required": false,
+      "secret": true,
+      "placeholder": "https://pipestreamr.com",
+      "help": "Override only for a self-hosted PipeStreamr deployment. Leave blank for the hosted service."
     },
     {
       "key": "persona",

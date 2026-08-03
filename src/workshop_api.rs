@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::{Form, Path, State},
+    extract::{Form, Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{
@@ -170,11 +170,35 @@ struct ApiToolSummary {
 }
 
 /// A stored API key, exposed to the workshop with its value masked — the
-/// raw secret is never sent over the wire.
+/// raw secret is never sent over the wire. Used by the load-time snapshot and
+/// the sidebar (global scope only).
 #[derive(Serialize)]
 struct KeySummary {
     name: String,
     masked: String,
+}
+
+/// A stored key with its **scope** and whether it is managed (platform- or
+/// connection-owned → read-only in the UI). Returned by `GET /api/v1/keys` so
+/// the Keys page can group global keys and per-channel secrets, and lock the
+/// managed ones. `channel_id`/`channel_name` are present only for channel scope.
+#[derive(Serialize)]
+struct KeyEntry {
+    name: String,
+    masked: String,
+    /// `"global"` or `"channel"`.
+    scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_name: Option<String>,
+    managed: bool,
+}
+
+/// The raw value of a key, returned only by the explicit reveal endpoint.
+#[derive(Serialize)]
+struct KeyRevealResponse {
+    value: String,
 }
 
 /// A key recommended by one or more *enabled* integration packs (from their
@@ -206,7 +230,15 @@ async fn auth_middleware(
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default();
 
-    if provided != state.api_key {
+    // Two accepted credentials, resolved to the same "allow" outcome:
+    //   1. the static WORKSHOP_API_KEY (legacy; also the /token exchange input), or
+    //   2. a Metalcraft ID token (`mck_…`) that resolves to this pod's owner or is
+    //      audience-scoped to this pod (e.g. a connection token). See `hub_auth`.
+    // The static key is checked first (cheap, no network); the hub path only runs
+    // for `mck_` bearers.
+    let ok = (!state.api_key.is_empty() && provided == state.api_key)
+        || crate::hub_auth::verify_pod_bearer(provided).await;
+    if !ok {
         return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "unauthorized".into() })).into_response();
     }
 
@@ -260,6 +292,7 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/keys/recommended", get(list_recommended_keys))
         .route("/api/v1/keys/{name}", put(put_key))
         .route("/api/v1/keys/{name}", delete(delete_key))
+        .route("/api/v1/keys/{name}/reveal", get(reveal_key))
         .route("/api/v1/chats", get(list_chats).post(post_create_chat))
         .route("/api/v1/chats/{id}", get(get_chat).delete(delete_chat))
         .route("/api/v1/chats/{id}/turn", post(post_chat_turn))
@@ -282,6 +315,7 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/gateway/metalcraft/status", get(gateway_metalcraft_status))
         .route("/api/v1/gateway/metalcraft/register", post(gateway_metalcraft_register))
         .route("/api/v1/gateway/metalcraft/connect", post(gateway_metalcraft_connect))
+        .route("/api/v1/gateway/metalcraft/disconnect", post(gateway_metalcraft_disconnect))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         // Health check — registered after the auth layer so it stays
         // unauthenticated (for Railway / DO App Platform probes).
@@ -747,8 +781,20 @@ async fn delete_api_tool(Path(name): Path<String>) -> Response {
 #[derive(Deserialize)]
 struct KeyValueBody {
     value: String,
+    /// When set, the key is written to this channel's secret scope instead of
+    /// the global namespace.
+    #[serde(default)]
+    channel_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct KeyScopeQuery {
+    /// When set, target this channel's secret scope instead of global.
+    #[serde(default)]
+    channel_id: Option<String>,
+}
+
+/// Global-scope masked keys — for the load-time snapshot and the sidebar.
 fn list_key_summaries() -> Vec<KeySummary> {
     crate::key_store::KeyStore::load(&paths::keys_file())
         .list_masked()
@@ -757,8 +803,52 @@ fn list_key_summaries() -> Vec<KeySummary> {
         .collect()
 }
 
-async fn list_keys() -> Json<Vec<KeySummary>> {
-    Json(list_key_summaries())
+/// Whether a channel's secrets are managed by its connection (provisioner-backed
+/// types like `metalcraft-gateway`) — such secrets are read-only in the UI.
+fn is_channel_managed(channel_id: &str) -> bool {
+    crate::gateway_channels::get_instance(channel_id)
+        .and_then(|i| crate::gateway_channels::find_type(&i.type_id))
+        .and_then(|t| t.provisioner)
+        .is_some()
+}
+
+/// All stored keys with scope + managed flags, for the scope-aware Keys page.
+fn list_key_entries() -> Vec<KeyEntry> {
+    let store = crate::key_store::KeyStore::load(&paths::keys_file());
+    let instances = crate::gateway_channels::load_instances();
+    store
+        .list_scoped()
+        .into_iter()
+        .map(|(scope, name, masked)| match scope {
+            crate::key_store::KeyScope::Global => KeyEntry {
+                managed: crate::key_store::is_env_authoritative(&name),
+                name,
+                masked,
+                scope: "global".into(),
+                channel_id: None,
+                channel_name: None,
+            },
+            crate::key_store::KeyScope::Channel(id) => {
+                let inst = instances.iter().find(|i| i.id == id);
+                let managed = inst
+                    .and_then(|i| crate::gateway_channels::find_type(&i.type_id))
+                    .and_then(|t| t.provisioner)
+                    .is_some();
+                KeyEntry {
+                    name,
+                    masked,
+                    scope: "channel".into(),
+                    channel_name: inst.map(|i| i.name.clone()),
+                    channel_id: Some(id),
+                    managed,
+                }
+            }
+        })
+        .collect()
+}
+
+async fn list_keys() -> Json<Vec<KeyEntry>> {
+    Json(list_key_entries())
 }
 
 /// Keys recommended by enabled packs, each flagged configured/missing. Lets the
@@ -792,7 +882,10 @@ async fn list_recommended_keys() -> Json<Vec<RecommendedKey>> {
     Json(out)
 }
 
-/// Upsert a key. The name comes from the path; the raw value from the body.
+/// Upsert a key. The name comes from the path; the raw value (and an optional
+/// target `channel_id`) from the body. Managed keys — a platform-injected global
+/// (env-authoritative) or a provisioner-backed channel's secrets — are read-only
+/// and rejected here.
 async fn put_key(Path(name): Path<String>, Json(body): Json<KeyValueBody>) -> Response {
     if name.trim().is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "key name must not be empty");
@@ -802,21 +895,86 @@ async fn put_key(Path(name): Path<String>, Json(body): Json<KeyValueBody>) -> Re
     }
     let path = paths::keys_file();
     let mut store = crate::key_store::KeyStore::load(&path);
-    store.upsert(&name, &body.value);
+    let (scope, channel_id, channel_name) = match body.channel_id.as_deref() {
+        Some(cid) => {
+            if is_channel_managed(cid) {
+                return err_json(
+                    StatusCode::FORBIDDEN,
+                    "this channel's secrets are managed by its connection and can't be edited here",
+                );
+            }
+            store.upsert_channel(cid, &name, &body.value);
+            let cname = crate::gateway_channels::get_instance(cid).map(|i| i.name);
+            ("channel".to_string(), Some(cid.to_string()), cname)
+        }
+        None => {
+            if crate::key_store::is_env_authoritative(&name) {
+                return err_json(
+                    StatusCode::FORBIDDEN,
+                    "this key is provided by the platform and can't be edited",
+                );
+            }
+            store.upsert(&name, &body.value);
+            ("global".to_string(), None, None)
+        }
+    };
     match store.save(&path) {
-        Ok(()) => Json(KeySummary {
+        Ok(()) => Json(KeyEntry {
             masked: crate::key_store::mask(&body.value),
             name,
+            scope,
+            channel_id,
+            channel_name,
+            managed: false,
         })
         .into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write: {e}")),
     }
 }
 
-async fn delete_key(Path(name): Path<String>) -> Response {
+/// Reveal a stored key's **raw** value. An optional `?channel_id=` targets a
+/// channel's secret scope; omitted means global. This is the one endpoint that
+/// returns an unmasked value — an explicit, user-initiated action in the Keys UI.
+/// Only returns values physically present in the store (a derived/env-only value
+/// like a provisioner's `API_KEY` is not stored, so there's nothing to reveal).
+async fn reveal_key(Path(name): Path<String>, Query(q): Query<KeyScopeQuery>) -> Response {
+    let store = crate::key_store::KeyStore::load(&paths::keys_file());
+    let value = match q.channel_id.as_deref() {
+        Some(cid) => store.get_channel(cid, &name).map(str::to_string),
+        None => store.get(&name).map(str::to_string),
+    };
+    match value {
+        Some(value) => Json(KeyRevealResponse { value }).into_response(),
+        None => err_json(StatusCode::NOT_FOUND, format!("key '{name}' has no stored value to reveal")),
+    }
+}
+
+/// Delete a key. An optional `?channel_id=` targets a channel's secret scope;
+/// omitted means the global scope. Managed keys are read-only and rejected.
+async fn delete_key(Path(name): Path<String>, Query(q): Query<KeyScopeQuery>) -> Response {
     let path = paths::keys_file();
     let mut store = crate::key_store::KeyStore::load(&path);
-    if !store.delete(&name) {
+    let removed = match q.channel_id.as_deref() {
+        Some(cid) => {
+            if is_channel_managed(cid) {
+                return err_json(
+                    StatusCode::FORBIDDEN,
+                    "this channel's secrets are managed by its connection and can't be deleted here",
+                );
+            }
+            store.delete_channel_key(cid, &name)
+        }
+        None => {
+            if crate::key_store::is_env_authoritative(&name) {
+                return err_json(
+                    StatusCode::FORBIDDEN,
+                    "this key is provided by the platform and can't be deleted",
+                );
+            }
+            store.delete(&name)
+        }
+    };
+    if !removed {
         return err_json(StatusCode::NOT_FOUND, format!("key '{name}' not found"));
     }
     match store.save(&path) {
@@ -2307,15 +2465,27 @@ struct MgConnectRequest {
     /// Override for the pod's public URL when `POD_PUBLIC_URL` isn't injected.
     #[serde(default)]
     webhook_base: Option<String>,
+    /// Audience-scoped connection token from the k3 broker, adopted as the
+    /// channel's outbound API key. Omitted on the Workshop path.
+    #[serde(default)]
+    connection_token: Option<String>,
 }
 
 /// Connect: fetch config + wire the webhook + enable the channel. 409 until verified.
 async fn gateway_metalcraft_connect(Json(req): Json<MgConnectRequest>) -> Response {
-    match crate::metalcraft_gateway::connect(req.webhook_base).await {
+    match crate::metalcraft_gateway::connect(req.webhook_base, req.connection_token).await {
         Ok(r) => Json(r).into_response(),
         Err(e) if e == crate::metalcraft_gateway::VERIFY_REQUIRED => {
             err_json(StatusCode::CONFLICT, "Register and verify your phone number before connecting")
         }
+        Err(e) => err_json(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+/// Disconnect: disable the metalcraft-gateway channel + drop its secrets. Idempotent.
+async fn gateway_metalcraft_disconnect() -> Response {
+    match crate::metalcraft_gateway::disconnect().await {
+        Ok(()) => Json(serde_json::json!({ "connected": false })).into_response(),
         Err(e) => err_json(StatusCode::BAD_GATEWAY, e),
     }
 }
@@ -2501,10 +2671,10 @@ async fn handle_twilio_webhook(
     .await
 }
 
-/// Inbound PipeStreamr webhook (JSON `message.created`). Validates the
-/// `X-PipeStreamr-Signature` (HMAC-SHA256 over the raw body) when
-/// `PIPESTREAMR_WEBHOOK_SECRET` is set, routes the message to the enabled
-/// channel whose `from` number received it, and runs that channel's persona to
+/// Inbound PipeStreamr webhook (JSON `message.created`). Routes the message to
+/// the enabled channel whose `integration_id` matches the payload `source_id`,
+/// validates the `X-PipeStreamr-Signature` (HMAC-SHA256 over the raw body)
+/// against *that channel's* `WEBHOOK_SECRET`, then runs the channel's persona to
 /// reply (via `gateway_send_message` with platform "pipestreamr"). Returns 200
 /// for accepted-but-unroutable cases so PipeStreamr doesn't retry.
 async fn handle_pipestreamr_webhook(
@@ -2512,43 +2682,6 @@ async fn handle_pipestreamr_webhook(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> StatusCode {
-    // Fail-closed: require a configured signing secret and a valid signature.
-    match crate::key_store::lookup("PIPESTREAMR_WEBHOOK_SECRET").filter(|s| !s.is_empty()) {
-        Some(secret) => {
-            let signature = headers
-                .get("x-pipestreamr-signature")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default();
-            if !crate::tools::pipestreamr::validate_signature(&secret, &body, signature) {
-                log::warn!("Rejected PipeStreamr webhook: invalid or missing X-PipeStreamr-Signature");
-                crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
-                    direction: "inbound".into(),
-                    platform: "pipestreamr".into(),
-                    outcome: "signature_rejected".into(),
-                    detail: Some("invalid or missing X-PipeStreamr-Signature".into()),
-                    ..Default::default()
-                });
-                // A rotated gateway secret is the usual cause — self-heal (rate-limited).
-                crate::metalcraft_gateway::maybe_reactive_resync();
-                return StatusCode::FORBIDDEN;
-            }
-        }
-        None => {
-            if !allow_unsigned_webhooks() {
-                log::warn!(
-                    "Rejected PipeStreamr webhook: PIPESTREAMR_WEBHOOK_SECRET is not set. \
-                     Set it to the secret configured on your PipeStreamr webhook (or set \
-                     GATEWAY_ALLOW_UNSIGNED=1 for local testing only)."
-                );
-                return StatusCode::FORBIDDEN;
-            }
-            log::warn!(
-                "Accepting UNSIGNED PipeStreamr webhook because GATEWAY_ALLOW_UNSIGNED is set — \
-                 do not use this in production."
-            );
-        }
-    }
-
     let payload: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => return StatusCode::BAD_REQUEST,
@@ -2560,7 +2693,9 @@ async fn handle_pipestreamr_webhook(
 
     // Route on the PipeStreamr integration UUID (`source_id`) — stable and
     // unique, unlike phone-number matching — against each channel's
-    // `integration_id` setting.
+    // `integration_id` setting. Resolving the channel first lets us verify the
+    // signature against *that channel's* webhook secret (secrets are per-channel
+    // now, so there's no single global secret to check against up front).
     let Some(source_id) = inbound.source_id.clone() else {
         log::warn!("PipeStreamr webhook has no source_id; cannot route — ignoring");
         crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
@@ -2592,6 +2727,46 @@ async fn handle_pipestreamr_webhook(
         });
         return StatusCode::OK;
     };
+
+    // Fail-closed: verify the signature with THIS channel's webhook secret.
+    match crate::tools::pipestreamr::channel_webhook_secret(&channel) {
+        Some(secret) => {
+            let signature = headers
+                .get("x-pipestreamr-signature")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            if !crate::tools::pipestreamr::validate_signature(&secret, &body, signature) {
+                log::warn!("Rejected PipeStreamr webhook: invalid or missing X-PipeStreamr-Signature");
+                crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+                    direction: "inbound".into(),
+                    platform: "pipestreamr".into(),
+                    source_id: Some(source_id.clone()),
+                    channel_id: Some(channel.id.clone()),
+                    channel_name: Some(channel.name.clone()),
+                    outcome: "signature_rejected".into(),
+                    detail: Some("invalid or missing X-PipeStreamr-Signature".into()),
+                    ..Default::default()
+                });
+                // A rotated gateway secret is the usual cause — self-heal (rate-limited).
+                crate::metalcraft_gateway::maybe_reactive_resync();
+                return StatusCode::FORBIDDEN;
+            }
+        }
+        None => {
+            if !allow_unsigned_webhooks() {
+                log::warn!(
+                    "Rejected PipeStreamr webhook: no WEBHOOK_SECRET configured for channel '{}'. \
+                     Reconnect the gateway (or set GATEWAY_ALLOW_UNSIGNED=1 for local testing only).",
+                    channel.name
+                );
+                return StatusCode::FORBIDDEN;
+            }
+            log::warn!(
+                "Accepting UNSIGNED PipeStreamr webhook because GATEWAY_ALLOW_UNSIGNED is set — \
+                 do not use this in production."
+            );
+        }
+    }
 
     // The orchestrator delegates to specialist personas as needed, so it's the
     // sensible default when a channel doesn't pin a specific persona.
@@ -2699,9 +2874,15 @@ fn gateway_reply_sink(
         let channel_name = channel_name.clone();
         Box::pin(async move {
             let result = match adapter.as_str() {
-                "pipestreamr" => {
-                    crate::tools::pipestreamr::send(&recipient, &content, from.as_deref()).await
-                }
+                "pipestreamr" => match crate::gateway_channels::get_instance(&channel_id) {
+                    Some(channel) => match crate::tools::pipestreamr::PipeCfg::for_channel(&channel) {
+                        Ok(cfg) => {
+                            crate::tools::pipestreamr::send(&recipient, &content, from.as_deref(), &cfg).await
+                        }
+                        Err(e) => Err(e),
+                    },
+                    None => Err(format!("channel '{channel_id}' no longer exists")),
+                },
                 "twilio" => {
                     crate::tools::twilio::send_whatsapp(&recipient, &content, from.as_deref()).await
                 }

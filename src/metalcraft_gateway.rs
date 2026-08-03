@@ -5,8 +5,10 @@
 //! token, the agent can *fetch* everything it needs instead of the user pasting it:
 //! `POST {gateway}/api/v1/agent/connect` returns the base URL, integration id, webhook
 //! secret, and active number, and registers the agent's inbound webhook — then we
-//! write the `PIPESTREAMR_*` keys and enable a `metalcraft-gateway` channel instance.
-//! The message path itself reuses the existing `pipestreamr` adapter unchanged.
+//! write the channel-scoped secrets (`BASE_URL`, `WEBHOOK_SECRET`) and enable a
+//! `metalcraft-gateway` channel instance. The API key is *derived* from the pod
+//! token at send time, never stored. The message path itself reuses the existing
+//! `pipestreamr` adapter unchanged.
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -71,18 +73,31 @@ pub struct ConnectResult {
 pub const VERIFY_REQUIRED: &str = "verify_required";
 
 /// Fetch config with the pod's token, register the agent's webhook, write the
-/// `PIPESTREAMR_*` keys, and create/enable the `metalcraft-gateway` channel. Idempotent
-/// — safe to re-run to re-sync after a rotated secret or a reassigned number.
-pub async fn connect(explicit_webhook_base: Option<String>) -> Result<ConnectResult, String> {
+/// channel-scoped secrets, and create/enable the `metalcraft-gateway` channel.
+/// Idempotent — safe to re-run to re-sync after a rotated secret or a reassigned
+/// number.
+///
+/// When `connection_token` is supplied (the k3 broker's audience-scoped token),
+/// it is used as the gateway bearer *and* adopted as the channel's outbound
+/// `API_KEY`, so the pod stops sending with its broad `METALCRAFT_TOKEN`. Omitted
+/// (the Workshop path) ⇒ the pod token is used and the send key keeps deriving
+/// from `METALCRAFT_TOKEN`.
+pub async fn connect(
+    explicit_webhook_base: Option<String>,
+    connection_token: Option<String>,
+) -> Result<ConnectResult, String> {
     let gw = gateway_url();
     let tok = token()?;
+    // Prefer the audience-scoped connection token for the gateway handshake.
+    let connection_token = connection_token.filter(|s| !s.trim().is_empty());
+    let auth = connection_token.as_deref().unwrap_or(tok.as_str());
     let base = webhook_base(explicit_webhook_base)
         .ok_or_else(|| "no POD_PUBLIC_URL set and no webhook_base provided".to_string())?;
     let webhook_url = format!("{base}/webhook/pipestreamr");
 
     let resp = client()?
         .post(format!("{gw}/api/v1/agent/connect"))
-        .bearer_auth(&tok)
+        .bearer_auth(auth)
         .json(&serde_json::json!({ "webhook_url": webhook_url }))
         .send()
         .await
@@ -102,33 +117,44 @@ pub async fn connect(explicit_webhook_base: Option<String>) -> Result<ConnectRes
     let cfg: ConnectResp =
         serde_json::from_str(&text).map_err(|e| format!("failed to parse connect response: {e}"))?;
 
-    // 1. Write the PipeStreamr keys (the API key is the same PAT).
-    let path = crate::paths::keys_file();
-    let mut store = crate::key_store::KeyStore::load(&path);
-    store.upsert("PIPESTREAMR_BASE_URL", &cfg.base_url);
-    store.upsert("PIPESTREAMR_API_KEY", &tok);
-    store.upsert("PIPESTREAMR_WEBHOOK_SECRET", &cfg.signing_secret);
-    store.save(&path).map_err(|e| format!("failed to write keys: {e}"))?;
-
-    // 2. Create or update the channel instance (preserving persona/model), enabled.
+    // 1. Create or update the channel instance (preserving persona/model), enabled.
+    //    We need its id to scope the secrets, so this comes first.
     let existing = crate::gateway_channels::load_instances()
         .into_iter()
         .find(|i| i.type_id == CHANNEL_TYPE);
-    match existing {
+    let channel = match existing {
         Some(inst) => {
             let mut s = inst.settings.clone();
             s.insert("integration_id".into(), cfg.integration_id.clone());
             s.insert("from".into(), cfg.active_number.clone());
-            crate::gateway_channels::update_instance(&inst.id, &inst.name, true, s)?;
+            crate::gateway_channels::update_instance(&inst.id, &inst.name, true, s)?
         }
         None => {
             let mut s = HashMap::new();
             s.insert("integration_id".to_string(), cfg.integration_id.clone());
             s.insert("from".to_string(), cfg.active_number.clone());
             let inst = crate::gateway_channels::create_instance(CHANNEL_TYPE, "Metalcraft Gateway", s)?;
-            crate::gateway_channels::update_instance(&inst.id, &inst.name, true, inst.settings)?;
+            crate::gateway_channels::update_instance(&inst.id, &inst.name, true, inst.settings)?
         }
+    };
+
+    // 2. Write the channel-scoped secrets. The API key is *derived* from the pod
+    //    token at send time, so it is never stored. Drop any legacy global
+    //    PIPESTREAMR_* keys left by an older build.
+    let path = crate::paths::keys_file();
+    let mut store = crate::key_store::KeyStore::load(&path);
+    store.upsert_channel(&channel.id, "BASE_URL", &cfg.base_url);
+    store.upsert_channel(&channel.id, "WEBHOOK_SECRET", &cfg.signing_secret);
+    // Adopt the audience-scoped connection token as the channel's outbound API key
+    // (replaces deriving from the broad METALCRAFT_TOKEN). The heal loop refreshes
+    // it before expiry; PipeCfg falls back to METALCRAFT_TOKEN if it's ever absent.
+    if let Some(ct) = connection_token.as_deref() {
+        store.upsert_channel(&channel.id, "API_KEY", ct);
     }
+    for legacy in ["PIPESTREAMR_BASE_URL", "PIPESTREAMR_API_KEY", "PIPESTREAMR_WEBHOOK_SECRET"] {
+        store.delete(legacy);
+    }
+    store.save(&path).map_err(|e| format!("failed to write channel secrets: {e}"))?;
 
     Ok(ConnectResult {
         connected: true,
@@ -136,6 +162,94 @@ pub async fn connect(explicit_webhook_base: Option<String>) -> Result<ConnectRes
         integration_id: cfg.integration_id,
         channel: cfg.channel,
     })
+}
+
+/// Tear down the gateway link: disable the `metalcraft-gateway` channel and drop
+/// its channel-scoped secrets (`BASE_URL`, `WEBHOOK_SECRET`, adopted `API_KEY`).
+/// Idempotent — a no-op `Ok` when nothing is connected. The heal loop then stays
+/// quiet (no enabled channel), and inbound webhooks stop verifying.
+pub async fn disconnect() -> Result<(), String> {
+    let Some(inst) = crate::gateway_channels::load_instances()
+        .into_iter()
+        .find(|i| i.type_id == CHANNEL_TYPE)
+    else {
+        return Ok(()); // nothing to disconnect
+    };
+
+    // Disable the channel instance (keep it so re-connect preserves persona/model).
+    crate::gateway_channels::update_instance(&inst.id, &inst.name, false, inst.settings.clone())?;
+
+    // Drop the channel-scoped secrets so no stale credential lingers.
+    let path = crate::paths::keys_file();
+    let mut store = crate::key_store::KeyStore::load(&path);
+    for k in ["BASE_URL", "WEBHOOK_SECRET", "API_KEY"] {
+        store.delete_channel_key(&inst.id, k);
+    }
+    store.save(&path).map_err(|e| format!("failed to clear channel secrets: {e}"))?;
+    log::info!("metalcraft-gateway: disconnected channel '{}'", inst.name);
+    Ok(())
+}
+
+/// URL of the k3 control plane (for connection-token refresh). Injected as
+/// `METALCRAFT_K3_URL`; defaults to production.
+fn k3_url() -> String {
+    crate::key_store::lookup("METALCRAFT_K3_URL")
+        .or_else(|| std::env::var("METALCRAFT_K3_URL").ok())
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://pods.metalcraftai.com".to_string())
+}
+
+/// This pod's slug — first label of `POD_PUBLIC_URL`'s host. `None` when unknown.
+fn pod_slug() -> Option<String> {
+    let url = std::env::var("POD_PUBLIC_URL").ok()?;
+    let host = url.trim().trim_start_matches("https://").trim_start_matches("http://");
+    let label = host.split('/').next().unwrap_or(host).split('.').next().unwrap_or("");
+    (!label.is_empty()).then(|| label.to_string())
+}
+
+/// Refresh the adopted connection token from k3 before it expires. No-op unless a
+/// `metalcraft-gateway` channel is enabled *and* holds an adopted `API_KEY` (i.e.
+/// it was connected via the broker, not the legacy METALCRAFT_TOKEN path). Best
+/// effort: on failure the current token stands until its own expiry.
+pub async fn refresh_connection_token() -> Result<(), String> {
+    let Some(inst) = crate::gateway_channels::load_instances()
+        .into_iter()
+        .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)
+    else {
+        return Ok(());
+    };
+    // Only broker-connected channels carry an adopted API_KEY worth refreshing.
+    if crate::key_store::lookup_scoped(Some(&inst.id), "API_KEY").is_none() {
+        return Ok(());
+    }
+    let slug = pod_slug().ok_or("no POD_PUBLIC_URL — cannot identify pod for refresh")?;
+    let tok = token()?;
+
+    #[derive(Deserialize)]
+    struct RefreshResp {
+        connection_token: String,
+    }
+    let resp = client()?
+        .post(format!("{}/api/pods/{slug}/connection/refresh", k3_url()))
+        .bearer_auth(&tok)
+        .send()
+        .await
+        .map_err(|e| format!("refresh request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("refresh returned HTTP {}", resp.status().as_u16()));
+    }
+    let r: RefreshResp = resp.json().await.map_err(|e| format!("parse refresh: {e}"))?;
+    if r.connection_token.trim().is_empty() {
+        return Err("refresh returned an empty token".to_string());
+    }
+
+    let path = crate::paths::keys_file();
+    let mut store = crate::key_store::KeyStore::load(&path);
+    store.upsert_channel(&inst.id, "API_KEY", r.connection_token.trim());
+    store.save(&path).map_err(|e| format!("write refreshed token: {e}"))?;
+    log::debug!("metalcraft-gateway: refreshed connection token");
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -172,10 +286,9 @@ pub struct GatewayStatus {
 pub async fn status() -> GatewayStatus {
     let connected = crate::gateway_channels::load_instances()
         .iter()
-        .any(|i| i.type_id == CHANNEL_TYPE && i.enabled)
-        && crate::key_store::lookup("PIPESTREAMR_WEBHOOK_SECRET")
-            .filter(|s| !s.is_empty())
-            .is_some();
+        .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)
+        .and_then(crate::tools::pipestreamr::channel_webhook_secret)
+        .is_some();
     let has_public_url = webhook_base(None).is_some();
 
     let tok = match token() {
@@ -232,6 +345,59 @@ pub async fn register(phone_number: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("failed to parse register response: {e}"))
 }
 
+/// One-time boot migration: move legacy **global** `PIPESTREAMR_*` secrets into
+/// the `metalcraft-gateway` channel's scope (renamed `BASE_URL`/`WEBHOOK_SECRET`)
+/// and delete the globals. The old `PIPESTREAMR_API_KEY` was just a copy of the
+/// pod token, so it is dropped (the key is derived now). Idempotent.
+///
+/// If legacy keys exist but there is no `metalcraft-gateway` channel, they are
+/// left untouched — they may belong to a manual `pipestreamr` channel that still
+/// relies on the back-compat fallback (handled in a later phase).
+pub fn migrate_legacy_keys() {
+    let path = crate::paths::keys_file();
+    let mut store = crate::key_store::KeyStore::load(&path);
+
+    let base = store.get("PIPESTREAMR_BASE_URL").map(str::to_string);
+    let secret = store.get("PIPESTREAMR_WEBHOOK_SECRET").map(str::to_string);
+    let had_legacy =
+        base.is_some() || secret.is_some() || store.get("PIPESTREAMR_API_KEY").is_some();
+
+    // Nothing to migrate — still persist the (idempotent) v2 schema upgrade so
+    // pre-v2 files get rewritten once on boot.
+    if !had_legacy {
+        let _ = store.save(&path);
+        return;
+    }
+
+    let Some(inst) = crate::gateway_channels::load_instances()
+        .into_iter()
+        .find(|i| i.type_id == CHANNEL_TYPE)
+    else {
+        // Legacy keys but no gateway channel: don't touch them (a manual
+        // pipestreamr channel may need them). Just upgrade the schema.
+        let _ = store.save(&path);
+        return;
+    };
+
+    if let Some(v) = base {
+        store.upsert_channel(&inst.id, "BASE_URL", &v);
+    }
+    if let Some(v) = secret {
+        store.upsert_channel(&inst.id, "WEBHOOK_SECRET", &v);
+    }
+    store.delete("PIPESTREAMR_BASE_URL");
+    store.delete("PIPESTREAMR_API_KEY");
+    store.delete("PIPESTREAMR_WEBHOOK_SECRET");
+    if let Err(e) = store.save(&path) {
+        log::warn!("metalcraft-gateway: failed to persist legacy key migration: {e}");
+        return;
+    }
+    log::info!(
+        "metalcraft-gateway: migrated legacy PIPESTREAMR_* keys into channel scope for '{}'",
+        inst.name
+    );
+}
+
 // ── Self-heal (Phase 3) ──────────────────────────────────────────────────────
 
 /// Re-sync the connection so a **rotated webhook secret** or a **reassigned number**
@@ -248,7 +414,7 @@ pub async fn resync() -> Result<(), String> {
     };
 
     if webhook_base(None).is_some() {
-        return match connect(None).await {
+        return match connect(None, None).await {
             Ok(_) => Ok(()),
             // A membership lapse mid-life shouldn't spam errors.
             Err(e) if e == VERIFY_REQUIRED => Ok(()),
@@ -286,8 +452,9 @@ pub async fn resync() -> Result<(), String> {
     if let Some(secret) = p.signing_secret.filter(|s| !s.is_empty()) {
         let path = crate::paths::keys_file();
         let mut store = crate::key_store::KeyStore::load(&path);
-        if store.get("PIPESTREAMR_WEBHOOK_SECRET") != Some(secret.as_str()) {
-            store.upsert("PIPESTREAMR_WEBHOOK_SECRET", &secret);
+        if store.get_channel(&inst.id, "WEBHOOK_SECRET") != Some(secret.as_str()) {
+            store.upsert_channel(&inst.id, "WEBHOOK_SECRET", &secret);
+            store.delete("PIPESTREAMR_WEBHOOK_SECRET"); // retire any legacy global
             store.save(&path).map_err(|e| format!("write keys: {e}"))?;
         }
     }
@@ -315,6 +482,11 @@ pub async fn heal_loop() {
     let interval = std::time::Duration::from_secs(secs);
     loop {
         tokio::time::sleep(interval).await;
+        // Refresh the audience-scoped connection token before it expires (no-op
+        // unless broker-connected), then re-sync secret/number drift.
+        if let Err(e) = refresh_connection_token().await {
+            log::warn!("metalcraft-gateway token refresh: {e}");
+        }
         if let Err(e) = resync().await {
             log::warn!("metalcraft-gateway heal: {e}");
         }

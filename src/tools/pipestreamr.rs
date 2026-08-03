@@ -11,29 +11,81 @@
 //!     daemon's `/webhook/pipestreamr` route to accept PipeStreamr's JSON
 //!     `message.created` webhooks and verify they really came from PipeStreamr.
 //!
-//! Credentials / config come from the key store / environment (see
-//! [`crate::key_store`]):
-//!   * `PIPESTREAMR_API_KEY`        — Bearer key for the send API (`ps_live_…`)
-//!   * `PIPESTREAMR_WEBHOOK_SECRET` — HMAC-SHA256 key for inbound signatures
-//!   * `PIPESTREAMR_BASE_URL`       — optional override of the API base URL
+//! Credentials / config are **channel-scoped** — resolved from the channel
+//! instance that owns them via [`PipeCfg::for_channel`] and
+//! [`channel_webhook_secret`], not from global keys:
+//!   * `API_KEY`        — Bearer key for the send API. For a `metalcraft-gateway`
+//!     provisioner it is *derived* from `METALCRAFT_TOKEN` at call time (never
+//!     stored); for a manual pipestreamr channel it is the channel's `API_KEY`
+//!     secret.
+//!   * `WEBHOOK_SECRET` — HMAC-SHA256 key for inbound signatures.
+//!   * `BASE_URL`       — optional override of the API base URL.
+//!
+//! Pre-scoped installs are read back-compatibly: resolution falls back to the
+//! legacy global `PIPESTREAMR_*` keys for one release (see the migration in
+//! [`crate::metalcraft_gateway`]).
 
 use std::time::Duration;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+use crate::gateway_channels::ChannelInstance;
+
 type HmacSha256 = Hmac<Sha256>;
 
 const DEFAULT_BASE: &str = "https://pipestreamr.com";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
-/// The PipeStreamr deployment base URL. Defaults to the hosted service; override
-/// with the `PIPESTREAMR_BASE_URL` key for a self-hosted deployment.
-fn base_url() -> String {
-    crate::key_store::lookup("PIPESTREAMR_BASE_URL")
-        .map(|s| s.trim().trim_end_matches('/').to_string())
+/// Resolved send config for one pipestreamr-adapter channel.
+pub struct PipeCfg {
+    /// Bearer key for the send API.
+    pub api_key: String,
+    /// API base URL (no trailing slash).
+    pub base_url: String,
+}
+
+impl PipeCfg {
+    /// Resolve the send config for `channel`. The `api_key` for a
+    /// `metalcraft-gateway` provisioner is derived from `METALCRAFT_TOKEN`
+    /// (never persisted); otherwise it comes from the channel's `API_KEY` secret
+    /// (legacy fallback: global `PIPESTREAMR_API_KEY`). `base_url` comes from the
+    /// channel's `BASE_URL` secret (legacy fallback: `PIPESTREAMR_BASE_URL`),
+    /// defaulting to the hosted service.
+    pub fn for_channel(channel: &ChannelInstance) -> Result<Self, String> {
+        let provisioner = crate::gateway_channels::find_type(&channel.type_id)
+            .and_then(|t| t.provisioner);
+        let api_key = if provisioner.as_deref() == Some("metalcraft-gateway") {
+            // Prefer the audience-scoped connection token adopted at connect;
+            // fall back to deriving from the pod's broad METALCRAFT_TOKEN (the
+            // pre-broker path, and a safety net if the token is ever missing).
+            crate::key_store::lookup_scoped(Some(&channel.id), "API_KEY")
+                .filter(|s| !s.is_empty())
+                .or_else(|| crate::key_store::lookup("METALCRAFT_TOKEN").filter(|s| !s.is_empty()))
+                .ok_or("METALCRAFT_TOKEN is not set — this pod isn't linked to a Metalcraft ID account")?
+        } else {
+            crate::key_store::lookup_scoped(Some(&channel.id), "API_KEY")
+                .filter(|s| !s.is_empty())
+                .or_else(|| crate::key_store::lookup("PIPESTREAMR_API_KEY"))
+                .filter(|s| !s.is_empty())
+                .ok_or("no API key configured for this channel (add its API_KEY secret)")?
+        };
+        let base_url = crate::key_store::lookup_scoped(Some(&channel.id), "BASE_URL")
+            .or_else(|| crate::key_store::lookup("PIPESTREAMR_BASE_URL"))
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_BASE.to_string());
+        Ok(Self { api_key, base_url })
+    }
+}
+
+/// The inbound HMAC secret for `channel`: its `WEBHOOK_SECRET` secret (legacy
+/// fallback: global `PIPESTREAMR_WEBHOOK_SECRET`). `None` when unconfigured.
+pub fn channel_webhook_secret(channel: &ChannelInstance) -> Option<String> {
+    crate::key_store::lookup_scoped(Some(&channel.id), "WEBHOOK_SECRET")
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_BASE.to_string())
+        .or_else(|| crate::key_store::lookup("PIPESTREAMR_WEBHOOK_SECRET"))
+        .filter(|s| !s.is_empty())
 }
 
 /// Loose check that a string is shaped like a UUID (8-4-4-4-12 hex). Used to
@@ -52,18 +104,16 @@ fn looks_like_uuid(s: &str) -> bool {
 /// Send a message through PipeStreamr. `channel_id` is the recipient (a phone
 /// number for the WhatsApp passthru); `integration_id`, when given, selects which
 /// PipeStreamr integration sends it (otherwise PipeStreamr uses the account's
-/// default integration). Returns a small JSON receipt or an error string. Called
-/// by the generic gateway send tool.
+/// default integration). `cfg` carries the sending channel's resolved API key +
+/// base URL (see [`PipeCfg::for_channel`]). Returns a small JSON receipt or an
+/// error string. Called by the generic gateway send tool.
 pub async fn send(
     channel_id: &str,
     content: &str,
     integration_id: Option<&str>,
+    cfg: &PipeCfg,
 ) -> Result<serde_json::Value, String> {
-    let api_key = crate::key_store::lookup("PIPESTREAMR_API_KEY")
-        .filter(|s| !s.is_empty())
-        .ok_or("PIPESTREAMR_API_KEY is not set (add it in the workshop's keys, or export it)")?;
-
-    let url = format!("{}/api/v1/messages/send", base_url());
+    let url = format!("{}/api/v1/messages/send", cfg.base_url);
     let mut body = serde_json::json!({ "to": channel_id, "body": content });
     if let Some(iid) = integration_id.map(str::trim).filter(|s| !s.is_empty()) {
         if looks_like_uuid(iid) {
@@ -81,7 +131,7 @@ pub async fn send(
 
     let resp = client
         .post(&url)
-        .bearer_auth(&api_key)
+        .bearer_auth(&cfg.api_key)
         .json(&body)
         .send()
         .await

@@ -79,7 +79,15 @@ impl metalcraft::Tool for GatewaySendMessageTool {
 
         let result = match adapter.as_str() {
             // PipeStreamr passthru: `from` carries the optional project_id selector.
-            "pipestreamr" => crate::tools::pipestreamr::send(channel_id, content, from).await,
+            // Credentials are channel-scoped, so resolve the sending channel first
+            // and build its config.
+            "pipestreamr" => match resolve_pipestreamr_channel(from) {
+                Ok(channel) => match crate::tools::pipestreamr::PipeCfg::for_channel(&channel) {
+                    Ok(cfg) => crate::tools::pipestreamr::send(channel_id, content, from, &cfg).await,
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            },
             "twilio" => crate::tools::twilio::send_whatsapp(channel_id, content, from).await,
             other => Err(format!(
                 "no send adapter for platform '{platform}' (adapter '{other}'). Enable a gateway channel of a supported type."
@@ -89,6 +97,35 @@ impl metalcraft::Tool for GatewaySendMessageTool {
         record_outbound(&adapter, channel_id, content, from, &result);
 
         result.map_err(err)
+    }
+}
+
+/// Resolve which pipestreamr-adapter channel a send should flow through. With a
+/// `from` selector, match it against a channel's `integration_id` (then `from`)
+/// setting. Without one, use the single enabled pipestreamr channel — ambiguity
+/// (>1) or absence (0) is a clear error, since each channel now carries its own
+/// credentials and we can't guess which to bill.
+fn resolve_pipestreamr_channel(
+    from: Option<&str>,
+) -> Result<gateway_channels::ChannelInstance, String> {
+    if let Some(f) = from {
+        return gateway_channels::resolve_by_setting("integration_id", f)
+            .or_else(|| gateway_channels::resolve_by_setting("from", f))
+            .ok_or_else(|| format!("no enabled channel matches from='{f}'"));
+    }
+    let mut candidates: Vec<_> = gateway_channels::enabled_instances()
+        .into_iter()
+        .filter(|c| {
+            gateway_channels::find_type(&c.type_id).map(|t| t.adapter).as_deref() == Some("pipestreamr")
+        })
+        .collect();
+    match candidates.len() {
+        0 => Err("no enabled pipestreamr channel configured".to_string()),
+        1 => Ok(candidates.remove(0)),
+        _ => Err(
+            "multiple enabled pipestreamr channels — pass `from` (the integration_id) to pick one"
+                .to_string(),
+        ),
     }
 }
 

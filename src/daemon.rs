@@ -119,6 +119,10 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
         workshop_api_port,
     } = config;
 
+    // One-time migration of legacy global PIPESTREAMR_* keys into channel scope
+    // (and a v2 keys.json schema upgrade). Idempotent — a no-op once migrated.
+    crate::metalcraft_gateway::migrate_legacy_keys();
+
     let context = AgentRuntimeContext::from_environment()?;
     let cwd = std::env::current_dir()?.display().to_string();
 

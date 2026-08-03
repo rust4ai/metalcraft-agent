@@ -63,6 +63,13 @@ pub struct SettingField {
     pub input_type: String,
     #[serde(default)]
     pub required: bool,
+    /// When true this field is a **secret**: its value is persisted to the
+    /// channel's secret scope in the key store (`field.key` is the secret name),
+    /// never to the instance's plaintext `settings`. The workshop renders it as a
+    /// masked, write-only input under the channel's secrets — the raw value never
+    /// flows back out. Adapters read it via `key_store::lookup_scoped`.
+    #[serde(default)]
+    pub secret: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,7 +246,8 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<(), String> {
     save_instances(&all).map_err(|e| format!("failed to write state: {e}"))
 }
 
-/// Delete an instance. Returns `true` if it existed.
+/// Delete an instance. Returns `true` if it existed. Cascades to the channel's
+/// scoped secrets so removing a channel leaves nothing behind.
 pub fn delete_instance(id: &str) -> Result<bool, String> {
     let mut all = load_instances();
     let before = all.len();
@@ -247,13 +255,24 @@ pub fn delete_instance(id: &str) -> Result<bool, String> {
     let removed = all.len() != before;
     if removed {
         save_instances(&all).map_err(|e| format!("failed to write state: {e}"))?;
+        // Cascade: drop this channel's secret scope from the key store.
+        let path = paths::keys_file();
+        let mut store = crate::key_store::KeyStore::load(&path);
+        if store.delete_channel(id) {
+            if let Err(e) = store.save(&path) {
+                log::warn!("deleted channel '{id}' but failed to prune its secrets: {e}");
+            }
+        }
     }
     Ok(removed)
 }
 
 fn validate_required(ty: &ChannelType, settings: &HashMap<String, String>) -> Result<(), String> {
     for field in &ty.settings {
-        if field.required {
+        // Secret fields aren't stored in `settings` — they live in the channel's
+        // secret scope, saved separately by the workshop. Skip them here; a
+        // missing secret surfaces as a clear runtime error from the adapter.
+        if field.required && !field.secret {
             let present = settings.get(&field.key).map(|v| !v.trim().is_empty()).unwrap_or(false);
             if !present {
                 return Err(format!("missing required setting '{}'", field.label));
@@ -348,6 +367,7 @@ mod tests {
                 label: "From number".into(),
                 input_type: "tel".into(),
                 required: true,
+                secret: false,
                 placeholder: None,
                 help: None,
             }],
@@ -357,5 +377,31 @@ mod tests {
         let mut ok = HashMap::new();
         ok.insert("from".to_string(), "+15550001234".to_string());
         assert!(validate_required(&ty, &ok).is_ok());
+    }
+
+    #[test]
+    fn validate_required_ignores_secret_fields() {
+        // A required *secret* field is not stored in `settings` (it lives in the
+        // channel's secret scope), so it must not trip settings validation.
+        let ty = ChannelType {
+            id: "x".into(),
+            name: "X".into(),
+            description: String::new(),
+            version: "1.0.0".into(),
+            adapter: "pipestreamr".into(),
+            provisioner: None,
+            requires_env: vec![],
+            settings: vec![SettingField {
+                key: "API_KEY".into(),
+                label: "API key".into(),
+                input_type: "password".into(),
+                required: true,
+                secret: true,
+                placeholder: None,
+                help: None,
+            }],
+        };
+        // Empty settings is fine despite the required secret field.
+        assert!(validate_required(&ty, &HashMap::new()).is_ok());
     }
 }
