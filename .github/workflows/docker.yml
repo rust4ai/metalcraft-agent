@@ -2,7 +2,10 @@ name: build-and-push
 
 # Builds the daemon image on GitHub's runners and pushes it to GHCR so the VPS
 # never has to compile Rust. Triggers:
-#   - push to master       -> tags `latest` + the git sha
+#   - push to master       -> tags `latest`, the git sha, AND the Cargo.toml
+#                             version (e.g. 0.11.0) so bumping the crate version
+#                             and pushing yields a pinned, roll-able image tag —
+#                             no separate git tag required.
 #   - push of a v* tag      -> tags the semver (e.g. 0.5.1, 0.5, plus latest)
 #
 # On a v* tag it ALSO publishes the crate to crates.io (so `cargo install
@@ -37,6 +40,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The crate version drives a pinned image tag on master pushes, so the
+      # control plane can roll pods to an immutable `:X.Y.Z` (a floating `:latest`
+      # can't be "upgraded to" — same tag string, new digest, no rollout).
+      - name: Read crate version
+        id: ver
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Derive image tags
         id: meta
         uses: docker/metadata-action@v5
@@ -44,6 +56,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.ver.outputs.version }},enable={{is_default_branch}}
             type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
