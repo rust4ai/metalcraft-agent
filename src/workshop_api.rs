@@ -9,7 +9,7 @@ use axum::{
     middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse, Response,
+        Html, IntoResponse, Response,
     },
     routing::{delete, get, post, put},
     Json,
@@ -282,6 +282,10 @@ pub fn build_router(api_key: String) -> Router {
         // Health check — registered after the auth layer so it stays
         // unauthenticated (for Railway / DO App Platform probes).
         .route("/health", get(health))
+        // Public landing page. Also after the auth layer, so hitting the pod's
+        // ingress host in a browser shows a friendly status page instead of a
+        // 401 or a bare JSON blob. No secrets — just "this agent is alive".
+        .route("/", get(landing))
         // Inbound gateway webhooks — unauthenticated like /health; each adapter
         // verifies provenance its own way (signed requests). PipeStreamr is the
         // active path; the Twilio route stays mounted but no channel type ships
@@ -304,6 +308,76 @@ async fn health() -> impl IntoResponse {
             "version": env!("CARGO_PKG_VERSION"),
         })),
     )
+}
+
+/// Public landing page served at `/`. Unauthenticated (registered after the
+/// auth layer, like `/health`) so a person visiting the pod's ingress host in a
+/// browser sees a simple "agent is running" card rather than a 401 or raw JSON.
+/// Intentionally static and secret-free — the real UI is the Workshop, which
+/// talks to `/api/v1/*` with a key.
+async fn landing() -> impl IntoResponse {
+    let name = env!("CARGO_PKG_NAME");
+    let version = env!("CARGO_PKG_VERSION");
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metalcraft Agent</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; padding: 1.5rem;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #17324f 0%, #0b1220 55%, #070b13 100%);
+    color: #e6edf6;
+  }}
+  .card {{
+    width: 100%; max-width: 30rem; text-align: center;
+    background: rgba(20, 30, 46, 0.75); border: 1px solid #24344b;
+    border-radius: 18px; padding: 2.25rem 2rem;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.45);
+  }}
+  .logo {{
+    height: 3rem; width: 3rem; margin: 0 auto 1.1rem; border-radius: 12px;
+    background: linear-gradient(135deg, #2f83f5, #1e5fbf);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 1.4rem; color: #fff;
+  }}
+  h1 {{ margin: 0 0 .35rem; font-size: 1.35rem; }}
+  .status {{
+    display: inline-flex; align-items: center; gap: .45rem;
+    color: #93b4d6; font-size: .9rem; margin-bottom: 1rem;
+  }}
+  .dot {{
+    height: .55rem; width: .55rem; border-radius: 50%;
+    background: #4ade80; box-shadow: 0 0 0 4px rgba(74,222,128,.18);
+  }}
+  p {{ color: #9db2c9; font-size: .92rem; line-height: 1.5; margin: .4rem 0 0; }}
+  a {{ color: #6aa8ff; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  code {{ background: #0d1524; border: 1px solid #24344b; border-radius: 6px;
+    padding: .1rem .4rem; font-size: .82rem; color: #cfe0f5; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">M</div>
+    <h1>Metalcraft Agent</h1>
+    <div class="status"><span class="dot"></span>running · v{version}</div>
+    <p>Your always-on agent pod is live.</p>
+    <p>Manage it from the control plane at
+       <a href="https://pods.metalcraftai.com">pods.metalcraftai.com</a>.</p>
+    <p style="margin-top:1.1rem;font-size:.78rem;color:#66788f">
+       {name} · API at <code>/api/v1</code> · health at <code>/health</code></p>
+  </div>
+</body>
+</html>"#
+    );
+    Html(html)
 }
 
 /// Agent identity/version + config the Workshop reads. `version` drives the
