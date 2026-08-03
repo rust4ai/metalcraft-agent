@@ -278,6 +278,10 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/gateway/channels/{id}/enabled", put(put_gateway_channel_enabled))
         .route("/api/v1/gateway/channels/{id}/events", get(list_gateway_channel_events))
         .route("/api/v1/gateway/activity", get(list_gateway_activity))
+        // Metalcraft Gateway — zero-copy connect (status / inline register / connect).
+        .route("/api/v1/gateway/metalcraft/status", get(gateway_metalcraft_status))
+        .route("/api/v1/gateway/metalcraft/register", post(gateway_metalcraft_register))
+        .route("/api/v1/gateway/metalcraft/connect", post(gateway_metalcraft_connect))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         // Health check — registered after the auth layer so it stays
         // unauthenticated (for Railway / DO App Platform probes).
@@ -2276,6 +2280,44 @@ async fn list_gateway_channel_events(
 /// matched no channel (the global Network view). Newest first.
 async fn list_gateway_activity() -> Json<Vec<crate::gateway_activity::GatewayEvent>> {
     Json(crate::gateway_activity::list(None, 300))
+}
+
+// ── Metalcraft Gateway: zero-copy connect ────────────────────────────────────
+
+/// Registration/verification/connection state for the workshop's Connect panel.
+async fn gateway_metalcraft_status() -> Json<crate::metalcraft_gateway::GatewayStatus> {
+    Json(crate::metalcraft_gateway::status().await)
+}
+
+#[derive(Deserialize)]
+struct MgRegisterRequest {
+    phone_number: String,
+}
+
+/// Inline register: proxy to the gateway with the pod's token; returns `verify_code`.
+async fn gateway_metalcraft_register(Json(req): Json<MgRegisterRequest>) -> Response {
+    match crate::metalcraft_gateway::register(&req.phone_number).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => err_json(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct MgConnectRequest {
+    /// Override for the pod's public URL when `POD_PUBLIC_URL` isn't injected.
+    #[serde(default)]
+    webhook_base: Option<String>,
+}
+
+/// Connect: fetch config + wire the webhook + enable the channel. 409 until verified.
+async fn gateway_metalcraft_connect(Json(req): Json<MgConnectRequest>) -> Response {
+    match crate::metalcraft_gateway::connect(req.webhook_base).await {
+        Ok(r) => Json(r).into_response(),
+        Err(e) if e == crate::metalcraft_gateway::VERIFY_REQUIRED => {
+            err_json(StatusCode::CONFLICT, "Register and verify your phone number before connecting")
+        }
+        Err(e) => err_json(StatusCode::BAD_GATEWAY, e),
+    }
 }
 
 #[derive(Deserialize)]

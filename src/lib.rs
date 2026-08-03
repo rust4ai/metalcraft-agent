@@ -13,6 +13,7 @@ pub mod gateway_channels;
 pub mod guard;
 pub mod integration_packs;
 pub mod key_store;
+pub mod metalcraft_gateway;
 pub mod paths;
 pub mod persona;
 pub mod runtime;

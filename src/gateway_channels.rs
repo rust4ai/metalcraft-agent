@@ -45,6 +45,11 @@ pub struct ChannelType {
     /// Per-instance configuration fields the workshop renders into a form.
     #[serde(default)]
     pub settings: Vec<SettingField>,
+    /// When set, this type is provisioned by a named "connect" flow rather than a
+    /// manual settings form — the workshop renders that provider's Connect panel
+    /// (e.g. `"metalcraft-gateway"` auto-syncs config from the gateway).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisioner: Option<String>,
 }
 
 /// One configurable field in a channel type's per-instance settings schema.

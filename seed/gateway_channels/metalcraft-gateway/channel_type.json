@@ -1,0 +1,26 @@
+{
+  "id": "metalcraft-gateway",
+  "name": "Metalcraft Gateway",
+  "description": "WhatsApp / SMS via the Metalcraft Gateway (gateway.metalcraftai.com). Zero setup: because your pod already holds a Metalcraft ID token, the agent fetches its own base URL, integration ID, and webhook secret and registers its inbound webhook automatically. You only verify your phone number once. Wire-compatible with PipeStreamr under the hood.",
+  "version": "1.0.0",
+  "adapter": "pipestreamr",
+  "provisioner": "metalcraft-gateway",
+  "requires_env": [],
+  "settings": [
+    {
+      "key": "persona",
+      "label": "Persona",
+      "input_type": "persona",
+      "required": false,
+      "placeholder": "orchestrator-agent",
+      "help": "The persona that answers inbound messages on this channel. Leave blank to use the orchestrator-agent."
+    },
+    {
+      "key": "model",
+      "label": "Model",
+      "input_type": "model",
+      "required": false,
+      "help": "Model the persona runs with. Leave blank for the daemon default."
+    }
+  ]
+}
