@@ -123,6 +123,21 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
     }
 }
 
+/// Build a rig OpenAI client that honors `OPENAI_BASE_URL` — so a pod can route
+/// all inference through the Metalcraft Inference gateway (auth + credit metering
+/// via the injected `METALCRAFT_TOKEN`). `openai::Client::new` ignores the base URL;
+/// this mirrors rig's own `from_env` (builder + optional `base_url`).
+pub fn build_openai_client(api_key: &str) -> Result<openai::Client, Box<dyn std::error::Error>> {
+    let mut builder = openai::Client::builder().api_key(api_key);
+    if let Ok(base) = std::env::var("OPENAI_BASE_URL") {
+        let base = base.trim();
+        if !base.is_empty() {
+            builder = builder.base_url(base);
+        }
+    }
+    Ok(builder.build()?)
+}
+
 impl AgentRuntimeContext {
     pub fn from_environment() -> Result<Self, Box<dyn std::error::Error>> {
         dotenvy::dotenv().ok();
@@ -209,7 +224,7 @@ where
         }
     }
     let registry = crate::tools::create_registry_for_with_config(&resolved_tools, Some(&tool_config));
-    let client = openai::Client::new(&context.api_key)?;
+    let client = build_openai_client(&context.api_key)?;
     let model = client.completion_model(model_name);
     let compaction_model = make_compaction_model(&client, model_name);
     let hook = approval::build_hook(approval_mode);
@@ -273,5 +288,44 @@ pub async fn run_one_shot_task(
     let (_compacted, outcome) = TurnRunner::new(runtime)
         .run(AgentState::new(request.task), step_guard)
         .await;
-    outcome.map_err(Into::into)
+    outcome.map_err(|e| -> Box<dyn std::error::Error> {
+        match out_of_credits_message(&e.to_string()) {
+            Some(msg) => msg.into(),
+            None => e.into(),
+        }
+    })
+}
+
+/// Turn the Metalcraft Inference gateway's credit/premium rejection (a 402 from
+/// `inference.metalcraftai.com`) into a clear user-facing message, instead of a raw
+/// provider error. Returns `None` for any other error. Reusable across run paths.
+pub fn out_of_credits_message(err_text: &str) -> Option<String> {
+    let t = err_text.to_lowercase();
+    let hit = t.contains("insufficient credits")
+        || t.contains("payment required")
+        || t.contains("requires a premium")
+        || t.contains("out of credits")
+        || t.contains(" 402")
+        || t.contains("(402")
+        || t.contains("status: 402");
+    hit.then(|| {
+        "You're out of Metalcraft inference credits (or your premium subscription \
+         lapsed). Top up or check your plan at https://id.metalcraftai.com/account."
+            .to_string()
+    })
+}
+
+#[cfg(test)]
+mod inference_tests {
+    use super::out_of_credits_message;
+
+    #[test]
+    fn detects_gateway_credit_and_premium_rejections() {
+        assert!(out_of_credits_message("HTTP status 402: insufficient credits: available 0").is_some());
+        assert!(out_of_credits_message("ProviderError { status: 402, ... }").is_some());
+        assert!(out_of_credits_message("inference requires a premium subscription").is_some());
+        // Unrelated errors pass through unchanged.
+        assert!(out_of_credits_message("connection reset by peer").is_none());
+        assert!(out_of_credits_message("400 bad request: model not found").is_none());
+    }
 }

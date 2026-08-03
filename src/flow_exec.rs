@@ -34,7 +34,6 @@ use metalcraft::{
 
 use crate::flow_runs::{FlowRun, PauseInfo};
 use rig::client::CompletionClient;
-use rig::providers::openai;
 
 use crate::approval::{self, ApprovalMode};
 use crate::diagnostics::DiagnosticsLogger;
@@ -718,7 +717,7 @@ impl<'a> FlowExecutor<'a> {
         }
 
         // A tool-only agent that must terminate by choosing exactly one handle.
-        let client = openai::Client::new(&self.context.api_key)
+        let client = crate::runtime::build_openai_client(&self.context.api_key)
             .map_err(|e| format!("branch node '{}': openai client: {e}", node.id))?;
         let model = client.completion_model(&model_name);
         let hook = approval::build_hook(ApprovalMode::AutoApprove);
