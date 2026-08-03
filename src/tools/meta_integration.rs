@@ -111,14 +111,14 @@ impl metalcraft::Tool for PackEnableTool {
         "pack_enable"
     }
     fn description(&self) -> &str {
-        "Enable (install) or disable an integration pack by id. Defaults to enabling. Enabling makes the pack's personas, skills, and tools available; check the returned `requires_env` and use key_set to provide any missing API keys. Returns an error if the pack id is not installed."
+        "Enable or disable an integration pack by id (defaults to enabling). Enabling installs the pack — it materializes the pack's personas, skills, and tools on disk and marks it active, so those capabilities become immediately available; check the returned `requires_env` and use key_set to provide any missing API keys. Idempotent. Disable with enabled=false. Errors only if the id matches no known pack."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
                 "id": { "type": "string", "description": "Integration pack id (e.g. \"linear\", \"github\")" },
-                "enabled": { "type": "boolean", "description": "true to enable/install (default), false to disable" }
+                "enabled": { "type": "boolean", "description": "true to enable (installs the pack's resources, default), false to disable" }
             },
             "required": ["id"]
         })

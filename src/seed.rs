@@ -188,6 +188,40 @@ fn write_integration_packs() {
     write_seed_tree("integration_packs", &paths::integration_packs_dir(), "pack.json");
 }
 
+/// Materialize a single embedded integration pack into the data dir, writing
+/// any of its files that are missing (which also repairs a partial install).
+/// Returns `false` if no pack with `id` is embedded in the binary.
+///
+/// Called by [`crate::integration_packs::set_enabled`] so that *enabling* a
+/// pack always guarantees its personas, skills, and api_tools are present on
+/// disk — an enabled flag with no files behind it was a real failure mode.
+/// Idempotent: existing files are left untouched (version upgrades still happen
+/// at startup via [`write_integration_packs`]).
+pub fn install_pack(id: &str) -> bool {
+    let Some(pack_dir) = SEED.get_dir(format!("integration_packs/{id}")) else {
+        return false;
+    };
+    let dest_root = paths::integration_packs_dir().join(id);
+    let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
+    collect_files(pack_dir, pack_dir.path(), &mut files);
+    for (rel_path, content) in files {
+        let target = dest_root.join(&rel_path);
+        if target.exists() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("Warning: could not create {}: {e}", parent.display());
+                continue;
+            }
+        }
+        if let Err(e) = fs::write(&target, content) {
+            eprintln!("Warning: could not write {}: {e}", target.display());
+        }
+    }
+    true
+}
+
 /// Write every embedded `<seed_subdir>/<id>/` tree to `<dest_root>/<id>/`. Each
 /// item is force-refreshed (all files overwritten) when its bundled `manifest`
 /// version exceeds the installed one; otherwise files are written only when

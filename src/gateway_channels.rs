@@ -341,6 +341,7 @@ mod tests {
             description: String::new(),
             version: "1.0.0".into(),
             adapter: "twilio".into(),
+            provisioner: None,
             requires_env: vec![],
             settings: vec![SettingField {
                 key: "from".into(),

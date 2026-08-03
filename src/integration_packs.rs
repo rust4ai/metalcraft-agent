@@ -148,11 +148,53 @@ pub fn load_state() -> HashMap<String, PackState> {
 
 fn save_state(state: &HashMap<String, PackState>) -> std::io::Result<()> {
     let path = paths::integration_packs_state_file();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
-    std::fs::write(&path, json)
+    // Atomic replace: write a sibling temp file, fsync it, then rename over the
+    // target. A crash or a concurrent reader never observes a half-written or
+    // truncated file — the old bare `fs::write` truncated first, so an
+    // interrupted or raced write left an empty file that read back as "no packs
+    // enabled". Safe with a fixed temp name because the only caller
+    // ([`mutate_state`]) holds the exclusive state lock across this write.
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut f, json.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Serialize the whole read-modify-write of the enable-state map across threads
+/// *and* processes — the agent daemon and the workshop both mutate it. Holds an
+/// exclusive advisory lock on a sidecar `.lock` file for the critical section so
+/// concurrent writers can't clobber each other's updates (a lost update was how
+/// an agent-side `pack_enable` and a workshop toggle would stomp one another),
+/// then persists atomically via [`save_state`]. Readers stay lock-free: the
+/// atomic rename means they always see a complete old-or-new file.
+fn mutate_state<T>(f: impl FnOnce(&mut HashMap<String, PackState>) -> T) -> Result<T, String> {
+    let lock_path = paths::data_dir().join("integration_packs.lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create state dir: {e}"))?;
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("failed to open state lock: {e}"))?;
+    // Blocking exclusive advisory lock (std, stable since Rust 1.89); released
+    // on drop, so a panicking holder can't wedge the file permanently.
+    lock.lock()
+        .map_err(|e| format!("failed to lock state: {e}"))?;
+    // Read fresh *under the lock* so we never lose a concurrent writer's change.
+    let mut state = load_state();
+    let out = f(&mut state);
+    let result = save_state(&state).map_err(|e| format!("failed to write state: {e}"));
+    let _ = lock.unlock();
+    result.map(|()| out)
 }
 
 pub fn is_enabled(id: &str) -> bool {
@@ -163,30 +205,33 @@ pub fn is_enabled(id: &str) -> bool {
 }
 
 pub fn set_enabled(id: &str, enabled: bool) -> Result<(), String> {
-    // Make sure the pack actually exists before flipping a flag for it.
+    // Enabling always installs first: materialize the pack's files from the
+    // embedded seed so an enabled pack is *guaranteed* to have its personas,
+    // skills, and api_tools on disk. A flag with nothing behind it — which made
+    // the persona/tools silently unresolvable — was the core bug. Install is
+    // idempotent (only writes missing files).
+    if enabled {
+        crate::seed::install_pack(id);
+    }
+    // The pack must exist on disk now — either just installed from the embedded
+    // seed, or previously side-loaded into the packs dir.
     if !list_installed().iter().any(|p| p.manifest.id == id) {
         return Err(format!("pack '{id}' not installed"));
     }
-    let mut state = load_state();
-    state
-        .entry(id.to_string())
-        .and_modify(|s| {
-            s.enabled = enabled;
-            s.enabled_at = if enabled {
-                Some(chrono::Utc::now().to_rfc3339())
-            } else {
-                None
-            };
-        })
-        .or_insert(PackState {
-            enabled,
-            enabled_at: if enabled {
-                Some(chrono::Utc::now().to_rfc3339())
-            } else {
-                None
-            },
-        });
-    save_state(&state).map_err(|e| format!("failed to write state: {e}"))
+    mutate_state(|state| {
+        let enabled_at = if enabled {
+            Some(chrono::Utc::now().to_rfc3339())
+        } else {
+            None
+        };
+        state
+            .entry(id.to_string())
+            .and_modify(|s| {
+                s.enabled = enabled;
+                s.enabled_at = enabled_at.clone();
+            })
+            .or_insert(PackState { enabled, enabled_at });
+    })
 }
 
 /// Iterate enabled packs in deterministic (sorted-id) order. Used by the
