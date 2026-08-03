@@ -21,9 +21,9 @@
 //!   * `WEBHOOK_SECRET` — HMAC-SHA256 key for inbound signatures.
 //!   * `BASE_URL`       — optional override of the API base URL.
 //!
-//! Pre-scoped installs are read back-compatibly: resolution falls back to the
-//! legacy global `PIPESTREAMR_*` keys for one release (see the migration in
-//! [`crate::metalcraft_gateway`]).
+//! Legacy global `PIPESTREAMR_*` keys from pre-scoped installs are migrated into
+//! channel scope on boot (see [`crate::metalcraft_gateway::migrate_legacy_keys`]);
+//! the runtime no longer reads them.
 
 use std::time::Duration;
 
@@ -48,10 +48,9 @@ pub struct PipeCfg {
 impl PipeCfg {
     /// Resolve the send config for `channel`. The `api_key` for a
     /// `metalcraft-gateway` provisioner is derived from `METALCRAFT_TOKEN`
-    /// (never persisted); otherwise it comes from the channel's `API_KEY` secret
-    /// (legacy fallback: global `PIPESTREAMR_API_KEY`). `base_url` comes from the
-    /// channel's `BASE_URL` secret (legacy fallback: `PIPESTREAMR_BASE_URL`),
-    /// defaulting to the hosted service.
+    /// (never persisted); otherwise it comes from the channel's `API_KEY` secret.
+    /// `base_url` comes from the channel's `BASE_URL` secret, defaulting to the
+    /// hosted service.
     pub fn for_channel(channel: &ChannelInstance) -> Result<Self, String> {
         let provisioner = crate::gateway_channels::find_type(&channel.type_id)
             .and_then(|t| t.provisioner);
@@ -66,12 +65,9 @@ impl PipeCfg {
         } else {
             crate::key_store::lookup_scoped(Some(&channel.id), "API_KEY")
                 .filter(|s| !s.is_empty())
-                .or_else(|| crate::key_store::lookup("PIPESTREAMR_API_KEY"))
-                .filter(|s| !s.is_empty())
                 .ok_or("no API key configured for this channel (add its API_KEY secret)")?
         };
         let base_url = crate::key_store::lookup_scoped(Some(&channel.id), "BASE_URL")
-            .or_else(|| crate::key_store::lookup("PIPESTREAMR_BASE_URL"))
             .map(|s| s.trim().trim_end_matches('/').to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_BASE.to_string());
@@ -79,12 +75,10 @@ impl PipeCfg {
     }
 }
 
-/// The inbound HMAC secret for `channel`: its `WEBHOOK_SECRET` secret (legacy
-/// fallback: global `PIPESTREAMR_WEBHOOK_SECRET`). `None` when unconfigured.
+/// The inbound HMAC secret for `channel`: its `WEBHOOK_SECRET` secret. `None`
+/// when unconfigured.
 pub fn channel_webhook_secret(channel: &ChannelInstance) -> Option<String> {
     crate::key_store::lookup_scoped(Some(&channel.id), "WEBHOOK_SECRET")
-        .filter(|s| !s.is_empty())
-        .or_else(|| crate::key_store::lookup("PIPESTREAMR_WEBHOOK_SECRET"))
         .filter(|s| !s.is_empty())
 }
 
