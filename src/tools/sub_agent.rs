@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use metalcraft::{create_react_agent, AgentState, Executor, RunOutcome};
 use rig::client::CompletionClient;
-use rig::providers::openai;
 
 pub struct SubAgentTool {
     api_key: String,
@@ -150,7 +149,10 @@ impl metalcraft::Tool for SubAgentTool {
             (registry, sub_prompt)
         };
 
-        let client = openai::Client::new(&self.api_key).map_err(|e| {
+        // Route through the same gateway-aware, chat/completions client the main
+        // runtime uses — `openai::Client::new` would ignore OPENAI_BASE_URL (bypass
+        // the Metalcraft Inference gateway) and default to the Responses API.
+        let client = crate::runtime::build_openai_client(&self.api_key).map_err(|e| {
             metalcraft::GraphError::ToolCallFailed {
                 tool: "sub_agent".into(),
                 message: format!("Failed to create OpenAI client: {e}"),
