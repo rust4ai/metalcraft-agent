@@ -25,7 +25,7 @@ use crate::trace::TraceLogger;
 use crate::flows;
 use crate::paths;
 use crate::persona::{Persona, PersonaSummary};
-use crate::runtime::{AgentRuntimeContext, RuntimeOptions, DEFAULT_MODEL};
+use crate::runtime::{AgentRuntimeContext, RuntimeOptions};
 use crate::session_io::SessionPreset;
 use crate::diagnostics_browse::{
     list_diagnostics_sessions, read_diagnostics_session, DiagnosticsSessionSummary,
@@ -947,7 +947,7 @@ async fn post_run_flow(
     let persona_slug = req
         .persona_slug
         .unwrap_or_else(|| "coding-agent".to_string());
-    let model_name = req.model_name.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model_name = req.model_name.unwrap_or_else(crate::runtime::configured_default_model);
 
     let Some(flow) = metalcraft_flows::load_flow(&crate::paths::flows_dir(), &id) else {
         return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
@@ -1325,7 +1325,7 @@ async fn post_create_chat(
         );
     }
     let id = uuid::Uuid::new_v4().to_string();
-    let model_name = req.model_name.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model_name = req.model_name.unwrap_or_else(crate::runtime::configured_default_model);
     let diagnostics = DiagnosticsLogger::new().ok().map(Arc::new);
     // The OTLP trace shares the diagnostics session-dir name so traces/<id> and
     // sessions/<id> line up. Best-effort, like diagnostics: never block a chat.
@@ -2421,7 +2421,7 @@ async fn handle_twilio_webhook(
     let model_name = channel
         .setting("model")
         .map(str::to_string)
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        .unwrap_or_else(crate::runtime::configured_default_model);
     let reply_from = channel.setting("from").unwrap_or(&inbound.to).to_string();
 
     crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
@@ -2559,7 +2559,7 @@ async fn handle_pipestreamr_webhook(
     let model_name = channel
         .setting("model")
         .map(str::to_string)
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        .unwrap_or_else(crate::runtime::configured_default_model);
 
     crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
         direction: "inbound".into(),

@@ -12,7 +12,7 @@ use crate::diagnostics::DiagnosticsLogger;
 use crate::flows::{self, FlowSchedule};
 use crate::paths;
 use crate::persona::Persona;
-use crate::runtime::{self, AgentRuntimeContext, RunOneShotRequest, DEFAULT_MODEL};
+use crate::runtime::{self, AgentRuntimeContext, RunOneShotRequest};
 use crate::workshop_api;
 
 use std::collections::HashMap;
@@ -54,8 +54,7 @@ impl DaemonConfig {
         let persona_slug =
             std::env::var("STARKBOT_PERSONA").unwrap_or_else(|_| "coding-agent".to_string());
 
-        let model_name =
-            std::env::var("STARKBOT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let model_name = runtime::configured_default_model();
 
         let poll_seconds = std::env::var("STARKBOT_POLL_SECONDS")
             .ok()

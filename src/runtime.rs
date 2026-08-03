@@ -21,6 +21,30 @@ use std::sync::Arc;
 pub const DEFAULT_MODEL: &str = "gpt-5.4";
 pub const AVAILABLE_MODELS: &[&str] = &["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"];
 
+/// The model name to use when a caller (Workshop chat, daemon, a flow node)
+/// doesn't specify one. Resolution order:
+///   1. `METALCRAFT_MODEL` — set by the control plane on managed pods; typically
+///      the sentinel `"default"`, which the inference gateway resolves to the
+///      user's dashboard-selected default model (no pod restart needed).
+///   2. `STARKBOT_MODEL` — legacy/local override.
+///   3. [`DEFAULT_MODEL`] — the compile-time fallback for local/dev use.
+///
+/// This is the single source of truth so every unspecified-model path honours the
+/// same env, rather than each site hard-coding [`DEFAULT_MODEL`]. Compaction is
+/// deliberately excluded (it uses a fixed model) so it never routes through the
+/// user's possibly-costlier default.
+pub fn configured_default_model() -> String {
+    for key in ["METALCRAFT_MODEL", "STARKBOT_MODEL"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    DEFAULT_MODEL.to_string()
+}
+
 /// Maximum executor steps for a single agent turn. Single source of truth so no
 /// call site (CLI, workshop, gateway, one-shot) can silently diverge — the exact
 /// class of bug [`TurnRunner`] exists to prevent.
