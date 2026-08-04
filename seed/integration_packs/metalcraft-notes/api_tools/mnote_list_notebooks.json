@@ -1,9 +1,0 @@
-{
-  "name": "mnote_list_notebooks",
-  "description": "List all notebooks the account owns. Returns an array, each with: id, name, slug (used to address the notebook in other tools), created_at. Call this before reading or writing pages so you know the target notebook's `slug`. Takes no parameters.",
-  "method": "GET",
-  "url": "https://notes.metalcraftai.com/api/v1/notebooks",
-  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Accept": "application/json" },
-  "parameters": { "type": "object", "properties": {} },
-  "body_mapping": "none"
-}

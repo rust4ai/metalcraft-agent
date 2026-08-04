@@ -18,20 +18,20 @@ const PERSONA_SLUG: &str = "metalcraft-notes-agent";
 
 const EXPECTED_TOOLS: &[&str] = &[
     "mnote_whoami",
-    "mnote_list_notebooks",
-    "mnote_create_notebook",
-    "mnote_list_pages",
-    "mnote_get_page",
-    "mnote_create_page",
-    "mnote_update_page",
-    "mnote_delete_page",
+    "mnote_list_notes",
+    "mnote_get_note",
+    "mnote_create_note",
+    "mnote_update_note",
+    "mnote_delete_note",
+    "mnote_list_categories",
+    "mnote_create_category",
 ];
 
 const READ_TOOLS: &[&str] =
-    &["mnote_whoami", "mnote_list_notebooks", "mnote_list_pages", "mnote_get_page"];
+    &["mnote_whoami", "mnote_list_notes", "mnote_get_note", "mnote_list_categories"];
 
 const WRITE_TOOLS: &[&str] =
-    &["mnote_create_notebook", "mnote_create_page", "mnote_update_page", "mnote_delete_page"];
+    &["mnote_create_note", "mnote_update_note", "mnote_delete_note", "mnote_create_category"];
 
 static INIT: Once = Once::new();
 
@@ -83,16 +83,16 @@ fn metalcraft_notes_pack_wires_up() {
         );
     }
 
-    // Page tools address the notebook by {notebook} slug.
-    for tool in ["mnote_list_pages", "mnote_get_page", "mnote_create_page"] {
+    // Per-note tools address the note by {slug}.
+    for tool in ["mnote_get_note", "mnote_update_note", "mnote_delete_note"] {
         let (p, _) =
             integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("resolves");
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
         assert!(
-            cfg["url"].as_str().is_some_and(|u| u.contains("{notebook}")),
-            "`{tool}` should address the notebook by {{notebook}} slug"
+            cfg["url"].as_str().is_some_and(|u| u.contains("{slug}")),
+            "`{tool}` should address the note by {{slug}}"
         );
     }
 

@@ -1,0 +1,9 @@
+{
+  "name": "mnote_list_categories",
+  "description": "List the account's categories — the color-coded tags used to organize notes (there are no folders). Returns an array, each with: id (used to tag notes in mnote_create_note / mnote_update_note and to filter mnote_list_notes), name, color (a hex), created_at. A user has at most 12 categories; the defaults are home, work, and personal.",
+  "method": "GET",
+  "url": "https://notes.metalcraftai.com/api/v1/categories",
+  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Accept": "application/json" },
+  "parameters": { "type": "object", "properties": {} },
+  "body_mapping": "none"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "mnote_delete_note",
+  "description": "Delete a note by `slug`. Requires the write scope (403 otherwise). Irreversible — confirm the exact note (title) with the user before deleting. Returns 204 No Content on success.",
+  "method": "DELETE",
+  "url": "https://notes.metalcraftai.com/api/v1/notes/{slug}",
+  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Accept": "application/json" },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "slug": { "type": "string", "description": "Note slug to delete." }
+    },
+    "required": ["slug"]
+  },
+  "body_mapping": "none"
+}

@@ -1,0 +1,17 @@
+{
+  "name": "mnote_create_note",
+  "description": "Create a note. `title` is the note title; `body` is the content as plain MARKDOWN (headings, lists, code fences, tables, task lists) — write clean, well-structured markdown. `categories` is an optional array of category ids to tag it with (from mnote_list_categories). The slug is derived from the title (auto-deduped). Requires the write scope (403 otherwise). Returns the created note including its new slug.",
+  "method": "POST",
+  "url": "https://notes.metalcraftai.com/api/v1/notes",
+  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Content-Type": "application/json", "Accept": "application/json" },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "title": { "type": "string", "description": "Note title." },
+      "body": { "type": "string", "description": "Note content as markdown." },
+      "categories": { "type": "array", "items": { "type": "string" }, "description": "Optional category ids to tag the note with." }
+    },
+    "required": ["title"]
+  },
+  "body_mapping": "params"
+}

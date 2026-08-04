@@ -11,31 +11,33 @@ the agent writes notes as plain markdown.
   The **only** setting, and the **same token works across every Metalcraft ecosystem app**.
 
 The API base is **fixed to `https://notes.metalcraftai.com`**. Every tool sends
-`Authorization: Bearer $METALCRAFT_TOKEN`. The account is implied by the token; a
-**notebook slug** + **page slug** address the content.
+`Authorization: Bearer $METALCRAFT_TOKEN`. The account is implied by the token; a **note
+slug** addresses the content.
 
 ## Model
-One account owns many **notebooks**, each a **tree of pages** whose body is **markdown**.
-Discover notebooks with `mnote_list_notebooks`, then a notebook's pages with
-`mnote_list_pages`.
+Notes are **flat** — there are no folders/notebooks and no nesting. One account owns many
+**notes** (body = **markdown**), each addressed by `slug`. Notes are organized by
+**categories**: color-coded tags, at most 12 per account (defaults: `home`, `work`,
+`personal`). A note can carry several categories. Discover notes with `mnote_list_notes`
+and categories with `mnote_list_categories`.
 
 ## Tools
 | Tool | Method | Path | Scope |
 |------|--------|------|-------|
 | `mnote_whoami` | GET | `/api/v1/whoami` | read |
-| `mnote_list_notebooks` | GET | `/api/v1/notebooks` | read |
-| `mnote_create_notebook` | POST | `/api/v1/notebooks` | **write** |
-| `mnote_list_pages` | GET | `/api/v1/notebooks/{notebook}/pages` | read |
-| `mnote_get_page` | GET | `/api/v1/notebooks/{notebook}/pages/{slug}` | read |
-| `mnote_create_page` | POST | `/api/v1/notebooks/{notebook}/pages` | **write** |
-| `mnote_update_page` | PATCH | `/api/v1/notebooks/{notebook}/pages/{slug}` | **write** |
-| `mnote_delete_page` | DELETE | `/api/v1/notebooks/{notebook}/pages/{slug}` | **write** |
+| `mnote_list_notes` | GET | `/api/v1/notes` | read |
+| `mnote_get_note` | GET | `/api/v1/notes/{slug}` | read |
+| `mnote_create_note` | POST | `/api/v1/notes` | **write** |
+| `mnote_update_note` | PATCH | `/api/v1/notes/{slug}` | **write** |
+| `mnote_delete_note` | DELETE | `/api/v1/notes/{slug}` | **write** |
+| `mnote_list_categories` | GET | `/api/v1/categories` | read |
+| `mnote_create_category` | POST | `/api/v1/categories` | **write** |
 
 Reads auto-approve; create/update/delete require approval. Writes need a token with the
-`write` scope (403 otherwise). Page bodies are plain markdown. *(Search + share
-tools arrive with the app's N5/N6.)*
+`write` scope (403 otherwise). Note bodies are plain markdown; categories are addressed by
+`id` (from `mnote_list_categories`). *(Search + share tools live in the web app.)*
 
 ## Ships
 - `personas/metalcraft-notes-agent.json` — a notes assistant scoped to this pack.
-- `skills/metalcraft-notes.md` — the whoami → list_notebooks → list_pages →
+- `skills/metalcraft-notes.md` — the whoami → list_notes / list_categories →
   create/update workflow, scope + markdown conventions.
