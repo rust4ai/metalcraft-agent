@@ -1,0 +1,17 @@
+{
+  "name": "mcal_now",
+  "description": "Get the current date and time — the authoritative, always-fresh clock. Do NOT rely on your own sense of the current date; call this to ground ANY relative date ('today', 'tomorrow', 'next Friday', 'the 15th') and before creating/updating an event from a user-given local time. Pass the target calendar's `tz` (its IANA timezone from mcal_list_calendars) to get local values. Returns: utc, timezone, local (ISO with offset), date (TODAY's local date, YYYY-MM-DD), weekday, tomorrow, yesterday. Prefer the ready-made date/tomorrow/yesterday fields — pass one straight to mcal_list_events `day`, or use `date` to build correct UTC timestamps for writes.",
+  "method": "GET",
+  "url": "https://calendar.metalcraftai.com/api/v1/now?tz={tz}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "tz": { "type": "string", "description": "IANA timezone to localize into — the target calendar's timezone, e.g. 'America/New_York'. Omit for UTC." }
+    }
+  },
+  "body_mapping": "none"
+}

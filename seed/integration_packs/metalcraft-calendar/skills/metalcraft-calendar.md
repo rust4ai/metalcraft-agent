@@ -23,15 +23,19 @@ id.metalcraftai.com → Account → Tokens.
 ## Times & timezones
 **Every calendar has a `timezone`** (an IANA name like `America/New_York`), returned by
 `mcal_list_calendars`. It is the calendar's locale:
+- **Never trust your own sense of "now".** To ground any relative date, call **`mcal_now`**
+  (pass the calendar's `tz`). It returns a fresh `date` (today), `tomorrow`, `yesterday`,
+  `weekday`, plus `utc`/`local`. Use it before answering "next Friday", "the 15th", etc.,
+  and before writing an event from a user-given local time.
 - **Reading a day:** prefer `mcal_list_events` with `day` = `today` / `tomorrow` /
-  `yesterday` / `YYYY-MM-DD`. The server resolves the day in the calendar's own
-  timezone, so "what's on tomorrow" is correct without you doing any UTC math.
+  `yesterday` / `YYYY-MM-DD`. The server resolves the day in the calendar's own timezone
+  against its live clock, so "what's on tomorrow" is correct with no date math from you.
+  For an explicit date from `mcal_now` (e.g. `next Friday`), pass it as `day=YYYY-MM-DD`.
 - **Interpreting the user:** a wall-clock time the user gives ("3pm Friday") means that
-  time **in the target calendar's timezone**. Convert to UTC ISO-8601 before sending it
-  in `from`/`to` or in create/update bodies.
+  time **in the target calendar's timezone**. Get today's local date from `mcal_now`, then
+  convert to UTC ISO-8601 before sending it in `from`/`to` or in create/update bodies.
 - **Reporting back:** event `starts_at`/`ends_at` come back as UTC ISO-8601 — convert to
-  the calendar's timezone when you tell the user. The system prompt gives you the current
-  UTC time; combine it with the calendar's timezone for anything relative ("next Tuesday").
+  the calendar's timezone when you tell the user.
 - **Creating a calendar:** `timezone` is REQUIRED. If you don't know the user's, **ask** —
   never guess.
 
@@ -40,10 +44,12 @@ id.metalcraftai.com → Account → Tokens.
 2. **`mcal_list_calendars`** — find the target calendar's `slug` **and its `timezone`**. If
    the user names one that doesn't exist, list what's there and ask, or offer
    `mcal_create_calendar` (ask for the timezone first).
-3. **Read:** optionally `mcal_sync` (calendar slug) to pull the linked Google calendar,
+3. **Ground the date** — for anything relative or any write, call `mcal_now` with the
+   calendar's `tz` so you have the real today/tomorrow (don't guess it).
+4. **Read:** optionally `mcal_sync` (calendar slug) to pull the linked Google calendar,
    then `mcal_list_events` — use `day=today/tomorrow/YYYY-MM-DD` for a single day, or a
    `from`/`to` window for a range.
-4. **Write (needs `write`):** `mcal_create_event`, `mcal_update_event`,
+5. **Write (needs `write`):** `mcal_create_event`, `mcal_update_event`,
    `mcal_delete_event` — all scoped to a calendar slug.
 
 ## Lifecycle notes
