@@ -143,20 +143,28 @@ impl Persona {
 
     /// Build the system prompt. The persona's `system_prompt` is treated as a
     /// template: `{{cwd}}`, `{{available_skills}}`, `{{available_personas}}`,
-    /// and `{{installed_packs}}` are substituted with live values so an author
-    /// can place each list exactly where they want it. Any of those lists that
-    /// the template does NOT reference is appended afterward with a default
-    /// heading, preserving the behavior of personas written before templating.
+    /// `{{installed_packs}}`, and `{{now_utc}}` are substituted with live values
+    /// so an author can place each exactly where they want it. Any of those the
+    /// template does NOT reference is appended afterward with a default heading,
+    /// preserving the behavior of personas written before templating.
     pub fn build_system_prompt(&self, skills_dir: &Path, cwd: &str) -> String {
         let skills_block = self.skills_block(skills_dir);
         let personas_block = self.personas_block();
         let packs_block = installed_packs_block();
+
+        // Ground the model in the current instant. Without this it has no
+        // reliable "today", so it can't resolve relative dates ("tomorrow") —
+        // the root of the calendar-in-UTC bug. Given in UTC; downstream tools
+        // (e.g. the calendar's per-calendar timezone) localize from there.
+        let now = chrono::Utc::now();
+        let now_utc = now.format("%Y-%m-%dT%H:%M:%SZ (%A)").to_string();
 
         let vars = [
             ("cwd", cwd.to_string()),
             ("available_skills", skills_block.clone()),
             ("available_personas", personas_block.clone()),
             ("installed_packs", packs_block),
+            ("now_utc", now_utc.clone()),
         ];
 
         let mut prompt = render_template(&self.system_prompt, &vars);
@@ -165,6 +173,12 @@ impl Persona {
         // so authored placeholders never produce a duplicate section.
         if !template_uses(&self.system_prompt, "cwd") {
             prompt.push_str(&format!("\n\nWorking directory: {}", cwd));
+        }
+
+        // Always surface "now" (it's never empty); skip only if the author
+        // placed {{now_utc}} themselves.
+        if !template_uses(&self.system_prompt, "now_utc") {
+            prompt.push_str(&format!("\n\nCurrent time: {} (UTC).", now_utc));
         }
 
         if !skills_block.is_empty() && !template_uses(&self.system_prompt, "available_skills") {

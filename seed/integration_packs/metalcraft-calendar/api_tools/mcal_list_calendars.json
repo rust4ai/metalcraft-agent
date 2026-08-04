@@ -1,6 +1,6 @@
 {
   "name": "mcal_list_calendars",
-  "description": "List all calendars the account owns. Returns an array of calendars, each with: id (UUID), name, slug (used to address the calendar in other tools), google_calendar_id (null if none linked), and last_synced_at. Call this before reading or writing events so you know the target calendar's `slug`. Takes no parameters.",
+  "description": "List all calendars the account owns. Returns an array of calendars, each with: id (UUID), name, slug (used to address the calendar in other tools), timezone (IANA, e.g. America/New_York — the calendar's locale for interpreting and reporting times), google_calendar_id (null if none linked), and last_synced_at. Call this before reading or writing events so you know the target calendar's `slug` AND its `timezone`. Takes no parameters.",
   "method": "GET",
   "url": "https://calendar.metalcraftai.com/api/v1/calendars",
   "headers": {

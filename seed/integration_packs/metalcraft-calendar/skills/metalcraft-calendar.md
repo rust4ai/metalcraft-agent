@@ -20,16 +20,29 @@ and creating calendars — requires **`write`**. Without it those calls return
 403; tell the user to mint a token with `write` at
 id.metalcraftai.com → Account → Tokens.
 
-## Times
-Always UTC ISO-8601 (e.g. `2026-07-28T07:00:00Z`). Convert the user's local time to
-UTC before sending; convert back when reporting. Ask for their timezone if unknown.
+## Times & timezones
+**Every calendar has a `timezone`** (an IANA name like `America/New_York`), returned by
+`mcal_list_calendars`. It is the calendar's locale:
+- **Reading a day:** prefer `mcal_list_events` with `day` = `today` / `tomorrow` /
+  `yesterday` / `YYYY-MM-DD`. The server resolves the day in the calendar's own
+  timezone, so "what's on tomorrow" is correct without you doing any UTC math.
+- **Interpreting the user:** a wall-clock time the user gives ("3pm Friday") means that
+  time **in the target calendar's timezone**. Convert to UTC ISO-8601 before sending it
+  in `from`/`to` or in create/update bodies.
+- **Reporting back:** event `starts_at`/`ends_at` come back as UTC ISO-8601 — convert to
+  the calendar's timezone when you tell the user. The system prompt gives you the current
+  UTC time; combine it with the calendar's timezone for anything relative ("next Tuesday").
+- **Creating a calendar:** `timezone` is REQUIRED. If you don't know the user's, **ask** —
+  never guess.
 
 ## Workflow
 1. **`mcal_whoami`** — validate the token, read `scopes`.
-2. **`mcal_list_calendars`** — find the target calendar's `slug`. If the user names one
-   that doesn't exist, list what's there and ask, or offer `mcal_create_calendar`.
+2. **`mcal_list_calendars`** — find the target calendar's `slug` **and its `timezone`**. If
+   the user names one that doesn't exist, list what's there and ask, or offer
+   `mcal_create_calendar` (ask for the timezone first).
 3. **Read:** optionally `mcal_sync` (calendar slug) to pull the linked Google calendar,
-   then `mcal_list_events` with a `from`/`to` window.
+   then `mcal_list_events` — use `day=today/tomorrow/YYYY-MM-DD` for a single day, or a
+   `from`/`to` window for a range.
 4. **Write (needs `write`):** `mcal_create_event`, `mcal_update_event`,
    `mcal_delete_event` — all scoped to a calendar slug.
 
