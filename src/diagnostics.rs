@@ -173,6 +173,13 @@ fn serialize_message(msg: &AgentMessage) -> serde_json::Value {
             "result": result,
             "is_error": result.starts_with("ERROR:"),
         }),
+        AgentMessage::Reasoning { id, .. } => json!({
+            "role": "reasoning",
+            "id": id,
+            // The encrypted payload is large and opaque; record only its
+            // presence, not its contents.
+            "encrypted": true,
+        }),
     }
 }
 

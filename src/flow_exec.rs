@@ -731,6 +731,9 @@ impl<'a> FlowExecutor<'a> {
                 llm_response_hook: None,
                 tool_choice: ToolChoice::Required,
                 terminal_tools: handle_names.clone(),
+                // Reasoning is driven per-model by the inference server; the pod
+                // leaves it unset (see the note in runtime.rs::build_agent_runtime).
+                reasoning_effort: None,
             },
         )
         .map_err(|e| format!("branch node '{}': build agent: {e}", node.id))?

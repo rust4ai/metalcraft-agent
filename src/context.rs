@@ -40,6 +40,9 @@ pub fn estimate_tokens(state: &AgentState) -> usize {
                 name.len() + serde_json::to_string(args).unwrap_or_default().len()
             }
             AgentMessage::ToolResult { name, result, .. } => name.len() + result.len(),
+            // The encrypted reasoning payload is sent back to the provider, so
+            // it counts toward context; its length is a rough proxy.
+            AgentMessage::Reasoning { encrypted, .. } => encrypted.len(),
         })
         .sum::<usize>()
         / 4
@@ -60,17 +63,38 @@ fn truncate_chars(s: &str, max_chars: usize) -> Cow<'_, str> {
 
 /// Pick the index at which to split history into "summarize" (before) and "keep
 /// recent" (from here on). Starts at `len - keep_recent` but walks the boundary
-/// earlier so the kept window never *begins* with a `ToolResult` — a tool result
-/// with no preceding tool call ahead of it is an invalid sequence for the
-/// provider and would make the very next request fail. Returns 0 if there is
-/// nothing to summarize.
+/// earlier so the kept window never *begins* in the middle of a tool block:
+///
+/// - a leading `ToolResult` has no preceding tool call ahead of it, and
+/// - a leading `ToolCall` would have its paired `Reasoning` item summarized away
+///   (reasoning items immediately precede their tool call),
+///
+/// both of which are invalid sequences for the provider and would make the very
+/// next request fail. Walking back stops at a `User`, `Assistant`, or `Reasoning`
+/// message — a `Reasoning` start is fine because its whole block (reasoning →
+/// tool call → tool result) is then kept together. Returns 0 if there is nothing
+/// to summarize.
 fn safe_split(messages: &[AgentMessage], keep_recent: usize) -> usize {
     if messages.len() <= keep_recent {
         return 0;
     }
     let mut split = messages.len() - keep_recent;
+    // Never start the kept window on a tool result (its call would be gone).
     while split > 0 && matches!(messages[split], AgentMessage::ToolResult { .. }) {
         split -= 1;
+    }
+    // If the window would start on a tool call, pull in a reasoning item that
+    // directly precedes the block (walking past any parallel calls in the same
+    // batch). Otherwise the kept tool call loses its paired reasoning item and
+    // the provider rejects it. A block with no leading reasoning is left as-is.
+    if split > 0 && matches!(messages[split], AgentMessage::ToolCall { .. }) {
+        let mut block_start = split;
+        while block_start > 0 && matches!(messages[block_start], AgentMessage::ToolCall { .. }) {
+            block_start -= 1;
+        }
+        if matches!(messages[block_start], AgentMessage::Reasoning { .. }) {
+            split = block_start;
+        }
     }
     split
 }
@@ -149,6 +173,9 @@ async fn summarize_messages<M: CompletionModel + 'static>(
                     truncate_chars(result, 500)
                 ));
             }
+            // Reasoning items are opaque encrypted payloads — nothing useful to
+            // add to a human-readable summary transcript.
+            AgentMessage::Reasoning { .. } => {}
         }
     }
 
@@ -219,6 +246,39 @@ mod tests {
         // Naive split = 5 - 2 = 3 (a ToolResult). safe_split walks back to 2.
         assert_eq!(safe_split(&messages, 2), 2);
         assert!(!matches!(messages[safe_split(&messages, 2)], AgentMessage::ToolResult { .. }));
+    }
+
+    #[test]
+    fn safe_split_keeps_reasoning_with_its_tool_call() {
+        // A reasoning item leads the tool block. The kept window must not start
+        // after it, or the tool call loses its paired reasoning item and the
+        // Responses API rejects the next request.
+        let messages = vec![
+            AgentMessage::User("hi".into()),                        // 0
+            AgentMessage::Reasoning { id: "rs_1".into(), encrypted: "enc".into() }, // 1
+            tool_call("read"),                                      // 2
+            tool_result("read", "contents"),                       // 3  <- naive boundary (keep_recent=2)
+            AgentMessage::Assistant("done".into()),                // 4
+        ];
+        // Naive split = 3 (ToolResult) -> walk to 2 (ToolCall) -> pull in the
+        // preceding reasoning at 1.
+        assert_eq!(safe_split(&messages, 2), 1);
+        assert!(matches!(messages[safe_split(&messages, 2)], AgentMessage::Reasoning { .. }));
+    }
+
+    #[test]
+    fn safe_split_keeps_reasoning_with_a_parallel_tool_batch() {
+        // Reasoning followed by two parallel tool calls: walking back from a
+        // mid-batch boundary must pass both calls and still land on the reasoning.
+        let messages = vec![
+            AgentMessage::User("hi".into()),                        // 0
+            AgentMessage::Reasoning { id: "rs_1".into(), encrypted: "enc".into() }, // 1
+            tool_call("read"),                                      // 2
+            tool_call("grep"),                                      // 3
+            tool_result("read", "a"),                               // 4
+            tool_result("grep", "b"),                               // 5  <- naive boundary (keep_recent=1)
+        ];
+        assert_eq!(safe_split(&messages, 1), 1);
     }
 
     #[test]

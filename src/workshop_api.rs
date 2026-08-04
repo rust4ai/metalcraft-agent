@@ -1234,6 +1234,14 @@ struct ChatDetail {
 enum ChatMessageWire {
     User { content: String },
     Assistant { content: String },
+    /// A reasoning item preserved so it can be replayed with its tool call on a
+    /// later turn (Responses API requirement for reasoning models). Persisted so
+    /// the pairing survives a reload — dropping it would re-trigger the "function
+    /// call without required reasoning item" 400 on resume.
+    Reasoning {
+        id: String,
+        encrypted: String,
+    },
     ToolCall {
         id: String,
         #[serde(default)]
@@ -1255,6 +1263,10 @@ impl From<&AgentMessage> for ChatMessageWire {
         match m {
             AgentMessage::User(s) => Self::User { content: s.clone() },
             AgentMessage::Assistant(s) => Self::Assistant { content: s.clone() },
+            AgentMessage::Reasoning { id, encrypted } => Self::Reasoning {
+                id: id.clone(),
+                encrypted: encrypted.clone(),
+            },
             AgentMessage::ToolCall { id, call_id, name, args } => Self::ToolCall {
                 id: id.clone(),
                 call_id: call_id.clone(),
@@ -1276,6 +1288,9 @@ impl From<ChatMessageWire> for AgentMessage {
         match w {
             ChatMessageWire::User { content } => AgentMessage::User(content),
             ChatMessageWire::Assistant { content } => AgentMessage::Assistant(content),
+            ChatMessageWire::Reasoning { id, encrypted } => {
+                AgentMessage::Reasoning { id, encrypted }
+            }
             ChatMessageWire::ToolCall { id, call_id, name, args } => {
                 AgentMessage::ToolCall { id, call_id, name, args }
             }
@@ -1871,6 +1886,10 @@ async fn post_chat_turn(
                             // include them in the assistant batch so they
                             // aren't silently dropped.
                             assistant_msgs.push(ChatMessageWire::from(m));
+                        }
+                        AgentMessage::Reasoning { .. } => {
+                            // Internal replay artifact — persisted via the full
+                            // AgentState, but not surfaced as a UI chat event.
                         }
                     }
                 }

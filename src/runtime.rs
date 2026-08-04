@@ -274,6 +274,13 @@ where
             llm_response_hook,
             tool_choice: options.tool_choice,
             terminal_tools: options.terminal_tools,
+            // Reasoning is driven per-model by the inference server (it injects
+            // the `reasoning` param + encrypted-content include for reasoning
+            // models), so the pod leaves it unset. Reasoning items still
+            // round-trip: rig captures whatever the provider returns and the
+            // ReAct loop replays it. Set this only for direct-to-OpenAI use
+            // without the inference gateway.
+            reasoning_effort: None,
         },
     )?
     .into_arc();
