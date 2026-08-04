@@ -2,7 +2,7 @@
   "id": "metalcraft-gateway",
   "name": "Metalcraft Gateway",
   "description": "WhatsApp / SMS via the Metalcraft Gateway (gateway.metalcraftai.com). Zero setup: because your pod already holds a Metalcraft ID token, the agent fetches its own base URL, integration ID, and webhook secret and registers its inbound webhook automatically. You only verify your phone number once. Wire-compatible with PipeStreamr under the hood.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "adapter": "pipestreamr",
   "provisioner": "metalcraft-gateway",
   "requires_env": [],
@@ -21,6 +21,14 @@
       "input_type": "model",
       "required": false,
       "help": "Model the persona runs with. Leave blank for the daemon default."
+    },
+    {
+      "key": "session_ttl_minutes",
+      "label": "New conversation after idle (minutes)",
+      "input_type": "number",
+      "required": false,
+      "placeholder": "15",
+      "help": "Start a fresh conversation when a contact hasn't messaged for this many minutes. Blank uses the default (15); 0 never resets (one continuous thread)."
     }
   ]
 }

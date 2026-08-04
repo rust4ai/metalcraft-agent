@@ -2,7 +2,7 @@
   "id": "pipestreamr",
   "name": "PipeStreamr",
   "description": "WhatsApp (and more) via the PipeStreamr passthru. Outbound replies go through PipeStreamr's /api/v1/messages/send; inbound messages arrive as PipeStreamr webhooks. Point your PipeStreamr project webhook at <daemon>/webhook/pipestreamr. This channel's API key and webhook secret are stored as its own scoped secrets (in the Keys tab, under this channel) — not as account-wide keys.",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "adapter": "pipestreamr",
   "requires_env": [],
   "settings": [
@@ -63,6 +63,14 @@
       "input_type": "model",
       "required": false,
       "help": "Model the persona runs with. Leave blank for the daemon default."
+    },
+    {
+      "key": "session_ttl_minutes",
+      "label": "New conversation after idle (minutes)",
+      "input_type": "number",
+      "required": false,
+      "placeholder": "15",
+      "help": "Start a fresh conversation when a contact hasn't messaged for this many minutes. Blank uses the default (15); 0 never resets (one continuous thread)."
     }
   ]
 }
