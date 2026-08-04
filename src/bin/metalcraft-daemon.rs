@@ -44,6 +44,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--api" => {
                 config.workshop_api_key = Some(args.next().ok_or("--api requires a key")?);
             }
+            "--api-oidc" => {
+                // OIDC-only: serve the workshop API with no static key, accepting
+                // only Metalcraft ID (`mck_`) tokens. Same as WORKSHOP_API_ENABLED=1.
+                config.workshop_api_oidc = true;
+            }
             "--api-port" => {
                 config.workshop_api_port = args.next().ok_or("--api-port requires a value")?.parse()?;
             }
@@ -83,6 +88,8 @@ fn print_usage() {
            --auto-approve           Skip tool approval prompts\n\n\
          Workshop API options:\n  \
            --api <KEY>              Enable workshop admin API with Bearer KEY (env: WORKSHOP_API_KEY)\n  \
+           --api-oidc               Enable workshop admin API with OIDC-only auth, no static key\n  \
+           \x20                        (env: WORKSHOP_API_ENABLED=1; managed pods)\n  \
            --api-port <n>           Workshop API port (default: 3002, env: WORKSHOP_API_PORT or PORT)\n\n\
          The workshop API also hosts gateway channels (inbound webhooks at\n  \
          /webhook/<adapter> and management under /api/v1/gateway/*).\n\n\

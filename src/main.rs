@@ -126,18 +126,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Workshop API server mode. Triggered by `--api [KEY]` or by a
-    // WORKSHOP_API_KEY in the environment (the env-only trigger preserves the
-    // historical behavior of running the server when the key is exported).
+    // Workshop API server mode. Triggered by `--api [KEY]`, a WORKSHOP_API_KEY in
+    // the environment (the env-only trigger preserves the historical behavior of
+    // running the server when the key is exported), or WORKSHOP_API_ENABLED for
+    // OIDC-only mode (managed pods that mint no static key).
     let api_key = invocation
         .api_key
         .clone()
-        .or_else(|| std::env::var("WORKSHOP_API_KEY").ok());
-    if invocation.api_requested || api_key.is_some() {
-        let key = match api_key {
-            Some(k) => k,
-            None => {
-                eprintln!("{} --api requires an API key: --api <KEY> or set WORKSHOP_API_KEY", ui::error("Error:"));
+        .or_else(|| std::env::var("WORKSHOP_API_KEY").ok())
+        .filter(|s| !s.is_empty());
+    let api_oidc = matches!(
+        std::env::var("WORKSHOP_API_ENABLED")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    );
+    if invocation.api_requested || api_key.is_some() || api_oidc {
+        // OIDC-only mode runs with an empty key (static-bearer path disabled,
+        // callers authenticate via Metalcraft ID tokens). A bare `--api` with no
+        // key and no OIDC opt-in is still an error — an all-rejecting endpoint.
+        let key = match (api_key, api_oidc) {
+            (Some(k), _) => k,
+            (None, true) => String::new(),
+            (None, false) => {
+                eprintln!("{} --api requires an API key (--api <KEY> or WORKSHOP_API_KEY) or WORKSHOP_API_ENABLED=1 for OIDC-only", ui::error("Error:"));
                 std::process::exit(1);
             }
         };

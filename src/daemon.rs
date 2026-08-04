@@ -37,6 +37,11 @@ pub struct DaemonConfig {
     // Workshop admin API
     pub workshop_api_key: Option<String>,
     pub workshop_api_port: u16,
+    /// Serve the workshop API even without a static key, authenticating callers
+    /// via Metalcraft ID (OIDC) tokens only. Set on managed pods that mint no
+    /// static key. When `workshop_api_key` is also present, both credential
+    /// paths work; the flag only matters in the no-key case.
+    pub workshop_api_oidc: bool,
 }
 
 impl DaemonConfig {
@@ -65,6 +70,7 @@ impl DaemonConfig {
         let auto_approve = env_flag("STARKBOT_AUTO_APPROVE", false);
 
         let workshop_api_key = std::env::var("WORKSHOP_API_KEY").ok().filter(|s| !s.is_empty());
+        let workshop_api_oidc = env_flag("WORKSHOP_API_ENABLED", false);
         let workshop_api_port = std::env::var("WORKSHOP_API_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
@@ -80,6 +86,7 @@ impl DaemonConfig {
             auto_approve,
             workshop_api_key,
             workshop_api_port,
+            workshop_api_oidc,
         }
     }
 
@@ -117,6 +124,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
         auto_approve: _,
         workshop_api_key,
         workshop_api_port,
+        workshop_api_oidc,
     } = config;
 
     // One-time migration of legacy global PIPESTREAMR_* keys into channel scope
@@ -135,11 +143,15 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
         once
     );
 
-    // Spawn the workshop admin API if a key was supplied. Runs alongside the
-    // flow scheduler so a single daemon process can both run flows and serve
-    // project edits from the workshop desktop app.
-    if let Some(key) = workshop_api_key.clone() {
+    // Spawn the workshop admin API when either a static key was supplied
+    // (legacy / self-hosted) or OIDC-only mode is enabled (managed pods that
+    // mint no static key). Runs alongside the flow scheduler so a single daemon
+    // process can both run flows and serve project edits from the workshop.
+    // An empty key disables the static-bearer path in `auth_middleware`, leaving
+    // Metalcraft ID (`mck_`) tokens as the only accepted credential.
+    if workshop_api_key.is_some() || workshop_api_oidc {
         let port = workshop_api_port;
+        let key = workshop_api_key.clone().unwrap_or_default();
         let router = workshop_api::build_router(key);
         tokio::spawn(async move {
             workshop_api::serve(port, router).await;
@@ -162,9 +174,19 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     } else {
         println!("  mode:           polling every {poll_seconds}s");
     }
-    match &workshop_api_key {
-        Some(_) => println!("  workshop API:   enabled on port {workshop_api_port}"),
-        None => println!("  workshop API:   disabled (set WORKSHOP_API_KEY to enable)"),
+    match (&workshop_api_key, workshop_api_oidc) {
+        (Some(_), true) => {
+            println!("  workshop API:   enabled on port {workshop_api_port} (static key + OIDC)")
+        }
+        (Some(_), false) => {
+            println!("  workshop API:   enabled on port {workshop_api_port} (static key)")
+        }
+        (None, true) => {
+            println!("  workshop API:   enabled on port {workshop_api_port} (OIDC only)")
+        }
+        (None, false) => {
+            println!("  workshop API:   disabled (set WORKSHOP_API_KEY or WORKSHOP_API_ENABLED)")
+        }
     }
     println!("──────────────────────────────────────────────");
 
