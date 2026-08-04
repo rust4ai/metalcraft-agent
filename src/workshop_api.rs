@@ -3011,6 +3011,36 @@ fn gateway_chat_id(channel_instance_id: &str, sender: &str) -> String {
     format!("gw-{channel_instance_id}-{suffix}")
 }
 
+/// Idle timeout for gateway conversations, from `METALCRAFT_GATEWAY_SESSION_TTL_SECS`
+/// (default 900s = 15 min). After this much inactivity the next inbound starts a
+/// fresh session instead of continuing the old one — matching the "new
+/// conversation after a gap" feel of SMS/WhatsApp, and (usefully) shedding any
+/// stale pre-upgrade history that a reasoning model would otherwise reject. `0`
+/// disables the reset (conversations continue forever). Gateway-only; workshop
+/// chats are user-managed and never auto-reset.
+fn gateway_session_ttl() -> Option<std::time::Duration> {
+    let secs = std::env::var("METALCRAFT_GATEWAY_SESSION_TTL_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(900);
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
+/// Whether the gateway conversation `chat_id` has been idle longer than `ttl`.
+/// Uses the persisted chat file's mtime — [`persist_chat`] rewrites it after every
+/// turn, and it survives a pod restart on the PVC, so it is a reliable
+/// last-activity clock without threading a timestamp through the session state.
+fn gateway_session_is_stale(chat_id: &str, ttl: std::time::Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(chat_file_path(chat_id)) else {
+        return false; // no file yet (brand-new session) — nothing to reset
+    };
+    meta.modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .map(|idle| idle > ttl)
+        .unwrap_or(false)
+}
+
 /// Build the reply sink for a gateway session: `say_to_user` text is sent back
 /// out through the bound adapter to the original sender, and the send is logged
 /// to the gateway activity feed (mirroring `gateway::record_outbound`).
@@ -3291,6 +3321,21 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
                 ..Default::default()
             });
             return StatusCode::OK;
+        }
+        // Idle-reset: if this conversation has been dormant past the TTL, drop the
+        // old history and start fresh (run_one_gateway_turn does `AgentState::new`
+        // when `state` is None). This gives a clean session after a gap and sheds
+        // any pre-upgrade turns that a reasoning model would 400 on.
+        if s.state.is_some() {
+            if let Some(ttl) = gateway_session_ttl() {
+                if gateway_session_is_stale(&chat_id, ttl) {
+                    s.state = None;
+                    log::info!(
+                        "Gateway chat {chat_id}: idle > {}s — starting a fresh session",
+                        ttl.as_secs()
+                    );
+                }
+            }
         }
         s.busy = true;
     }
