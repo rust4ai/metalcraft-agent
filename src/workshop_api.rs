@@ -264,6 +264,14 @@ pub fn build_router(api_key: String) -> Router {
         cwd,
     });
 
+    // Inbound Pull: hold a long-poll to the Metalcraft Gateway and drain queued inbound.
+    // A no-op until a `metalcraft-gateway` channel is enabled, so it's safe to always
+    // spawn (idle cost is one sleeping task). See INBOUND_PULL_PLAN.md.
+    {
+        let state = state.clone();
+        tokio::spawn(async move { inbound_pull_loop(state).await });
+    }
+
     Router::new()
         .route("/api/v1/info", get(agent_info))
         .route("/api/v1/snapshot", get(get_snapshot))
@@ -2718,7 +2726,24 @@ async fn handle_pipestreamr_webhook(
         // Not an inbound message (log/status/outbound echo) — nothing to do.
         return StatusCode::OK;
     };
+    let sig = headers
+        .get("x-pipestreamr-signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    route_pipestreamr_inbound(state, inbound, Some((body, sig))).await
+}
 
+/// Route + run one inbound PipeStreamr `message.created`, shared by the unauthenticated
+/// webhook (push) and the authenticated long-poll (pull, see [`inbound_pull_loop`]).
+/// `verify = Some((body, sig))` enforces the per-channel HMAC for the webhook path;
+/// `None` skips it because the pull transport already authenticated the pod via its
+/// connection token.
+async fn route_pipestreamr_inbound(
+    state: Arc<ApiState>,
+    inbound: crate::tools::pipestreamr::InboundMessage,
+    verify: Option<(axum::body::Bytes, String)>,
+) -> StatusCode {
     // Route on the PipeStreamr integration UUID (`source_id`) — stable and
     // unique, unlike phone-number matching — against each channel's
     // `integration_id` setting. Resolving the channel first lets us verify the
@@ -2756,43 +2781,43 @@ async fn handle_pipestreamr_webhook(
         return StatusCode::OK;
     };
 
-    // Fail-closed: verify the signature with THIS channel's webhook secret.
-    match crate::tools::pipestreamr::channel_webhook_secret(&channel) {
-        Some(secret) => {
-            let signature = headers
-                .get("x-pipestreamr-signature")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default();
-            if !crate::tools::pipestreamr::validate_signature(&secret, &body, signature) {
-                log::warn!("Rejected PipeStreamr webhook: invalid or missing X-PipeStreamr-Signature");
-                crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
-                    direction: "inbound".into(),
-                    platform: "pipestreamr".into(),
-                    source_id: Some(source_id.clone()),
-                    channel_id: Some(channel.id.clone()),
-                    channel_name: Some(channel.name.clone()),
-                    outcome: "signature_rejected".into(),
-                    detail: Some("invalid or missing X-PipeStreamr-Signature".into()),
-                    ..Default::default()
-                });
-                // A rotated gateway secret is the usual cause — self-heal (rate-limited).
-                crate::metalcraft_gateway::maybe_reactive_resync();
-                return StatusCode::FORBIDDEN;
+    // Fail-closed: verify the signature with THIS channel's webhook secret — but only on
+    // the webhook (push) path. The pull long-poll passes `verify = None` because the pod
+    // authenticated the connection itself, so there is no HMAC to check.
+    if let Some((body, signature)) = &verify {
+        match crate::tools::pipestreamr::channel_webhook_secret(&channel) {
+            Some(secret) => {
+                if !crate::tools::pipestreamr::validate_signature(&secret, body, signature) {
+                    log::warn!("Rejected PipeStreamr webhook: invalid or missing X-PipeStreamr-Signature");
+                    crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+                        direction: "inbound".into(),
+                        platform: "pipestreamr".into(),
+                        source_id: Some(source_id.clone()),
+                        channel_id: Some(channel.id.clone()),
+                        channel_name: Some(channel.name.clone()),
+                        outcome: "signature_rejected".into(),
+                        detail: Some("invalid or missing X-PipeStreamr-Signature".into()),
+                        ..Default::default()
+                    });
+                    // A rotated gateway secret is the usual cause — self-heal (rate-limited).
+                    crate::metalcraft_gateway::maybe_reactive_resync();
+                    return StatusCode::FORBIDDEN;
+                }
             }
-        }
-        None => {
-            if !allow_unsigned_webhooks() {
+            None => {
+                if !allow_unsigned_webhooks() {
+                    log::warn!(
+                        "Rejected PipeStreamr webhook: no WEBHOOK_SECRET configured for channel '{}'. \
+                         Reconnect the gateway (or set GATEWAY_ALLOW_UNSIGNED=1 for local testing only).",
+                        channel.name
+                    );
+                    return StatusCode::FORBIDDEN;
+                }
                 log::warn!(
-                    "Rejected PipeStreamr webhook: no WEBHOOK_SECRET configured for channel '{}'. \
-                     Reconnect the gateway (or set GATEWAY_ALLOW_UNSIGNED=1 for local testing only).",
-                    channel.name
+                    "Accepting UNSIGNED PipeStreamr webhook because GATEWAY_ALLOW_UNSIGNED is set — \
+                     do not use this in production."
                 );
-                return StatusCode::FORBIDDEN;
             }
-            log::warn!(
-                "Accepting UNSIGNED PipeStreamr webhook because GATEWAY_ALLOW_UNSIGNED is set — \
-                 do not use this in production."
-            );
         }
     }
 
@@ -2842,6 +2867,89 @@ async fn handle_pipestreamr_webhook(
         },
     )
     .await
+}
+
+/// **Inbound Pull** long-poll client. While a `metalcraft-gateway` channel is enabled,
+/// hold `GET {gateway}/api/v1/agent/inbound/next`, run each pulled inbound through the
+/// same path as the webhook (`verify = None` — the connection is already authenticated),
+/// then ACK it. Self-manages reconnect with backoff; a no-op while nothing is connected.
+/// The held connection is the liveness signal surfaced as `GatewayStatus::streaming`.
+/// See `metalcraft-gateway/docs/INBOUND_PULL_PLAN.md`.
+async fn inbound_pull_loop(state: Arc<ApiState>) {
+    use std::time::Duration;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90)) // > the server's max long-poll wait
+        .user_agent("metalcraft-agent (inbound-pull)")
+        .build()
+        .unwrap_or_default();
+    let mut backoff = 1u64;
+    loop {
+        let Some((base, bearer)) = crate::metalcraft_gateway::pull_target() else {
+            // Not connected to the gateway — stay idle and re-check periodically.
+            crate::metalcraft_gateway::set_streaming(false);
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            continue;
+        };
+        let url = format!("{base}/api/v1/agent/inbound/next?wait=25");
+        match client.get(&url).bearer_auth(&bearer).send().await {
+            Ok(resp) if resp.status() == reqwest::StatusCode::NO_CONTENT => {
+                // Idle timeout — connection is healthy, just nothing waiting.
+                crate::metalcraft_gateway::set_streaming(true);
+                backoff = 1;
+            }
+            Ok(resp) if resp.status().is_success() => {
+                crate::metalcraft_gateway::set_streaming(true);
+                backoff = 1;
+                match resp.json::<serde_json::Value>().await {
+                    Ok(v) => {
+                        let message_id =
+                            v.get("message_id").and_then(|x| x.as_str()).map(str::to_string);
+                        if let Some(payload) = v.get("payload") {
+                            if let Some(inbound) = crate::tools::pipestreamr::parse_inbound(payload) {
+                                let _ = route_pipestreamr_inbound(state.clone(), inbound, None).await;
+                            }
+                        }
+                        // ACK regardless of routing outcome: an unroutable message (no
+                        // matching channel) must not wedge the queue — the webhook path
+                        // also returns 200 for that case.
+                        if let Some(id) = message_id {
+                            ack_inbound(&client, &base, &bearer, &id).await;
+                        }
+                    }
+                    Err(e) => log::warn!("inbound pull: malformed response body: {e}"),
+                }
+            }
+            Ok(resp) => {
+                // 401/403 (token stale — the heal loop refreshes it), 404 (no managed
+                // integration yet), or 5xx. Back off; don't hot-loop.
+                crate::metalcraft_gateway::set_streaming(false);
+                log::warn!("inbound pull: gateway returned HTTP {}", resp.status().as_u16());
+                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                backoff = (backoff * 2).min(60);
+            }
+            Err(e) => {
+                crate::metalcraft_gateway::set_streaming(false);
+                log::warn!("inbound pull: request failed: {e}");
+                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                backoff = (backoff * 2).min(60);
+            }
+        }
+    }
+}
+
+/// ACK a pulled inbound so the gateway marks it delivered. Best-effort: a failed ACK just
+/// means the message re-delivers on the next poll (the pod dedups via `external_id`).
+async fn ack_inbound(client: &reqwest::Client, base: &str, bearer: &str, message_id: &str) {
+    let url = format!("{base}/api/v1/agent/inbound/ack");
+    if let Err(e) = client
+        .post(&url)
+        .bearer_auth(bearer)
+        .json(&serde_json::json!({ "message_id": message_id }))
+        .send()
+        .await
+    {
+        log::warn!("inbound pull: ack failed for {message_id}: {e}");
+    }
 }
 
 /// Shared tail for inbound webhook handlers: build the runtime context, acquire

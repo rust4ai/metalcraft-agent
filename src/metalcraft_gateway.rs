@@ -17,6 +17,42 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_GATEWAY: &str = "https://gateway.metalcraftai.com";
 const CHANNEL_TYPE: &str = "metalcraft-gateway";
 
+/// Liveness for **Inbound Pull**: set by the long-poll client while it is connected and
+/// draining. This is the honest "am I actually receiving?" signal surfaced on
+/// [`GatewayStatus::streaming`], distinct from the on-disk `connected` config flag.
+static STREAMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set by the long-poll client on each successful/idle poll (true) and on error (false).
+pub fn set_streaming(on: bool) {
+    STREAMING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the Inbound Pull long-poll is currently connected.
+pub fn is_streaming() -> bool {
+    STREAMING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The enabled `metalcraft-gateway` channel's pull target: `(gateway_base_url, bearer)`.
+/// The bearer is the channel's adopted connection token (`API_KEY`) when present — else
+/// the pod's broad `METALCRAFT_TOKEN`. `None` when no gateway channel is enabled (the
+/// long-poll then stays idle). The base URL prefers the channel's stored `BASE_URL` (what
+/// the gateway told us at connect) and falls back to the configured gateway origin.
+pub fn pull_target() -> Option<(String, String)> {
+    let inst = crate::gateway_channels::load_instances()
+        .into_iter()
+        .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)?;
+    let bearer = crate::key_store::lookup_scoped(Some(&inst.id), "API_KEY")
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| crate::key_store::lookup("METALCRAFT_TOKEN"))
+        .filter(|s| !s.trim().is_empty())?;
+    let base = crate::key_store::lookup_scoped(Some(&inst.id), "BASE_URL")
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(gateway_url)
+        .trim_end_matches('/')
+        .to_string();
+    Some((base, bearer))
+}
+
 /// The gateway base URL — override with the `METALCRAFT_GATEWAY_URL` key.
 fn gateway_url() -> String {
     crate::key_store::lookup("METALCRAFT_GATEWAY_URL")
@@ -91,14 +127,20 @@ pub async fn connect(
     // Prefer the audience-scoped connection token for the gateway handshake.
     let connection_token = connection_token.filter(|s| !s.trim().is_empty());
     let auth = connection_token.as_deref().unwrap_or(tok.as_str());
-    let base = webhook_base(explicit_webhook_base)
-        .ok_or_else(|| "no POD_PUBLIC_URL set and no webhook_base provided".to_string())?;
-    let webhook_url = format!("{base}/webhook/pipestreamr");
+    // A public URL is now OPTIONAL. In pull mode the pod has no POD_PUBLIC_URL and needs
+    // none — inbound is drained via the long-poll, so there's no webhook to register. We
+    // still send + persist one when we have it (push/dual mode) so a webhook consumer keeps
+    // working during the transition.
+    let base = webhook_base(explicit_webhook_base);
+    let body = match &base {
+        Some(b) => serde_json::json!({ "webhook_url": format!("{b}/webhook/pipestreamr") }),
+        None => serde_json::json!({}),
+    };
 
     let resp = client()?
         .post(format!("{gw}/api/v1/agent/connect"))
         .bearer_auth(auth)
-        .json(&serde_json::json!({ "webhook_url": webhook_url }))
+        .json(&body)
         .send()
         .await
         .map_err(|e| format!("gateway connect request failed: {e}"))?;
@@ -127,12 +169,20 @@ pub async fn connect(
             let mut s = inst.settings.clone();
             s.insert("integration_id".into(), cfg.integration_id.clone());
             s.insert("from".into(), cfg.active_number.clone());
+            // Persist the base we registered with (when we have one) so the heal loop can
+            // re-register the webhook even after POD_PUBLIC_URL is lost (see `resync`).
+            if let Some(b) = &base {
+                s.insert("webhook_base".into(), b.clone());
+            }
             crate::gateway_channels::update_instance(&inst.id, &inst.name, true, s)?
         }
         None => {
             let mut s = HashMap::new();
             s.insert("integration_id".to_string(), cfg.integration_id.clone());
             s.insert("from".to_string(), cfg.active_number.clone());
+            if let Some(b) = &base {
+                s.insert("webhook_base".to_string(), b.clone());
+            }
             let inst = crate::gateway_channels::create_instance(CHANNEL_TYPE, "Metalcraft Gateway", s)?;
             crate::gateway_channels::update_instance(&inst.id, &inst.name, true, inst.settings)?
         }
@@ -262,6 +312,10 @@ struct PhoneResp {
     active_number: Option<String>,
     #[serde(default)]
     channel: Option<String>,
+    /// The inbound webhook the gateway will POST to. Compared against this pod's own
+    /// URL to detect the "connected but stale webhook" drift.
+    #[serde(default)]
+    consumer_webhook_url: Option<String>,
 }
 
 /// What the workshop Connect panel renders from.
@@ -275,10 +329,19 @@ pub struct GatewayStatus {
     pub verified: bool,
     /// A local `metalcraft-gateway` channel is enabled and the webhook secret is set.
     pub connected: bool,
+    /// The Inbound Pull long-poll is currently connected and draining. Unlike `connected`
+    /// (config present on disk), this is *intrinsic* liveness — it cannot be true while
+    /// inbound delivery is actually dead. `false` in push mode (no long-poll runs).
+    pub streaming: bool,
     pub active_number: Option<String>,
     pub channel: Option<String>,
     /// Whether the pod knows its own public URL (POD_PUBLIC_URL) for the webhook.
     pub has_public_url: bool,
+    /// The gateway's registered inbound webhook (`consumer_webhook_url`) no longer
+    /// points at this pod's current URL, so inbound messages are being delivered into
+    /// the void. `connected` can be true while this is true — the "green light, dead
+    /// pipe" state. Detecting it kicks off a reactive re-register (see `status`).
+    pub webhook_stale: bool,
     pub error: Option<String>,
 }
 
@@ -289,35 +352,59 @@ pub async fn status() -> GatewayStatus {
         .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)
         .and_then(crate::tools::pipestreamr::channel_webhook_secret)
         .is_some();
-    let has_public_url = webhook_base(None).is_some();
+    let my_webhook = webhook_base(None).map(|b| format!("{b}/webhook/pipestreamr"));
+    let has_public_url = my_webhook.is_some();
+    let streaming = is_streaming();
 
     let tok = match token() {
         Ok(t) => t,
         Err(e) => {
-            return GatewayStatus { connected, has_public_url, error: Some(e), ..Default::default() };
+            return GatewayStatus { connected, streaming, has_public_url, error: Some(e), ..Default::default() };
         }
     };
 
     let resp = match client() {
         Ok(c) => c.get(format!("{}/api/v1/phone", gateway_url())).bearer_auth(&tok).send().await,
-        Err(e) => return GatewayStatus { configured: true, connected, has_public_url, error: Some(e), ..Default::default() },
+        Err(e) => return GatewayStatus { configured: true, connected, streaming, has_public_url, error: Some(e), ..Default::default() },
     };
     match resp {
         Ok(r) if r.status().is_success() => match r.json::<PhoneResp>().await {
-            Ok(p) => GatewayStatus {
-                configured: true,
-                registered: p.personal_number.is_some(),
-                verified: p.verified,
-                connected,
-                active_number: p.active_number,
-                channel: p.channel,
-                has_public_url,
-                error: None,
-            },
-            Err(e) => GatewayStatus { configured: true, connected, has_public_url, error: Some(format!("parse /phone: {e}")), ..Default::default() },
+            Ok(p) => {
+                // "Green light, dead pipe" detection: the gateway POSTs inbound to
+                // `consumer_webhook_url`. If we're connected but that no longer equals
+                // this pod's own URL, inbound is being dropped. Kick a reactive heal so
+                // merely opening this panel (like the periodic heal loop) re-registers
+                // the webhook. Only judged when we know our own URL.
+                // Suppressed while `streaming`: a live long-poll proves inbound is being
+                // drained, so a stored `consumer_webhook_url` is irrelevant (pull mode).
+                let webhook_stale = connected
+                    && !streaming
+                    && my_webhook.is_some()
+                    && p.consumer_webhook_url.as_deref() != my_webhook.as_deref();
+                if webhook_stale {
+                    log::warn!(
+                        "metalcraft-gateway: registered webhook {:?} != this pod {:?}; re-registering",
+                        p.consumer_webhook_url, my_webhook
+                    );
+                    maybe_reactive_resync();
+                }
+                GatewayStatus {
+                    configured: true,
+                    registered: p.personal_number.is_some(),
+                    verified: p.verified,
+                    connected,
+                    streaming,
+                    active_number: p.active_number,
+                    channel: p.channel,
+                    has_public_url,
+                    webhook_stale,
+                    error: None,
+                }
+            }
+            Err(e) => GatewayStatus { configured: true, connected, streaming, has_public_url, error: Some(format!("parse /phone: {e}")), ..Default::default() },
         },
-        Ok(r) => GatewayStatus { configured: true, connected, has_public_url, error: Some(format!("gateway /phone returned HTTP {}", r.status().as_u16())), ..Default::default() },
-        Err(e) => GatewayStatus { configured: true, connected, has_public_url, error: Some(format!("gateway unreachable: {e}")), ..Default::default() },
+        Ok(r) => GatewayStatus { configured: true, connected, streaming, has_public_url, error: Some(format!("gateway /phone returned HTTP {}", r.status().as_u16())), ..Default::default() },
+        Err(e) => GatewayStatus { configured: true, connected, streaming, has_public_url, error: Some(format!("gateway unreachable: {e}")), ..Default::default() },
     }
 }
 
@@ -413,8 +500,13 @@ pub async fn resync() -> Result<(), String> {
         return Ok(()); // nothing connected — stay quiet
     };
 
-    if webhook_base(None).is_some() {
-        return match connect(None, None).await {
+    // Prefer a full re-register: it re-points the gateway's `consumer_webhook_url` at
+    // our current URL, healing the "connected but stale webhook" drift. Use
+    // POD_PUBLIC_URL if known, else the base captured at connect time (`webhook_base`),
+    // so heal still works after POD_PUBLIC_URL is lost across a reschedule.
+    let base = webhook_base(None).or_else(|| inst.settings.get("webhook_base").cloned());
+    if let Some(base) = base {
+        return match connect(Some(base), None).await {
             Ok(_) => Ok(()),
             // A membership lapse mid-life shouldn't spam errors.
             Err(e) if e == VERIFY_REQUIRED => Ok(()),
@@ -422,7 +514,7 @@ pub async fn resync() -> Result<(), String> {
         };
     }
 
-    // No public URL: refresh secret + routing from /phone.
+    // No URL anywhere (can't fix the webhook): refresh secret + routing from /phone.
     #[derive(Deserialize)]
     struct P {
         #[serde(default)]
