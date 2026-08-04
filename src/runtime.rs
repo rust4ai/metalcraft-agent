@@ -325,43 +325,184 @@ pub async fn run_one_shot_task(
         .run(AgentState::new(request.task), step_guard)
         .await;
     outcome.map_err(|e| -> Box<dyn std::error::Error> {
-        match out_of_credits_message(&e.to_string()) {
-            Some(msg) => msg.into(),
-            None => e.into(),
+        // Translate terminal inference rejections (credits/premium) into a clear
+        // user-facing message; leave transient/unknown errors raw for the caller.
+        let ce = classify_turn_error(&e.to_string());
+        if ce.retryable {
+            e.into()
+        } else {
+            ce.user_message.into()
         }
     })
 }
 
-/// Turn the Metalcraft Inference gateway's credit/premium rejection (a 402 from
-/// `inference.metalcraftai.com`) into a clear user-facing message, instead of a raw
-/// provider error. Returns `None` for any other error. Reusable across run paths.
-pub fn out_of_credits_message(err_text: &str) -> Option<String> {
-    let t = err_text.to_lowercase();
-    let hit = t.contains("insufficient credits")
+/// A classified chat-turn failure, shared by every run path (one-shot task,
+/// Workshop chat SSE, and the gateway/WhatsApp path). This is the single
+/// vocabulary the whole error-response system speaks; see
+/// `docs/CHAT_ERROR_RESPONSE_PLAN.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ErrorCode {
+    /// Premium account, but out of inference credits (402). Terminal.
+    InsufficientCredits,
+    /// No active premium subscription (402). Terminal.
+    NotPremium,
+    /// Upstream provider/network failure (5xx, timeout, reset). Retryable.
+    UpstreamUnavailable,
+    /// Anything unrecognized. Retryable; raw text is logged to diagnostics only,
+    /// never shown to the end user.
+    Internal,
+}
+
+impl ErrorCode {
+    /// Stable machine-readable identifier (matches the inference `code` field).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorCode::InsufficientCredits => "insufficient_credits",
+            ErrorCode::NotPremium => "not_premium",
+            ErrorCode::UpstreamUnavailable => "upstream_unavailable",
+            ErrorCode::Internal => "internal",
+        }
+    }
+
+    /// Whether retrying the same turn could plausibly succeed. Terminal errors
+    /// (credits/premium) are `false`; the gateway path only notifies the user
+    /// for terminal errors, to avoid spamming "try again" on transient blips.
+    pub fn retryable(&self) -> bool {
+        matches!(self, ErrorCode::UpstreamUnavailable | ErrorCode::Internal)
+    }
+
+    /// A message safe to show an end user (Workshop bubble, WhatsApp reply).
+    pub fn user_message(&self) -> String {
+        match self {
+            ErrorCode::InsufficientCredits =>
+                "You're out of Metalcraft inference credits. Top up or check your plan at \
+                 https://id.metalcraftai.com/account.",
+            ErrorCode::NotPremium =>
+                "Metalcraft inference needs an active premium subscription. Check your plan at \
+                 https://id.metalcraftai.com/account.",
+            ErrorCode::UpstreamUnavailable =>
+                "The AI service is temporarily unavailable — please try again in a moment.",
+            ErrorCode::Internal =>
+                "Something went wrong handling that message. Please try again.",
+        }
+        .to_string()
+    }
+}
+
+/// A classified failure with its user-facing message and retry disposition.
+#[derive(Debug, Clone)]
+pub struct ChatError {
+    pub code: ErrorCode,
+    pub user_message: String,
+    pub retryable: bool,
+}
+
+/// Classify the flattened error string the agent sees at the turn boundary
+/// (`RunOutcome::Failed { error }` or `error_chain(Err)`). The Metalcraft
+/// Inference gateway's JSON body — `{"error":"...","code":"..."}` — survives
+/// intact inside rig's `ProviderError(String)` and the core's
+/// `GraphError::Node.message`, so we can recover the structured `code` from the
+/// text even though rig discards the HTTP status. Falls back to phrase matching
+/// for pre-`code` inference and non-gateway providers.
+pub fn classify_turn_error(raw: &str) -> ChatError {
+    let code = classify_code(raw);
+    ChatError { user_message: code.user_message(), retryable: code.retryable(), code }
+}
+
+fn classify_code(raw: &str) -> ErrorCode {
+    let t = raw.to_lowercase();
+
+    // 1. Structured `code` emitted by metalcraft-inference. The snake_case
+    //    tokens are distinctive, so a substring check is a reliable proxy for
+    //    parsing the JSON out of the surrounding provider-error text.
+    if t.contains("insufficient_credits") {
+        return ErrorCode::InsufficientCredits;
+    }
+    if t.contains("not_premium") {
+        return ErrorCode::NotPremium;
+    }
+
+    // 2. Human phrasings (legacy / pre-`code` inference, upstream OpenAI).
+    if t.contains("insufficient credits") || t.contains("out of credits") {
+        return ErrorCode::InsufficientCredits;
+    }
+    if t.contains("requires a premium") || t.contains("premium subscription") {
+        return ErrorCode::NotPremium;
+    }
+
+    // 3. Transient upstream/network failures.
+    if t.contains("upstream_unavailable")
+        || t.contains("bad gateway")
+        || t.contains(" 502")
+        || t.contains("(502")
+        || t.contains("status: 502")
+        || t.contains(" 503")
+        || t.contains(" 504")
+        || t.contains("timed out")
+        || t.contains("timeout")
+        || t.contains("connection reset")
+        || t.contains("connection refused")
+        || t.contains("dns error")
+    {
+        return ErrorCode::UpstreamUnavailable;
+    }
+
+    // 4. A bare 402 with no discriminator — dominant runtime cause is a premium
+    //    user who ran out of credits, so surface that (both messages point to
+    //    the same account page).
+    if t.contains("payment_required")
         || t.contains("payment required")
-        || t.contains("requires a premium")
-        || t.contains("out of credits")
         || t.contains(" 402")
         || t.contains("(402")
-        || t.contains("status: 402");
-    hit.then(|| {
-        "You're out of Metalcraft inference credits (or your premium subscription \
-         lapsed). Top up or check your plan at https://id.metalcraftai.com/account."
-            .to_string()
-    })
+        || t.contains("status: 402")
+    {
+        return ErrorCode::InsufficientCredits;
+    }
+
+    ErrorCode::Internal
 }
 
 #[cfg(test)]
 mod inference_tests {
-    use super::out_of_credits_message;
+    use super::{classify_turn_error, ErrorCode};
+
+    fn code(s: &str) -> ErrorCode {
+        classify_turn_error(s).code
+    }
 
     #[test]
-    fn detects_gateway_credit_and_premium_rejections() {
-        assert!(out_of_credits_message("HTTP status 402: insufficient credits: available 0").is_some());
-        assert!(out_of_credits_message("ProviderError { status: 402, ... }").is_some());
-        assert!(out_of_credits_message("inference requires a premium subscription").is_some());
-        // Unrelated errors pass through unchanged.
-        assert!(out_of_credits_message("connection reset by peer").is_none());
-        assert!(out_of_credits_message("400 bad request: model not found").is_none());
+    fn detects_structured_codes() {
+        assert_eq!(
+            code(r#"agent: ProviderError: {"error":"insufficient credits — top up or upgrade","code":"insufficient_credits"}"#),
+            ErrorCode::InsufficientCredits
+        );
+        assert_eq!(
+            code(r#"ProviderError: {"error":"inference requires a premium subscription","code":"not_premium"}"#),
+            ErrorCode::NotPremium
+        );
+    }
+
+    #[test]
+    fn detects_legacy_phrasings() {
+        assert_eq!(code("HTTP status 402: insufficient credits: available 0"), ErrorCode::InsufficientCredits);
+        assert_eq!(code("inference requires a premium subscription"), ErrorCode::NotPremium);
+        // Bare 402 with no discriminator falls back to credits.
+        assert_eq!(code("ProviderError { status: 402, ... }"), ErrorCode::InsufficientCredits);
+    }
+
+    #[test]
+    fn transient_and_unknown() {
+        assert_eq!(code("openai 502: bad gateway"), ErrorCode::UpstreamUnavailable);
+        assert_eq!(code("connection reset by peer"), ErrorCode::UpstreamUnavailable);
+        // Unrelated errors are Internal (raw text stays in diagnostics only).
+        assert_eq!(code("400 bad request: model not found"), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn retry_disposition() {
+        assert!(!classify_turn_error("insufficient_credits").retryable);
+        assert!(!classify_turn_error("not_premium").retryable);
+        assert!(classify_turn_error("502 bad gateway").retryable);
+        assert!(classify_turn_error("something weird").retryable);
     }
 }

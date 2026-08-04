@@ -1631,6 +1631,17 @@ enum ChatEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// A classified turn failure, safe to show the user. Emitted instead of a
+    /// bare `Done{status:"failed"}` so frontends can render a friendly message
+    /// (and branch on `code`) rather than the raw provider-error chain. `code`
+    /// is the machine-readable identifier (see `runtime::ErrorCode`); `message`
+    /// is the user-facing text; `retryable` hints whether "try again" is useful.
+    /// A `done` still follows so lifecycle handling is unchanged for old clients.
+    Error {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
 }
 
 /// Run one turn against the chat session. Streams new messages as Server-Sent
@@ -2009,6 +2020,16 @@ async fn post_chat_turn(
                         t.end_turn(false);
                     }
                     s.state = Some(state);
+                    // Classified, user-safe error frame (new clients render this);
+                    // the raw `reason` still rides in the trailing `done` for old
+                    // clients and diagnostics deep-linking.
+                    let ce = crate::runtime::classify_turn_error(&error);
+                    let _ = tx.send(ChatEvent::Error {
+                        code: ce.code.as_str().into(),
+                        message: ce.user_message,
+                        retryable: ce.retryable,
+                    })
+                    .await;
                     let _ = tx.send(ChatEvent::Done {
                         status: "failed".into(),
                         reason: Some(reason),
@@ -2029,6 +2050,13 @@ async fn post_chat_turn(
                         t.end_turn(false);
                     }
                     s.state = Some(state_before_turn);
+                    let ce = crate::runtime::classify_turn_error(&reason);
+                    let _ = tx.send(ChatEvent::Error {
+                        code: ce.code.as_str().into(),
+                        message: ce.user_message,
+                        retryable: ce.retryable,
+                    })
+                    .await;
                     let _ = tx.send(ChatEvent::Done {
                         status: "failed".into(),
                         reason: Some(reason),
@@ -3038,7 +3066,7 @@ async fn run_one_gateway_turn(
         llm_call_hook,
         None,
         RuntimeOptions {
-            reply_sink: Some(sink),
+            reply_sink: Some(sink.clone()),
             tool_choice: metalcraft::ToolChoice::Required,
             terminal_tools: vec!["say_to_user".to_string()],
             // Gateway follow-up delivery (rebuilding the adapter sink at fire
@@ -3050,26 +3078,47 @@ async fn run_one_gateway_turn(
     )
     .await;
 
-    {
+    // On failure, classify the error and — for terminal failures only (out of
+    // credits / not premium) — send the user a reply through the same channel
+    // the inbound arrived on. Transient/internal failures stay silent (logged
+    // only) so a flaky upstream doesn't spam "try again" at the sender. The turn
+    // only reaches the reply sink itself via `say_to_user`, so without this the
+    // sender would get nothing at all on a failed turn.
+    let terminal_error: Option<crate::runtime::ChatError> = {
         let mut s = session.lock().await;
         match outcome {
-            Ok(RunOutcome::Completed(st)) => s.state = Some(st),
-            Ok(RunOutcome::Interrupted { state: st, .. }) => s.state = Some(st),
+            Ok(RunOutcome::Completed(st)) => {
+                s.state = Some(st);
+                None
+            }
+            Ok(RunOutcome::Interrupted { state: st, .. }) => {
+                s.state = Some(st);
+                None
+            }
             Ok(RunOutcome::Failed { state: st, node, error }) => {
+                let raw = format!("{node}: {error}");
                 if let Some(logger) = &s.diagnostics {
-                    logger.log_error(&format!("{node}: {error}"));
+                    logger.log_error(&raw);
                 }
                 s.state = Some(st);
+                let ce = crate::runtime::classify_turn_error(&error);
+                (!ce.retryable).then_some(ce)
             }
             Err(e) => {
                 // Framework error with no recoverable state: roll back so the
                 // conversation history isn't wiped.
+                let raw = error_chain(e.as_ref());
                 if let Some(logger) = &s.diagnostics {
-                    logger.log_error(&error_chain(e.as_ref()));
+                    logger.log_error(&raw);
                 }
                 s.state = Some(state_before_turn);
+                let ce = crate::runtime::classify_turn_error(&raw);
+                (!ce.retryable).then_some(ce)
             }
         }
+    };
+    if let Some(ce) = terminal_error {
+        let _ = sink(ce.user_message).await;
     }
     persist_chat(session).await;
 }
