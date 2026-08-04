@@ -82,6 +82,16 @@ pub fn integration_packs_state_file() -> PathBuf {
     data_dir().join("integration_packs.json")
 }
 
+/// One-shot marker written after the daemon auto-enables the Metalcraft
+/// ecosystem packs on a managed pod (gated by `ENABLE_METALCRAFT_PACKS`). Its
+/// presence is what stops the seed from re-running on later boots — the env var
+/// stays set forever, this file makes the *action* fire exactly once. Lives on
+/// the pod's persistent volume, so the one-shot holds across restarts; only a
+/// wiped/reprovisioned volume (a genuinely fresh pod) re-seeds.
+pub fn ecosystem_packs_seeded_marker() -> PathBuf {
+    data_dir().join(".metalcraft_packs_seeded")
+}
+
 /// Directory of installed gateway *channel types* — declarative JSON manifests
 /// (one `<id>/channel_type.json` per type), seeded from the binary like
 /// integration packs. See [`crate::gateway_channels`].

@@ -36,6 +36,36 @@ pub struct PackManifest {
     pub version: String,
     #[serde(default)]
     pub requires_env: Vec<String>,
+    /// Free-form classification labels. The only one acted on today is
+    /// [`ECOSYSTEM_TAG`], which marks a pack for one-shot auto-enable on a
+    /// managed pod (see [`ecosystem_pack_ids`]); the field is general so future
+    /// grouping/filtering can reuse it without another manifest column.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Tag marking a pack as a first-party Metalcraft ecosystem pack (Notes,
+/// Calendar, Contacts, Drive, …) — the ones that authenticate with the pod's
+/// injected `METALCRAFT_TOKEN` and nothing else. A managed pod auto-enables
+/// exactly these on first boot when `ENABLE_METALCRAFT_PACKS` is set. The pack
+/// author owns this assertion: only tag a pack that is fully functional with the
+/// injected token alone.
+pub const ECOSYSTEM_TAG: &str = "metalcraft-ecosystem";
+
+/// True when a manifest carries [`ECOSYSTEM_TAG`]. Pure (no disk) so the
+/// selection rule is unit-testable without a data dir.
+pub fn is_ecosystem(manifest: &PackManifest) -> bool {
+    manifest.tags.iter().any(|t| t == ECOSYSTEM_TAG)
+}
+
+/// Ids of installed packs tagged [`ECOSYSTEM_TAG`], in sorted-id order. This is
+/// the exact set the daemon auto-enables on a managed pod's first boot.
+pub fn ecosystem_pack_ids() -> Vec<String> {
+    list_installed()
+        .into_iter()
+        .filter(|p| is_ecosystem(&p.manifest))
+        .map(|p| p.manifest.id)
+        .collect()
 }
 
 /// A loaded pack — manifest plus the path to its directory.
@@ -400,4 +430,42 @@ pub fn list_files_layered(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(id: &str, tags: &[&str]) -> PackManifest {
+        PackManifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            version: "1.0.0".to_string(),
+            requires_env: vec!["METALCRAFT_TOKEN".to_string()],
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn is_ecosystem_matches_only_the_tag() {
+        assert!(is_ecosystem(&manifest("metalcraft-notes", &[ECOSYSTEM_TAG])));
+        assert!(!is_ecosystem(&manifest("github", &[])));
+        // A superset of tags still matches on the ecosystem tag.
+        assert!(is_ecosystem(&manifest("x", &["other", ECOSYSTEM_TAG])));
+        // A different tag does not.
+        assert!(!is_ecosystem(&manifest("x", &["metalcraft"])));
+    }
+
+    #[test]
+    fn manifest_defaults_tags_to_empty_when_absent() {
+        // Older/foreign pack.json with no `tags` key must deserialize (not error)
+        // and read as "not an ecosystem pack".
+        let m: PackManifest = serde_json::from_str(
+            r#"{"id":"github","name":"GitHub","description":"","version":"1.0.0"}"#,
+        )
+        .expect("manifest without tags should parse");
+        assert!(m.tags.is_empty());
+        assert!(!is_ecosystem(&m));
+    }
 }

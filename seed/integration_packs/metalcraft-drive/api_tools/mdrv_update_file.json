@@ -1,0 +1,26 @@
+{
+  "name": "mdrv_update_file",
+  "description": "Rename, move, star, or trash a file by `id`. Set `name` to rename. Set `folder_id` to move (a folder UUID, or null to move to the drive root) — include this field ONLY when moving. Set `starred` true/false to (un)star. Set `trashed` true to move to Trash, false to restore. Only the fields you send change. Requires the write scope (403 otherwise). Returns the updated file.",
+  "method": "PATCH",
+  "url": "https://drive.metalcraftai.com/api/v1/files/{id}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": { "type": "string", "description": "File id (UUID) to update." },
+      "name": { "type": "string", "description": "New name (rename)." },
+      "folder_id": {
+        "type": "string",
+        "description": "New parent folder UUID, or null for the drive root. Include ONLY to move."
+      },
+      "starred": { "type": "boolean", "description": "Star (true) or unstar (false)." },
+      "trashed": { "type": "boolean", "description": "Move to Trash (true) or restore (false)." }
+    },
+    "required": ["id"]
+  },
+  "body_mapping": "params"
+}

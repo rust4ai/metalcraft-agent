@@ -1,0 +1,18 @@
+{
+  "name": "mdrv_delete_file",
+  "description": "Permanently delete a file by `id` (UUID) — removes both the database record and the object in Spaces. Irreversible; prefer mdrv_update_file with trashed=true (move to Trash) unless the user explicitly wants a permanent delete. Confirm the exact file (name) with the user first. Requires the write scope. Returns 204 No Content on success.",
+  "method": "DELETE",
+  "url": "https://drive.metalcraftai.com/api/v1/files/{id}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": { "type": "string", "description": "File id (UUID) to permanently delete." }
+    },
+    "required": ["id"]
+  },
+  "body_mapping": "none"
+}

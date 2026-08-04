@@ -356,4 +356,32 @@ mod tests {
         assert!(names.iter().any(|n| n == "pack.json"), "got {names:?}");
         assert!(names.iter().any(|n| n.starts_with("personas/")), "got {names:?}");
     }
+
+    /// Every first-party `metalcraft-*` pack must carry the ecosystem tag, or the
+    /// daemon's first-boot auto-enable (`ENABLE_METALCRAFT_PACKS`) silently skips
+    /// it. This guards a new subapp pack shipped without the tag.
+    #[test]
+    fn metalcraft_packs_are_tagged_ecosystem() {
+        use crate::integration_packs::{is_ecosystem, PackManifest};
+        let packs = SEED.get_dir("integration_packs").expect("integration_packs embedded");
+        let mut checked = 0;
+        for item in packs.dirs() {
+            let id = item.path().file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !id.starts_with("metalcraft-") {
+                continue;
+            }
+            let manifest_json = item
+                .get_file(item.path().join("pack.json"))
+                .and_then(|f| f.contents_utf8())
+                .unwrap_or_else(|| panic!("{id} missing pack.json"));
+            let manifest: PackManifest = serde_json::from_str(manifest_json)
+                .unwrap_or_else(|e| panic!("{id} pack.json invalid: {e}"));
+            assert!(
+                is_ecosystem(&manifest),
+                "pack '{id}' must carry the metalcraft-ecosystem tag"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 4, "expected the 4 metalcraft-* packs, checked {checked}");
+    }
 }

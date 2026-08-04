@@ -1,0 +1,15 @@
+{
+  "name": "mdrv_list_starred",
+  "description": "List the user's starred (non-trashed) files, most-recently-updated first. Each file has id, name, content_type, size_bytes, folder_id, created_at. Takes no parameters.",
+  "method": "GET",
+  "url": "https://drive.metalcraftai.com/api/v1/starred",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "none"
+}

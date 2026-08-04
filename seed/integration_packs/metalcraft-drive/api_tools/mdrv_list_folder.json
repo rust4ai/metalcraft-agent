@@ -1,0 +1,21 @@
+{
+  "name": "mdrv_list_folder",
+  "description": "List a folder's contents. Pass `folder` = 'root' for the top level (default), or a folder UUID to open that folder. Returns { folder, breadcrumb, folders, files }: `folder` is the current folder (null at root), `breadcrumb` is the ancestor chain root-first, `folders` are the subfolders, and `files` are the (non-trashed) files here. Each file has id (UUID), name, content_type, size_bytes, starred, folder_id, created_at. Use this to discover folder and file `id`s before get/move/delete.",
+  "method": "GET",
+  "url": "https://drive.metalcraftai.com/api/v1/folders/{folder}/contents",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "folder": {
+        "type": "string",
+        "description": "'root' for the drive root (default), or a folder UUID to list that folder."
+      }
+    },
+    "required": ["folder"]
+  },
+  "body_mapping": "none"
+}

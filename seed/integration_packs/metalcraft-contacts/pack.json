@@ -2,8 +2,11 @@
   "id": "metalcraft-contacts",
   "name": "Metalcraft Contacts",
   "description": "Persona, skill, and HTTP API tools to read and manage a user's personal contacts / address book via Metalcraft Contacts (contacts.metalcraftai.com). One Metalcraft account owns a flat list of people, each addressed by a slug and grouped with tags: list/filter contacts, full-text search, read a contact, create/update/delete contacts (needs the write scope), see whose birthday is coming up, and set a photo from an image URL. A contact carries name, organization/title, birthday (year optional), tags, freeform markdown notes, and repeatable phones/emails/addresses/links. Authenticated by a single Metalcraft account token — METALCRAFT_TOKEN, sent as Authorization: Bearer — the same token that works across every Metalcraft ecosystem app. The API base is fixed to https://contacts.metalcraftai.com.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "requires_env": [
     "METALCRAFT_TOKEN"
+  ],
+  "tags": [
+    "metalcraft-ecosystem"
   ]
 }

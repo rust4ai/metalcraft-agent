@@ -1,0 +1,21 @@
+{
+  "name": "mdrv_presign_upload",
+  "description": "Step 1 of an upload. Reserves a file and returns { upload_url, s3_key }: `upload_url` is a short-lived presigned PUT URL you (or a client that can PUT raw bytes) send the file's bytes to DIRECTLY (HTTP PUT, no auth header, Content-Type = the file's type). `name` is required; `content_type` defaults to application/octet-stream; `folder_id` is the destination folder UUID (omit for the drive root). After the PUT succeeds, call mdrv_confirm_upload with the returned `s3_key`. Requires the write scope.",
+  "method": "POST",
+  "url": "https://drive.metalcraftai.com/api/v1/files/presign",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": { "type": "string", "description": "File name to store." },
+      "content_type": { "type": "string", "description": "MIME type (default application/octet-stream)." },
+      "folder_id": { "type": "string", "description": "Destination folder UUID; omit for the drive root." }
+    },
+    "required": ["name"]
+  },
+  "body_mapping": "params"
+}

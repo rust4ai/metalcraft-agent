@@ -1,0 +1,12 @@
+{
+  "id": "metalcraft-drive",
+  "name": "Metalcraft Drive",
+  "description": "Persona, skill, and HTTP API tools to browse and manage a user's files and folders on Metalcraft Drive (drive.metalcraftai.com) — a personal Google-Drive-style store backed by DigitalOcean Spaces. List a folder's contents (subfolders + files, with a breadcrumb), create folders, get file metadata, rename/move/star files, move files to Trash or delete them, and list Starred and Trash. Uploads are two steps (mdrv_presign_upload to mint a direct-to-Spaces PUT URL, then mdrv_confirm_upload after the bytes are PUT). Authenticated by a single Metalcraft account token — METALCRAFT_TOKEN, sent as Authorization: Bearer — the same token that works across every Metalcraft ecosystem app. Reads work with any token; create/upload/move/delete need the write scope. The API base is fixed to https://drive.metalcraftai.com.",
+  "version": "1.1.0",
+  "requires_env": [
+    "METALCRAFT_TOKEN"
+  ],
+  "tags": [
+    "metalcraft-ecosystem"
+  ]
+}

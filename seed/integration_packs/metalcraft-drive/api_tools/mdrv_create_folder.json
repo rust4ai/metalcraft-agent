@@ -1,0 +1,23 @@
+{
+  "name": "mdrv_create_folder",
+  "description": "Create a folder. `name` is required; `parent_id` is the UUID of the folder to create it in — omit (or null) to create at the drive root. Requires the write scope (403 otherwise). Returns the created folder including its new `id`.",
+  "method": "POST",
+  "url": "https://drive.metalcraftai.com/api/v1/folders",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": { "type": "string", "description": "Folder name." },
+      "parent_id": {
+        "type": "string",
+        "description": "Optional parent folder UUID; omit for the drive root."
+      }
+    },
+    "required": ["name"]
+  },
+  "body_mapping": "params"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "mdrv_list_trash",
+  "description": "List the user's trashed files (most-recently-trashed first). Each file has id, name, content_type, size_bytes, trashed_at. Restore one with mdrv_update_file trashed=false, or permanently remove it with mdrv_delete_file. Takes no parameters.",
+  "method": "GET",
+  "url": "https://drive.metalcraftai.com/api/v1/trash",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "none"
+}
