@@ -173,6 +173,11 @@ pub struct InboundMessage {
     pub body: String,
     /// PipeStreamr/platform message id, if present.
     pub external_id: Option<String>,
+    /// The gateway's own message UUID (`messages.id`), if the gateway included it
+    /// (`data.gateway_message_id`). Preferred dedup key — always present per real
+    /// inbound and stable across re-delivery, unlike `external_id` (carrier SID,
+    /// which can be absent). See [`crate::inbound_dedup`].
+    pub gateway_message_id: Option<String>,
     /// Sender display name, if present.
     pub from_name: Option<String>,
 }
@@ -198,6 +203,11 @@ pub fn parse_inbound(payload: &serde_json::Value) -> Option<InboundMessage> {
         source_id: data.get("source_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string),
         body: body.to_string(),
         external_id: data.get("external_id").and_then(|v| v.as_str()).map(str::to_string),
+        gateway_message_id: data
+            .get("gateway_message_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         from_name: data
             .get("from_name")
             .and_then(|v| v.as_str())
@@ -253,6 +263,7 @@ mod tests {
                 "source_id": "550e8400-e29b-41d4-a716-446655440000",
                 "body": "hello",
                 "external_id": "SM123",
+                "gateway_message_id": "11111111-2222-3333-4444-555555555555",
                 "from_name": "Alice"
             },
             "timestamp": "2026-06-06T00:00:00Z"
@@ -263,7 +274,17 @@ mod tests {
         assert_eq!(m.source_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
         assert_eq!(m.body, "hello");
         assert_eq!(m.external_id.as_deref(), Some("SM123"));
+        // The gateway's dedup key must survive parsing (the cross-repo contract).
+        assert_eq!(m.gateway_message_id.as_deref(), Some("11111111-2222-3333-4444-555555555555"));
         assert_eq!(m.from_name.as_deref(), Some("Alice"));
+
+        // Absent gateway_message_id (older gateway / non-gateway source) ⇒ None,
+        // so dedup falls back to external_id.
+        let no_gw = serde_json::json!({
+            "event": "message.created",
+            "data": { "from_id": "+1", "body": "hi", "external_id": "SM9" }
+        });
+        assert_eq!(parse_inbound(&no_gw).unwrap().gateway_message_id, None);
 
         // Wrong event type, missing body, and outbound echo all yield None.
         assert!(parse_inbound(&serde_json::json!({"event":"log.created","data":{}})).is_none());

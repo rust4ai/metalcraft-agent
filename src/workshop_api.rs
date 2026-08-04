@@ -2840,6 +2840,34 @@ async fn route_pipestreamr_inbound(
         }
     }
 
+    // Idempotency: the same inbound can reach us on both transports (the gateway's
+    // `dual` mode delivers via push AND pull) or be re-delivered after a pod
+    // restart (a long-poll pull that wasn't ACKed). Dedup on the gateway's message
+    // UUID (falling back to the carrier SID) so the agent runs exactly once.
+    // Checked after signature verification so a forged request can't poison the
+    // window.
+    let dedup_key = inbound
+        .gateway_message_id
+        .as_deref()
+        .or(inbound.external_id.as_deref());
+    if crate::inbound_dedup::is_duplicate(dedup_key) {
+        log::info!("duplicate inbound (id={}); skipping — already processed", dedup_key.unwrap_or("?"));
+        crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
+            direction: "inbound".into(),
+            platform: "pipestreamr".into(),
+            from: Some(inbound.from.clone()),
+            from_name: inbound.from_name.clone(),
+            body: crate::gateway_activity::truncate_body(&inbound.body),
+            source_id: Some(source_id.clone()),
+            channel_id: Some(channel.id.clone()),
+            channel_name: Some(channel.name.clone()),
+            outcome: "duplicate".into(),
+            detail: Some("already processed (dedup)".into()),
+            ..Default::default()
+        });
+        return StatusCode::OK;
+    }
+
     // The orchestrator delegates to specialist personas as needed, so it's the
     // sensible default when a channel doesn't pin a specific persona.
     let persona_slug = channel

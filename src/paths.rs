@@ -101,6 +101,12 @@ pub fn keys_file() -> PathBuf {
     data_dir().join("keys.json")
 }
 
+/// Persistent record of recently-processed inbound message ids (gateway dedup).
+/// See [`crate::inbound_dedup`].
+pub fn inbound_dedup_file() -> PathBuf {
+    data_dir().join("inbound_dedup.json")
+}
+
 /// Persisted scheduled follow-up tasks — deferred subagent jobs the agent
 /// arms via `schedule_followup`, fired by the daemon when due. A JSON array at
 /// `<data>/scheduled_tasks.json`. See [`crate::scheduled_tasks`].
