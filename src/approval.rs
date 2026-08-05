@@ -107,6 +107,15 @@ impl OperationKind {
             {
                 Self::ReadFile
             }
+            // Metalcraft Meet pack (`mmeet_` tools): reads (whoami/list/get) auto-
+            // approve; schedule/update/cancel/add-participants create real meetings,
+            // write to the calendar, and EMAIL real people, so they fall through to the
+            // default Execute arm and require approval.
+            n if n.starts_with("mmeet_")
+                && (n.contains("_list") || n.contains("_get") || n == "mmeet_whoami") =>
+            {
+                Self::ReadFile
+            }
             // Meta tools — managing the project's own personas/skills/flows.
             // Read-only ones auto-approve; mutating ones require approval.
             "persona_list" | "persona_read" | "skill_list" | "skill_read" | "flow_list"

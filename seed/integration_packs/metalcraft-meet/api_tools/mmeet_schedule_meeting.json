@@ -1,0 +1,32 @@
+{
+  "name": "mmeet_schedule_meeting",
+  "description": "Schedule a video meeting. In one call this creates the meeting, mints a join URL, adds the event to the user's Metalcraft Calendar, and (by default) EMAILS every participant a personal join link + an .ics. Requires the write scope (403 otherwise). Because it emails real people, CONFIRM the participant list and the time (with timezone) with the user before calling. Resolve names to emails via Metalcraft Contacts (mcon_search) first. Times are UTC ISO-8601 (convert the user's local wall-clock time first) and `timezone` is an IANA name. Omit start/end for an instant ('meet now') meeting. Returns the meeting including its `slug`, `room_id`, `join_url`, and participants.",
+  "method": "POST",
+  "url": "https://meet.metalcraftai.com/api/v1/meetings",
+  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Content-Type": "application/json", "Accept": "application/json" },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "title": { "type": "string", "description": "Meeting title." },
+      "scheduled_start": { "type": "string", "description": "Start time, UTC ISO-8601 (e.g. 2026-08-06T14:00:00Z). Omit for an instant meeting." },
+      "scheduled_end": { "type": "string", "description": "End time, UTC ISO-8601. Omit for an instant meeting." },
+      "timezone": { "type": "string", "description": "IANA timezone the times are shown in, e.g. America/New_York. Ask the user if unknown." },
+      "participants": {
+        "type": "array",
+        "description": "People to invite. Resolve names to emails via mcon_search first; never invent an email.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "email": { "type": "string", "description": "Invitee email address." },
+            "name": { "type": "string", "description": "Optional display name." }
+          },
+          "required": ["email"]
+        }
+      },
+      "add_to_calendar": { "type": "boolean", "description": "Mirror into Metalcraft Calendar (default true)." },
+      "notify": { "type": "boolean", "description": "Email the invitees (default true)." }
+    },
+    "required": ["title"]
+  },
+  "body_mapping": "params"
+}
