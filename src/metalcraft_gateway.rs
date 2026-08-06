@@ -319,7 +319,7 @@ struct PhoneResp {
 }
 
 /// What the workshop Connect panel renders from.
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, utoipa::ToSchema)]
 pub struct GatewayStatus {
     /// The pod has a token (is linked to a Metalcraft ID account).
     pub configured: bool,

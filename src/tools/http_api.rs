@@ -15,7 +15,7 @@ fn make_error(tool: &str, message: impl std::fmt::Display) -> metalcraft::GraphE
 }
 
 /// JSON config schema for a user-defined HTTP API tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct HttpApiToolConfig {
     pub name: String,
     pub description: String,
@@ -58,7 +58,7 @@ pub struct HttpApiToolConfig {
 /// `file_param` is treated as a local file path (constrained to the upload
 /// root) and sent as the file part `file_field`; all other arguments become
 /// text fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MultipartConfig {
     /// Incoming argument that holds the local file path to upload.
     pub file_param: String,

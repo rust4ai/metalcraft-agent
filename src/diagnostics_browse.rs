@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::paths;
 
 /// One session in the listing (metadata + turn count, no per-turn payloads).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct DiagnosticsSessionSummary {
     pub id: String,
     pub timestamp: String,
@@ -29,7 +29,7 @@ pub struct DiagnosticsSessionSummary {
 
 /// A fully reconstructed session: its `session_info.json` plus an ordered
 /// timeline of every other JSON event file in the directory.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct DiagnosticsSession {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37,7 +37,7 @@ pub struct DiagnosticsSession {
     pub timeline: Vec<TimelineEvent>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct TimelineEvent {
     pub kind: String,
     pub file: String,

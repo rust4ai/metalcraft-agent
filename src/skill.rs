@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::paths;
 
 /// Summary of a skill for listings (no body).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct SkillSummary {
     pub slug: String,
     pub description: String,
@@ -22,7 +22,7 @@ pub struct SkillSummary {
 }
 
 /// A full skill (frontmatter description + body).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Skill {
     pub slug: String,
     pub description: String,

@@ -127,7 +127,7 @@ struct ApiState {
 
 // ── Response types ──────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ErrorResponse {
     error: String,
 }
@@ -138,10 +138,13 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> Response {
 
 // ── Snapshot types ──────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ProjectSnapshot {
     personas: Vec<PersonaSummary>,
     skills: Vec<SkillSummary>,
+    /// From the external `metalcraft-flows` crate, which has no `ToSchema`; the
+    /// web app doesn't consume this field, so expose it as an opaque object array.
+    #[schema(value_type = Vec<Object>)]
     flows: Vec<metalcraft_flows::FlowSummary>,
     sessions: Vec<DiagnosticsSessionSummary>,
     api_tools: Vec<ApiToolSummary>,
@@ -149,7 +152,7 @@ struct ProjectSnapshot {
     layout: ProjectLayout,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ProjectLayout {
     data_dir: String,
     personas_dir: String,
@@ -159,7 +162,7 @@ struct ProjectLayout {
     api_tools_dir: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ApiToolSummary {
     name: String,
     description: String,
@@ -172,7 +175,7 @@ struct ApiToolSummary {
 /// A stored API key, exposed to the workshop with its value masked — the
 /// raw secret is never sent over the wire. Used by the load-time snapshot and
 /// the sidebar (global scope only).
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct KeySummary {
     name: String,
     masked: String,
@@ -182,7 +185,7 @@ struct KeySummary {
 /// connection-owned → read-only in the UI). Returned by `GET /api/v1/keys` so
 /// the Keys page can group global keys and per-channel secrets, and lock the
 /// managed ones. `channel_id`/`channel_name` are present only for channel scope.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct KeyEntry {
     name: String,
     masked: String,
@@ -196,7 +199,7 @@ struct KeyEntry {
 }
 
 /// The raw value of a key, returned only by the explicit reveal endpoint.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct KeyRevealResponse {
     value: String,
 }
@@ -205,7 +208,7 @@ struct KeyRevealResponse {
 /// `requires_env`), with whether it currently resolves (key store or env) and
 /// which packs declare it. Drives the "keys these packs still need" list in
 /// the key store UI — `configured: false` is the hint to add it.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct RecommendedKey {
     name: String,
     configured: bool,
@@ -245,6 +248,106 @@ async fn auth_middleware(
     next.run(request).await
 }
 
+// ── OpenAPI ──────────────────────────────────────────────────────────────
+
+/// The machine-readable description of the pod's `/api/v1` surface, served at
+/// `GET /api/v1/openapi.json` and rendered by Scalar at `GET /api/v1/docs`.
+///
+/// This is the single source of truth for the wire shapes: it is *derived* from
+/// the same Rust structs the handlers serialize (via `#[derive(ToSchema)]` and
+/// the `#[utoipa::path]` annotations on each handler), so it cannot drift from
+/// what the pod actually sends. The workshop clients generate their TypeScript
+/// types from this document — see `metalcraft-workshop-web`'s `gen:types`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    modifiers(&BearerAuthAddon),
+    security(("bearer" = [])),
+    info(
+        title = "Metalcraft Agent API",
+        version = env!("CARGO_PKG_VERSION"),
+        description = "The pod's workshop admin API. Manages personas, skills, flows, keys, \
+            chats, diagnostics sessions, integration packs, and gateway channels. Authenticate \
+            with a Bearer token: the static WORKSHOP_API_KEY or a Metalcraft ID token (mck_…) \
+            scoped to this pod.",
+    ),
+    paths(
+        agent_info, get_snapshot,
+        get_persona, put_persona, delete_persona,
+        get_skill, put_skill, delete_skill,
+        get_flow, put_flow, delete_flow, post_run_flow,
+        list_flow_runs, get_flow_run, post_resume_flow_run,
+        list_flow_templates, get_flow_template,
+        list_diagnostics, get_diagnostics_session,
+        list_api_tools, get_api_tool, put_api_tool, delete_api_tool,
+        list_keys, list_recommended_keys, put_key, delete_key, reveal_key,
+        list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
+        list_scheduled_tasks, delete_scheduled_task,
+        list_integration_packs, get_integration_pack, put_pack_enabled,
+        list_gateway_types, list_gateway_channels, post_create_gateway_channel,
+        put_gateway_channel, delete_gateway_channel, put_gateway_channel_enabled,
+        list_gateway_channel_events, list_gateway_activity,
+        gateway_metalcraft_status, gateway_metalcraft_register,
+        gateway_metalcraft_connect, gateway_metalcraft_disconnect,
+    ),
+    components(schemas(
+        ErrorResponse, ProjectSnapshot, ProjectLayout, ApiToolSummary,
+        KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
+        FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, ResumeFlowRunRequest,
+        ChatSummary, ChatDetail, ChatMessageWire, CreateChatRequest, ChatTurnRequest, ChatEvent,
+        IntegrationPackSummary, IntegrationPackDetail, SetEnabledRequest,
+        MgRegisterRequest, MgConnectRequest, CreateGatewayChannelRequest, UpdateGatewayChannelRequest,
+        crate::persona::Persona, crate::persona::PersonaSummary,
+        crate::skill::Skill, crate::skill::SkillSummary,
+        crate::gateway_channels::ChannelType, crate::gateway_channels::SettingField,
+        crate::gateway_channels::ChannelInstance, crate::gateway_activity::GatewayEvent,
+        crate::metalcraft_gateway::GatewayStatus,
+        crate::tools::http_api::HttpApiToolConfig, crate::tools::http_api::MultipartConfig,
+        crate::flows::FlowPromptResult,
+        crate::diagnostics_browse::DiagnosticsSessionSummary,
+        crate::diagnostics_browse::DiagnosticsSession, crate::diagnostics_browse::TimelineEvent,
+    )),
+    tags(
+        (name = "agent", description = "Agent identity + project snapshot"),
+        (name = "personas", description = "Persona definitions"),
+        (name = "skills", description = "Skill definitions"),
+        (name = "flows", description = "Flows, flow runs, and flow templates"),
+        (name = "diagnostics", description = "Diagnostics session browsing"),
+        (name = "api-tools", description = "HTTP-API tool configs"),
+        (name = "keys", description = "The agent key/secret store"),
+        (name = "chats", description = "Interactive chat sessions"),
+        (name = "scheduled-tasks", description = "Scheduled follow-ups"),
+        (name = "integration-packs", description = "Installable integration packs"),
+        (name = "gateway", description = "Messaging gateway channels + Metalcraft connect"),
+    ),
+)]
+pub struct ApiDoc;
+
+/// Registers the `bearer` security scheme so the docs show that `/api/v1/*`
+/// requires a Bearer token (WORKSHOP_API_KEY or an `mck_…` pod token).
+struct BearerAuthAddon;
+impl utoipa::Modify for BearerAuthAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "bearer",
+                SecurityScheme::Http(
+                    HttpBuilder::new()
+                        .scheme(HttpAuthScheme::Bearer)
+                        .bearer_format("token")
+                        .build(),
+                ),
+            );
+        }
+    }
+}
+
+/// Serve the OpenAPI document. Unauthenticated (like `/health`) so client build
+/// tooling and browsers can fetch it without a pod token.
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(<ApiDoc as utoipa::OpenApi>::openapi())
+}
+
 // ── Router + server ────────────────────────────────────────────────────
 
 /// Build the workshop API router. Callable from any binary that wants to
@@ -252,6 +355,8 @@ async fn auth_middleware(
 /// `metalcraft-daemon --api` mounts it alongside the event listener and the
 /// flow scheduler.
 pub fn build_router(api_key: String) -> Router {
+    // Brings `Scalar::with_url` (a `Servable` trait method) into scope.
+    use utoipa_scalar::Servable as _;
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".into());
@@ -328,6 +433,13 @@ pub fn build_router(api_key: String) -> Router {
         // Health check — registered after the auth layer so it stays
         // unauthenticated (for Railway / DO App Platform probes).
         .route("/health", get(health))
+        // OpenAPI document + Scalar docs UI. Unauthenticated (like /health) so
+        // client build tooling and browsers can read the API contract.
+        .route("/api/v1/openapi.json", get(openapi_json))
+        .merge(utoipa_scalar::Scalar::with_url(
+            "/api/v1/docs",
+            <ApiDoc as utoipa::OpenApi>::openapi(),
+        ))
         // Public landing page. Also after the auth layer, so hitting the pod's
         // ingress host in a browser shows a friendly status page instead of a
         // 401 or a bare JSON blob. No secrets — just "this agent is alive".
@@ -430,6 +542,12 @@ async fn landing() -> impl IntoResponse {
 /// Settings tab's "which build is live" check; `default_persona` is the persona
 /// the Workshop's New Chat modal defaults to (set `METALCRAFT_DEFAULT_PERSONA`
 /// to override; falls back to the orchestrator, which delegates to specialists).
+#[utoipa::path(
+    get,
+    path = "/api/v1/info",
+    tag = "agent",
+    responses((status = 200, description = "Agent name, version, and default persona")),
+)]
 async fn agent_info() -> impl IntoResponse {
     let default_persona = std::env::var("METALCRAFT_DEFAULT_PERSONA")
         .ok()
@@ -469,6 +587,12 @@ pub async fn start(config: WorkshopApiConfig) {
 
 // ── Snapshot handler ────────────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/snapshot",
+    tag = "agent",
+    responses((status = 200, body = ProjectSnapshot)),
+)]
 async fn get_snapshot() -> Json<ProjectSnapshot> {
     let personas = list_persona_summaries();
     let skills = list_skill_summaries();
@@ -527,6 +651,13 @@ fn list_persona_summaries() -> Vec<PersonaSummary> {
     out
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/personas/{slug}",
+    tag = "personas",
+    params(("slug" = String, Path, description = "Persona slug")),
+    responses((status = 200, body = crate::persona::Persona), (status = 404, body = ErrorResponse)),
+)]
 async fn get_persona(Path(slug): Path<String>) -> Response {
     let filename = format!("{slug}.json");
     let Some((path, _origin)) = crate::integration_packs::resolve_file(
@@ -545,6 +676,14 @@ async fn get_persona(Path(slug): Path<String>) -> Response {
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/personas/{slug}",
+    tag = "personas",
+    params(("slug" = String, Path, description = "Persona slug")),
+    request_body = crate::persona::Persona,
+    responses((status = 200, description = "Saved")),
+)]
 async fn put_persona(Path(slug): Path<String>, Json(persona): Json<Persona>) -> Response {
     // Reject if this slug is currently owned by a pack — the user must pick
     // a different slug instead of trying to shadow a read-only entry through
@@ -574,6 +713,13 @@ async fn put_persona(Path(slug): Path<String>, Json(persona): Json<Persona>) -> 
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/personas/{slug}",
+    tag = "personas",
+    params(("slug" = String, Path, description = "Persona slug")),
+    responses((status = 200, description = "Deleted")),
+)]
 async fn delete_persona(Path(slug): Path<String>) -> Response {
     let local = paths::personas_dir().join(format!("{slug}.json"));
     if !local.exists() {
@@ -593,6 +739,13 @@ async fn delete_persona(Path(slug): Path<String>) -> Response {
 // ── Skill handlers ──────────────────────────────────────────────────────
 // Skill types and CRUD live in `crate::skill` so the meta tools share them.
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/skills/{slug}",
+    tag = "skills",
+    params(("slug" = String, Path, description = "Skill slug")),
+    responses((status = 200, body = crate::skill::Skill), (status = 404, body = ErrorResponse)),
+)]
 async fn get_skill(Path(slug): Path<String>) -> Response {
     match load_skill(&slug) {
         Some(skill) => Json(skill).into_response(),
@@ -600,6 +753,14 @@ async fn get_skill(Path(slug): Path<String>) -> Response {
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/skills/{slug}",
+    tag = "skills",
+    params(("slug" = String, Path, description = "Skill slug")),
+    request_body = crate::skill::Skill,
+    responses((status = 200, description = "Saved")),
+)]
 async fn put_skill(Path(slug): Path<String>, Json(skill): Json<Skill>) -> Response {
     // Block writing to a slug that's currently provided by a pack (the user
     // would otherwise be shadowing read-only content silently).
@@ -634,6 +795,13 @@ async fn put_skill(Path(slug): Path<String>, Json(skill): Json<Skill>) -> Respon
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/skills/{slug}",
+    tag = "skills",
+    params(("slug" = String, Path, description = "Skill slug")),
+    responses((status = 200, description = "Deleted")),
+)]
 async fn delete_skill(Path(slug): Path<String>) -> Response {
     let path = paths::skills_dir().join(format!("{slug}.md"));
     if !path.exists() {
@@ -650,6 +818,13 @@ async fn delete_skill(Path(slug): Path<String>) -> Response {
 
 // ── Flow handlers ───────────────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/flows/{id}",
+    tag = "flows",
+    params(("id" = String, Path, description = "Flow id")),
+    responses((status = 200, description = "The saved flow (metalcraft-flows SavedFlow)", body = Object), (status = 404, body = ErrorResponse)),
+)]
 async fn get_flow(Path(id): Path<String>) -> Response {
     match metalcraft_flows::load_flow(&paths::flows_dir(), &id) {
         Some(flow) => Json(flow).into_response(),
@@ -657,6 +832,14 @@ async fn get_flow(Path(id): Path<String>) -> Response {
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/flows/{id}",
+    tag = "flows",
+    params(("id" = String, Path, description = "Flow id")),
+    request_body = Object,
+    responses((status = 200, description = "Saved")),
+)]
 async fn put_flow(Path(id): Path<String>, Json(mut flow): Json<metalcraft_flows::SavedFlow>) -> Response {
     flow.id = id;
     match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
@@ -665,6 +848,13 @@ async fn put_flow(Path(id): Path<String>, Json(mut flow): Json<metalcraft_flows:
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/flows/{id}",
+    tag = "flows",
+    params(("id" = String, Path, description = "Flow id")),
+    responses((status = 200, description = "Deleted")),
+)]
 async fn delete_flow(Path(id): Path<String>) -> Response {
     if metalcraft_flows::delete_flow(&paths::flows_dir(), &id) {
         StatusCode::NO_CONTENT.into_response()
@@ -675,10 +865,23 @@ async fn delete_flow(Path(id): Path<String>) -> Response {
 
 // ── Diagnostics handlers ────────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/diagnostics",
+    tag = "diagnostics",
+    responses((status = 200, body = Vec<crate::diagnostics_browse::DiagnosticsSessionSummary>)),
+)]
 async fn list_diagnostics() -> Json<Vec<DiagnosticsSessionSummary>> {
     Json(list_diagnostics_sessions())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/diagnostics/{id}",
+    tag = "diagnostics",
+    params(("id" = String, Path, description = "Session id")),
+    responses((status = 200, body = crate::diagnostics_browse::DiagnosticsSession), (status = 404, body = ErrorResponse)),
+)]
 async fn get_diagnostics_session(Path(id): Path<String>) -> Response {
     match read_diagnostics_session(&id) {
         Some(session) => Json(session).into_response(),
@@ -714,10 +917,23 @@ fn list_api_tool_summaries() -> Vec<ApiToolSummary> {
     summaries
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/api-tools",
+    tag = "api-tools",
+    responses((status = 200, body = Vec<ApiToolSummary>)),
+)]
 async fn list_api_tools() -> Json<Vec<ApiToolSummary>> {
     Json(list_api_tool_summaries())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/api-tools/{name}",
+    tag = "api-tools",
+    params(("name" = String, Path, description = "Tool name")),
+    responses((status = 200, body = crate::tools::http_api::HttpApiToolConfig), (status = 404, body = ErrorResponse)),
+)]
 async fn get_api_tool(Path(name): Path<String>) -> Response {
     let filename = format!("{name}.json");
     let Some((path, _)) = crate::integration_packs::resolve_file(
@@ -736,6 +952,14 @@ async fn get_api_tool(Path(name): Path<String>) -> Response {
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/api-tools/{name}",
+    tag = "api-tools",
+    params(("name" = String, Path, description = "Tool name")),
+    request_body = crate::tools::http_api::HttpApiToolConfig,
+    responses((status = 200, description = "Saved")),
+)]
 async fn put_api_tool(Path(name): Path<String>, Json(mut config): Json<HttpApiToolConfig>) -> Response {
     config.name = name.clone();
     let filename = format!("{name}.json");
@@ -766,6 +990,13 @@ async fn put_api_tool(Path(name): Path<String>, Json(mut config): Json<HttpApiTo
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/api-tools/{name}",
+    tag = "api-tools",
+    params(("name" = String, Path, description = "Tool name")),
+    responses((status = 200, description = "Deleted")),
+)]
 async fn delete_api_tool(Path(name): Path<String>) -> Response {
     let path = paths::api_tools_dir().join(format!("{name}.json"));
     if !path.exists() {
@@ -786,7 +1017,7 @@ async fn delete_api_tool(Path(name): Path<String>) -> Response {
 // reference via `$NAME`. The workshop manages them here; raw values only ever
 // flow inward (on PUT) — list/get responses are always masked.
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct KeyValueBody {
     value: String,
     /// When set, the key is written to this channel's secret scope instead of
@@ -795,7 +1026,7 @@ struct KeyValueBody {
     channel_id: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct KeyScopeQuery {
     /// When set, target this channel's secret scope instead of global.
     #[serde(default)]
@@ -855,6 +1086,12 @@ fn list_key_entries() -> Vec<KeyEntry> {
         .collect()
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/keys",
+    tag = "keys",
+    responses((status = 200, body = Vec<KeyEntry>)),
+)]
 async fn list_keys() -> Json<Vec<KeyEntry>> {
     Json(list_key_entries())
 }
@@ -862,6 +1099,12 @@ async fn list_keys() -> Json<Vec<KeyEntry>> {
 /// Keys recommended by enabled packs, each flagged configured/missing. Lets the
 /// key store UI surface "these enabled packs need these keys" without the user
 /// having to read each pack's manifest.
+#[utoipa::path(
+    get,
+    path = "/api/v1/keys/recommended",
+    tag = "keys",
+    responses((status = 200, body = Vec<RecommendedKey>)),
+)]
 async fn list_recommended_keys() -> Json<Vec<RecommendedKey>> {
     // Merge recommendations from enabled integration packs and enabled gateway
     // channel types. The `packs` field carries the source label (pack id or
@@ -894,6 +1137,14 @@ async fn list_recommended_keys() -> Json<Vec<RecommendedKey>> {
 /// target `channel_id`) from the body. Managed keys — a platform-injected global
 /// (env-authoritative) or a provisioner-backed channel's secrets — are read-only
 /// and rejected here.
+#[utoipa::path(
+    put,
+    path = "/api/v1/keys/{name}",
+    tag = "keys",
+    params(("name" = String, Path, description = "Key name")),
+    request_body = KeyValueBody,
+    responses((status = 200, description = "Saved")),
+)]
 async fn put_key(Path(name): Path<String>, Json(body): Json<KeyValueBody>) -> Response {
     if name.trim().is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "key name must not be empty");
@@ -945,6 +1196,13 @@ async fn put_key(Path(name): Path<String>, Json(body): Json<KeyValueBody>) -> Re
 /// returns an unmasked value — an explicit, user-initiated action in the Keys UI.
 /// Only returns values physically present in the store (a derived/env-only value
 /// like a provisioner's `API_KEY` is not stored, so there's nothing to reveal).
+#[utoipa::path(
+    get,
+    path = "/api/v1/keys/{name}/reveal",
+    tag = "keys",
+    params(("name" = String, Path, description = "Key name"), ("channel_id" = Option<String>, Query, description = "Channel scope for a channel secret")),
+    responses((status = 200, body = KeyRevealResponse), (status = 404, body = ErrorResponse)),
+)]
 async fn reveal_key(Path(name): Path<String>, Query(q): Query<KeyScopeQuery>) -> Response {
     let store = crate::key_store::KeyStore::load(&paths::keys_file());
     let value = match q.channel_id.as_deref() {
@@ -959,6 +1217,13 @@ async fn reveal_key(Path(name): Path<String>, Query(q): Query<KeyScopeQuery>) ->
 
 /// Delete a key. An optional `?channel_id=` targets a channel's secret scope;
 /// omitted means the global scope. Managed keys are read-only and rejected.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/keys/{name}",
+    tag = "keys",
+    params(("name" = String, Path, description = "Key name"), ("channel_id" = Option<String>, Query, description = "Channel scope for a channel secret")),
+    responses((status = 200, description = "Deleted")),
+)]
 async fn delete_key(Path(name): Path<String>, Query(q): Query<KeyScopeQuery>) -> Response {
     let path = paths::keys_file();
     let mut store = crate::key_store::KeyStore::load(&path);
@@ -993,7 +1258,7 @@ async fn delete_key(Path(name): Path<String>, Query(q): Query<KeyScopeQuery>) ->
 
 // ── Flow template handlers ──────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct FlowTemplateSummary {
     slug: String,
     name: String,
@@ -1001,7 +1266,7 @@ struct FlowTemplateSummary {
     pack_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct FlowTemplate {
     slug: String,
     name: String,
@@ -1039,10 +1304,23 @@ fn list_flow_template_summaries() -> Vec<FlowTemplateSummary> {
     summaries
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow-templates",
+    tag = "flows",
+    responses((status = 200, body = Vec<FlowTemplateSummary>)),
+)]
 async fn list_flow_templates() -> Json<Vec<FlowTemplateSummary>> {
     Json(list_flow_template_summaries())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow-templates/{slug}",
+    tag = "flows",
+    params(("slug" = String, Path, description = "Template slug")),
+    responses((status = 200, body = FlowTemplate), (status = 404, body = ErrorResponse)),
+)]
 async fn get_flow_template(Path(slug): Path<String>) -> Response {
     let filename = format!("{slug}.json");
     let Some((path, origin)) = crate::integration_packs::resolve_file(
@@ -1078,7 +1356,7 @@ async fn get_flow_template(Path(slug): Path<String>) -> Response {
 
 // ── Run flow handler ────────────────────────────────────────────────────
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, utoipa::ToSchema)]
 struct RunFlowRequest {
     /// Persona to run the flow's prompts as. Defaults to `coding-agent` if
     /// the caller doesn't specify one.
@@ -1092,12 +1370,20 @@ struct RunFlowRequest {
     inputs: Option<serde_json::Value>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct RunFlowResponse {
     flow_id: String,
     prompts: Vec<flows::FlowPromptResult>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/flows/{id}/run",
+    tag = "flows",
+    params(("id" = String, Path, description = "Flow id")),
+    request_body = RunFlowRequest,
+    responses((status = 200, body = RunFlowResponse)),
+)]
 async fn post_run_flow(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
@@ -1157,6 +1443,12 @@ async fn post_run_flow(
 // ── Flow-run (v2 pause/resume) handlers ─────────────────────────────────
 
 /// List persisted flow runs, optionally filtered by `?flow_id=`.
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow-runs",
+    tag = "flows",
+    responses((status = 200, description = "Flow run summaries", body = Object)),
+)]
 async fn list_flow_runs(
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
@@ -1169,6 +1461,13 @@ async fn list_flow_runs(
 }
 
 /// Get one flow run by id.
+#[utoipa::path(
+    get,
+    path = "/api/v1/flow-runs/{run_id}",
+    tag = "flows",
+    params(("run_id" = String, Path, description = "Flow run id")),
+    responses((status = 200, description = "Flow run detail", body = Object), (status = 404, body = ErrorResponse)),
+)]
 async fn get_flow_run(Path(run_id): Path<String>) -> Response {
     match crate::flow_runs::load_run(&paths::runs_dir(), &run_id) {
         Some(run) => Json(run).into_response(),
@@ -1176,7 +1475,7 @@ async fn get_flow_run(Path(run_id): Path<String>) -> Response {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct ResumeFlowRunRequest {
     /// Handle to take (an approval decision, or `"after"` for a wait).
     handle: String,
@@ -1186,6 +1485,14 @@ struct ResumeFlowRunRequest {
 }
 
 /// Resume a paused flow run.
+#[utoipa::path(
+    post,
+    path = "/api/v1/flow-runs/{run_id}/resume",
+    tag = "flows",
+    params(("run_id" = String, Path, description = "Flow run id")),
+    request_body = ResumeFlowRunRequest,
+    responses((status = 200, description = "Resumed run", body = Object)),
+)]
 async fn post_resume_flow_run(
     Path(run_id): Path<String>,
     Json(req): Json<ResumeFlowRunRequest>,
@@ -1208,7 +1515,7 @@ async fn post_resume_flow_run(
 
 // ── Chat handlers ───────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ChatSummary {
     id: String,
     persona_slug: String,
@@ -1217,7 +1524,7 @@ struct ChatSummary {
     turn_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ChatDetail {
     id: String,
     persona_slug: String,
@@ -1229,7 +1536,7 @@ struct ChatDetail {
 /// Wire form for `metalcraft::AgentMessage` — the in-memory enum isn't
 /// `Serialize`, so we convert before responding. Also used as the on-disk
 /// format for persisted chats, so it derives `Deserialize` too.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, utoipa::ToSchema)]
 #[serde(tag = "role", rename_all = "snake_case")]
 enum ChatMessageWire {
     User { content: String },
@@ -1443,13 +1750,19 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
     out
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct CreateChatRequest {
     persona_slug: String,
     #[serde(default)]
     model_name: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/chats",
+    tag = "chats",
+    responses((status = 200, body = Vec<ChatSummary>)),
+)]
 async fn list_chats(State(_state): State<Arc<ApiState>>) -> Response {
     // Read the chat list straight from `<data>/chats/*.json` rather than the
     // in-memory store. The two are kept in sync (every create/turn/delete
@@ -1497,6 +1810,13 @@ fn read_persisted_chats() -> Vec<PersistedChat> {
     out
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/chats",
+    tag = "chats",
+    request_body = CreateChatRequest,
+    responses((status = 200, body = ChatSummary)),
+)]
 async fn post_create_chat(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<CreateChatRequest>,
@@ -1561,6 +1881,13 @@ async fn post_create_chat(
     .into_response()
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/chats/{id}",
+    tag = "chats",
+    params(("id" = String, Path, description = "Chat id")),
+    responses((status = 200, body = ChatDetail), (status = 404, body = ErrorResponse)),
+)]
 async fn get_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
     let chats = state.chats.lock().await;
     let Some(session) = chats.get(&id).cloned() else {
@@ -1583,6 +1910,13 @@ async fn get_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) ->
     .into_response()
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/chats/{id}",
+    tag = "chats",
+    params(("id" = String, Path, description = "Chat id")),
+    responses((status = 200, description = "Deleted")),
+)]
 async fn delete_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
     let mut chats = state.chats.lock().await;
     if chats.remove(&id).is_some() {
@@ -1594,7 +1928,7 @@ async fn delete_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>)
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct ChatTurnRequest {
     message: String,
 }
@@ -1605,7 +1939,7 @@ struct ChatTurnRequest {
 ///                   → `tool_started`* → `tool_completed`*)+
 ///                   → `done`
 /// (`tool_started` and `tool_completed` can repeat per LLM step.)
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ChatEvent {
     /// Marks the start of a turn — emitted once at the top of `post_chat_turn`
@@ -1670,6 +2004,14 @@ enum ChatEvent {
 /// Run one turn against the chat session. Streams new messages as Server-Sent
 /// Events as the agent steps; closes the connection when the executor returns.
 #[axum::debug_handler]
+#[utoipa::path(
+    post,
+    path = "/api/v1/chats/{id}/turn",
+    tag = "chats",
+    params(("id" = String, Path, description = "Chat id")),
+    request_body = ChatTurnRequest,
+    responses((status = 200, description = "SSE stream (text/event-stream) of ChatEvent frames", body = ChatEvent, content_type = "text/event-stream")),
+)]
 async fn post_chat_turn(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
@@ -2110,6 +2452,13 @@ async fn post_chat_turn(
 /// The workshop opens this when a chat is on screen so a follow-up that fires
 /// while the user is idle streams in without a page refresh. Normal
 /// user-initiated turns still come back on their own `POST .../turn` response.
+#[utoipa::path(
+    get,
+    path = "/api/v1/chats/{id}/events",
+    tag = "chats",
+    params(("id" = String, Path, description = "Chat id")),
+    responses((status = 200, description = "SSE stream of agent-initiated ChatEvent frames", body = ChatEvent, content_type = "text/event-stream")),
+)]
 async fn get_chat_events(State(_state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
     let sender = chat_event_sender(&id).await;
     let rx = sender.subscribe();
@@ -2128,11 +2477,24 @@ async fn get_chat_events(State(_state): State<Arc<ApiState>>, Path(id): Path<Str
 }
 
 /// List scheduled follow-ups (pending + recently completed), newest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/scheduled-tasks",
+    tag = "scheduled-tasks",
+    responses((status = 200, description = "Scheduled follow-ups", body = Object)),
+)]
 async fn list_scheduled_tasks(State(_state): State<Arc<ApiState>>) -> Response {
     Json(crate::scheduled_tasks::list()).into_response()
 }
 
 /// Cancel a pending scheduled follow-up.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/scheduled-tasks/{id}",
+    tag = "scheduled-tasks",
+    params(("id" = String, Path, description = "Task id")),
+    responses((status = 200, description = "Deleted")),
+)]
 async fn delete_scheduled_task(
     State(_state): State<Arc<ApiState>>,
     Path(id): Path<String>,
@@ -2333,7 +2695,7 @@ fn _stream_trait_in_scope<T: Stream<Item = ()>>(_: T) {}
 
 // ── Integration pack handlers ───────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct IntegrationPackSummary {
     id: String,
     name: String,
@@ -2349,7 +2711,7 @@ struct IntegrationPackSummary {
     requires_env: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct IntegrationPackDetail {
     id: String,
     name: String,
@@ -2391,6 +2753,12 @@ fn list_file_stems(dir: &std::path::Path, ext: &str) -> Vec<String> {
     out
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/integration-packs",
+    tag = "integration-packs",
+    responses((status = 200, body = Vec<IntegrationPackSummary>)),
+)]
 async fn list_integration_packs() -> Json<Vec<IntegrationPackSummary>> {
     let state = crate::integration_packs::load_state();
     let packs = crate::integration_packs::list_installed();
@@ -2416,6 +2784,13 @@ async fn list_integration_packs() -> Json<Vec<IntegrationPackSummary>> {
     Json(summaries)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/integration-packs/{id}",
+    tag = "integration-packs",
+    params(("id" = String, Path, description = "Pack id")),
+    responses((status = 200, body = IntegrationPackDetail), (status = 404, body = ErrorResponse)),
+)]
 async fn get_integration_pack(Path(id): Path<String>) -> Response {
     let Some(pack) = crate::integration_packs::list_installed()
         .into_iter()
@@ -2448,11 +2823,19 @@ async fn get_integration_pack(Path(id): Path<String>) -> Response {
     .into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct SetEnabledRequest {
     enabled: bool,
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/integration-packs/{id}/enabled",
+    tag = "integration-packs",
+    params(("id" = String, Path, description = "Pack id")),
+    request_body = SetEnabledRequest,
+    responses((status = 200, description = "Updated")),
+)]
 async fn put_pack_enabled(
     Path(id): Path<String>,
     Json(req): Json<SetEnabledRequest>,
@@ -2473,16 +2856,35 @@ async fn put_pack_enabled(
 
 /// List the installed gateway channel types (with their per-instance settings
 /// schema), so the workshop can render a "new channel" form.
+#[utoipa::path(
+    get,
+    path = "/api/v1/gateway/types",
+    tag = "gateway",
+    responses((status = 200, body = Vec<crate::gateway_channels::ChannelType>)),
+)]
 async fn list_gateway_types() -> Json<Vec<crate::gateway_channels::ChannelType>> {
     Json(crate::gateway_channels::list_types())
 }
 
 /// List all configured gateway channel instances.
+#[utoipa::path(
+    get,
+    path = "/api/v1/gateway/channels",
+    tag = "gateway",
+    responses((status = 200, body = Vec<crate::gateway_channels::ChannelInstance>)),
+)]
 async fn list_gateway_channels() -> Json<Vec<crate::gateway_channels::ChannelInstance>> {
     Json(crate::gateway_channels::load_instances())
 }
 
 /// Recent inbound/outbound activity for a single channel (newest first).
+#[utoipa::path(
+    get,
+    path = "/api/v1/gateway/channels/{id}/events",
+    tag = "gateway",
+    params(("id" = String, Path, description = "Channel id")),
+    responses((status = 200, body = Vec<crate::gateway_activity::GatewayEvent>)),
+)]
 async fn list_gateway_channel_events(
     Path(id): Path<String>,
 ) -> Json<Vec<crate::gateway_activity::GatewayEvent>> {
@@ -2491,6 +2893,12 @@ async fn list_gateway_channel_events(
 
 /// Recent gateway activity across all channels, including inbound messages that
 /// matched no channel (the global Network view). Newest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/gateway/activity",
+    tag = "gateway",
+    responses((status = 200, body = Vec<crate::gateway_activity::GatewayEvent>)),
+)]
 async fn list_gateway_activity() -> Json<Vec<crate::gateway_activity::GatewayEvent>> {
     Json(crate::gateway_activity::list(None, 300))
 }
@@ -2498,16 +2906,29 @@ async fn list_gateway_activity() -> Json<Vec<crate::gateway_activity::GatewayEve
 // ── Metalcraft Gateway: zero-copy connect ────────────────────────────────────
 
 /// Registration/verification/connection state for the workshop's Connect panel.
+#[utoipa::path(
+    get,
+    path = "/api/v1/gateway/metalcraft/status",
+    tag = "gateway",
+    responses((status = 200, body = crate::metalcraft_gateway::GatewayStatus)),
+)]
 async fn gateway_metalcraft_status() -> Json<crate::metalcraft_gateway::GatewayStatus> {
     Json(crate::metalcraft_gateway::status().await)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct MgRegisterRequest {
     phone_number: String,
 }
 
 /// Inline register: proxy to the gateway with the pod's token; returns `verify_code`.
+#[utoipa::path(
+    post,
+    path = "/api/v1/gateway/metalcraft/register",
+    tag = "gateway",
+    request_body = MgRegisterRequest,
+    responses((status = 200, description = "Registered")),
+)]
 async fn gateway_metalcraft_register(Json(req): Json<MgRegisterRequest>) -> Response {
     match crate::metalcraft_gateway::register(&req.phone_number).await {
         Ok(v) => Json(v).into_response(),
@@ -2515,7 +2936,7 @@ async fn gateway_metalcraft_register(Json(req): Json<MgRegisterRequest>) -> Resp
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct MgConnectRequest {
     /// Override for the pod's public URL when `POD_PUBLIC_URL` isn't injected.
     #[serde(default)]
@@ -2527,6 +2948,13 @@ struct MgConnectRequest {
 }
 
 /// Connect: fetch config + wire the webhook + enable the channel. 409 until verified.
+#[utoipa::path(
+    post,
+    path = "/api/v1/gateway/metalcraft/connect",
+    tag = "gateway",
+    request_body = MgConnectRequest,
+    responses((status = 200, description = "Connected")),
+)]
 async fn gateway_metalcraft_connect(Json(req): Json<MgConnectRequest>) -> Response {
     match crate::metalcraft_gateway::connect(req.webhook_base, req.connection_token).await {
         Ok(r) => Json(r).into_response(),
@@ -2538,6 +2966,12 @@ async fn gateway_metalcraft_connect(Json(req): Json<MgConnectRequest>) -> Respon
 }
 
 /// Disconnect: disable the metalcraft-gateway channel + drop its secrets. Idempotent.
+#[utoipa::path(
+    post,
+    path = "/api/v1/gateway/metalcraft/disconnect",
+    tag = "gateway",
+    responses((status = 200, description = "Disconnected")),
+)]
 async fn gateway_metalcraft_disconnect() -> Response {
     match crate::metalcraft_gateway::disconnect().await {
         Ok(()) => Json(serde_json::json!({ "connected": false })).into_response(),
@@ -2545,7 +2979,7 @@ async fn gateway_metalcraft_disconnect() -> Response {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct CreateGatewayChannelRequest {
     type_id: String,
     name: String,
@@ -2553,6 +2987,13 @@ struct CreateGatewayChannelRequest {
     settings: HashMap<String, String>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/gateway/channels",
+    tag = "gateway",
+    request_body = CreateGatewayChannelRequest,
+    responses((status = 201, body = crate::gateway_channels::ChannelInstance), (status = 400, body = ErrorResponse)),
+)]
 async fn post_create_gateway_channel(Json(req): Json<CreateGatewayChannelRequest>) -> Response {
     match crate::gateway_channels::create_instance(&req.type_id, &req.name, req.settings) {
         Ok(instance) => (StatusCode::CREATED, Json(instance)).into_response(),
@@ -2560,7 +3001,7 @@ async fn post_create_gateway_channel(Json(req): Json<CreateGatewayChannelRequest
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct UpdateGatewayChannelRequest {
     name: String,
     #[serde(default)]
@@ -2569,6 +3010,14 @@ struct UpdateGatewayChannelRequest {
     settings: HashMap<String, String>,
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/gateway/channels/{id}",
+    tag = "gateway",
+    params(("id" = String, Path, description = "Channel id")),
+    request_body = UpdateGatewayChannelRequest,
+    responses((status = 200, description = "Updated")),
+)]
 async fn put_gateway_channel(
     Path(id): Path<String>,
     Json(req): Json<UpdateGatewayChannelRequest>,
@@ -2579,6 +3028,14 @@ async fn put_gateway_channel(
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/gateway/channels/{id}/enabled",
+    tag = "gateway",
+    params(("id" = String, Path, description = "Channel id")),
+    request_body = SetEnabledRequest,
+    responses((status = 200, description = "Updated")),
+)]
 async fn put_gateway_channel_enabled(
     Path(id): Path<String>,
     Json(req): Json<SetEnabledRequest>,
@@ -2589,6 +3046,13 @@ async fn put_gateway_channel_enabled(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/gateway/channels/{id}",
+    tag = "gateway",
+    params(("id" = String, Path, description = "Channel id")),
+    responses((status = 200, description = "Deleted")),
+)]
 async fn delete_gateway_channel(Path(id): Path<String>) -> Response {
     match crate::gateway_channels::delete_instance(&id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),

@@ -1,6 +1,6 @@
 [package]
 name = "metalcraft-agent"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 default-run = "metalcraft-agent"
 description = "Interactive AI coding agent with personas, skills, and tool approval"
@@ -35,6 +35,8 @@ base64 = "0.22"
 hex = "0.4"
 include_dir = "0.7"
 axum = { version = "0.8", features = ["macros"] }
+utoipa = { version = "5", features = ["axum_extras", "chrono"] }
+utoipa-scalar = { version = "0.3", features = ["axum"] }
 uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }

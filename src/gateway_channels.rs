@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use crate::paths;
 
 /// Manifest for a channel type — what `channel_type.json` contains.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChannelType {
     pub id: String,
     pub name: String,
@@ -55,7 +55,7 @@ pub struct ChannelType {
 /// One configurable field in a channel type's per-instance settings schema.
 /// `input_type` is a hint for the workshop form (`text`, `tel`, `password`,
 /// `number`, `persona`, `model`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SettingField {
     pub key: String,
     pub label: String,
@@ -81,7 +81,7 @@ fn default_input_type() -> String {
 }
 
 /// A user-created configuration of a [`ChannelType`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ChannelInstance {
     pub id: String,
     pub type_id: String,

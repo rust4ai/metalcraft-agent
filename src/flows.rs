@@ -171,7 +171,7 @@ pub fn collect_reachable_prompts(flow: &SavedFlow) -> Result<Vec<FlowPrompt>, St
 }
 
 /// Result of running one prompt node of a flow.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct FlowPromptResult {
     pub prompt_index: usize,
     /// "completed" | "interrupted" | "failed".

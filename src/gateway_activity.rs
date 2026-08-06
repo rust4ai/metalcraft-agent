@@ -28,7 +28,7 @@ const MAX_BODY_CHARS: usize = 500;
 /// `channel_id` is `None` when an inbound message matched no enabled channel —
 /// these "unrouted" records are what make the global Network view useful for
 /// diagnosing misconfiguration (e.g. a wrong `integration_id`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GatewayEvent {
     /// RFC3339 timestamp; filled in by [`record`] if left empty.
     pub ts: String,
