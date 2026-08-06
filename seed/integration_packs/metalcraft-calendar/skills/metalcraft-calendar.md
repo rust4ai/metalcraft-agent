@@ -52,6 +52,20 @@ id.metalcraftai.com → Account → Tokens.
 5. **Write (needs `write`):** `mcal_create_event`, `mcal_update_event`,
    `mcal_delete_event` — all scoped to a calendar slug.
 
+## Guests & video meetings
+The calendar is the scheduling hub — a "meeting" is an event with guests and (optionally) a
+video room, the Google model.
+- **Add guests** with `mcal_add_guests` (emails, optionally names). Resolve names to emails
+  via the **Metalcraft Contacts** pack (`mcon_search`) first — never invent an address.
+  Remove with `mcal_remove_guest`. `mcal_get_event` returns the event's `guests` + their rsvp.
+- **Add a video call** with `mcal_add_meeting` — this provisions a Metalcraft Meet room for
+  the event's guests and puts the `meeting_join_url` on the event (and in its location).
+  Remove with `mcal_remove_meeting`.
+- **The headline flow** — "set up a call with Alice and Bob Thursday 2pm": `mcon_search` for
+  their emails → `mcal_create_event` (title + time; confirm the timezone) → `mcal_add_guests`
+  → `mcal_add_meeting` → report the join URL. Confirm the guest list + time with the user
+  before adding guests/meeting.
+
 ## Lifecycle notes
 - Resolve an event's `id` via `mcal_list_events` before get/update/delete.
 - `mcal_update_event` **replaces** all fields — fetch the current event with

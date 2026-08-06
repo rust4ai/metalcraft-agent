@@ -1,0 +1,19 @@
+{
+  "name": "mcal_add_meeting",
+  "description": "Attach a video meeting (a Metalcraft Meet room) to an event by `id` in calendar `calendar` — like adding Google Meet to an event. Provisions a room for the event's current guests, stores the join URL on the event (and in its location), and returns the event including `meeting_join_url` and its guest list. Idempotent (returns the existing meeting if one is attached). Requires the write scope. Add the guests first (mcal_add_guests) so they're seeded into the room. If it returns 503, meetings aren't configured on the server.",
+  "method": "POST",
+  "url": "https://calendar.metalcraftai.com/api/v1/calendars/{calendar}/events/{id}/meeting",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "calendar": { "type": "string", "description": "Calendar slug." },
+      "id": { "type": "string", "description": "Event id (UUID) to add a meeting to." }
+    },
+    "required": ["calendar", "id"]
+  },
+  "body_mapping": "none"
+}

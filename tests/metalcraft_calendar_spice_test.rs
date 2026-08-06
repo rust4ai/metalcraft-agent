@@ -29,6 +29,8 @@ const EXPECTED_TOOLS: &[&str] = &[
     "mcal_now",
     "mcal_add_guests",
     "mcal_remove_guest",
+    "mcal_add_meeting",
+    "mcal_remove_meeting",
 ];
 
 /// Reads + the idempotent sync — should auto-approve.
@@ -48,6 +50,8 @@ const WRITE_TOOLS: &[&str] = &[
     "mcal_delete_event",
     "mcal_add_guests",
     "mcal_remove_guest",
+    "mcal_add_meeting",
+    "mcal_remove_meeting",
 ];
 
 static INIT: Once = Once::new();
@@ -123,7 +127,7 @@ fn metalcraft_calendar_pack_wires_up() {
     }
 
     // Slug-scoped tools must carry the {calendar} path placeholder.
-    for tool in ["mcal_list_events", "mcal_get_event", "mcal_create_event", "mcal_sync", "mcal_add_guests", "mcal_remove_guest"] {
+    for tool in ["mcal_list_events", "mcal_get_event", "mcal_create_event", "mcal_sync", "mcal_add_guests", "mcal_remove_guest", "mcal_add_meeting", "mcal_remove_meeting"] {
         let (p, _) =
             integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("slug tool resolves");
