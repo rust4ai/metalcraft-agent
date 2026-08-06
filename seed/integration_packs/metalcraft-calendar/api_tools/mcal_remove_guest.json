@@ -1,0 +1,20 @@
+{
+  "name": "mcal_remove_guest",
+  "description": "Remove a guest from an event by their `email` (in calendar `calendar`, event `id`). Requires the write scope (403 otherwise). Returns 204 No Content. Confirm the exact guest with the user before removing.",
+  "method": "DELETE",
+  "url": "https://calendar.metalcraftai.com/api/v1/calendars/{calendar}/events/{id}/guests/{email}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "calendar": { "type": "string", "description": "Calendar slug." },
+      "id": { "type": "string", "description": "Event id (UUID)." },
+      "email": { "type": "string", "description": "Email of the guest to remove." }
+    },
+    "required": ["calendar", "id", "email"]
+  },
+  "body_mapping": "none"
+}

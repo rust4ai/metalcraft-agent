@@ -1,0 +1,32 @@
+{
+  "name": "mcal_add_guests",
+  "description": "Add one or more guests (attendees) to an event by `id` in a calendar (`calendar` slug). Each guest is an email (optionally a name). Idempotent per email. Requires the write scope (403 otherwise). Resolve people to emails via Metalcraft Contacts (mcon_search) first; never invent an address. Returns the event's full guest list (email, name, rsvp). Guests appear on mcal_get_event; to hold a video call, add a meeting to the event as well.",
+  "method": "POST",
+  "url": "https://calendar.metalcraftai.com/api/v1/calendars/{calendar}/events/{id}/guests",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "calendar": { "type": "string", "description": "Calendar slug." },
+      "id": { "type": "string", "description": "Event id (UUID) to add guests to." },
+      "guests": {
+        "type": "array",
+        "description": "Guests to invite.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "email": { "type": "string", "description": "Guest email address." },
+            "name": { "type": "string", "description": "Optional display name." }
+          },
+          "required": ["email"]
+        }
+      }
+    },
+    "required": ["calendar", "id", "guests"]
+  },
+  "body_mapping": "params"
+}

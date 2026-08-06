@@ -26,6 +26,9 @@ const EXPECTED_TOOLS: &[&str] = &[
     "mcal_update_event",
     "mcal_delete_event",
     "mcal_sync",
+    "mcal_now",
+    "mcal_add_guests",
+    "mcal_remove_guest",
 ];
 
 /// Reads + the idempotent sync — should auto-approve.
@@ -43,6 +46,8 @@ const WRITE_TOOLS: &[&str] = &[
     "mcal_create_event",
     "mcal_update_event",
     "mcal_delete_event",
+    "mcal_add_guests",
+    "mcal_remove_guest",
 ];
 
 static INIT: Once = Once::new();
@@ -108,7 +113,7 @@ fn metalcraft_calendar_pack_wires_up() {
     }
 
     // Write tools that carry a body map params into it.
-    for tool in ["mcal_create_calendar", "mcal_create_event", "mcal_update_event"] {
+    for tool in ["mcal_create_calendar", "mcal_create_event", "mcal_update_event", "mcal_add_guests"] {
         let (p, _) =
             integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("write tool resolves");
@@ -118,7 +123,7 @@ fn metalcraft_calendar_pack_wires_up() {
     }
 
     // Slug-scoped tools must carry the {calendar} path placeholder.
-    for tool in ["mcal_list_events", "mcal_get_event", "mcal_create_event", "mcal_sync"] {
+    for tool in ["mcal_list_events", "mcal_get_event", "mcal_create_event", "mcal_sync", "mcal_add_guests", "mcal_remove_guest"] {
         let (p, _) =
             integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("slug tool resolves");
