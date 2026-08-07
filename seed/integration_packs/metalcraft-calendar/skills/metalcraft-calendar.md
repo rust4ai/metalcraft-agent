@@ -73,9 +73,9 @@ The flip side of adding guests: other people can invite *this* user to their eve
   for the most recent), and `on_my_calendar`. Use it for "do I have any invites?"; it also
   gives you the `event_id` to respond with.
 - **`mcal_respond_invite`** (`event_id`, `rsvp`: `accepted`|`declined`) answers one.
-  **Accepting copies the event onto the user's own calendar** — a dedicated `Invitations`
-  calendar that appears in `mcal_list_calendars`/`mcal_list_events` — so accepted invites
-  show up alongside their own events; declining removes that copy. Confirm which invite
+  **Accepting makes the shared event appear on the user's read-only `Invitations` calendar**
+  (in `mcal_list_calendars`/`mcal_list_events`) — it's the SAME event record, not a copy, so
+  the organizer's edits always show through; declining removes it from that view. Confirm which invite
   (title + time) before responding.
 
 ## Lifecycle notes
