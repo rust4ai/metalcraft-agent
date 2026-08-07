@@ -1,0 +1,15 @@
+{
+  "name": "memail_accounts",
+  "description": "List the user's connected mailboxes. Returns { accounts: [{ id (UUID), email, provider, imap_host, mailbox, status ('active'|'auth_error'|'disabled'), last_synced_at, last_error }] }. Use an account `id` to scope memail_list to one mailbox, and check `status` — an 'auth_error' mailbox has stopped syncing (its app password likely needs re-entering) so its cached mail may be stale. Never returns any credential. Takes no parameters.",
+  "method": "GET",
+  "url": "https://email.metalcraftai.com/api/v1/accounts",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "none"
+}

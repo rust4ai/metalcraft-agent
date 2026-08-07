@@ -1,0 +1,18 @@
+{
+  "name": "memail_thread",
+  "description": "Read a whole conversation. Pass a `thread_id` (found on any message from memail_list / memail_search / memail_get) to get every cached message in that thread, oldest first — same summary shape as memail_list ({ thread_id, messages: [...] }, no bodies). Use it to see the back-and-forth around a message before summarizing or replying context; fetch individual bodies with memail_get as needed.",
+  "method": "GET",
+  "url": "https://email.metalcraftai.com/api/v1/threads/{thread_id}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "thread_id": { "type": "string", "description": "Thread id from a message." }
+    },
+    "required": ["thread_id"]
+  },
+  "body_mapping": "none"
+}

@@ -1,0 +1,21 @@
+{
+  "name": "memail_list",
+  "description": "List cached messages, newest first. Optional filters: `account` (a mailbox id from memail_accounts — omit to span all mailboxes), `mailbox` (folder name, default INBOX), `unread` ('true' to show only unread), and `limit` (default 50, max 200). For paging older mail, pass `before` = the `sent_at` of the last message you saw (UTC ISO-8601) to get the next page. Returns { messages: [{ id (UUID), account_id, thread_id, from_addr, from_name, subject, snippet, sent_at, is_unread, has_attachments }] } — a lightweight summary with NO body. Use memail_get for a message's full body, or memail_search to find by keyword instead of listing.",
+  "method": "GET",
+  "url": "https://email.metalcraftai.com/api/v1/messages?account={account}&mailbox={mailbox}&unread={unread}&before={before}&limit={limit}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "account": { "type": "string", "description": "Optional mailbox id (from memail_accounts) to limit to one account. Omit for all." },
+      "mailbox": { "type": "string", "description": "Optional folder name (default INBOX)." },
+      "unread": { "type": "string", "description": "Optional: 'true' to return only unread messages. Omit for all." },
+      "before": { "type": "string", "description": "Optional keyset cursor: return messages strictly older than this sent_at (UTC ISO-8601). Use the last message's sent_at to page." },
+      "limit": { "type": "string", "description": "Optional max results, 1–200 (default 50)." }
+    }
+  },
+  "body_mapping": "none"
+}

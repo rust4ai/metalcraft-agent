@@ -1,0 +1,18 @@
+{
+  "name": "memail_get",
+  "description": "Get one message in full by `id` (a UUID from memail_list / memail_search / memail_thread). Returns the message with from/to/cc, subject, both body_text and body_html, sent_at/received_at, is_unread, thread_id, and `attachments` — a list of { id, filename, content_type, size_bytes, downloadable }. Note: attachment metadata is available but the bytes are NOT retrievable in this version (downloadable is false), so describe attachments by name/type/size; you cannot open or read their contents.",
+  "method": "GET",
+  "url": "https://email.metalcraftai.com/api/v1/messages/{id}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": { "type": "string", "description": "Message id (UUID)." }
+    },
+    "required": ["id"]
+  },
+  "body_mapping": "none"
+}

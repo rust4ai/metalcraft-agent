@@ -1,0 +1,19 @@
+{
+  "name": "memail_search",
+  "description": "Full-text search the cached mail by keyword — matches across subject, sender name/address, and body text (Postgres full-text search). Pass a natural query in `q` (e.g. 'overdue invoice', 'flight confirmation', 'alice project update'); results are newest-first, `limit` default 50 / max 200. Returns the same summary shape as memail_list ({ query, messages: [...] }, no body). This is the primary way to answer 'did I get an email about X?' — prefer it over paging memail_list. Follow up with memail_get on a result's `id` for the full message.",
+  "method": "GET",
+  "url": "https://email.metalcraftai.com/api/v1/messages/search?q={q}&limit={limit}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "q": { "type": "string", "description": "Search text; matched against subject, sender, and body." },
+      "limit": { "type": "string", "description": "Optional max results, 1–200 (default 50)." }
+    },
+    "required": ["q"]
+  },
+  "body_mapping": "none"
+}
