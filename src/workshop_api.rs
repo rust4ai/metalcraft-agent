@@ -369,10 +369,12 @@ pub fn build_router(api_key: String) -> Router {
         cwd,
     });
 
-    // Inbound Pull: hold a long-poll to the Metalcraft Gateway and drain queued inbound.
-    // A no-op until a `metalcraft-gateway` channel is enabled, so it's safe to always
-    // spawn (idle cost is one sleeping task). See INBOUND_PULL_PLAN.md.
-    {
+    // Inbound is now delivered by the gateway PUSHING to this pod's signed
+    // `/webhook/pipestreamr` endpoint (route resolved live from k3 — see the gateway's
+    // PUSH_VIA_K3_ROUTE_PLAN.md), so the pod no longer holds a long-poll by default. The
+    // legacy Inbound Pull loop stays available for a dual-transport bake: set
+    // `GATEWAY_INBOUND_PULL=1` to re-enable it.
+    if gateway_inbound_pull_enabled() {
         let state = state.clone();
         tokio::spawn(async move { inbound_pull_loop(state).await });
     }
@@ -3141,6 +3143,16 @@ fn webhook_semaphore() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
 fn allow_unsigned_webhooks() -> bool {
     matches!(
         std::env::var("GATEWAY_ALLOW_UNSIGNED").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
+/// Whether to run the legacy Inbound Pull long-poll. Off by default — inbound now arrives
+/// via the gateway's push to `/webhook/pipestreamr`. Set `GATEWAY_INBOUND_PULL=1` to
+/// re-enable pulling for a dual-transport rollout bake.
+fn gateway_inbound_pull_enabled() -> bool {
+    matches!(
+        std::env::var("GATEWAY_INBOUND_PULL").ok().as_deref(),
         Some("1") | Some("true") | Some("yes") | Some("on")
     )
 }
