@@ -66,6 +66,18 @@ video room, the Google model.
   → `mcal_add_meeting` → report the join URL. Confirm the guest list + time with the user
   before adding guests/meeting.
 
+## Invites the user received
+The flip side of adding guests: other people can invite *this* user to their events.
+- **`mcal_list_invites`** (no args) lists invites the user received — matched to their
+  account email — soonest first, with `rsvp`, `organizer_email`, `invited_at` (sort by this
+  for the most recent), and `on_my_calendar`. Use it for "do I have any invites?"; it also
+  gives you the `event_id` to respond with.
+- **`mcal_respond_invite`** (`event_id`, `rsvp`: `accepted`|`declined`) answers one.
+  **Accepting copies the event onto the user's own calendar** — a dedicated `Invitations`
+  calendar that appears in `mcal_list_calendars`/`mcal_list_events` — so accepted invites
+  show up alongside their own events; declining removes that copy. Confirm which invite
+  (title + time) before responding.
+
 ## Lifecycle notes
 - Resolve an event's `id` via `mcal_list_events` before get/update/delete.
 - `mcal_update_event` **replaces** all fields — fetch the current event with

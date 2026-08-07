@@ -1,0 +1,20 @@
+{
+  "name": "mcal_respond_invite",
+  "description": "Accept or decline an event invite the user received, by `event_id` (get it from mcal_list_invites). Set `rsvp` to 'accepted' or 'declined'. ACCEPTING copies the event onto the user's own calendar (a dedicated 'Invitations' calendar, auto-created the first time) so it shows up in mcal_list_calendars / mcal_list_events; DECLINING removes that copy. Idempotent — re-accepting won't duplicate it. The organizer sees the updated RSVP. Only affects the caller's own invite; returns no content on success (404 if there is no invite for this user on that event).",
+  "method": "POST",
+  "url": "https://calendar.metalcraftai.com/api/v1/invites/{event_id}/rsvp",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "event_id": { "type": "string", "description": "The invite's event_id (UUID) from mcal_list_invites." },
+      "rsvp": { "type": "string", "enum": ["accepted", "declined"], "description": "'accepted' (copies the event onto the user's calendar) or 'declined' (removes any copy)." }
+    },
+    "required": ["event_id", "rsvp"]
+  },
+  "body_mapping": "params"
+}

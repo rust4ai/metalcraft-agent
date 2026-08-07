@@ -31,6 +31,8 @@ const EXPECTED_TOOLS: &[&str] = &[
     "mcal_remove_guest",
     "mcal_add_meeting",
     "mcal_remove_meeting",
+    "mcal_list_invites",
+    "mcal_respond_invite",
 ];
 
 /// Reads + the idempotent sync — should auto-approve.
@@ -40,6 +42,7 @@ const READ_TOOLS: &[&str] = &[
     "mcal_list_events",
     "mcal_get_event",
     "mcal_sync",
+    "mcal_list_invites",
 ];
 
 /// Mutations — require approval.
@@ -52,6 +55,7 @@ const WRITE_TOOLS: &[&str] = &[
     "mcal_remove_guest",
     "mcal_add_meeting",
     "mcal_remove_meeting",
+    "mcal_respond_invite",
 ];
 
 static INIT: Once = Once::new();
