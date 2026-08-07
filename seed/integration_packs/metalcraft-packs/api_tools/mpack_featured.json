@@ -1,0 +1,15 @@
+{
+  "name": "mpack_featured",
+  "description": "List the featured (editorially highlighted) packs in the Metalcraft Packs registry. Returns an array of pack summaries, same shape as mpack_search. Good for suggesting popular first-party packs.",
+  "method": "GET",
+  "url": "https://packs.metalcraftai.com/api/v1/packs/featured",
+  "headers": {
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "body_mapping": "none"
+}

@@ -1,0 +1,17 @@
+{
+  "name": "mpack_get",
+  "description": "Get one pack's full detail by slug: {slug, name, description, readme, version, tags, requires_env, tool_count, persona_count, skill_count, flow_count, install_count, verified, featured, manifest, created_at}. Read `requires_env` to tell the user which keys the pack needs, and `readme` for its setup guide, before they install it.",
+  "method": "GET",
+  "url": "https://packs.metalcraftai.com/api/v1/packs/{slug}",
+  "headers": {
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "slug": { "type": "string", "description": "The pack's slug (equals its id)." }
+    },
+    "required": ["slug"]
+  },
+  "body_mapping": "none"
+}

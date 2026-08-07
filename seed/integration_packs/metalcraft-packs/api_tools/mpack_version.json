@@ -1,0 +1,17 @@
+{
+  "name": "mpack_version",
+  "description": "Cheap latest-version check for a pack: returns {slug, version}. Compare against the version installed on this agent (from the integration-packs list) to decide whether an update is available.",
+  "method": "GET",
+  "url": "https://packs.metalcraftai.com/api/v1/packs/{slug}/version",
+  "headers": {
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "slug": { "type": "string", "description": "The pack's slug (equals its id)." }
+    },
+    "required": ["slug"]
+  },
+  "body_mapping": "none"
+}

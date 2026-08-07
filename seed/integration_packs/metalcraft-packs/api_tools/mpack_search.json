@@ -1,0 +1,20 @@
+{
+  "name": "mpack_search",
+  "description": "Search and browse the Metalcraft Packs registry. Returns an array of pack summaries: {slug, name, description, version, tags, requires_env, tool_count, persona_count, skill_count, flow_count, install_count, verified, featured}. All params optional: `q` (free-text filter over name/description), `tag` (filter to a tag), `sort` ('installs' default, 'name', or 'new'), `limit`. Use this to find a pack, then mpack_get for its full detail.",
+  "method": "GET",
+  "url": "https://packs.metalcraftai.com/api/v1/packs?q={q}&tag={tag}&sort={sort}&limit={limit}",
+  "headers": {
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "q": { "type": "string", "description": "Free-text filter over pack name/description." },
+      "tag": { "type": "string", "description": "Only return packs carrying this tag." },
+      "sort": { "type": "string", "enum": ["installs", "name", "new"], "description": "Sort order. Defaults to 'installs'." },
+      "limit": { "type": "integer", "description": "Maximum number of results." }
+    },
+    "required": []
+  },
+  "body_mapping": "none"
+}
