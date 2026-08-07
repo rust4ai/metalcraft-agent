@@ -18,6 +18,7 @@ pub mod key_store;
 pub mod metalcraft_gateway;
 pub mod paths;
 pub mod persona;
+pub mod registry;
 pub mod runtime;
 pub mod scheduled_tasks;
 pub mod seed;

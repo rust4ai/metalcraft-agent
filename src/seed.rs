@@ -197,6 +197,13 @@ fn write_integration_packs() {
 /// disk — an enabled flag with no files behind it was a real failure mode.
 /// Idempotent: existing files are left untouched (version upgrades still happen
 /// at startup via [`write_integration_packs`]).
+/// True when a pack with this id ships embedded in the binary (a first-party
+/// seed). Registry installs refuse ids that collide with an embedded pack so the
+/// version-gated boot seeder can never clobber a registry install.
+pub fn is_embedded_pack(id: &str) -> bool {
+    SEED.get_dir(format!("integration_packs/{id}")).is_some()
+}
+
 pub fn install_pack(id: &str) -> bool {
     let Some(pack_dir) = SEED.get_dir(format!("integration_packs/{id}")) else {
         return false;

@@ -282,7 +282,7 @@ async fn auth_middleware(
         list_keys, list_recommended_keys, put_key, delete_key, reveal_key,
         list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
         list_scheduled_tasks, delete_scheduled_task,
-        list_integration_packs, get_integration_pack, put_pack_enabled,
+        list_integration_packs, get_integration_pack, put_pack_enabled, post_install_pack,
         list_gateway_types, list_gateway_channels, post_create_gateway_channel,
         put_gateway_channel, delete_gateway_channel, put_gateway_channel_enabled,
         list_gateway_channel_events, list_gateway_activity,
@@ -294,7 +294,7 @@ async fn auth_middleware(
         KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
         FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, ResumeFlowRunRequest,
         ChatSummary, ChatDetail, ChatMessageWire, CreateChatRequest, ChatTurnRequest, ChatEvent,
-        IntegrationPackSummary, IntegrationPackDetail, SetEnabledRequest,
+        IntegrationPackSummary, IntegrationPackDetail, SetEnabledRequest, InstallPackRequest,
         MgRegisterRequest, MgConnectRequest, CreateGatewayChannelRequest, UpdateGatewayChannelRequest,
         crate::persona::Persona, crate::persona::PersonaSummary,
         crate::skill::Skill, crate::skill::SkillSummary,
@@ -413,6 +413,9 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/scheduled-tasks", get(list_scheduled_tasks))
         .route("/api/v1/scheduled-tasks/{id}", delete(delete_scheduled_task))
         .route("/api/v1/integration-packs", get(list_integration_packs))
+        // Static `/install` before the `{id}` param route (matchit prefers the
+        // literal; different method anyway) — install a registry pack onto the pod.
+        .route("/api/v1/integration-packs/install", post(post_install_pack))
         .route("/api/v1/integration-packs/{id}", get(get_integration_pack))
         .route("/api/v1/integration-packs/{id}/enabled", put(put_pack_enabled))
         // Gateway channels: declarative channel *types* + user-created channel
@@ -2843,6 +2846,65 @@ async fn put_pack_enabled(
     match crate::integration_packs::set_enabled(&id, req.enabled) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// Build the same summary the list endpoint returns, for a single installed pack.
+fn pack_summary(pack: &crate::integration_packs::Pack) -> IntegrationPackSummary {
+    IntegrationPackSummary {
+        enabled: crate::integration_packs::is_enabled(&pack.manifest.id),
+        personas: count_files(&pack.personas_dir(), "json"),
+        skills: count_files(&pack.skills_dir(), "md"),
+        api_tools: count_files(&pack.api_tools_dir(), "json")
+            + crate::tools::native_pack_tool_names(&pack.manifest.id).len(),
+        flow_templates: count_files(&pack.flow_templates_dir(), "json"),
+        id: pack.manifest.id.clone(),
+        name: pack.manifest.name.clone(),
+        description: pack.manifest.description.clone(),
+        version: pack.manifest.version.clone(),
+        requires_env: pack.manifest.requires_env.clone(),
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct InstallPackRequest {
+    /// Registry slug of the pack to install (equals the pack id).
+    slug: String,
+}
+
+/// Install a registry pack onto this agent: download its ZIP from
+/// packs.metalcraftai.com, extract it into the data dir, and enable it. Returns
+/// the new pack's summary (same shape as the list endpoint).
+#[utoipa::path(
+    post,
+    path = "/api/v1/integration-packs/install",
+    tag = "integration-packs",
+    request_body = InstallPackRequest,
+    responses(
+        (status = 200, body = IntegrationPackSummary),
+        (status = 400, body = ErrorResponse),
+        (status = 502, body = ErrorResponse),
+    ),
+)]
+async fn post_install_pack(Json(req): Json<InstallPackRequest>) -> Response {
+    let slug = req.slug.trim().to_string();
+    if slug.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "slug is required");
+    }
+    let bytes = match crate::registry::fetch_zip(&slug).await {
+        Ok(b) => b,
+        Err(e) => return err_json(StatusCode::BAD_GATEWAY, e),
+    };
+    let id = match crate::integration_packs::install_from_zip(&bytes) {
+        Ok(id) => id,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
+    };
+    if let Err(e) = crate::integration_packs::set_enabled(&id, true) {
+        return err_json(StatusCode::BAD_REQUEST, e);
+    }
+    match crate::integration_packs::find_installed(&id) {
+        Some(pack) => Json(pack_summary(&pack)).into_response(),
+        None => err_json(StatusCode::INTERNAL_SERVER_ERROR, "pack installed but not found"),
     }
 }
 

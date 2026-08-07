@@ -23,9 +23,15 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::io::{Cursor, Read};
+use std::path::{Component, Path, PathBuf};
 
 use crate::paths;
+
+/// Cap on the total uncompressed size we'll extract for one pack — a modest
+/// guard against a zip bomb from a compromised registry. Packs are tiny
+/// (JSON + markdown); 16 MB is far more than any real pack needs.
+const MAX_PACK_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Manifest for a pack — what `pack.json` contains.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +87,12 @@ pub struct PackState {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled_at: Option<String>,
+    /// Provenance: `"registry"` for packs installed from packs.metalcraftai.com,
+    /// absent for built-in (embedded) packs. Lets the UI distinguish them and
+    /// scopes any future uninstall to registry packs. Back-compatible: older
+    /// state files with no `source` read as `None` (= built-in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// Lazily-resolved pack content — we keep [`Pack`] cheap and pull files
@@ -260,8 +272,113 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<(), String> {
                 s.enabled = enabled;
                 s.enabled_at = enabled_at.clone();
             })
-            .or_insert(PackState { enabled, enabled_at });
+            .or_insert(PackState { enabled, enabled_at, source: None });
     })
+}
+
+/// Record a pack's provenance (`"registry"` / `"embedded"`) without disturbing
+/// its enable state. Creates a disabled entry if none exists yet.
+pub fn set_source(id: &str, source: &str) -> Result<(), String> {
+    let src = source.to_string();
+    mutate_state(|state| {
+        state
+            .entry(id.to_string())
+            .and_modify(|s| s.source = Some(src.clone()))
+            .or_insert(PackState { enabled: false, enabled_at: None, source: Some(src) });
+    })
+}
+
+/// Pack ids are directory names: lowercase ascii, digits, `-` and `_` (e.g.
+/// `github`, `digitalocean_spaces`). Rejecting anything else keeps the id safe
+/// as a single path segment.
+fn valid_pack_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// Parse an `x.y.z` version into a comparable tuple (missing parts default to 0).
+fn version_tuple(v: &str) -> (u64, u64, u64) {
+    let mut parts = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+}
+
+/// Install a pack from a registry ZIP into `<data>/integration_packs/<id>/`.
+///
+/// Validates the archive (top-level `pack.json`, safe id, no path traversal,
+/// size cap), refuses to shadow a built-in pack of the same id, and won't
+/// downgrade an existing install. On success it records `source = "registry"`
+/// and returns the pack id — it does **not** enable the pack (the caller decides,
+/// typically `set_enabled(id, true)` right after).
+pub fn install_from_zip(bytes: &[u8]) -> Result<String, String> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a valid zip: {e}"))?;
+
+    // Learn the pack id from the (required, top-level) manifest.
+    let manifest_json = {
+        let mut f = zip
+            .by_name("pack.json")
+            .map_err(|_| "archive has no top-level pack.json".to_string())?;
+        let mut s = String::new();
+        f.read_to_string(&mut s).map_err(|e| format!("reading pack.json: {e}"))?;
+        s
+    };
+    let manifest: PackManifest =
+        serde_json::from_str(&manifest_json).map_err(|e| format!("invalid pack.json: {e}"))?;
+    let id = manifest.id.clone();
+    if !valid_pack_id(&id) {
+        return Err(format!("invalid pack id '{id}'"));
+    }
+    // Never let a registry pack fight or shadow a bundled first-party pack: the
+    // boot seeder version-gates embedded ids, so a same-id registry copy could be
+    // clobbered on the next boot (or shadow the bundled one). Refuse up front.
+    if crate::seed::is_embedded_pack(&id) {
+        return Err(format!(
+            "'{id}' is a built-in pack — it's managed by the app, not installable from the registry"
+        ));
+    }
+    // Don't downgrade an existing install.
+    if let Some(existing) = find_installed(&id) {
+        if version_tuple(&manifest.version) < version_tuple(&existing.manifest.version) {
+            return Err(format!(
+                "pack '{id}' v{} is older than the installed v{}",
+                manifest.version, existing.manifest.version
+            ));
+        }
+    }
+
+    let dest_root = paths::integration_packs_dir().join(&id);
+    let mut total: u64 = 0;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| format!("reading zip entry: {e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        // Reject anything that could escape the pack dir (`..`, absolute, drive).
+        let raw = entry.name().replace('\\', "/");
+        let rel = PathBuf::from(&raw);
+        if raw.starts_with('/')
+            || rel.components().any(|c| {
+                matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+            })
+        {
+            return Err(format!("unsafe path in zip: {}", entry.name()));
+        }
+        total = total.saturating_add(entry.size());
+        if total > MAX_PACK_BYTES {
+            return Err("pack exceeds the maximum allowed size".to_string());
+        }
+        let mut buf = Vec::with_capacity(entry.size().min(MAX_PACK_BYTES) as usize);
+        entry.read_to_end(&mut buf).map_err(|e| format!("reading {}: {e}", entry.name()))?;
+        let target = dest_root.join(&rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        }
+        std::fs::write(&target, &buf).map_err(|e| format!("writing {}: {e}", target.display()))?;
+    }
+
+    // Mark provenance so the boot seeder / UI never confuse it with a bundled pack.
+    let _ = set_source(&id, "registry");
+    Ok(id)
 }
 
 /// Iterate enabled packs in deterministic (sorted-id) order. Used by the
@@ -455,6 +572,71 @@ mod tests {
         assert!(is_ecosystem(&manifest("x", &["other", ECOSYSTEM_TAG])));
         // A different tag does not.
         assert!(!is_ecosystem(&manifest("x", &["metalcraft"])));
+    }
+
+    #[test]
+    fn valid_pack_id_accepts_real_ids_rejects_unsafe() {
+        assert!(valid_pack_id("github"));
+        assert!(valid_pack_id("digitalocean_spaces"));
+        assert!(valid_pack_id("metalcraft-notes"));
+        assert!(!valid_pack_id(""));
+        assert!(!valid_pack_id("../evil"));
+        assert!(!valid_pack_id("Foo")); // uppercase
+        assert!(!valid_pack_id("a/b"));
+        assert!(!valid_pack_id(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn version_tuple_parses_and_orders() {
+        assert_eq!(version_tuple("1.2.3"), (1, 2, 3));
+        assert_eq!(version_tuple("2"), (2, 0, 0));
+        assert_eq!(version_tuple("garbage"), (0, 0, 0));
+        assert!(version_tuple("1.0.0") < version_tuple("1.0.1"));
+        assert!(version_tuple("2.0.0") > version_tuple("1.9.9"));
+    }
+
+    /// Build a minimal in-memory zip with the given files (path, contents).
+    fn zip_of(files: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts: zip::write::SimpleFileOptions = Default::default();
+            for (path, content) in files {
+                w.start_file(*path, opts).unwrap();
+                w.write_all(content.as_bytes()).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    #[test]
+    fn install_from_zip_rejects_non_zip() {
+        assert!(install_from_zip(b"definitely not a zip").is_err());
+    }
+
+    #[test]
+    fn install_from_zip_requires_pack_json() {
+        let z = zip_of(&[("personas/x.json", "{}")]);
+        let err = install_from_zip(&z).unwrap_err();
+        assert!(err.contains("pack.json"), "got: {err}");
+    }
+
+    #[test]
+    fn install_from_zip_refuses_embedded_id() {
+        // `github` ships embedded, so a registry pack claiming that id is refused
+        // before anything is written to disk.
+        let z = zip_of(&[("pack.json", r#"{"id":"github","name":"x","description":"","version":"9.9.9"}"#)]);
+        let err = install_from_zip(&z).unwrap_err();
+        assert!(err.contains("built-in"), "got: {err}");
+    }
+
+    #[test]
+    fn install_from_zip_rejects_invalid_id() {
+        let z = zip_of(&[("pack.json", r#"{"id":"Bad Id","name":"x","description":"","version":"1.0.0"}"#)]);
+        let err = install_from_zip(&z).unwrap_err();
+        assert!(err.contains("invalid pack id"), "got: {err}");
     }
 
     #[test]
