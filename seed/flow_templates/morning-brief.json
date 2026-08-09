@@ -1,0 +1,72 @@
+{
+  "spec_version": "2",
+  "id": "morning-brief",
+  "name": "Morning calendar brief (8am push)",
+  "created_at": "2026-08-08T00:00:00Z",
+  "updated_at": "2026-08-08T00:00:00Z",
+  "enabled": false,
+  "flow": {
+    "nodes": [
+      {
+        "id": "entry",
+        "node_type": "entry",
+        "data": {
+          "schedule_type": "cron",
+          "cron": "0 0 13 * * *",
+          "persona": "morning-briefer",
+          "inputs": {
+            "push_integration_id": {
+              "type": "string",
+              "required": false,
+              "default": ""
+            }
+          }
+        },
+        "position": [0.0, 0.0]
+      },
+      {
+        "id": "compose",
+        "node_type": "prompt",
+        "data": {
+          "persona": "morning-briefer",
+          "prompt": "Build today's calendar agenda now. Follow your instructions: mcal_now, mcal_list_calendars, then mcal_list_events day=today for each calendar. Output ONLY the plain-text agenda (no preamble): the first line is a short title like 'Today: N events' (or 'Today: nothing scheduled'), followed by one line per event as 'HH:MM Title' in the calendar's timezone. Do not send anything yet.",
+          "output_var": "brief"
+        },
+        "position": [280.0, 0.0]
+      },
+      {
+        "id": "send",
+        "node_type": "tool",
+        "data": {
+          "tool_name": "gateway_send_message",
+          "args": {
+            "platform": "pipestreamr",
+            "channel_id": "me",
+            "content": "{{brief}}",
+            "from": "{{push_integration_id}}"
+          }
+        },
+        "position": [560.0, 0.0]
+      },
+      {
+        "id": "done",
+        "node_type": "end",
+        "data": { "status": "sent" },
+        "position": [840.0, -80.0]
+      },
+      {
+        "id": "failed",
+        "node_type": "end",
+        "data": { "status": "failed" },
+        "position": [840.0, 80.0]
+      }
+    ],
+    "edges": [
+      { "id": "e0", "source": "entry", "target": "compose" },
+      { "id": "e1", "source": "compose", "target": "send", "source_handle": "ok" },
+      { "id": "e2", "source": "compose", "target": "failed", "source_handle": "error" },
+      { "id": "e3", "source": "send", "target": "done", "source_handle": "ok" },
+      { "id": "e4", "source": "send", "target": "failed", "source_handle": "error" }
+    ]
+  }
+}
