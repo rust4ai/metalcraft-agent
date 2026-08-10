@@ -9,11 +9,11 @@ use metalcraft_agent::guard::{build_agent_guard, GuardConfig};
 fn turns_tracks_tool_calls_and_results() {
     let mut state = AgentState::new("test");
 
-    state.apply(AgentUpdate::ToolCalls(vec![PendingToolCall {
+    state.apply(AgentUpdate::ToolCalls { reasoning: vec![], calls: vec![PendingToolCall {
         call_id: None, id: "1".into(),
         name: "read_file".into(),
         args: serde_json::json!({"path": "foo.txt"}),
-    }]));
+    }] });
 
     state.apply(AgentUpdate::ToolResults(vec![ToolResult {
         call_id: None, id: "1".into(),
@@ -34,10 +34,10 @@ fn turns_tracks_tool_calls_and_results() {
 fn tools_called_returns_all_tool_names() {
     let mut state = AgentState::new("test");
 
-    state.apply(AgentUpdate::ToolCalls(vec![
+    state.apply(AgentUpdate::ToolCalls { reasoning: vec![], calls: vec![
         PendingToolCall { call_id: None, id: "1".into(), name: "read_file".into(), args: serde_json::json!({}) },
         PendingToolCall { call_id: None, id: "2".into(), name: "grep".into(), args: serde_json::json!({}) },
-    ]));
+    ] });
     state.apply(AgentUpdate::ToolResults(vec![
         ToolResult { call_id: None, id: "1".into(), name: "read_file".into(), result: Ok(serde_json::json!({})) },
         ToolResult { call_id: None, id: "2".into(), name: "grep".into(), result: Ok(serde_json::json!({})) },
@@ -136,10 +136,10 @@ fn guard_detects_error_spiral() {
     let mut state = AgentState::new("test");
 
     // First all-error turn
-    state.apply(AgentUpdate::ToolCalls(vec![PendingToolCall {
+    state.apply(AgentUpdate::ToolCalls { reasoning: vec![], calls: vec![PendingToolCall {
         call_id: None, id: "1".into(), name: "bash".into(),
         args: serde_json::json!({"command": "bad"}),
-    }]));
+    }] });
     state.apply(AgentUpdate::ToolResults(vec![ToolResult {
         call_id: None, id: "1".into(), name: "bash".into(),
         result: Err("failed".into()),
@@ -147,10 +147,10 @@ fn guard_detects_error_spiral() {
     assert!(matches!(guard(&state, &dummy_event()), GuardAction::Continue));
 
     // Second all-error turn -> should stop
-    state.apply(AgentUpdate::ToolCalls(vec![PendingToolCall {
+    state.apply(AgentUpdate::ToolCalls { reasoning: vec![], calls: vec![PendingToolCall {
         call_id: None, id: "2".into(), name: "bash".into(),
         args: serde_json::json!({"command": "also bad"}),
-    }]));
+    }] });
     state.apply(AgentUpdate::ToolResults(vec![ToolResult {
         call_id: None, id: "2".into(), name: "bash".into(),
         result: Err("also failed".into()),
@@ -169,10 +169,10 @@ fn guard_resets_on_success() {
     let mut state = AgentState::new("test");
 
     // One error turn
-    state.apply(AgentUpdate::ToolCalls(vec![PendingToolCall {
+    state.apply(AgentUpdate::ToolCalls { reasoning: vec![], calls: vec![PendingToolCall {
         call_id: None, id: "1".into(), name: "bash".into(),
         args: serde_json::json!({"command": "bad"}),
-    }]));
+    }] });
     state.apply(AgentUpdate::ToolResults(vec![ToolResult {
         call_id: None, id: "1".into(), name: "bash".into(),
         result: Err("failed".into()),
@@ -180,10 +180,10 @@ fn guard_resets_on_success() {
     assert!(matches!(guard(&state, &dummy_event()), GuardAction::Continue));
 
     // Success resets counter
-    state.apply(AgentUpdate::ToolCalls(vec![PendingToolCall {
+    state.apply(AgentUpdate::ToolCalls { reasoning: vec![], calls: vec![PendingToolCall {
         call_id: None, id: "2".into(), name: "bash".into(),
         args: serde_json::json!({"command": "good"}),
-    }]));
+    }] });
     state.apply(AgentUpdate::ToolResults(vec![ToolResult {
         call_id: None, id: "2".into(), name: "bash".into(),
         result: Ok(serde_json::json!("ok")),
@@ -191,10 +191,10 @@ fn guard_resets_on_success() {
     assert!(matches!(guard(&state, &dummy_event()), GuardAction::Continue));
 
     // Another error — should be fine (counter was reset)
-    state.apply(AgentUpdate::ToolCalls(vec![PendingToolCall {
+    state.apply(AgentUpdate::ToolCalls { reasoning: vec![], calls: vec![PendingToolCall {
         call_id: None, id: "3".into(), name: "bash".into(),
         args: serde_json::json!({"command": "bad again"}),
-    }]));
+    }] });
     state.apply(AgentUpdate::ToolResults(vec![ToolResult {
         call_id: None, id: "3".into(), name: "bash".into(),
         result: Err("nope".into()),
@@ -217,10 +217,10 @@ fn guard_detects_repeated_tool_call() {
     let mut state = AgentState::new("test");
 
     // First call
-    state.apply(AgentUpdate::ToolCalls(vec![PendingToolCall {
+    state.apply(AgentUpdate::ToolCalls { reasoning: vec![], calls: vec![PendingToolCall {
         call_id: None, id: "1".into(), name: "read_file".into(),
         args: serde_json::json!({"path": "foo.txt"}),
-    }]));
+    }] });
     assert!(matches!(guard(&state, &dummy_event()), GuardAction::Continue));
 
     state.apply(AgentUpdate::ToolResults(vec![ToolResult {
@@ -230,10 +230,10 @@ fn guard_detects_repeated_tool_call() {
     assert!(matches!(guard(&state, &dummy_event()), GuardAction::Continue));
 
     // Same call again -> loop detected
-    state.apply(AgentUpdate::ToolCalls(vec![PendingToolCall {
+    state.apply(AgentUpdate::ToolCalls { reasoning: vec![], calls: vec![PendingToolCall {
         call_id: None, id: "2".into(), name: "read_file".into(),
         args: serde_json::json!({"path": "foo.txt"}),
-    }]));
+    }] });
     assert!(matches!(guard(&state, &dummy_event()), GuardAction::Stop(_)));
 }
 
@@ -247,10 +247,10 @@ fn guard_allows_different_args() {
 
     let mut state = AgentState::new("test");
 
-    state.apply(AgentUpdate::ToolCalls(vec![PendingToolCall {
+    state.apply(AgentUpdate::ToolCalls { reasoning: vec![], calls: vec![PendingToolCall {
         call_id: None, id: "1".into(), name: "read_file".into(),
         args: serde_json::json!({"path": "foo.txt"}),
-    }]));
+    }] });
     assert!(matches!(guard(&state, &dummy_event()), GuardAction::Continue));
 
     state.apply(AgentUpdate::ToolResults(vec![ToolResult {
@@ -260,9 +260,9 @@ fn guard_allows_different_args() {
     guard(&state, &dummy_event());
 
     // Different args — not a loop
-    state.apply(AgentUpdate::ToolCalls(vec![PendingToolCall {
+    state.apply(AgentUpdate::ToolCalls { reasoning: vec![], calls: vec![PendingToolCall {
         call_id: None, id: "2".into(), name: "read_file".into(),
         args: serde_json::json!({"path": "bar.txt"}),
-    }]));
+    }] });
     assert!(matches!(guard(&state, &dummy_event()), GuardAction::Continue));
 }
