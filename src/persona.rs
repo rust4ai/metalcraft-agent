@@ -129,12 +129,18 @@ impl Persona {
                     names.push(tool);
                 }
             }
-            // Packs whose tools are native Rust (e.g. s3, which
-            // needs S3 SigV4 signing) ship no api_tools/ files, so pull their
-            // tool names from the native-pack registry too.
-            for tool in crate::tools::native_pack_tool_names(pack) {
-                if !names.contains(&tool) {
-                    names.push(tool);
+            // Packs whose tools are native Rust (e.g. s3, which needs S3 SigV4
+            // signing) ship no api_tools/ files, so pull their tool names from the
+            // native-pack registry too — but only when the pack is enabled, matching
+            // the HTTP-API path above (which resolves through enabled packs only).
+            // Without this gate a disabled or uninstalled native-tool pack keeps
+            // leaking its tools into any persona that pins it, so "disable" wouldn't
+            // actually disable them.
+            if crate::integration_packs::is_enabled(pack) {
+                for tool in crate::tools::native_pack_tool_names(pack) {
+                    if !names.contains(&tool) {
+                        names.push(tool);
+                    }
                 }
             }
         }

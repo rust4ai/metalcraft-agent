@@ -235,6 +235,49 @@ pub fn all_enabled_native_pack_tool_names() -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
+mod native_tools_drift {
+    //! Guards that a pack's `native_tools` manifest field (the registry's source
+    //! for the tool→pack index) stays in sync with [`native_pack_tool_names`]
+    //! (the binary's actual native tools). If they drift, the registry would
+    //! index a native tool to the wrong pack — or miss it — so a flow binding a
+    //! bare `tool` node to that tool couldn't have its pack dependency resolved.
+    use std::path::Path;
+
+    #[test]
+    fn seed_manifests_match_native_pack_tool_names() {
+        let seed = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/integration_packs");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&seed).expect("seed/integration_packs must exist") {
+            let manifest_path = entry.unwrap().path().join("pack.json");
+            if !manifest_path.exists() {
+                continue;
+            }
+            let m: metalcraft_packs::PackManifest =
+                serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap())
+                    .expect("seed pack.json must parse");
+            let mut from_code = super::native_pack_tool_names(&m.id);
+            let mut from_manifest = m.native_tools.clone();
+            // Only packs that claim native tools on either side are relevant.
+            if from_code.is_empty() && from_manifest.is_empty() {
+                continue;
+            }
+            from_code.sort();
+            from_manifest.sort();
+            assert_eq!(
+                from_code, from_manifest,
+                "native_tools drift for seeded pack '{}': native_pack_tool_names={from_code:?} \
+                 but pack.json native_tools={from_manifest:?} — update whichever is stale",
+                m.id
+            );
+            checked += 1;
+        }
+        // `email` is seeded with native tools, so at least one pack must be checked;
+        // a zero here means the guard silently stopped covering anything.
+        assert!(checked > 0, "expected at least one seeded pack with native tools");
+    }
+}
+
 /// Build a `ToolCallFailed` error for a missing required parameter. Shared by
 /// the meta tools so their error shape matches the native tools (e.g.
 /// `write_file`).

@@ -313,6 +313,13 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                     continue;
                 }
 
+                // Flag any missing packs/personas before running so the daemon log shows
+                // why a scheduled flow may misbehave (v2 flows surface this in their run
+                // record; the legacy prompt path only has the log).
+                for w in crate::flow_install::runtime_warnings(&flow.saved) {
+                    log::warn!("Flow '{}': {w}", flow.saved.id);
+                }
+
                 match flows::collect_reachable_prompts(&flow.saved) {
                     Ok(prompts) => {
                         if prompts.is_empty() {

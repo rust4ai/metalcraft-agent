@@ -90,6 +90,50 @@ pub async fn resolve_pack_version(
     Ok((version, content_sha256))
 }
 
+/// A pack that provides a tool, from the registry's tool → pack index.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ToolProvider {
+    /// Providing pack slug.
+    pub slug: String,
+    /// The pack's latest version.
+    #[serde(default)]
+    pub version: String,
+    /// `"http"` (declarative api_tool) or `"native"`.
+    #[serde(default)]
+    pub kind: String,
+    /// Whether the pack is first-party / verified.
+    #[serde(default)]
+    pub verified: bool,
+}
+
+/// Resolve tool names to the packs that provide them, via the registry's bulk
+/// tool → pack index (`GET /api/v1/tools/resolve?names=a,b`). Returns a map from
+/// each requested name to its providers (unknown names map to an empty list).
+/// Used to enrich a flow's pack requirements from the bare `tool_name`s it binds.
+pub async fn resolve_tools(
+    names: &[String],
+) -> Result<std::collections::HashMap<String, Vec<ToolProvider>>, String> {
+    if names.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let url = format!("{}/api/v1/tools/resolve", base_url().trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let resp = client
+        .get(&url)
+        .query(&[("names", names.join(","))])
+        .send()
+        .await
+        .map_err(|e| format!("registry request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("registry tool resolve failed: {status}"));
+    }
+    resp.json().await.map_err(|e| format!("reading resolve response: {e}"))
+}
+
 /// Download the ZIP for pack `slug` from the registry's public download endpoint.
 ///
 /// When `version` is `Some`, requests that specific published version

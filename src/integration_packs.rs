@@ -632,6 +632,7 @@ mod tests {
             requires_env: vec!["METALCRAFT_TOKEN".to_string()],
             icon: None,
             tags: tags.iter().map(|t| t.to_string()).collect(),
+            native_tools: Vec::new(),
         }
     }
 

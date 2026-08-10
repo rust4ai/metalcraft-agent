@@ -2,10 +2,16 @@
   "id": "email",
   "name": "Email (IMAP, read-only)",
   "description": "Persona and skill for reading an email mailbox over IMAP. Provides read-only tools (native, because IMAP is not HTTP) to list mailboxes, search mail, list recent mail, and fetch a full message. Every session uses IMAP EXAMINE, so the mailbox is never modified (no marking read, no deletes). Works with any IMAP provider (Gmail, Fastmail, Zoho, self-hosted). Authenticated by IMAP_HOST, IMAP_USER, and IMAP_PASSWORD (an App Password for Gmail); optional IMAP_PORT (default 993).",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "requires_env": [
     "IMAP_HOST",
     "IMAP_USER",
     "IMAP_PASSWORD"
+  ],
+  "native_tools": [
+    "email_list_mailboxes",
+    "email_search",
+    "email_list_recent",
+    "email_get_message"
   ]
 }

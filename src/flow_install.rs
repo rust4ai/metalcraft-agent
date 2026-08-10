@@ -81,6 +81,38 @@ fn effective_requires(flow: &metalcraft_flows::SavedFlow) -> metalcraft_flows::R
         .unwrap_or_else(|| metalcraft_flows::derive_requires(flow))
 }
 
+/// Fill in pack requirements for the flow's `tool` nodes using the registry's
+/// tool → pack index, so a flow that binds a bare `tool_name` (not a
+/// `sub_agent.pack` or `vendor:` node) still records the pack that provides it.
+/// Best-effort: a registry error leaves `requires` unchanged (enforcement then
+/// falls back to whatever was derivable locally). Prefers a verified provider on
+/// a name clash; adds each provider as an unconstrained (`version = None`)
+/// requirement, since the index maps identity, not a compatible range.
+async fn enrich_requires_from_tools(requires: &mut metalcraft_flows::Requires) {
+    if requires.tools.is_empty() {
+        return;
+    }
+    let map = match crate::registry::resolve_tools(&requires.tools).await {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("tool→pack enrichment skipped (registry resolve failed): {e}");
+            return;
+        }
+    };
+    let mut have: std::collections::BTreeSet<String> =
+        requires.packs.iter().map(|p| p.id.clone()).collect();
+    for providers in map.values() {
+        let Some(chosen) = providers.iter().find(|p| p.verified).or_else(|| providers.first())
+        else {
+            continue;
+        };
+        if have.insert(chosen.slug.clone()) {
+            requires.packs.push(metalcraft_flows::PackRequirement::new(&chosen.slug));
+        }
+    }
+    requires.packs.sort_by(|a, b| a.id.cmp(&b.id));
+}
+
 /// Personas referenced by a flow's nodes (`data.persona`).
 fn scan_personas(flow: &metalcraft_flows::SavedFlow) -> Vec<String> {
     let mut personas = BTreeSet::new();
@@ -165,6 +197,31 @@ pub fn dependency_report(flow: &metalcraft_flows::SavedFlow) -> DependencyReport
         missing_personas,
         required_env: required_env.into_iter().collect(),
     }
+}
+
+/// Human-readable warnings for running `flow` against this agent's *current* state —
+/// empty when everything it needs is installed and enabled. Recomputed at run time (not
+/// just install time) and surfaced in the flow-run output so a run that will misbehave
+/// for lack of a pack, persona, or a version/hash mismatch says so up front.
+pub fn runtime_warnings(flow: &metalcraft_flows::SavedFlow) -> Vec<String> {
+    let report = dependency_report(flow);
+    let mut out = Vec::new();
+    if !report.missing_packs.is_empty() {
+        out.push(format!(
+            "Missing or disabled packs: {} — install and enable them (Packs app) or this flow's tools won't run.",
+            report.missing_packs.join(", ")
+        ));
+    }
+    if !report.missing_personas.is_empty() {
+        out.push(format!(
+            "Missing personas: {} — the flow references personas this agent doesn't have.",
+            report.missing_personas.join(", ")
+        ));
+    }
+    for conflict in &report.version_conflicts {
+        out.push(format!("Pack version/hash conflict — {conflict}."));
+    }
+    out
 }
 
 /// Outcome of trying to satisfy one pack requirement of a flow.
@@ -306,17 +363,21 @@ pub async fn install_flow_from_registry(slug: &str) -> Result<InstallResult, Str
         return Err(format!("flow failed validation: {msg}"));
     }
 
-    let dependencies = dependency_report(&flow);
-
     // Persist the dependency shape if the author didn't declare one, so the
     // installed flow carries a record of what it needs. We never overwrite an
-    // author-provided `requires` (that is their compatibility contract).
+    // author-provided `requires` (that is their compatibility contract). When we
+    // derive it, also enrich pack coverage from the registry's tool→pack index so
+    // a bare-`tool`-node flow records the packs its tools come from. Done before
+    // the dependency report so the report reflects the resolved packs.
     if flow.requires.is_none() {
-        let derived = metalcraft_flows::derive_requires(&flow);
+        let mut derived = metalcraft_flows::derive_requires(&flow);
+        enrich_requires_from_tools(&mut derived).await;
         if !derived.is_empty() {
             flow.requires = Some(derived);
         }
     }
+
+    let dependencies = dependency_report(&flow);
 
     metalcraft_flows::save_flow(&paths::flows_dir(), &flow).map_err(|e| e.to_string())?;
 

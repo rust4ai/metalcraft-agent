@@ -57,6 +57,11 @@ pub struct FlowRun {
     /// current flow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<metalcraft_flows::SavedFlow>,
+    /// Non-fatal warnings computed when the run started — e.g. required packs/personas
+    /// that aren't installed or enabled. Surfaced in flow-debug UIs so a run that can't
+    /// fully work says why. Empty (and omitted) when the flow has everything it needs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// RFC-3339 creation timestamp.
     pub created_at: String,
     /// RFC-3339 last-update timestamp.
@@ -121,6 +126,7 @@ mod tests {
             cwd: ".".into(),
             steps: vec![],
             flow: None,
+            warnings: vec![],
             created_at: "2026-07-27T00:00:00Z".into(),
             updated_at: "2026-07-27T00:00:00Z".into(),
         }

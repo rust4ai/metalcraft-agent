@@ -89,6 +89,10 @@ pub struct FlowRunSummary {
     pub steps: Vec<FlowStep>,
     /// Final (or checkpointed) state — the `variables` object.
     pub variables: Value,
+    /// Missing-dependency warnings for this run (empty when the flow has everything
+    /// it needs). Shown in flow-debug UIs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Stepwise executor over a single flow run.
@@ -111,6 +115,10 @@ pub struct FlowExecutor<'a> {
     run_id: String,
     /// Preserved creation timestamp across pause/resume (set when resumed).
     created_at: Option<String>,
+    /// Non-fatal "this flow is missing packs/personas it needs" warnings, computed
+    /// from the agent's current state when the executor is built. Carried into the
+    /// run summary + record so flow-debug UIs can show them.
+    warnings: Vec<String>,
 }
 
 impl<'a> FlowExecutor<'a> {
@@ -147,6 +155,7 @@ impl<'a> FlowExecutor<'a> {
         };
 
         let step_budget = step_budget_for(&flow);
+        let warnings = crate::flow_install::runtime_warnings(&flow);
         Ok(Self {
             context,
             flow,
@@ -160,6 +169,7 @@ impl<'a> FlowExecutor<'a> {
             extra_tools: Vec::new(),
             run_id: uuid::Uuid::new_v4().to_string(),
             created_at: None,
+            warnings,
         })
     }
 
@@ -171,6 +181,7 @@ impl<'a> FlowExecutor<'a> {
         logger: Option<Arc<DiagnosticsLogger>>,
     ) -> Self {
         let step_budget = step_budget_for(&flow);
+        let warnings = crate::flow_install::runtime_warnings(&flow);
         Self {
             context,
             flow,
@@ -184,6 +195,7 @@ impl<'a> FlowExecutor<'a> {
             extra_tools: Vec::new(),
             run_id: run.id.clone(),
             created_at: Some(run.created_at.clone()),
+            warnings,
         }
     }
 
@@ -198,6 +210,16 @@ impl<'a> FlowExecutor<'a> {
     /// budget is exhausted.
     pub async fn run(self) -> Result<FlowRunSummary, String> {
         let start = entry_node(&self.flow)?.id.clone();
+        // Announce any missing-dependency warnings once, at the start of a fresh run:
+        // to the log and to the flow's diagnostics session so the workshop's flow-debug
+        // view shows them alongside the step trace. They're also carried in the summary
+        // and the persisted record for other UIs.
+        for w in &self.warnings {
+            log::warn!("flow '{}': {w}", self.flow.id);
+            if let Some(l) = &self.logger {
+                l.log_config_change("flow_warning", serde_json::json!({ "message": w }));
+            }
+        }
         self.drive(start).await
     }
 
@@ -292,6 +314,7 @@ impl<'a> FlowExecutor<'a> {
             status,
             steps: self.steps,
             variables: self.variables.into_value(),
+            warnings: self.warnings,
         }
     }
 
@@ -322,6 +345,7 @@ impl<'a> FlowExecutor<'a> {
             cwd: self.cwd.clone(),
             steps: self.steps.clone(),
             flow: Some(self.flow.clone()),
+            warnings: self.warnings.clone(),
             created_at,
             updated_at: now,
         };
@@ -344,6 +368,7 @@ impl<'a> FlowExecutor<'a> {
             run.pause = None;
             run.variables = self.variables.as_value().clone();
             run.steps = self.steps.clone();
+            run.warnings = self.warnings.clone();
             run.updated_at = Utc::now().to_rfc3339();
             let _ = crate::flow_runs::save_run(&dir, &run);
         }
