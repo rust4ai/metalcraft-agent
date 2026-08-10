@@ -50,9 +50,58 @@ pub async fn fetch_flow(slug: &str) -> Result<metalcraft_flows::SavedFlow, Strin
     serde_json::from_slice(&bytes).map_err(|e| format!("invalid flow document from registry: {e}"))
 }
 
+/// Ask the registry to resolve a semver range to the highest published version of
+/// `slug`, returning `(version, content_sha256)`. `range = None` resolves to the
+/// latest version. This is the first hop of a requirement-driven install:
+/// resolve → [`fetch_zip`] that version → verify the hash on install.
+pub async fn resolve_pack_version(
+    slug: &str,
+    range: Option<&str>,
+) -> Result<(String, String), String> {
+    let url = format!("{}/api/v1/packs/{}/resolve", base_url().trim_end_matches('/'), slug);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let mut req = client.get(&url);
+    if let Some(r) = range {
+        req = req.query(&[("range", r)]);
+    }
+    let resp = req.send().await.map_err(|e| format!("registry request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!(
+            "registry could not resolve pack '{slug}'{}: {status}",
+            range.map(|r| format!(" for range {r}")).unwrap_or_default()
+        ));
+    }
+    let body: serde_json::Value =
+        resp.json().await.map_err(|e| format!("reading resolve response: {e}"))?;
+    let version = body
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or("resolve response missing version")?
+        .to_string();
+    let content_sha256 = body
+        .get("content_sha256")
+        .and_then(|v| v.as_str())
+        .ok_or("resolve response missing content_sha256")?
+        .to_string();
+    Ok((version, content_sha256))
+}
+
 /// Download the ZIP for pack `slug` from the registry's public download endpoint.
-pub async fn fetch_zip(slug: &str) -> Result<Vec<u8>, String> {
-    let url = format!("{}/api/v1/packs/{}/download", base_url().trim_end_matches('/'), slug);
+///
+/// When `version` is `Some`, requests that specific published version
+/// (`?version=`) instead of the latest — used to satisfy a flow's pinned/ranged
+/// pack requirement.
+pub async fn fetch_zip(slug: &str, version: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut url = format!("{}/api/v1/packs/{}/download", base_url().trim_end_matches('/'), slug);
+    if let Some(v) = version {
+        // Concrete semver only reaches here; `+` (build metadata) is the sole
+        // char needing escaping in a query value.
+        url.push_str(&format!("?version={}", v.replace('+', "%2B")));
+    }
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()

@@ -303,14 +303,69 @@ fn version_tuple(v: &str) -> (u64, u64, u64) {
     (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0))
 }
 
+/// Canonical content hash of an already-installed pack, computed over the files
+/// on disk under `<data>/integration_packs/<id>/`. Matches the registry's
+/// published `content_sha256`, so a flow's hash pin can be verified against what
+/// is actually installed. Returns `None` if the pack isn't installed.
+pub fn installed_content_sha256(id: &str) -> Option<String> {
+    let pack = find_installed(id)?;
+    let mut files: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
+    for entry in walk_files(&pack.root) {
+        if let Ok(rel) = entry.strip_prefix(&pack.root) {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if let Ok(bytes) = std::fs::read(&entry) {
+                files.insert(rel, bytes);
+            }
+        }
+    }
+    Some(canonical_pack_sha256(&files))
+}
+
+/// Recursively list every file (not dir) under `root`.
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// Canonical content hash of a pack's file-map — must match the registry's
+/// `hash::canonical_sha256`: sort by path, then for each file feed the path, a
+/// `0x00` separator, the 8-byte little-endian length, and the bytes.
+fn canonical_pack_sha256(files: &std::collections::BTreeMap<String, Vec<u8>>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for (path, bytes) in files {
+        hasher.update(path.as_bytes());
+        hasher.update([0u8]);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    hex::encode(hasher.finalize())
+}
+
 /// Install a pack from a registry ZIP into `<data>/integration_packs/<id>/`.
 ///
 /// Validates the archive (top-level `pack.json`, safe id, no path traversal,
 /// size cap), refuses to shadow a built-in pack of the same id, and won't
-/// downgrade an existing install. On success it records `source = "registry"`
-/// and returns the pack id — it does **not** enable the pack (the caller decides,
-/// typically `set_enabled(id, true)` right after).
-pub fn install_from_zip(bytes: &[u8]) -> Result<String, String> {
+/// downgrade an existing install. When `expected_sha256` is `Some`, the extracted
+/// file-map's canonical hash must match it or the install is refused (integrity
+/// pin). On success it records `source = "registry"` and returns the pack id — it
+/// does **not** enable the pack (the caller decides, typically
+/// `set_enabled(id, true)` right after).
+pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<String, String> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a valid zip: {e}"))?;
 
     // Learn the pack id from the (required, top-level) manifest.
@@ -346,7 +401,9 @@ pub fn install_from_zip(bytes: &[u8]) -> Result<String, String> {
         }
     }
 
-    let dest_root = paths::integration_packs_dir().join(&id);
+    // Extract into an in-memory file-map first so we can verify integrity before
+    // touching disk (a hash mismatch must leave nothing behind).
+    let mut files: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
     let mut total: u64 = 0;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(|e| format!("reading zip entry: {e}"))?;
@@ -369,11 +426,26 @@ pub fn install_from_zip(bytes: &[u8]) -> Result<String, String> {
         }
         let mut buf = Vec::with_capacity(entry.size().min(MAX_PACK_BYTES) as usize);
         entry.read_to_end(&mut buf).map_err(|e| format!("reading {}: {e}", entry.name()))?;
-        let target = dest_root.join(&rel);
+        files.insert(raw, buf);
+    }
+
+    // Integrity pin: refuse to install bytes that don't match the expected hash.
+    if let Some(expected) = expected_sha256 {
+        let actual = canonical_pack_sha256(&files);
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "pack '{id}' content hash {actual} does not match the expected {expected}"
+            ));
+        }
+    }
+
+    let dest_root = paths::integration_packs_dir().join(&id);
+    for (raw, buf) in &files {
+        let target = dest_root.join(raw);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
         }
-        std::fs::write(&target, &buf).map_err(|e| format!("writing {}: {e}", target.display()))?;
+        std::fs::write(&target, buf).map_err(|e| format!("writing {}: {e}", target.display()))?;
     }
 
     // Mark provenance so the boot seeder / UI never confuse it with a bundled pack.
@@ -395,17 +467,33 @@ pub fn uninstall(id: &str) -> Result<bool, String> {
             "'{id}' is a built-in pack — it's managed by the app and can't be uninstalled"
         ));
     }
+    // Packs that ship native (compiled-in) Rust tools — e.g. the `s3` pack —
+    // can't be fully removed: deleting the files would strip the pack's persona/docs
+    // while the tools remain live in the binary, leaving a half-uninstalled pack.
+    // Refuse and let the user disable it instead.
+    if !crate::tools::native_pack_tool_names(id).is_empty() {
+        return Err(format!(
+            "'{id}' ships built-in tools compiled into the app and can't be fully uninstalled — disable it instead"
+        ));
+    }
     if find_installed(id).is_none() {
         return Ok(false);
     }
-    // `id` is validated to a single safe path segment above, so this stays inside
-    // the packs dir.
-    let dir = paths::integration_packs_dir().join(id);
-    std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to remove pack files: {e}"))?;
-    // Drop its state entry so it doesn't linger as a disabled ghost.
+    // Drop the enable-state entry *first* so a crash mid-uninstall can never leave a
+    // ghost `enabled: true` pointing at deleted files (a later re-install would then
+    // look enabled without the user opting in). If the file removal then fails, the
+    // pack is left installed-but-disabled — recoverable, not corrupt.
     mutate_state(|state| {
         state.remove(id);
     })?;
+    // `id` is validated to a single safe path segment above, so this stays inside
+    // the packs dir.
+    let dir = paths::integration_packs_dir().join(id);
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("failed to remove pack files: {e}"));
+        }
+    }
     Ok(true)
 }
 
@@ -641,13 +729,13 @@ mod tests {
 
     #[test]
     fn install_from_zip_rejects_non_zip() {
-        assert!(install_from_zip(b"definitely not a zip").is_err());
+        assert!(install_from_zip(b"definitely not a zip", None).is_err());
     }
 
     #[test]
     fn install_from_zip_requires_pack_json() {
         let z = zip_of(&[("personas/x.json", "{}")]);
-        let err = install_from_zip(&z).unwrap_err();
+        let err = install_from_zip(&z, None).unwrap_err();
         assert!(err.contains("pack.json"), "got: {err}");
     }
 
@@ -656,15 +744,52 @@ mod tests {
         // `email` ships embedded, so a registry pack claiming that id is refused
         // before anything is written to disk.
         let z = zip_of(&[("pack.json", r#"{"id":"email","name":"x","description":"","version":"9.9.9"}"#)]);
-        let err = install_from_zip(&z).unwrap_err();
+        let err = install_from_zip(&z, None).unwrap_err();
         assert!(err.contains("built-in"), "got: {err}");
+    }
+
+    #[test]
+    fn uninstall_refuses_builtin_and_native_tool_packs() {
+        // An embedded ecosystem pack is app-managed — refused before any disk touch.
+        let err = uninstall("metalcraft-notes").unwrap_err();
+        assert!(err.contains("built-in"), "got: {err}");
+        // A registry pack that ships native (compiled-in) tools can't be fully
+        // removed, so uninstall is refused (disable instead).
+        let err = uninstall("s3").unwrap_err();
+        assert!(err.contains("built-in tools"), "got: {err}");
     }
 
     #[test]
     fn install_from_zip_rejects_invalid_id() {
         let z = zip_of(&[("pack.json", r#"{"id":"Bad Id","name":"x","description":"","version":"1.0.0"}"#)]);
-        let err = install_from_zip(&z).unwrap_err();
+        let err = install_from_zip(&z, None).unwrap_err();
         assert!(err.contains("invalid pack id"), "got: {err}");
+    }
+
+    #[test]
+    fn install_from_zip_rejects_hash_mismatch_before_touching_disk() {
+        // A non-embedded, valid id so we reach the integrity check, with a wrong
+        // expected hash. It must fail before any file is written.
+        let z = zip_of(&[(
+            "pack.json",
+            r#"{"id":"some-third-party-pack","name":"x","description":"","version":"1.0.0"}"#,
+        )]);
+        let err = install_from_zip(&z, Some(&"0".repeat(64))).unwrap_err();
+        assert!(err.contains("does not match"), "got: {err}");
+    }
+
+    #[test]
+    fn canonical_pack_sha256_is_deterministic_and_order_independent() {
+        let mut a = std::collections::BTreeMap::new();
+        a.insert("pack.json".to_string(), b"{}".to_vec());
+        a.insert("skills/x.md".to_string(), b"hi".to_vec());
+        let h1 = canonical_pack_sha256(&a);
+        // BTreeMap is already sorted; rebuild inserting in the other order.
+        let mut b = std::collections::BTreeMap::new();
+        b.insert("skills/x.md".to_string(), b"hi".to_vec());
+        b.insert("pack.json".to_string(), b"{}".to_vec());
+        assert_eq!(h1, canonical_pack_sha256(&b));
+        assert_eq!(h1.len(), 64);
     }
 
     #[test]

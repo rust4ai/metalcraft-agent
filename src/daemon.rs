@@ -396,8 +396,26 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
             // Auto-resume any paused run whose wake time has arrived: `wait`
             // nodes (via the `after` handle) and `approval` nodes that timed out
             // (via the `timeout` handle).
-            for run in crate::flow_runs::list_runs(&crate::paths::runs_dir()) {
+            for mut run in crate::flow_runs::list_runs(&crate::paths::runs_dir()) {
                 if run.status != "paused" {
+                    continue;
+                }
+                // If the flow behind this run is gone and the record carries no flow
+                // snapshot to resume from (a pre-snapshot/legacy run), resume can never
+                // succeed — mark it failed once instead of re-attempting (and error-
+                // logging) it every poll iteration forever.
+                if run.flow.is_none()
+                    && metalcraft_flows::load_flow(&crate::paths::flows_dir(), &run.flow_id)
+                        .is_none()
+                {
+                    log::warn!(
+                        "Failing paused run '{}': flow '{}' no longer exists and the run has no snapshot to resume from",
+                        run.id,
+                        run.flow_id
+                    );
+                    run.status = "failed".into();
+                    run.pause = None;
+                    let _ = crate::flow_runs::save_run(&crate::paths::runs_dir(), &run);
                     continue;
                 }
                 let Some(pause) = &run.pause else { continue };

@@ -275,6 +275,7 @@ async fn auth_middleware(
         get_persona, put_persona, delete_persona,
         get_skill, put_skill, delete_skill,
         get_flow, put_flow, delete_flow, post_run_flow, post_install_flow,
+        post_install_flow_dependencies,
         list_flow_runs, get_flow_run, post_resume_flow_run,
         list_flow_templates, get_flow_template,
         list_diagnostics, get_diagnostics_session,
@@ -295,7 +296,7 @@ async fn auth_middleware(
         FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, ResumeFlowRunRequest,
         InstallFlowRequest,
         ChatSummary, ChatDetail, ChatMessageWire, CreateChatRequest, ChatTurnRequest, ChatEvent,
-        IntegrationPackSummary, IntegrationPackDetail, SetEnabledRequest, InstallPackRequest,
+        IntegrationPackSummary, IntegrationPackDetail, SetEnabledRequest, InstallPackRequest, UninstallPackResult,
         MgRegisterRequest, MgConnectRequest, CreateGatewayChannelRequest, UpdateGatewayChannelRequest,
         crate::persona::Persona, crate::persona::PersonaSummary,
         crate::skill::Skill, crate::skill::SkillSummary,
@@ -396,6 +397,7 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/flows/{id}", put(put_flow))
         .route("/api/v1/flows/{id}", delete(delete_flow))
         .route("/api/v1/flows/{id}/run", post(post_run_flow))
+        .route("/api/v1/flows/{id}/install-dependencies", post(post_install_flow_dependencies))
         .route("/api/v1/flow-runs", get(list_flow_runs))
         .route("/api/v1/flow-runs/{run_id}", get(get_flow_run))
         .route("/api/v1/flow-runs/{run_id}/resume", post(post_resume_flow_run))
@@ -898,6 +900,29 @@ async fn post_install_flow(Json(req): Json<InstallFlowRequest>) -> Response {
         Ok(result) => Json(result).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }
+}
+
+/// Install the integration packs an already-installed flow declares in its
+/// `requires` block: for each, resolve its semver range against the registry,
+/// download that exact version, verify the content hash, install, and enable it.
+/// Returns one outcome per pack. Idempotent — packs already satisfied are left
+/// untouched.
+#[utoipa::path(
+    post,
+    path = "/api/v1/flows/{id}/install-dependencies",
+    tag = "flows",
+    params(("id" = String, Path, description = "Flow id")),
+    responses(
+        (status = 200, description = "Per-pack install outcomes", body = Object),
+        (status = 404, body = ErrorResponse),
+    ),
+)]
+async fn post_install_flow_dependencies(Path(id): Path<String>) -> Response {
+    let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
+    };
+    let outcomes = crate::flow_install::install_flow_dependencies(&flow).await;
+    Json(serde_json::json!({ "flow": id, "packs": outcomes })).into_response()
 }
 
 // ── Diagnostics handlers ────────────────────────────────────────────────
@@ -2860,23 +2885,57 @@ async fn get_integration_pack(Path(id): Path<String>) -> Response {
     .into_response()
 }
 
+#[derive(Serialize, utoipa::ToSchema)]
+struct UninstallPackResult {
+    /// Installed flows that still reference the removed pack — they'll fail to resolve
+    /// it until the pack is reinstalled or the flow is edited.
+    dependent_flows: Vec<String>,
+    /// Surviving personas that still declare the removed pack in their `packs` list.
+    dependent_personas: Vec<String>,
+}
+
 #[utoipa::path(
     delete,
     path = "/api/v1/integration-packs/{id}",
     tag = "integration-packs",
     params(("id" = String, Path, description = "Pack id")),
     responses(
-        (status = 204, description = "Uninstalled"),
+        (status = 200, body = UninstallPackResult, description = "Uninstalled; body lists anything that still depends on the pack"),
         (status = 404, body = ErrorResponse),
         (status = 400, body = ErrorResponse),
     ),
 )]
 async fn delete_integration_pack(Path(id): Path<String>) -> Response {
     match crate::integration_packs::uninstall(&id) {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => Json(pack_dependents(&id)).into_response(),
         Ok(false) => err_json(StatusCode::NOT_FOUND, format!("pack '{id}' not found")),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }
+}
+
+/// After a pack is removed, scan the *surviving* flows and personas for references to
+/// its id — these are exactly the things that will now fail to resolve it, so the client
+/// can warn the user.
+fn pack_dependents(id: &str) -> UninstallPackResult {
+    let flows_dir = paths::flows_dir();
+    let dependent_flows = metalcraft_flows::list_flows(&flows_dir)
+        .into_iter()
+        .filter_map(|s| metalcraft_flows::load_flow(&flows_dir, &s.id))
+        .filter(|f| crate::flow_install::required_packs(f).iter().any(|p| p == id))
+        .map(|f| f.id)
+        .collect();
+
+    let personas_dir = paths::personas_dir();
+    let dependent_personas = crate::persona::Persona::list_available(&personas_dir)
+        .into_iter()
+        .filter_map(|slug| {
+            crate::persona::Persona::load(&slug, &personas_dir).ok().map(|p| (slug, p))
+        })
+        .filter(|(_, p)| p.packs.iter().any(|x| x == id))
+        .map(|(slug, _)| slug)
+        .collect();
+
+    UninstallPackResult { dependent_flows, dependent_personas }
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -2923,6 +2982,13 @@ fn pack_summary(pack: &crate::integration_packs::Pack) -> IntegrationPackSummary
 struct InstallPackRequest {
     /// Registry slug of the pack to install (equals the pack id).
     slug: String,
+    /// Optional specific version to install (defaults to the registry's latest).
+    #[serde(default)]
+    version: Option<String>,
+    /// Optional integrity pin: if set, the downloaded pack's canonical content
+    /// hash must match this or the install is refused.
+    #[serde(default)]
+    content_sha256: Option<String>,
 }
 
 /// Install a registry pack onto this agent: download its ZIP from
@@ -2944,11 +3010,11 @@ async fn post_install_pack(Json(req): Json<InstallPackRequest>) -> Response {
     if slug.is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "slug is required");
     }
-    let bytes = match crate::registry::fetch_zip(&slug).await {
+    let bytes = match crate::registry::fetch_zip(&slug, req.version.as_deref()).await {
         Ok(b) => b,
         Err(e) => return err_json(StatusCode::BAD_GATEWAY, e),
     };
-    let id = match crate::integration_packs::install_from_zip(&bytes) {
+    let id = match crate::integration_packs::install_from_zip(&bytes, req.content_sha256.as_deref()) {
         Ok(id) => id,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
     };

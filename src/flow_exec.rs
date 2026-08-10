@@ -1373,6 +1373,7 @@ mod tests {
             created_at: "2026-07-27T00:00:00Z".into(),
             updated_at: "2026-07-27T00:00:00Z".into(),
             enabled: false,
+            requires: None,
             flow: FlowDefinition { nodes, edges },
         }
     }
