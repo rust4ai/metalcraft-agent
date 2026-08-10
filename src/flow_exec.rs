@@ -64,7 +64,7 @@ struct PauseSpec {
 }
 
 /// One node's contribution to the run trace.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct FlowStep {
     /// The node that ran.
     pub node_id: String,
@@ -77,7 +77,7 @@ pub struct FlowStep {
 }
 
 /// The result of running (or pausing) a flow.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct FlowRunSummary {
     /// The run id (matches the `runs/{id}.json` record when the run paused).
     pub run_id: String,
@@ -88,6 +88,7 @@ pub struct FlowRunSummary {
     /// Per-node trace, in execution order.
     pub steps: Vec<FlowStep>,
     /// Final (or checkpointed) state — the `variables` object.
+    #[schema(value_type = Object)]
     pub variables: Value,
     /// Missing-dependency warnings for this run (empty when the flow has everything
     /// it needs). Shown in flow-debug UIs.

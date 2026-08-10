@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::{paths, registry};
 
 /// What a flow needs beyond itself, checked against this agent's current state.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DependencyReport {
     /// Integration packs the flow requires — the union of what the graph
     /// references (`sub_agent.pack` + custom vendor nodes) and what the flow's
@@ -39,7 +39,7 @@ pub struct DependencyReport {
 }
 
 /// Summary of the flow that was written.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct InstalledFlow {
     pub id: String,
     pub name: String,
@@ -49,7 +49,7 @@ pub struct InstalledFlow {
 }
 
 /// The result of a successful install: what landed + what it still needs.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct InstallResult {
     pub flow: InstalledFlow,
     pub dependencies: DependencyReport,
@@ -225,7 +225,7 @@ pub fn runtime_warnings(flow: &metalcraft_flows::SavedFlow) -> Vec<String> {
 }
 
 /// Outcome of trying to satisfy one pack requirement of a flow.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PackInstallOutcome {
     /// The pack id.
     pub pack: String,

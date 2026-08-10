@@ -294,8 +294,13 @@ async fn auth_middleware(
     components(schemas(
         ErrorResponse, ProjectSnapshot, ProjectLayout, ApiToolSummary,
         KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
-        FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, ResumeFlowRunRequest,
-        InstallFlowRequest,
+        FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, RunFlowOutput, ResumeFlowRunRequest,
+        InstallFlowRequest, InstallDependenciesResponse,
+        crate::flow_exec::FlowRunSummary, crate::flow_exec::FlowStep,
+        crate::flow_runs::FlowRun, crate::flow_runs::PauseInfo,
+        crate::flow_install::InstallResult, crate::flow_install::InstalledFlow,
+        crate::flow_install::DependencyReport, crate::flow_install::PackInstallOutcome,
+        crate::lockfile::Lock, crate::lockfile::LockEntry, RestoreOutcome, RestoreResult,
         ChatSummary, ChatDetail, ChatMessageWire, CreateChatRequest, ChatTurnRequest, ChatEvent,
         IntegrationPackSummary, IntegrationPackDetail, SetEnabledRequest, InstallPackRequest, UninstallPackResult,
         MgRegisterRequest, MgConnectRequest, CreateGatewayChannelRequest, UpdateGatewayChannelRequest,
@@ -894,7 +899,7 @@ struct InstallFlowRequest {
     tag = "flows",
     request_body = InstallFlowRequest,
     responses(
-        (status = 200, description = "Installed flow + dependency report", body = Object),
+        (status = 200, description = "Installed flow + dependency report", body = crate::flow_install::InstallResult),
         (status = 400, body = ErrorResponse),
         (status = 502, body = ErrorResponse),
     ),
@@ -925,7 +930,7 @@ async fn post_install_flow(Json(req): Json<InstallFlowRequest>) -> Response {
     tag = "flows",
     params(("id" = String, Path, description = "Flow id")),
     responses(
-        (status = 200, description = "Per-pack install outcomes", body = Object),
+        (status = 200, description = "Per-pack install outcomes", body = InstallDependenciesResponse),
         (status = 404, body = ErrorResponse),
     ),
 )]
@@ -934,7 +939,16 @@ async fn post_install_flow_dependencies(Path(id): Path<String>) -> Response {
         return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
     };
     let outcomes = crate::flow_install::install_flow_dependencies(&flow).await;
-    Json(serde_json::json!({ "flow": id, "packs": outcomes })).into_response()
+    Json(InstallDependenciesResponse { flow: id, packs: outcomes }).into_response()
+}
+
+/// Response for `POST /flows/{id}/install-dependencies`.
+#[derive(Serialize, utoipa::ToSchema)]
+struct InstallDependenciesResponse {
+    /// The flow whose dependencies were installed.
+    flow: String,
+    /// One outcome per required pack.
+    packs: Vec<crate::flow_install::PackInstallOutcome>,
 }
 
 // ── Diagnostics handlers ────────────────────────────────────────────────
@@ -1450,13 +1464,26 @@ struct RunFlowResponse {
     prompts: Vec<flows::FlowPromptResult>,
 }
 
+/// The run endpoint returns one of two shapes depending on the flow's spec
+/// version: v2 (state-machine) flows return a [`FlowRunSummary`]; v1 (linear)
+/// flows return a [`RunFlowResponse`]. Documented as a `oneOf` so generated
+/// clients see a proper union rather than an opaque object. Never constructed —
+/// it exists only to describe the response schema.
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+enum RunFlowOutput {
+    V2(crate::flow_exec::FlowRunSummary),
+    V1(RunFlowResponse),
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/flows/{id}/run",
     tag = "flows",
     params(("id" = String, Path, description = "Flow id")),
     request_body = RunFlowRequest,
-    responses((status = 200, body = RunFlowResponse)),
+    responses((status = 200, description = "v2 flows return a FlowRunSummary; v1 flows return a RunFlowResponse", body = RunFlowOutput)),
 )]
 async fn post_run_flow(
     State(state): State<Arc<ApiState>>,
@@ -1521,7 +1548,7 @@ async fn post_run_flow(
     get,
     path = "/api/v1/flow-runs",
     tag = "flows",
-    responses((status = 200, description = "Flow run summaries", body = Object)),
+    responses((status = 200, description = "Flow run summaries", body = Vec<crate::flow_runs::FlowRun>)),
 )]
 async fn list_flow_runs(
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -1540,7 +1567,7 @@ async fn list_flow_runs(
     path = "/api/v1/flow-runs/{run_id}",
     tag = "flows",
     params(("run_id" = String, Path, description = "Flow run id")),
-    responses((status = 200, description = "Flow run detail", body = Object), (status = 404, body = ErrorResponse)),
+    responses((status = 200, description = "Flow run detail", body = crate::flow_runs::FlowRun), (status = 404, body = ErrorResponse)),
 )]
 async fn get_flow_run(Path(run_id): Path<String>) -> Response {
     match crate::flow_runs::load_run(&paths::runs_dir(), &run_id) {
@@ -1565,7 +1592,7 @@ struct ResumeFlowRunRequest {
     tag = "flows",
     params(("run_id" = String, Path, description = "Flow run id")),
     request_body = ResumeFlowRunRequest,
-    responses((status = 200, description = "Resumed run", body = Object)),
+    responses((status = 200, description = "Resumed run", body = crate::flow_exec::FlowRunSummary)),
 )]
 async fn post_resume_flow_run(
     Path(run_id): Path<String>,
@@ -3059,13 +3086,13 @@ async fn post_install_pack(Json(req): Json<InstallPackRequest>) -> Response {
     get,
     path = "/api/v1/lockfile",
     tag = "lockfile",
-    responses((status = 200, description = "The install lockfile", body = Object)),
+    responses((status = 200, description = "The install lockfile", body = crate::lockfile::Lock)),
 )]
 async fn get_lockfile() -> Response {
     Json(crate::lockfile::load()).into_response()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct RestoreOutcome {
     kind: &'static str,
     name: String,
@@ -3076,6 +3103,12 @@ struct RestoreOutcome {
     detail: Option<String>,
 }
 
+/// Wrapper for the lockfile-restore response (`{ outcomes: [...] }`).
+#[derive(Serialize, utoipa::ToSchema)]
+struct RestoreResult {
+    outcomes: Vec<RestoreOutcome>,
+}
+
 /// Reinstall everything in the lockfile at its pinned version, verifying each against
 /// its locked content hash — the reproducible-rebuild path for a fresh or cloned pod.
 /// Returns one outcome per entry; a failure on one entry doesn't stop the rest.
@@ -3083,7 +3116,7 @@ struct RestoreOutcome {
     post,
     path = "/api/v1/lockfile/restore",
     tag = "lockfile",
-    responses((status = 200, description = "Per-entry restore outcomes", body = Object)),
+    responses((status = 200, description = "Per-entry restore outcomes", body = RestoreResult)),
 )]
 async fn post_lockfile_restore() -> Response {
     let lock = crate::lockfile::load();
@@ -3094,7 +3127,7 @@ async fn post_lockfile_restore() -> Response {
     for e in &lock.flows {
         outcomes.push(restore_flow(e).await);
     }
-    Json(serde_json::json!({ "outcomes": outcomes })).into_response()
+    Json(RestoreResult { outcomes }).into_response()
 }
 
 async fn restore_pack(e: &crate::lockfile::LockEntry) -> RestoreOutcome {

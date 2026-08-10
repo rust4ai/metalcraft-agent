@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::paths;
 
 /// One pinned artifact in the lockfile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct LockEntry {
     /// Registry slug (== pack id / flow id).
     pub name: String,
@@ -30,7 +30,7 @@ pub struct LockEntry {
 }
 
 /// The lockfile document.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Lock {
     /// Lockfile format version (not the artifacts' versions).
     #[serde(default = "one")]

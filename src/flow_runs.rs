@@ -12,7 +12,7 @@ use std::path::Path;
 use crate::flow_exec::FlowStep;
 
 /// Why a run is paused and what will resume it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PauseInfo {
     /// `"approval"` or `"wait"`.
     pub reason: String,
@@ -28,7 +28,7 @@ pub struct PauseInfo {
 }
 
 /// A persisted flow run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct FlowRun {
     /// Unique run id (the `runs/{id}.json` filename).
     pub id: String,
@@ -39,6 +39,7 @@ pub struct FlowRun {
     /// The node the run is paused at (for `paused`) or last ran.
     pub current_node_id: String,
     /// The run's state (`variables`) at the checkpoint.
+    #[schema(value_type = Object)]
     pub variables: Value,
     /// Pause details when `status == "paused"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,6 +57,7 @@ pub struct FlowRun {
     /// Absent (`None`) on legacy records; resume then falls back to loading the
     /// current flow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
     pub flow: Option<metalcraft_flows::SavedFlow>,
     /// Non-fatal warnings computed when the run started — e.g. required packs/personas
     /// that aren't installed or enabled. Surfaced in flow-debug UIs so a run that can't
