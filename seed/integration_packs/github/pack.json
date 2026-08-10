@@ -1,9 +1,0 @@
-{
-  "id": "github",
-  "name": "GitHub",
-  "description": "Persona, skill, and HTTP API tools that let an agent work with GitHub via the REST API and a personal access token — read public and PRIVATE repositories (metadata, file contents, branches), push commits to files, create branches, open and list pull requests and issues, and comment on them. Authenticated by a single GITHUB_TOKEN (a classic or fine-grained PAT).",
-  "version": "1.0.1",
-  "requires_env": [
-    "GITHUB_TOKEN"
-  ]
-}

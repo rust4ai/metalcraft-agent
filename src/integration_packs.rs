@@ -653,9 +653,9 @@ mod tests {
 
     #[test]
     fn install_from_zip_refuses_embedded_id() {
-        // `github` ships embedded, so a registry pack claiming that id is refused
+        // `email` ships embedded, so a registry pack claiming that id is refused
         // before anything is written to disk.
-        let z = zip_of(&[("pack.json", r#"{"id":"github","name":"x","description":"","version":"9.9.9"}"#)]);
+        let z = zip_of(&[("pack.json", r#"{"id":"email","name":"x","description":"","version":"9.9.9"}"#)]);
         let err = install_from_zip(&z).unwrap_err();
         assert!(err.contains("built-in"), "got: {err}");
     }

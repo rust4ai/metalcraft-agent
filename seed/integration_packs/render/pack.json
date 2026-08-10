@@ -1,9 +1,0 @@
-{
-  "id": "render",
-  "name": "Render",
-  "description": "Persona, skill, and HTTP API tools that let an agent manage Render.com deployments through the Render REST API — verify the key and list workspaces (owners), list services, add a custom domain to a service, list/read a service's custom domains and their verification status, and trigger a DNS re-verify. Render's API does NOT return the target DNS values, so the skill derives them (subdomain CNAME -> the service's onrender.com host; apex A -> Render's fixed load-balancer IP). Authenticated by a single RENDER_API_KEY (Authorization: Bearer).",
-  "version": "1.0.0",
-  "requires_env": [
-    "RENDER_API_KEY"
-  ]
-}

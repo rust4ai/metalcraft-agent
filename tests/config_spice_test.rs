@@ -12,19 +12,20 @@
 //!
 //!   2. `installing_a_pack_via_meta_tools_works` — always runs, no network and
 //!      NO LLM. Calls the meta tools directly (exactly what the agent would do
-//!      for "install X using key Y") against the `github` pack and proves the
+//!      for "install X using key Y") against the `email` pack and proves the
 //!      side effects actually land: the pack flips to enabled and the key is
 //!      stored and reported configured. This is the deterministic proof that
 //!      the meta tools *do the thing*.
 //!
-//!   3. `live_config_agent_installs_linear` — a real, gated [Spice] suite that
-//!      drives an actual agentic loop (OpenAI LLM -> meta tools) through the
-//!      `config-agent` persona with the prompt "install the linear integration
-//!      using linear api key …". Asserts the model calls `pack_enable` and
-//!      `key_set`, then verifies the `linear` pack is enabled and the key
-//!      landed in the store. Skipped unless `OPENAI_API_KEY` is present (drop
-//!      it in a crate-root `.env`); needs NO real Linear key — the key is a
-//!      throwaway we only check round-trips into the store. Run:
+//!   3. `live_config_agent_installs_metalcraft_drive` — a real, gated [Spice]
+//!      suite that drives an actual agentic loop (OpenAI LLM -> meta tools)
+//!      through the `config-agent` persona with the prompt "install the
+//!      metalcraft-drive integration using this Metalcraft token …". Asserts
+//!      the model calls `pack_enable` and `key_set`, then verifies the
+//!      `metalcraft-drive` pack is enabled and the key landed in the store.
+//!      Skipped unless `OPENAI_API_KEY` is present (drop it in a crate-root
+//!      `.env`); needs NO real token — it's a throwaway we only check
+//!      round-trips into the store. Run:
 //!
 //!          cargo test --test config_spice_test -- --nocapture
 //!
@@ -284,17 +285,17 @@ fn config_agent_wires_up() {
         "config-agent should reference the managing-integrations skill"
     );
 
-    // The linear pack ships installed but DISABLED — the thing the agent is
-    // expected to turn on.
+    // The metalcraft-drive pack ships installed but DISABLED — the thing the
+    // agent is expected to turn on.
     assert!(
         integration_packs::list_installed()
             .iter()
-            .any(|p| p.manifest.id == "linear"),
-        "linear pack should be installed (seeded)"
+            .any(|p| p.manifest.id == "metalcraft-drive"),
+        "metalcraft-drive pack should be installed (seeded)"
     );
     assert!(
-        !integration_packs::is_enabled("linear"),
-        "linear pack should start disabled"
+        !integration_packs::is_enabled("metalcraft-drive"),
+        "metalcraft-drive pack should start disabled"
     );
 }
 
@@ -307,16 +308,16 @@ async fn installing_a_pack_via_meta_tools_works() {
     init();
     let _guard = lock_state();
 
-    // Uses the `github` pack / GITHUB_TOKEN so it can't collide with the live
-    // tier's global state (which uses `linear` / LINEAR_API_KEY).
-    const PACK: &str = "github";
-    const KEY: &str = "GITHUB_TOKEN";
-    const VALUE: &str = "ghp_config_spice_test_token_value";
+    // Uses the `email` pack / IMAP_PASSWORD so it can't collide with the live
+    // tier's global state (which uses `metalcraft-drive` / METALCRAFT_TOKEN).
+    const PACK: &str = "email";
+    const KEY: &str = "IMAP_PASSWORD";
+    const VALUE: &str = "imap_config_spice_test_password_value";
 
     reset_pack_key(PACK, KEY);
     assert!(
         !integration_packs::is_enabled(PACK),
-        "github pack should start disabled"
+        "email pack should start disabled"
     );
 
     // Step 1: enable (install) the pack — exactly what the agent's pack_enable
@@ -328,7 +329,7 @@ async fn installing_a_pack_via_meta_tools_works() {
     assert_eq!(enable["enabled"], true);
     assert!(
         integration_packs::is_enabled(PACK),
-        "pack_enable should have flipped github to enabled"
+        "pack_enable should have flipped email to enabled"
     );
     // The result surfaces the still-missing required key so the agent knows to set it.
     let requires = enable["pack"]["requires_env"]
@@ -338,7 +339,7 @@ async fn installing_a_pack_via_meta_tools_works() {
         requires
             .iter()
             .any(|e| e["name"] == KEY && e["configured"] == false),
-        "github pack should report {KEY} as a still-missing required key"
+        "email pack should report {KEY} as a still-missing required key"
     );
 
     // Step 2: set the API key — exactly what the agent's key_set call does.
@@ -373,7 +374,7 @@ async fn installing_a_pack_via_meta_tools_works() {
         recommended
             .iter()
             .any(|e| e["name"] == KEY && e["configured"] == true),
-        "key_list should report {KEY} configured for the enabled github pack"
+        "key_list should report {KEY} configured for the enabled email pack"
     );
     let raw = serde_json::to_string(&list).unwrap();
     assert!(
@@ -393,28 +394,28 @@ async fn installing_a_pack_via_meta_tools_works() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn live_config_agent_installs_linear() {
+async fn live_config_agent_installs_metalcraft_drive() {
     init();
     let _guard = lock_state();
 
     if std::env::var("OPENAI_API_KEY").is_err() {
         eprintln!(
-            "SKIP live_config_agent_installs_linear: set OPENAI_API_KEY \
+            "SKIP live_config_agent_installs_metalcraft_drive: set OPENAI_API_KEY \
              (e.g. in a crate-root .env) to run the live suite."
         );
         return;
     }
 
-    // Throwaway key — we never call Linear, only verify it round-trips into the
-    // store. Use a recognizable sentinel so the post-run assertion is precise.
-    const TEST_KEY_VALUE: &str = "lin_api_configspice_TESTKEY_do_not_use";
+    // Throwaway key — we never call the service, only verify it round-trips into
+    // the store. Use a recognizable sentinel so the post-run assertion is precise.
+    const TEST_KEY_VALUE: &str = "mck_configspice_TESTKEY_do_not_use";
 
-    // Preconditions: linear must start disabled and unkeyed so the agent has to
-    // do both steps itself.
-    reset_pack_key("linear", "LINEAR_API_KEY");
+    // Preconditions: metalcraft-drive must start disabled and unkeyed so the
+    // agent has to do both steps itself.
+    reset_pack_key("metalcraft-drive", "METALCRAFT_TOKEN");
     assert!(
-        !integration_packs::is_enabled("linear"),
-        "linear should start disabled for the live install test"
+        !integration_packs::is_enabled("metalcraft-drive"),
+        "metalcraft-drive should start disabled for the live install test"
     );
 
     let agent =
@@ -422,12 +423,12 @@ async fn live_config_agent_installs_linear() {
 
     let tests = vec![
         test(
-            "install-linear",
+            "install-metalcraft-drive",
             format!(
-                "Install the linear integration for me. Use this Linear API key: {TEST_KEY_VALUE}"
+                "Install the metalcraft-drive integration for me. Use this Metalcraft token: {TEST_KEY_VALUE}"
             ),
         )
-        .name("Enables the linear pack and stores LINEAR_API_KEY")
+        .name("Enables the metalcraft-drive pack and stores METALCRAFT_TOKEN")
         .expect_tools(&["pack_enable", "key_set"])
         .expect_tools_within_allowlist()
         .expect_no_error()
@@ -458,19 +459,19 @@ async fn live_config_agent_installs_linear() {
 
     // The proof it actually worked: the side effects landed in real state.
     assert!(
-        integration_packs::is_enabled("linear"),
-        "after the install prompt, the linear pack should be enabled"
+        integration_packs::is_enabled("metalcraft-drive"),
+        "after the install prompt, the metalcraft-drive pack should be enabled"
     );
     assert_eq!(
-        key_store::lookup("LINEAR_API_KEY").as_deref(),
+        key_store::lookup("METALCRAFT_TOKEN").as_deref(),
         Some(TEST_KEY_VALUE),
-        "after the install prompt, LINEAR_API_KEY should be stored verbatim"
+        "after the install prompt, METALCRAFT_TOKEN should be stored verbatim"
     );
 
     // Leave no state behind.
-    let _ = integration_packs::set_enabled("linear", false);
+    let _ = integration_packs::set_enabled("metalcraft-drive", false);
     let mut store = KeyStore::load(&paths::keys_file());
-    if store.delete("LINEAR_API_KEY") {
+    if store.delete("METALCRAFT_TOKEN") {
         let _ = store.save(&paths::keys_file());
     }
 }
@@ -544,7 +545,7 @@ fn orchestrator_can_delegate_config() {
 // ---------------------------------------------------------------------------
 // Tier 5 — live: the orchestrator, given the user's exact phrasing, delegates
 // the install to config-agent and the config tools fire through the sub-agent.
-// Gated on OPENAI_API_KEY; uses a throwaway linear key.
+// Gated on OPENAI_API_KEY; uses a throwaway metalcraft-drive key.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -560,12 +561,12 @@ async fn live_orchestrator_delegates_install_to_config() {
         return;
     }
 
-    const TEST_KEY_VALUE: &str = "lin_api_orchspice_TESTKEY_do_not_use";
+    const TEST_KEY_VALUE: &str = "mck_orchspice_TESTKEY_do_not_use";
 
-    reset_pack_key("linear", "LINEAR_API_KEY");
+    reset_pack_key("metalcraft-drive", "METALCRAFT_TOKEN");
     assert!(
-        !integration_packs::is_enabled("linear"),
-        "linear should start disabled for the orchestrator install test"
+        !integration_packs::is_enabled("metalcraft-drive"),
+        "metalcraft-drive should start disabled for the orchestrator install test"
     );
 
     let agent = MetalcraftPersonaAgent::for_persona(ORCHESTRATOR_SLUG)
@@ -573,9 +574,9 @@ async fn live_orchestrator_delegates_install_to_config() {
 
     let tests = vec![
         test(
-            "delegate-install-linear",
+            "delegate-install-metalcraft-drive",
             format!(
-                "Install the linear integration for me. Use this Linear API key: {TEST_KEY_VALUE}"
+                "Install the metalcraft-drive integration for me. Use this Metalcraft token: {TEST_KEY_VALUE}"
             ),
         )
         .name("Orchestrator delegates the install to config-agent")
@@ -630,15 +631,15 @@ async fn live_orchestrator_delegates_install_to_config() {
 
     // The proof the delegated install actually landed in real state.
     assert!(
-        integration_packs::is_enabled("linear"),
-        "after delegating the install, the linear pack should be enabled"
+        integration_packs::is_enabled("metalcraft-drive"),
+        "after delegating the install, the metalcraft-drive pack should be enabled"
     );
     assert_eq!(
-        key_store::lookup("LINEAR_API_KEY").as_deref(),
+        key_store::lookup("METALCRAFT_TOKEN").as_deref(),
         Some(TEST_KEY_VALUE),
-        "after delegating the install, LINEAR_API_KEY should be stored verbatim"
+        "after delegating the install, METALCRAFT_TOKEN should be stored verbatim"
     );
 
     // Leave no state behind.
-    reset_pack_key("linear", "LINEAR_API_KEY");
+    reset_pack_key("metalcraft-drive", "METALCRAFT_TOKEN");
 }

@@ -187,11 +187,11 @@ async fn meta_writes_refuse_pack_owned_slugs() {
     init();
     // Enable a pack so it has a read-only persona slug, then prove a write to
     // that slug is refused (the user must choose a different slug).
-    metalcraft_agent::integration_packs::set_enabled("github", true).expect("enable github");
+    metalcraft_agent::integration_packs::set_enabled("email", true).expect("enable email");
 
     let out = meta_persona::PersonaWriteTool
         .call(serde_json::json!({
-            "slug": "github-agent",
+            "slug": "email-agent",
             "persona": {
                 "name": "x", "description": "y",
                 "tools": ["read_file"], "system_prompt": "z"

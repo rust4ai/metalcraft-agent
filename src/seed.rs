@@ -341,8 +341,9 @@ mod tests {
     }
 
     /// The embedded `seed/` tree resolves and contains the expected top-level
-    /// dirs and at least the packs we ship — guards against an empty/mis-rooted
-    /// `include_dir!` and proves the digitalocean_spaces pack is bundled.
+    /// dirs and at least the first-party packs we ship — guards against an
+    /// empty/mis-rooted `include_dir!`. (The external-service packs now live in
+    /// the `metalcraft-agent-external-packs` repo and are no longer embedded.)
     #[test]
     fn embedded_seed_tree_has_expected_contents() {
         assert!(!embedded_flat("personas").is_empty(), "personas should be embedded");
@@ -352,13 +353,14 @@ mod tests {
             .dirs()
             .filter_map(|d| d.path().file_name().and_then(|s| s.to_str()))
             .collect();
-        for expected in ["cloudflare", "github", "digitalocean_spaces", "sentry"] {
+        for expected in ["email", "metalcraft-notes", "metalcraft-calendar", "metalcraft-drive"] {
             assert!(ids.contains(&expected), "pack '{expected}' should be embedded, got {ids:?}");
         }
-        // The Spaces pack ships a manifest + persona + skill but no api_tools/.
-        let spaces = SEED.get_dir("integration_packs/digitalocean_spaces").expect("spaces pack");
+        // The email pack ships a manifest + persona + skill but no api_tools/
+        // (its tools are native Rust, compiled into the agent).
+        let email = SEED.get_dir("integration_packs/email").expect("email pack");
         let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
-        collect_files(spaces, spaces.path(), &mut files);
+        collect_files(email, email.path(), &mut files);
         let names: Vec<String> = files.iter().map(|(p, _)| p.to_string_lossy().into_owned()).collect();
         assert!(names.iter().any(|n| n == "pack.json"), "got {names:?}");
         assert!(names.iter().any(|n| n.starts_with("personas/")), "got {names:?}");

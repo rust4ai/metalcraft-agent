@@ -1,9 +1,0 @@
-{
-  "id": "cloudflare",
-  "name": "Cloudflare DNS",
-  "description": "Persona, skill, and HTTP API tools that let an agent manage Cloudflare DNS via the Cloudflare API — verify the token, list zones (domains), and read, create, update, patch, and delete DNS records (A, AAAA, CNAME, TXT, MX, SRV, NS, etc.). Authenticated by a single scoped CLOUDFLARE_API_TOKEN (needs Zone:Read and DNS:Edit).",
-  "version": "1.0.0",
-  "requires_env": [
-    "CLOUDFLARE_API_TOKEN"
-  ]
-}
