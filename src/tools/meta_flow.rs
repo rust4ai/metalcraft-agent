@@ -153,6 +153,35 @@ impl metalcraft::Tool for FlowWriteTool {
     }
 }
 
+pub struct FlowInstallTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowInstallTool {
+    fn name(&self) -> &str {
+        "flow_install"
+    }
+    fn description(&self) -> &str {
+        "Install a flow from the Metalcraft flows registry (flows.metalcraftai.com) by its slug. Downloads the flow, validates it, and saves it (disabled). Returns the installed flow plus a dependency report listing any packs/personas it still needs. Use flow_templates_list for built-in starting points; use this to pull a published flow from the registry."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "slug": { "type": "string", "description": "Registry slug of the flow to install (equals its id)" } },
+            "required": ["slug"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let slug = match args["slug"].as_str() {
+            Some(s) => s.to_string(),
+            None => return Err(missing_param("flow_install", "slug")),
+        };
+        match crate::flow_install::install_flow_from_registry(&slug).await {
+            Ok(result) => Ok(serde_json::to_value(result).unwrap_or(serde_json::Value::Null)),
+            Err(e) => Ok(serde_json::json!({ "error": e })),
+        }
+    }
+}
+
 pub struct FlowDeleteTool;
 
 #[async_trait]

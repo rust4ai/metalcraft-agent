@@ -274,7 +274,7 @@ async fn auth_middleware(
         agent_info, get_snapshot,
         get_persona, put_persona, delete_persona,
         get_skill, put_skill, delete_skill,
-        get_flow, put_flow, delete_flow, post_run_flow,
+        get_flow, put_flow, delete_flow, post_run_flow, post_install_flow,
         list_flow_runs, get_flow_run, post_resume_flow_run,
         list_flow_templates, get_flow_template,
         list_diagnostics, get_diagnostics_session,
@@ -293,6 +293,7 @@ async fn auth_middleware(
         ErrorResponse, ProjectSnapshot, ProjectLayout, ApiToolSummary,
         KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
         FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, ResumeFlowRunRequest,
+        InstallFlowRequest,
         ChatSummary, ChatDetail, ChatMessageWire, CreateChatRequest, ChatTurnRequest, ChatEvent,
         IntegrationPackSummary, IntegrationPackDetail, SetEnabledRequest, InstallPackRequest,
         MgRegisterRequest, MgConnectRequest, CreateGatewayChannelRequest, UpdateGatewayChannelRequest,
@@ -388,6 +389,9 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/skills/{slug}", get(get_skill))
         .route("/api/v1/skills/{slug}", put(put_skill))
         .route("/api/v1/skills/{slug}", delete(delete_skill))
+        // Static `/install` before the `{id}` param route (matchit prefers the
+        // literal) — install a registry flow onto this agent.
+        .route("/api/v1/flows/install", post(post_install_flow))
         .route("/api/v1/flows/{id}", get(get_flow))
         .route("/api/v1/flows/{id}", put(put_flow))
         .route("/api/v1/flows/{id}", delete(delete_flow))
@@ -865,6 +869,34 @@ async fn delete_flow(Path(id): Path<String>) -> Response {
         StatusCode::NO_CONTENT.into_response()
     } else {
         err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"))
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct InstallFlowRequest {
+    /// Registry slug of the flow to install (equals the flow id).
+    slug: String,
+}
+
+/// Install a registry flow onto this agent: download its `SavedFlow` JSON from
+/// flows.metalcraftai.com, validate it, and save it into the flows dir (installed
+/// disabled). Returns `{ flow, dependencies }` — the dependency report lists any
+/// packs/personas the flow needs that aren't installed yet.
+#[utoipa::path(
+    post,
+    path = "/api/v1/flows/install",
+    tag = "flows",
+    request_body = InstallFlowRequest,
+    responses(
+        (status = 200, description = "Installed flow + dependency report", body = Object),
+        (status = 400, body = ErrorResponse),
+        (status = 502, body = ErrorResponse),
+    ),
+)]
+async fn post_install_flow(Json(req): Json<InstallFlowRequest>) -> Response {
+    match crate::flow_install::install_flow_from_registry(&req.slug).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }
 }
 

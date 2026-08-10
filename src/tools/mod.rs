@@ -103,6 +103,7 @@ pub fn create_registry_for_with_config(
             "flow_read" => registry.register(meta_flow::FlowReadTool),
             "flow_validate" => registry.register(meta_flow::FlowValidateTool),
             "flow_write" => registry.register(meta_flow::FlowWriteTool),
+            "flow_install" => registry.register(meta_flow::FlowInstallTool),
             "flow_delete" => registry.register(meta_flow::FlowDeleteTool),
             "flow_run" => registry.register(meta_flow::FlowRunTool),
             "flow_resume" => registry.register(meta_flow::FlowResumeTool),
