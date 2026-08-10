@@ -282,7 +282,7 @@ async fn auth_middleware(
         list_keys, list_recommended_keys, put_key, delete_key, reveal_key,
         list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
         list_scheduled_tasks, delete_scheduled_task,
-        list_integration_packs, get_integration_pack, put_pack_enabled, post_install_pack,
+        list_integration_packs, get_integration_pack, delete_integration_pack, put_pack_enabled, post_install_pack,
         list_gateway_types, list_gateway_channels, post_create_gateway_channel,
         put_gateway_channel, delete_gateway_channel, put_gateway_channel_enabled,
         list_gateway_channel_events, list_gateway_activity,
@@ -422,7 +422,7 @@ pub fn build_router(api_key: String) -> Router {
         // Static `/install` before the `{id}` param route (matchit prefers the
         // literal; different method anyway) — install a registry pack onto the pod.
         .route("/api/v1/integration-packs/install", post(post_install_pack))
-        .route("/api/v1/integration-packs/{id}", get(get_integration_pack))
+        .route("/api/v1/integration-packs/{id}", get(get_integration_pack).delete(delete_integration_pack))
         .route("/api/v1/integration-packs/{id}/enabled", put(put_pack_enabled))
         // Gateway channels: declarative channel *types* + user-created channel
         // *instances*. Inbound messages arrive on the unauthenticated webhook
@@ -2858,6 +2858,25 @@ async fn get_integration_pack(Path(id): Path<String>) -> Response {
         flow_templates,
     })
     .into_response()
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/integration-packs/{id}",
+    tag = "integration-packs",
+    params(("id" = String, Path, description = "Pack id")),
+    responses(
+        (status = 204, description = "Uninstalled"),
+        (status = 404, body = ErrorResponse),
+        (status = 400, body = ErrorResponse),
+    ),
+)]
+async fn delete_integration_pack(Path(id): Path<String>) -> Response {
+    match crate::integration_packs::uninstall(&id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => err_json(StatusCode::NOT_FOUND, format!("pack '{id}' not found")),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

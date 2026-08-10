@@ -381,6 +381,34 @@ pub fn install_from_zip(bytes: &[u8]) -> Result<String, String> {
     Ok(id)
 }
 
+/// Uninstall a registry pack: delete its files from
+/// `<data>/integration_packs/<id>/` and drop its enable-state entry. Refuses
+/// built-in (embedded) packs — those are app-managed and would just be re-seeded
+/// on the next boot. Returns `Ok(false)` when no such pack is installed (so the
+/// caller can answer 404), `Ok(true)` on a successful removal.
+pub fn uninstall(id: &str) -> Result<bool, String> {
+    if !valid_pack_id(id) {
+        return Err(format!("invalid pack id '{id}'"));
+    }
+    if crate::seed::is_embedded_pack(id) {
+        return Err(format!(
+            "'{id}' is a built-in pack — it's managed by the app and can't be uninstalled"
+        ));
+    }
+    if find_installed(id).is_none() {
+        return Ok(false);
+    }
+    // `id` is validated to a single safe path segment above, so this stays inside
+    // the packs dir.
+    let dir = paths::integration_packs_dir().join(id);
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to remove pack files: {e}"))?;
+    // Drop its state entry so it doesn't linger as a disabled ghost.
+    mutate_state(|state| {
+        state.remove(id);
+    })?;
+    Ok(true)
+}
+
 /// Iterate enabled packs in deterministic (sorted-id) order. Used by the
 /// resolvers below to walk packs when a user-local item isn't found.
 pub fn enabled_packs() -> Vec<Pack> {
