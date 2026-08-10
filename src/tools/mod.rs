@@ -17,7 +17,7 @@ pub mod read_file;
 pub mod say_to_user;
 pub mod schedule_followup;
 pub mod email_imap;
-pub mod spaces;
+pub mod s3;
 pub mod sub_agent;
 pub mod twilio;
 pub mod web_fetch;
@@ -123,15 +123,16 @@ pub fn create_registry_for_with_config(
             "key_list" => registry.register(meta_keys::KeyListTool),
             "key_set" => registry.register(meta_keys::KeySetTool),
             "key_delete" => registry.register(meta_keys::KeyDeleteTool),
-            // DigitalOcean Spaces (S3-compatible) file storage — native tools
-            // because S3 requires per-request AWS SigV4 signing the declarative
-            // HTTP-API tool can't produce. Shipped by the `digitalocean_spaces`
-            // pack; read DO_SPACES_KEY/SECRET/REGION from the key store.
-            "spaces_list_buckets" => registry.register(spaces::SpacesListBucketsTool),
-            "spaces_list_objects" => registry.register(spaces::SpacesListObjectsTool),
-            "spaces_get_object" => registry.register(spaces::SpacesGetObjectTool),
-            "spaces_put_object" => registry.register(spaces::SpacesPutObjectTool),
-            "spaces_delete_object" => registry.register(spaces::SpacesDeleteObjectTool),
+            // S3-compatible object storage (AWS S3, R2, DO Spaces, MinIO, …) —
+            // native tools because S3 requires per-request AWS SigV4 signing the
+            // declarative HTTP-API tool can't produce. Shipped by the `s3` pack;
+            // read S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_REGION/S3_ENDPOINT
+            // from the key store.
+            "s3_list_buckets" => registry.register(s3::S3ListBucketsTool),
+            "s3_list_objects" => registry.register(s3::S3ListObjectsTool),
+            "s3_get_object" => registry.register(s3::S3GetObjectTool),
+            "s3_put_object" => registry.register(s3::S3PutObjectTool),
+            "s3_delete_object" => registry.register(s3::S3DeleteObjectTool),
             // Read-only IMAP email — native tools because IMAP is not HTTP, so
             // the declarative HTTP-API tool can't speak it. Shipped by the
             // `email` pack; read IMAP_HOST/IMAP_USER/IMAP_PASSWORD(/IMAP_PORT)
@@ -198,19 +199,19 @@ pub fn create_registry() -> ToolRegistry {
 /// Native (Rust) tool names contributed by an integration pack, keyed by pack
 /// id. Most packs ship only declarative HTTP-API tools (discovered from the
 /// pack directory by [`http_api::HttpApiTool::installed_tool_names_for_pack`]);
-/// a few — like `digitalocean_spaces`, whose S3 SigV4 signing the HTTP-API tool
+/// a few — like `s3`, whose S3 SigV4 signing the HTTP-API tool
 /// can't produce — ship native tools registered by name in
 /// [`create_registry_for_with_config`]. Those tools live in no pack directory,
 /// so they must be surfaced through this map wherever a pack's tools are
 /// resolved (persona `resolved_tool_names`, sub-agent pack scoping).
 pub fn native_pack_tool_names(pack_id: &str) -> Vec<String> {
     let names: &[&str] = match pack_id {
-        "digitalocean_spaces" => &[
-            "spaces_list_buckets",
-            "spaces_list_objects",
-            "spaces_get_object",
-            "spaces_put_object",
-            "spaces_delete_object",
+        "s3" => &[
+            "s3_list_buckets",
+            "s3_list_objects",
+            "s3_get_object",
+            "s3_put_object",
+            "s3_delete_object",
         ],
         "email" => &[
             "email_list_mailboxes",

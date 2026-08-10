@@ -2806,7 +2806,7 @@ async fn list_integration_packs() -> Json<Vec<IntegrationPackSummary>> {
             personas: count_files(&p.personas_dir(), "json"),
             skills: count_files(&p.skills_dir(), "md"),
             // Declarative HTTP-API tools (api_tools/*.json) plus any native Rust
-            // tools the pack contributes (e.g. digitalocean_spaces' S3 tools,
+            // tools the pack contributes (e.g. the s3 pack's S3 tools,
             // which ship no api_tools/ files). See `tools::native_pack_tool_names`.
             api_tools: count_files(&p.api_tools_dir(), "json")
                 + crate::tools::native_pack_tool_names(&p.manifest.id).len(),

@@ -2,7 +2,7 @@
 //!
 //! IMAP is not HTTP, so the declarative HTTP-API tool framework
 //! ([`crate::tools::http_api`]) cannot speak it — hence these purpose-built
-//! native tools (the same reasoning as [`crate::tools::spaces`], whose S3 SigV4
+//! native tools (the same reasoning as [`crate::tools::s3`], whose S3 SigV4
 //! signing the HTTP framework can't produce). They are **read-only**: every
 //! session uses IMAP `EXAMINE` (SELECT without write access) and `BODY.PEEK` /
 //! `RFC822.HEADER` fetches, so nothing in the mailbox is ever mutated — no

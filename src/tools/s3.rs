@@ -1,21 +1,33 @@
-//! Native DigitalOcean Spaces (S3-compatible) tools.
+//! Native S3-compatible object-storage tools.
 //!
-//! Spaces speaks the S3 REST API, which authenticates every request with an
-//! **AWS Signature Version 4** header computed over the request's method, path,
-//! query, headers, and a SHA-256 of the body. The declarative HTTP-API tool
-//! framework ([`crate::tools::http_api`]) can only substitute static `$ENV`
-//! values into headers, so it cannot produce that per-request signature — hence
-//! these purpose-built native tools. They also handle the parts of S3 that are
-//! not JSON: raw/binary object bodies and the XML `ListBucket` response.
+//! Any S3-compatible service (AWS S3, Cloudflare R2, DigitalOcean Spaces,
+//! Backblaze B2, MinIO, …) speaks the S3 REST API, which authenticates every
+//! request with an **AWS Signature Version 4** header computed over the
+//! request's method, path, query, headers, and a SHA-256 of the body. The
+//! declarative HTTP-API tool framework ([`crate::tools::http_api`]) can only
+//! substitute static `$ENV` values into headers, so it cannot produce that
+//! per-request signature — hence these purpose-built native tools. They also
+//! handle the parts of S3 that are not JSON: raw/binary object bodies and the
+//! XML `ListBucket` response.
 //!
-//! Credentials come from the key store / environment (see [`crate::key_store`]):
-//!   * `DO_SPACES_KEY`    — the Spaces access key id
-//!   * `DO_SPACES_SECRET` — the Spaces secret access key
-//!   * `DO_SPACES_REGION` — the region slug (e.g. `nyc3`, `sfo3`); default `nyc3`
+//! Credentials and endpoint come from the key store / environment (see
+//! [`crate::key_store`]):
+//!   * `S3_ACCESS_KEY_ID`     — the access key id
+//!   * `S3_SECRET_ACCESS_KEY` — the secret access key
+//!   * `S3_REGION`            — the SigV4 signing region (default `us-east-1`;
+//!                              use `auto` for Cloudflare R2, the datacenter
+//!                              slug like `nyc3` for DigitalOcean Spaces)
+//!   * `S3_ENDPOINT`          — optional host of the S3 service, e.g.
+//!                              `s3.us-east-1.amazonaws.com` (AWS, the default
+//!                              when unset), `nyc3.digitaloceanspaces.com` (DO
+//!                              Spaces), `<account>.r2.cloudflarestorage.com`
+//!                              (R2), or `localhost:9000` (MinIO). May include a
+//!                              `http://` / `https://` scheme (defaults to
+//!                              https) and a port.
 //!
-//! Requests use **path-style** addressing
-//! (`https://{region}.digitaloceanspaces.com/{bucket}/{key}`), which keeps the
-//! signing host constant and is fully supported by Spaces.
+//! Requests use **path-style** addressing (`{scheme}://{endpoint}/{bucket}/{key}`),
+//! which keeps the signing host constant and is the most portable form across
+//! providers (notably MinIO and R2).
 //!
 //! Local file arguments (`file_path` on put, `dest_path` on get) are constrained
 //! to [`crate::paths::upload_root`], the same jail the multipart upload tool
@@ -30,7 +42,7 @@ use std::time::Duration;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const DEFAULT_REGION: &str = "nyc3";
+const DEFAULT_REGION: &str = "us-east-1";
 const SERVICE: &str = "s3";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// SHA-256 of the empty string — the payload hash for bodyless requests.
@@ -164,14 +176,18 @@ fn sigv4_authorization(inp: &SignInputs) -> (String, String) {
 }
 
 // ---------------------------------------------------------------------------
-// Spaces client
+// S3 client
 // ---------------------------------------------------------------------------
 
-struct Spaces {
+struct S3 {
     access_key: String,
     secret_key: String,
     region: String,
+    /// Endpoint host (`host` or `host:port`), used verbatim in the `Host`
+    /// header, the SigV4 signature, and the request URL.
     host: String,
+    /// `https` (default) or `http`, taken from an explicit scheme in `S3_ENDPOINT`.
+    scheme: String,
 }
 
 /// Outcome of a signed S3 request: HTTP status plus the raw response bytes.
@@ -180,20 +196,38 @@ struct RawResponse {
     body: Vec<u8>,
 }
 
-impl Spaces {
-    /// Resolve credentials from the key store / environment.
+/// Split an `S3_ENDPOINT` value into `(scheme, host[:port])`. Accepts a bare
+/// host (`s3.example.com`), a host with a scheme (`https://s3.example.com`), and
+/// trims a trailing slash. Defaults to `https` when no scheme is given.
+fn parse_endpoint(ep: &str) -> (String, String) {
+    let ep = ep.trim();
+    if let Some(rest) = ep.strip_prefix("https://") {
+        ("https".to_string(), rest.trim_end_matches('/').to_string())
+    } else if let Some(rest) = ep.strip_prefix("http://") {
+        ("http".to_string(), rest.trim_end_matches('/').to_string())
+    } else {
+        ("https".to_string(), ep.trim_end_matches('/').to_string())
+    }
+}
+
+impl S3 {
+    /// Resolve credentials and endpoint from the key store / environment.
     fn from_env(tool: &str) -> metalcraft::Result<Self> {
-        let access_key = crate::key_store::lookup("DO_SPACES_KEY")
+        let access_key = crate::key_store::lookup("S3_ACCESS_KEY_ID")
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| err(tool, "DO_SPACES_KEY is not set (add it in the workshop's keys, or export it)"))?;
-        let secret_key = crate::key_store::lookup("DO_SPACES_SECRET")
+            .ok_or_else(|| err(tool, "S3_ACCESS_KEY_ID is not set (add it in the workshop's keys, or export it)"))?;
+        let secret_key = crate::key_store::lookup("S3_SECRET_ACCESS_KEY")
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| err(tool, "DO_SPACES_SECRET is not set (add it in the workshop's keys, or export it)"))?;
-        let region = crate::key_store::lookup("DO_SPACES_REGION")
+            .ok_or_else(|| err(tool, "S3_SECRET_ACCESS_KEY is not set (add it in the workshop's keys, or export it)"))?;
+        let region = crate::key_store::lookup("S3_REGION")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_REGION.to_string());
-        let host = format!("{region}.digitaloceanspaces.com");
-        Ok(Self { access_key, secret_key, region, host })
+        // Explicit endpoint (any S3-compatible provider) or the AWS default.
+        let (scheme, host) = match crate::key_store::lookup("S3_ENDPOINT").filter(|s| !s.is_empty()) {
+            Some(ep) => parse_endpoint(&ep),
+            None => ("https".to_string(), format!("s3.{region}.amazonaws.com")),
+        };
+        Ok(Self { access_key, secret_key, region, host, scheme })
     }
 
     /// Sign and send one request. `bucket`/`key` build the path-style URI; an
@@ -256,14 +290,14 @@ impl Spaces {
         });
 
         let url = if cq.is_empty() {
-            format!("https://{}{}", self.host, canonical_uri)
+            format!("{}://{}{}", self.scheme, self.host, canonical_uri)
         } else {
-            format!("https://{}{}?{}", self.host, canonical_uri, cq)
+            format!("{}://{}{}?{}", self.scheme, self.host, canonical_uri, cq)
         };
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .user_agent("metalcraft-agent/0.3 (spaces)")
+            .user_agent("metalcraft-agent/0.3 (s3)")
             .build()
             .map_err(|e| err(tool, format!("failed to build HTTP client: {e}")))?;
 
@@ -306,7 +340,7 @@ fn s3_error(tool: &str, status: u16, body: &[u8]) -> metalcraft::GraphError {
         (false, true) => code,
         _ => crate::tools::truncate_output(text.trim(), 1_000),
     };
-    err(tool, format!("Spaces returned HTTP {status} — {detail}"))
+    err(tool, format!("S3 returned HTTP {status} — {detail}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -419,20 +453,20 @@ fn require_str<'a>(tool: &str, args: &'a serde_json::Value, key: &str) -> metalc
 // Tools
 // ---------------------------------------------------------------------------
 
-/// `spaces_list_objects` — list object keys in a bucket (ListObjectsV2).
-pub struct SpacesListObjectsTool;
+/// `s3_list_objects` — list object keys in a bucket (ListObjectsV2).
+pub struct S3ListObjectsTool;
 
 #[async_trait]
-impl metalcraft::Tool for SpacesListObjectsTool {
-    fn name(&self) -> &str { "spaces_list_objects" }
+impl metalcraft::Tool for S3ListObjectsTool {
+    fn name(&self) -> &str { "s3_list_objects" }
     fn description(&self) -> &str {
-        "List objects (files) in a DigitalOcean Spaces bucket. Requires `bucket`. Optional `prefix` to list only keys under a folder-like path (e.g. 'reports/'), and `max_keys` (default 1000, max 1000). Returns an array of {key, size, last_modified, etag} plus `is_truncated` and a `next_continuation_token` you can pass back as `continuation_token` to page through more than max_keys results."
+        "List objects (files) in an S3 bucket. Requires `bucket`. Optional `prefix` to list only keys under a folder-like path (e.g. 'reports/'), and `max_keys` (default 1000, max 1000). Returns an array of {key, size, last_modified, etag} plus `is_truncated` and a `next_continuation_token` you can pass back as `continuation_token` to page through more than max_keys results."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "bucket": { "type": "string", "description": "The Spaces bucket name." },
+                "bucket": { "type": "string", "description": "The S3 bucket name." },
                 "prefix": { "type": "string", "description": "Optional key prefix filter, e.g. 'reports/2026/'." },
                 "max_keys": { "type": "integer", "description": "Max keys to return (default 1000, max 1000)." },
                 "continuation_token": { "type": "string", "description": "Token from a previous truncated response to fetch the next page." }
@@ -443,7 +477,7 @@ impl metalcraft::Tool for SpacesListObjectsTool {
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
         let tool = self.name();
         let bucket = require_str(tool, &args, "bucket")?;
-        let spaces = Spaces::from_env(tool)?;
+        let s3 = S3::from_env(tool)?;
 
         let mut query: Vec<(String, String)> = vec![("list-type".into(), "2".into())];
         if let Some(prefix) = args.get("prefix").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
@@ -456,7 +490,7 @@ impl metalcraft::Tool for SpacesListObjectsTool {
             query.push(("max-keys".into(), max.min(1000).to_string()));
         }
 
-        let resp = spaces.send(tool, "GET", bucket, "", &query, &[], Vec::new()).await?;
+        let resp = s3.send(tool, "GET", bucket, "", &query, &[], Vec::new()).await?;
         if !(200..300).contains(&resp.status) {
             return Err(s3_error(tool, resp.status, &resp.body));
         }
@@ -483,21 +517,21 @@ impl metalcraft::Tool for SpacesListObjectsTool {
     }
 }
 
-/// `spaces_get_object` — download an object, either to a local file (under the
+/// `s3_get_object` — download an object, either to a local file (under the
 /// upload root) or returned inline as text.
-pub struct SpacesGetObjectTool;
+pub struct S3GetObjectTool;
 
 #[async_trait]
-impl metalcraft::Tool for SpacesGetObjectTool {
-    fn name(&self) -> &str { "spaces_get_object" }
+impl metalcraft::Tool for S3GetObjectTool {
+    fn name(&self) -> &str { "s3_get_object" }
     fn description(&self) -> &str {
-        "Download an object (file) from DigitalOcean Spaces. Requires `bucket` and `key`. If `dest_path` is given, the bytes are written to that local file (path is relative to the agent's upload directory; absolute paths must stay inside it) and the result reports the byte count. If `dest_path` is omitted, the content is returned inline as text (UTF-8 only, up to ~100 KB) — use `dest_path` for binary or large files."
+        "Download an object (file) from S3. Requires `bucket` and `key`. If `dest_path` is given, the bytes are written to that local file (path is relative to the agent's upload directory; absolute paths must stay inside it) and the result reports the byte count. If `dest_path` is omitted, the content is returned inline as text (UTF-8 only, up to ~100 KB) — use `dest_path` for binary or large files."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "bucket": { "type": "string", "description": "The Spaces bucket name." },
+                "bucket": { "type": "string", "description": "The S3 bucket name." },
                 "key": { "type": "string", "description": "Object key (path within the bucket), e.g. 'reports/q1.pdf'." },
                 "dest_path": { "type": "string", "description": "Optional local path (within the upload root) to save the file to. Omit to get small text content inline." }
             },
@@ -508,9 +542,9 @@ impl metalcraft::Tool for SpacesGetObjectTool {
         let tool = self.name();
         let bucket = require_str(tool, &args, "bucket")?;
         let key = require_str(tool, &args, "key")?;
-        let spaces = Spaces::from_env(tool)?;
+        let s3 = S3::from_env(tool)?;
 
-        let resp = spaces.send(tool, "GET", bucket, key, &[], &[], Vec::new()).await?;
+        let resp = s3.send(tool, "GET", bucket, key, &[], &[], Vec::new()).await?;
         if !(200..300).contains(&resp.status) {
             return Err(s3_error(tool, resp.status, &resp.body));
         }
@@ -556,20 +590,20 @@ impl metalcraft::Tool for SpacesGetObjectTool {
     }
 }
 
-/// `spaces_put_object` — upload content or a local file to an object key.
-pub struct SpacesPutObjectTool;
+/// `s3_put_object` — upload content or a local file to an object key.
+pub struct S3PutObjectTool;
 
 #[async_trait]
-impl metalcraft::Tool for SpacesPutObjectTool {
-    fn name(&self) -> &str { "spaces_put_object" }
+impl metalcraft::Tool for S3PutObjectTool {
+    fn name(&self) -> &str { "s3_put_object" }
     fn description(&self) -> &str {
-        "Upload (write) an object to DigitalOcean Spaces, creating or overwriting it. Requires `bucket` and `key`. Provide exactly one source: `content` (inline text) or `file_path` (a local file within the agent's upload directory). Optional `content_type` (e.g. 'text/plain', 'application/pdf'; defaults to a sensible value) and `acl` ('private' default, or 'public-read' to make the object publicly downloadable). Overwrites silently if the key already exists."
+        "Upload (write) an object to S3, creating or overwriting it. Requires `bucket` and `key`. Provide exactly one source: `content` (inline text) or `file_path` (a local file within the agent's upload directory). Optional `content_type` (e.g. 'text/plain', 'application/pdf'; defaults to a sensible value) and `acl` ('private' default, or 'public-read' to make the object publicly downloadable). Overwrites silently if the key already exists."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "bucket": { "type": "string", "description": "The Spaces bucket name." },
+                "bucket": { "type": "string", "description": "The S3 bucket name." },
                 "key": { "type": "string", "description": "Destination object key, e.g. 'reports/q1.pdf'." },
                 "content": { "type": "string", "description": "Inline text content to upload. Use this OR file_path." },
                 "file_path": { "type": "string", "description": "Local file (within the upload root) to upload. Use this OR content." },
@@ -583,7 +617,7 @@ impl metalcraft::Tool for SpacesPutObjectTool {
         let tool = self.name();
         let bucket = require_str(tool, &args, "bucket")?;
         let key = require_str(tool, &args, "key")?;
-        let spaces = Spaces::from_env(tool)?;
+        let s3 = S3::from_env(tool)?;
 
         let content = args.get("content").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
         let file_path = args.get("file_path").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
@@ -616,7 +650,7 @@ impl metalcraft::Tool for SpacesPutObjectTool {
         }
 
         let bytes_len = body.len();
-        let resp = spaces.send(tool, "PUT", bucket, key, &[], &extra, body).await?;
+        let resp = s3.send(tool, "PUT", bucket, key, &[], &extra, body).await?;
         if !(200..300).contains(&resp.status) {
             return Err(s3_error(tool, resp.status, &resp.body));
         }
@@ -626,7 +660,7 @@ impl metalcraft::Tool for SpacesPutObjectTool {
             "key": key,
             "bytes_written": bytes_len,
             "public_url": if public {
-                Some(format!("https://{bucket}.{}/{key}", spaces.host))
+                Some(format!("{}://{}/{bucket}/{key}", s3.scheme, s3.host))
             } else {
                 None
             },
@@ -634,20 +668,20 @@ impl metalcraft::Tool for SpacesPutObjectTool {
     }
 }
 
-/// `spaces_delete_object` — delete an object by key.
-pub struct SpacesDeleteObjectTool;
+/// `s3_delete_object` — delete an object by key.
+pub struct S3DeleteObjectTool;
 
 #[async_trait]
-impl metalcraft::Tool for SpacesDeleteObjectTool {
-    fn name(&self) -> &str { "spaces_delete_object" }
+impl metalcraft::Tool for S3DeleteObjectTool {
+    fn name(&self) -> &str { "s3_delete_object" }
     fn description(&self) -> &str {
-        "Delete an object (file) from DigitalOcean Spaces. Requires `bucket` and `key`. This is irreversible — confirm the exact bucket and key with the user before deleting. S3 delete is idempotent: deleting a non-existent key still returns success."
+        "Delete an object (file) from S3. Requires `bucket` and `key`. This is irreversible — confirm the exact bucket and key with the user before deleting. S3 delete is idempotent: deleting a non-existent key still returns success."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "bucket": { "type": "string", "description": "The Spaces bucket name." },
+                "bucket": { "type": "string", "description": "The S3 bucket name." },
                 "key": { "type": "string", "description": "Object key to delete." }
             },
             "required": ["bucket", "key"]
@@ -657,9 +691,9 @@ impl metalcraft::Tool for SpacesDeleteObjectTool {
         let tool = self.name();
         let bucket = require_str(tool, &args, "bucket")?;
         let key = require_str(tool, &args, "key")?;
-        let spaces = Spaces::from_env(tool)?;
+        let s3 = S3::from_env(tool)?;
 
-        let resp = spaces.send(tool, "DELETE", bucket, key, &[], &[], Vec::new()).await?;
+        let resp = s3.send(tool, "DELETE", bucket, key, &[], &[], Vec::new()).await?;
         if !(200..300).contains(&resp.status) {
             return Err(s3_error(tool, resp.status, &resp.body));
         }
@@ -667,23 +701,23 @@ impl metalcraft::Tool for SpacesDeleteObjectTool {
     }
 }
 
-/// `spaces_list_buckets` — list the buckets (Spaces) in the account. Doubles as
-/// a cheap credential/connectivity check.
-pub struct SpacesListBucketsTool;
+/// `s3_list_buckets` — list the buckets in the account. Doubles as a cheap
+/// credential/connectivity check.
+pub struct S3ListBucketsTool;
 
 #[async_trait]
-impl metalcraft::Tool for SpacesListBucketsTool {
-    fn name(&self) -> &str { "spaces_list_buckets" }
+impl metalcraft::Tool for S3ListBucketsTool {
+    fn name(&self) -> &str { "s3_list_buckets" }
     fn description(&self) -> &str {
-        "List all Spaces (buckets) in the account for the configured region. The cheapest way to confirm the DO_SPACES_KEY/SECRET/REGION credentials work before doing file operations. Takes no parameters. Returns an array of {name, creation_date}."
+        "List all buckets in the account for the configured endpoint/region. The cheapest way to confirm the S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_REGION credentials (and S3_ENDPOINT) work before doing file operations. Takes no parameters. Returns an array of {name, creation_date}."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({ "type": "object", "properties": {} })
     }
     async fn call(&self, _args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
         let tool = self.name();
-        let spaces = Spaces::from_env(tool)?;
-        let resp = spaces.send(tool, "GET", "", "", &[], &[], Vec::new()).await?;
+        let s3 = S3::from_env(tool)?;
+        let resp = s3.send(tool, "GET", "", "", &[], &[], Vec::new()).await?;
         if !(200..300).contains(&resp.status) {
             return Err(s3_error(tool, resp.status, &resp.body));
         }
@@ -698,7 +732,7 @@ impl metalcraft::Tool for SpacesListBucketsTool {
             })
             .collect();
         Ok(serde_json::json!({
-            "region": spaces.region,
+            "region": s3.region,
             "count": buckets.len(),
             "buckets": buckets,
         }))
@@ -728,6 +762,13 @@ mod tests {
             ("list-type".into(), "2".into()),
         ]);
         assert_eq!(q, "list-type=2&prefix=a%20b");
+    }
+
+    #[test]
+    fn parse_endpoint_scheme_and_host() {
+        assert_eq!(parse_endpoint("s3.example.com"), ("https".into(), "s3.example.com".into()));
+        assert_eq!(parse_endpoint("https://nyc3.digitaloceanspaces.com/"), ("https".into(), "nyc3.digitaloceanspaces.com".into()));
+        assert_eq!(parse_endpoint("http://localhost:9000"), ("http".into(), "localhost:9000".into()));
     }
 
     /// AWS's documented **S3 "GET Object" SigV4 example** (service = `s3`,
