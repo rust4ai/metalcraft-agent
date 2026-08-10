@@ -26,7 +26,7 @@ impl metalcraft::Tool for GatewaySendMessageTool {
         "gateway_send_message"
     }
     fn description(&self) -> &str {
-        "Send a message to a user on a gateway channel. `platform` is the channel type (e.g. \"whatsapp\"). `channel_id` is the recipient on that platform (for WhatsApp, their phone number in E.164 format, e.g. +15551234567). `content` is the message text. Optionally pass `from` to choose which of your channel's accounts/numbers sends it."
+        "Send a message to a user on a gateway channel. `platform` is the channel type/kind (e.g. \"whatsapp\" for SMS/WhatsApp, or \"apns\" to deliver as a push notification). `channel_id` is the recipient on that platform (for WhatsApp, their phone number in E.164 format, e.g. +15551234567; ignored for push, which fans out over the user's registered devices). `content` is the message text. Optionally pass `from` to choose which of your channel's accounts/numbers sends it."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -34,7 +34,7 @@ impl metalcraft::Tool for GatewaySendMessageTool {
             "properties": {
                 "platform": {
                     "type": "string",
-                    "description": "The gateway channel type to send through, e.g. \"whatsapp\"."
+                    "description": "The gateway channel type/kind to send through, e.g. \"whatsapp\" for SMS/WhatsApp or \"apns\" to deliver as a push notification."
                 },
                 "channel_id": {
                     "type": "string",
@@ -83,7 +83,25 @@ impl metalcraft::Tool for GatewaySendMessageTool {
             // and build its config.
             "pipestreamr" => match resolve_pipestreamr_channel(from) {
                 Ok(channel) => match crate::tools::pipestreamr::PipeCfg::for_channel(&channel) {
-                    Ok(cfg) => crate::tools::pipestreamr::send(channel_id, content, from, &cfg).await,
+                    Ok(cfg) => {
+                        crate::tools::pipestreamr::send(channel_id, content, from, None, &cfg).await
+                    }
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            },
+            // Push (APNs): the caller is declaring a destination *kind*, not a
+            // specific sender. Ride the same gateway-wire transport as pipestreamr
+            // (the pod's connected gateway channel carries the credentials), but
+            // tell the gateway to route through the account's default/primary apns
+            // integration. `from`/`channel_id` don't apply — a push fans out over
+            // the owner's registered devices server-side.
+            "apns" => match resolve_pipestreamr_channel(None) {
+                Ok(channel) => match crate::tools::pipestreamr::PipeCfg::for_channel(&channel) {
+                    Ok(cfg) => {
+                        crate::tools::pipestreamr::send(channel_id, content, None, Some("apns"), &cfg)
+                            .await
+                    }
                     Err(e) => Err(e),
                 },
                 Err(e) => Err(e),

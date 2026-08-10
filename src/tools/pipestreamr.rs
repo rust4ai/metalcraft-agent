@@ -95,16 +95,20 @@ fn looks_like_uuid(s: &str) -> bool {
         })
 }
 
-/// Send a message through PipeStreamr. `channel_id` is the recipient (a phone
-/// number for the WhatsApp passthru); `integration_id`, when given, selects which
-/// PipeStreamr integration sends it (otherwise PipeStreamr uses the account's
-/// default integration). `cfg` carries the sending channel's resolved API key +
-/// base URL (see [`PipeCfg::for_channel`]). Returns a small JSON receipt or an
-/// error string. Called by the generic gateway send tool.
+/// Send a message through the gateway. `channel_id` is the recipient (a phone
+/// number for the WhatsApp passthru; ignored for push kinds). `integration_id`,
+/// when given, selects which integration sends it. `target_platform`, when given
+/// (e.g. `"apns"`), tells the gateway to route through the account's
+/// default/primary integration of that *kind* instead — this is how a caller
+/// says "deliver this as a push" without knowing the integration UUID.
+/// `cfg` carries the sending channel's resolved API key + base URL (see
+/// [`PipeCfg::for_channel`]). Returns a small JSON receipt or an error string.
+/// Called by the generic gateway send tool.
 pub async fn send(
     channel_id: &str,
     content: &str,
     integration_id: Option<&str>,
+    target_platform: Option<&str>,
     cfg: &PipeCfg,
 ) -> Result<serde_json::Value, String> {
     let url = format!("{}/api/v1/messages/send", cfg.base_url);
@@ -115,6 +119,9 @@ pub async fn send(
         } else {
             log::warn!("pipestreamr: ignoring non-UUID integration_id '{iid}'; using default integration");
         }
+    }
+    if let Some(kind) = target_platform.map(str::trim).filter(|s| !s.is_empty()) {
+        body["platform"] = serde_json::Value::String(kind.to_string());
     }
 
     let client = reqwest::Client::builder()

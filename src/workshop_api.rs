@@ -3915,7 +3915,7 @@ fn gateway_reply_sink(
                 "pipestreamr" => match crate::gateway_channels::get_instance(&channel_id) {
                     Some(channel) => match crate::tools::pipestreamr::PipeCfg::for_channel(&channel) {
                         Ok(cfg) => {
-                            crate::tools::pipestreamr::send(&recipient, &content, from.as_deref(), &cfg).await
+                            crate::tools::pipestreamr::send(&recipient, &content, from.as_deref(), None, &cfg).await
                         }
                         Err(e) => Err(e),
                     },

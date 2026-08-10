@@ -14,13 +14,7 @@
           "schedule_type": "cron",
           "cron": "0 0 13 * * *",
           "persona": "morning-briefer",
-          "inputs": {
-            "push_integration_id": {
-              "type": "string",
-              "required": false,
-              "default": ""
-            }
-          }
+          "inputs": {}
         },
         "position": [0.0, 0.0]
       },
@@ -40,10 +34,9 @@
         "data": {
           "tool_name": "gateway_send_message",
           "args": {
-            "platform": "pipestreamr",
+            "platform": "apns",
             "channel_id": "me",
-            "content": "{{brief}}",
-            "from": "{{push_integration_id}}"
+            "content": "{{brief}}"
           }
         },
         "position": [560.0, 0.0]
