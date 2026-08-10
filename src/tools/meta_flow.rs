@@ -182,6 +182,33 @@ impl metalcraft::Tool for FlowInstallTool {
     }
 }
 
+pub struct FlowInstallDependenciesTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowInstallDependenciesTool {
+    fn name(&self) -> &str {
+        "flow_install_dependencies"
+    }
+    fn description(&self) -> &str {
+        "Install and enable the integration packs a saved flow declares in its `requires` block. For each required pack: resolve its version range against the registry, download that exact version, verify the content hash, install, and enable it. Idempotent — packs already installed, enabled, and in-range are left untouched. Returns one outcome per pack (installed | already-satisfied | skipped | failed). Run this after flow_install when the dependency report lists missing packs, before flow_run."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "id": { "type": "string", "description": "Id of an already-installed flow" } },
+            "required": ["id"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = id_arg(&args, "flow_install_dependencies")?;
+        let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
+            return Ok(serde_json::json!({ "error": format!("flow '{id}' not found") }));
+        };
+        let outcomes = crate::flow_install::install_flow_dependencies(&flow).await;
+        Ok(serde_json::json!({ "flow": id, "packs": outcomes }))
+    }
+}
+
 pub struct FlowDeleteTool;
 
 #[async_trait]

@@ -4981,7 +4981,7 @@ dependencies = [
 
 [[package]]
 name = "metalcraft-agent"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "async-trait",
  "atty",
@@ -5004,6 +5004,7 @@ dependencies = [
  "mail-parser",
  "metalcraft",
  "metalcraft-flows",
+ "metalcraft-packs",
  "native-tls",
  "reqwest 0.12.28",
  "rig",
@@ -5033,6 +5034,19 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "metalcraft-packs"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be53e50c2495d5b6876f8ff01e508f9179dc405a0fe0c703aef109fac7e250ed"
+dependencies = [
+ "hex",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

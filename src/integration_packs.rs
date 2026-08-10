@@ -33,36 +33,12 @@ use crate::paths;
 /// (JSON + markdown); 16 MB is far more than any real pack needs.
 const MAX_PACK_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Manifest for a pack — what `pack.json` contains.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackManifest {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub version: String,
-    #[serde(default)]
-    pub requires_env: Vec<String>,
-    /// Free-form classification labels. The only one acted on today is
-    /// [`ECOSYSTEM_TAG`], which marks a pack for one-shot auto-enable on a
-    /// managed pod (see [`ecosystem_pack_ids`]); the field is general so future
-    /// grouping/filtering can reuse it without another manifest column.
-    #[serde(default)]
-    pub tags: Vec<String>,
-}
-
-/// Tag marking a pack as a first-party Metalcraft ecosystem pack (Notes,
-/// Calendar, Contacts, Drive, …) — the ones that authenticate with the pod's
-/// injected `METALCRAFT_TOKEN` and nothing else. A managed pod auto-enables
-/// exactly these on first boot when `ENABLE_METALCRAFT_PACKS` is set. The pack
-/// author owns this assertion: only tag a pack that is fully functional with the
-/// injected token alone.
-pub const ECOSYSTEM_TAG: &str = "metalcraft-ecosystem";
-
-/// True when a manifest carries [`ECOSYSTEM_TAG`]. Pure (no disk) so the
-/// selection rule is unit-testable without a data dir.
-pub fn is_ecosystem(manifest: &PackManifest) -> bool {
-    manifest.tags.iter().any(|t| t == ECOSYSTEM_TAG)
-}
+// The pack manifest, the ecosystem tag, and the ecosystem check live in the
+// shared `metalcraft-packs` spec crate so the agent and the registry parse and
+// classify packs identically. Re-exported here so existing
+// `crate::integration_packs::{PackManifest, ECOSYSTEM_TAG, is_ecosystem}` paths
+// keep working unchanged.
+pub use metalcraft_packs::{is_ecosystem, PackManifest, ECOSYSTEM_TAG};
 
 /// Ids of installed packs tagged [`ECOSYSTEM_TAG`], in sorted-id order. This is
 /// the exact set the daemon auto-enables on a managed pod's first boot.
@@ -288,20 +264,10 @@ pub fn set_source(id: &str, source: &str) -> Result<(), String> {
     })
 }
 
-/// Pack ids are directory names: lowercase ascii, digits, `-` and `_` (e.g.
-/// `github`, `digitalocean_spaces`). Rejecting anything else keeps the id safe
-/// as a single path segment.
-fn valid_pack_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-}
-
-/// Parse an `x.y.z` version into a comparable tuple (missing parts default to 0).
-fn version_tuple(v: &str) -> (u64, u64, u64) {
-    let mut parts = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
-    (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0))
-}
+// Pack id/slug validation and semver compare live in the shared spec crate so
+// the agent and the registry agree. `valid_pack_id` keeps its local name via the
+// alias; the id rule is `^[a-z0-9][a-z0-9_-]{0,63}$`.
+use metalcraft_packs::{is_valid_pack_id as valid_pack_id, version_ge};
 
 /// Canonical content hash of an already-installed pack, computed over the files
 /// on disk under `<data>/integration_packs/<id>/`. Matches the registry's
@@ -318,7 +284,9 @@ pub fn installed_content_sha256(id: &str) -> Option<String> {
             }
         }
     }
-    Some(canonical_pack_sha256(&files))
+    Some(metalcraft_packs::canonical_sha256(
+        files.iter().map(|(p, c)| (p.as_str(), c.as_slice())),
+    ))
 }
 
 /// Recursively list every file (not dir) under `root`.
@@ -339,21 +307,6 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
         }
     }
     out
-}
-
-/// Canonical content hash of a pack's file-map — must match the registry's
-/// `hash::canonical_sha256`: sort by path, then for each file feed the path, a
-/// `0x00` separator, the 8-byte little-endian length, and the bytes.
-fn canonical_pack_sha256(files: &std::collections::BTreeMap<String, Vec<u8>>) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    for (path, bytes) in files {
-        hasher.update(path.as_bytes());
-        hasher.update([0u8]);
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(bytes);
-    }
-    hex::encode(hasher.finalize())
 }
 
 /// Install a pack from a registry ZIP into `<data>/integration_packs/<id>/`.
@@ -391,9 +344,9 @@ pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<S
             "'{id}' is a built-in pack — it's managed by the app, not installable from the registry"
         ));
     }
-    // Don't downgrade an existing install.
+    // Don't downgrade an existing install (equal versions are allowed to reinstall).
     if let Some(existing) = find_installed(&id) {
-        if version_tuple(&manifest.version) < version_tuple(&existing.manifest.version) {
+        if !version_ge(&manifest.version, &existing.manifest.version) {
             return Err(format!(
                 "pack '{id}' v{} is older than the installed v{}",
                 manifest.version, existing.manifest.version
@@ -431,7 +384,8 @@ pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<S
 
     // Integrity pin: refuse to install bytes that don't match the expected hash.
     if let Some(expected) = expected_sha256 {
-        let actual = canonical_pack_sha256(&files);
+        let actual =
+            metalcraft_packs::canonical_sha256(files.iter().map(|(p, c)| (p.as_str(), c.as_slice())));
         if !actual.eq_ignore_ascii_case(expected) {
             return Err(format!(
                 "pack '{id}' content hash {actual} does not match the expected {expected}"
@@ -676,6 +630,7 @@ mod tests {
             description: String::new(),
             version: "1.0.0".to_string(),
             requires_env: vec!["METALCRAFT_TOKEN".to_string()],
+            icon: None,
             tags: tags.iter().map(|t| t.to_string()).collect(),
         }
     }
@@ -702,14 +657,8 @@ mod tests {
         assert!(!valid_pack_id(&"x".repeat(65)));
     }
 
-    #[test]
-    fn version_tuple_parses_and_orders() {
-        assert_eq!(version_tuple("1.2.3"), (1, 2, 3));
-        assert_eq!(version_tuple("2"), (2, 0, 0));
-        assert_eq!(version_tuple("garbage"), (0, 0, 0));
-        assert!(version_tuple("1.0.0") < version_tuple("1.0.1"));
-        assert!(version_tuple("2.0.0") > version_tuple("1.9.9"));
-    }
+    // version compare + canonical hashing are now unit-tested in the shared
+    // `metalcraft-packs` crate; the agent only tests its install/verify wiring.
 
     /// Build a minimal in-memory zip with the given files (path, contents).
     fn zip_of(files: &[(&str, &str)]) -> Vec<u8> {
@@ -776,20 +725,6 @@ mod tests {
         )]);
         let err = install_from_zip(&z, Some(&"0".repeat(64))).unwrap_err();
         assert!(err.contains("does not match"), "got: {err}");
-    }
-
-    #[test]
-    fn canonical_pack_sha256_is_deterministic_and_order_independent() {
-        let mut a = std::collections::BTreeMap::new();
-        a.insert("pack.json".to_string(), b"{}".to_vec());
-        a.insert("skills/x.md".to_string(), b"hi".to_vec());
-        let h1 = canonical_pack_sha256(&a);
-        // BTreeMap is already sorted; rebuild inserting in the other order.
-        let mut b = std::collections::BTreeMap::new();
-        b.insert("skills/x.md".to_string(), b"hi".to_vec());
-        b.insert("pack.json".to_string(), b"{}".to_vec());
-        assert_eq!(h1, canonical_pack_sha256(&b));
-        assert_eq!(h1.len(), 64);
     }
 
     #[test]

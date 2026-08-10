@@ -113,7 +113,9 @@ impl OperationKind {
             | "flow_read" | "flow_validate" | "flow_templates_list" | "flow_template_read"
             | "diagnostics_list" | "diagnostics_read" | "pack_list" | "pack_read" => Self::MetaRead,
             "persona_write" | "persona_delete" | "skill_write" | "skill_delete" | "flow_write"
-            | "flow_install" | "flow_delete" | "pack_enable" => Self::MetaWrite,
+            | "flow_install" | "flow_install_dependencies" | "flow_delete" | "pack_enable" => {
+                Self::MetaWrite
+            }
             // flow_run spawns agent runs that may use any tool — treat it like
             // a sub-agent (requires approval).
             "flow_run" => Self::SubAgent,
