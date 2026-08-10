@@ -16,6 +16,7 @@ pub mod hub_auth;
 pub mod inbound_dedup;
 pub mod integration_packs;
 pub mod key_store;
+pub mod lockfile;
 pub mod metalcraft_gateway;
 pub mod paths;
 pub mod persona;

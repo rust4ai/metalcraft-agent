@@ -90,6 +90,61 @@ pub async fn resolve_pack_version(
     Ok((version, content_sha256))
 }
 
+/// The flows registry's latest `{ version, content_sha256 }` for `slug`
+/// (`GET /flows/{slug}/version`). `content_sha256` may be absent on legacy rows that
+/// predate version hashing — returned as `None` then.
+pub async fn flow_version(slug: &str) -> Result<(String, Option<String>), String> {
+    let url = format!("{}/api/v1/flows/{}/version", flows_base_url().trim_end_matches('/'), slug);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let resp = client.get(&url).send().await.map_err(|e| format!("flows registry request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("flows registry returned {status} for flow '{slug}'"));
+    }
+    let body: serde_json::Value =
+        resp.json().await.map_err(|e| format!("reading version response: {e}"))?;
+    let version = body
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or("version response missing version")?
+        .to_string();
+    let content_sha256 = body.get("content_sha256").and_then(|v| v.as_str()).map(str::to_string);
+    Ok((version, content_sha256))
+}
+
+/// Download a flow's exact bytes from the flows registry. When `version` is `Some`,
+/// requests that pinned version (`?version=`) so the bytes — and their hash — match
+/// what was locked. Returns the raw document bytes (not parsed), so the caller can
+/// verify the content hash before trusting them.
+pub async fn fetch_flow_bytes(slug: &str, version: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut url = format!("{}/api/v1/flows/{}/download", flows_base_url().trim_end_matches('/'), slug);
+    if let Some(v) = version {
+        url.push_str(&format!("?version={}", v.replace('+', "%2B")));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let resp = client.get(&url).send().await.map_err(|e| format!("flows registry request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("flows registry returned {status} for flow '{slug}'"));
+    }
+    if let Some(len) = resp.content_length() {
+        if len as usize > MAX_DOWNLOAD_BYTES {
+            return Err(format!("flow '{slug}' download is too large"));
+        }
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("reading registry response: {e}"))?;
+    if bytes.len() > MAX_DOWNLOAD_BYTES {
+        return Err(format!("flow '{slug}' download is too large"));
+    }
+    Ok(bytes.to_vec())
+}
+
 /// A pack that provides a tool, from the registry's tool → pack index.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ToolProvider {

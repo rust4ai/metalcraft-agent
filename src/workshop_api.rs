@@ -284,6 +284,7 @@ async fn auth_middleware(
         list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
         list_scheduled_tasks, delete_scheduled_task,
         list_integration_packs, get_integration_pack, delete_integration_pack, put_pack_enabled, post_install_pack,
+        get_lockfile, post_lockfile_restore,
         list_gateway_types, list_gateway_channels, post_create_gateway_channel,
         put_gateway_channel, delete_gateway_channel, put_gateway_channel_enabled,
         list_gateway_channel_events, list_gateway_activity,
@@ -426,6 +427,8 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/integration-packs/install", post(post_install_pack))
         .route("/api/v1/integration-packs/{id}", get(get_integration_pack).delete(delete_integration_pack))
         .route("/api/v1/integration-packs/{id}/enabled", put(put_pack_enabled))
+        .route("/api/v1/lockfile", get(get_lockfile))
+        .route("/api/v1/lockfile/restore", post(post_lockfile_restore))
         // Gateway channels: declarative channel *types* + user-created channel
         // *instances*. Inbound messages arrive on the unauthenticated webhook
         // routes below; these manage configuration.
@@ -868,6 +871,7 @@ async fn put_flow(Path(id): Path<String>, Json(mut flow): Json<metalcraft_flows:
 )]
 async fn delete_flow(Path(id): Path<String>) -> Response {
     if metalcraft_flows::delete_flow(&paths::flows_dir(), &id) {
+        let _ = crate::lockfile::remove_flow(&id);
         StatusCode::NO_CONTENT.into_response()
     } else {
         err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"))
@@ -897,7 +901,15 @@ struct InstallFlowRequest {
 )]
 async fn post_install_flow(Json(req): Json<InstallFlowRequest>) -> Response {
     match crate::flow_install::install_flow_from_registry(&req.slug).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => {
+            // Pin the installed flow in the lockfile (version + content hash from the
+            // registry) so a rebuilt/cloned pod reinstalls the same document. Best-effort.
+            if let Ok((version, Some(hash))) = crate::registry::flow_version(&req.slug).await {
+                let _ = crate::lockfile::record_flow(
+                    &req.slug, &version, &hash, &crate::registry::flows_base_url());
+            }
+            Json(result).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }
 }
@@ -2907,7 +2919,10 @@ struct UninstallPackResult {
 )]
 async fn delete_integration_pack(Path(id): Path<String>) -> Response {
     match crate::integration_packs::uninstall(&id) {
-        Ok(true) => Json(pack_dependents(&id)).into_response(),
+        Ok(true) => {
+            let _ = crate::lockfile::remove_pack(&id);
+            Json(pack_dependents(&id)).into_response()
+        }
         Ok(false) => err_json(StatusCode::NOT_FOUND, format!("pack '{id}' not found")),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }
@@ -3022,8 +3037,115 @@ async fn post_install_pack(Json(req): Json<InstallPackRequest>) -> Response {
         return err_json(StatusCode::BAD_REQUEST, e);
     }
     match crate::integration_packs::find_installed(&id) {
-        Some(pack) => Json(pack_summary(&pack)).into_response(),
+        Some(pack) => {
+            // Pin this pack in the lockfile so a rebuilt/cloned pod reinstalls the exact
+            // version + verified content. Best-effort: a lockfile write never fails install.
+            if let Some(hash) = crate::integration_packs::installed_content_sha256(&id) {
+                let _ = crate::lockfile::record_pack(
+                    &id, &pack.manifest.version, &hash, &crate::registry::base_url());
+            }
+            Json(pack_summary(&pack)).into_response()
+        }
         None => err_json(StatusCode::INTERNAL_SERVER_ERROR, "pack installed but not found"),
+    }
+}
+
+// ── Lockfile (reproducible install manifest) ────────────────────────────
+
+/// The pod's `metalcraft.lock` — every registry pack/flow pinned to an exact
+/// version + content hash. Export it to clone a pod's toolset, or feed it to
+/// `/lockfile/restore` on a rebuilt pod.
+#[utoipa::path(
+    get,
+    path = "/api/v1/lockfile",
+    tag = "lockfile",
+    responses((status = 200, description = "The install lockfile", body = Object)),
+)]
+async fn get_lockfile() -> Response {
+    Json(crate::lockfile::load()).into_response()
+}
+
+#[derive(Serialize)]
+struct RestoreOutcome {
+    kind: &'static str,
+    name: String,
+    version: String,
+    /// `installed` | `failed`.
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+/// Reinstall everything in the lockfile at its pinned version, verifying each against
+/// its locked content hash — the reproducible-rebuild path for a fresh or cloned pod.
+/// Returns one outcome per entry; a failure on one entry doesn't stop the rest.
+#[utoipa::path(
+    post,
+    path = "/api/v1/lockfile/restore",
+    tag = "lockfile",
+    responses((status = 200, description = "Per-entry restore outcomes", body = Object)),
+)]
+async fn post_lockfile_restore() -> Response {
+    let lock = crate::lockfile::load();
+    let mut outcomes: Vec<RestoreOutcome> = Vec::new();
+    for e in &lock.packs {
+        outcomes.push(restore_pack(e).await);
+    }
+    for e in &lock.flows {
+        outcomes.push(restore_flow(e).await);
+    }
+    Json(serde_json::json!({ "outcomes": outcomes })).into_response()
+}
+
+async fn restore_pack(e: &crate::lockfile::LockEntry) -> RestoreOutcome {
+    let done = |status: &'static str, detail: Option<String>| RestoreOutcome {
+        kind: "pack",
+        name: e.name.clone(),
+        version: e.version.clone(),
+        status,
+        detail,
+    };
+    let bytes = match crate::registry::fetch_zip(&e.name, Some(&e.version)).await {
+        Ok(b) => b,
+        Err(err) => return done("failed", Some(err)),
+    };
+    match crate::integration_packs::install_from_zip(&bytes, Some(&e.content_sha256)) {
+        Ok(id) => {
+            let _ = crate::integration_packs::set_enabled(&id, true);
+            done("installed", None)
+        }
+        Err(err) => done("failed", Some(err)),
+    }
+}
+
+async fn restore_flow(e: &crate::lockfile::LockEntry) -> RestoreOutcome {
+    let done = |status: &'static str, detail: Option<String>| RestoreOutcome {
+        kind: "flow",
+        name: e.name.clone(),
+        version: e.version.clone(),
+        status,
+        detail,
+    };
+    let bytes = match crate::registry::fetch_flow_bytes(&e.name, Some(&e.version)).await {
+        Ok(b) => b,
+        Err(err) => return done("failed", Some(err)),
+    };
+    // Verify integrity against the locked hash before trusting the bytes.
+    if crate::lockfile::sha256_hex(&bytes) != e.content_sha256 {
+        return done("failed", Some("content hash does not match the locked hash".into()));
+    }
+    let flow: metalcraft_flows::SavedFlow = match serde_json::from_slice(&bytes) {
+        Ok(f) => f,
+        Err(err) => return done("failed", Some(format!("invalid flow document: {err}"))),
+    };
+    let errors = metalcraft_flows::validate(&flow);
+    if !errors.is_empty() {
+        let msg = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
+        return done("failed", Some(format!("flow failed validation: {msg}")));
+    }
+    match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
+        Ok(()) => done("installed", None),
+        Err(err) => done("failed", Some(err.to_string())),
     }
 }
 
