@@ -9,7 +9,6 @@
 //! `metalcraft-gateway` channel instance. The API key is *derived* from the pod
 //! token at send time, never stored. The message path itself reuses the existing
 //! `pipestreamr` adapter unchanged.
-use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -114,6 +113,9 @@ fn client() -> Result<reqwest::Client, String> {
 
 #[derive(Deserialize)]
 struct ConnectResp {
+    /// The gateway base URL. The metalcraft channel synthesizes its own url, so
+    /// this is informational only.
+    #[allow(dead_code)]
     base_url: String,
     integration_id: String,
     signing_secret: String,
@@ -184,72 +186,39 @@ pub async fn connect(
     let cfg: ConnectResp =
         serde_json::from_str(&text).map_err(|e| format!("failed to parse connect response: {e}"))?;
 
-    // 1. Create or update the channel instance (preserving persona/model), enabled.
-    //    We need its id to scope the secrets, so this comes first.
-    let existing = crate::gateway_channels::load_instances()
-        .into_iter()
-        .find(|i| i.type_id == CHANNEL_TYPE);
-    let channel = match existing {
-        Some(inst) => {
-            let mut s = inst.settings.clone();
-            s.insert("integration_id".into(), cfg.integration_id.clone());
-            s.insert("from".into(), cfg.active_number.clone());
-            // Persist the base we registered with (when we have one) so the heal loop can
-            // re-register the webhook even after POD_PUBLIC_URL is lost (see `resync`).
-            if let Some(b) = &base {
-                s.insert("webhook_base".into(), b.clone());
-            }
-            crate::gateway_channels::update_instance(&inst.id, &inst.name, true, s)?
-        }
-        None => {
-            let mut s = HashMap::new();
-            s.insert("integration_id".to_string(), cfg.integration_id.clone());
-            s.insert("from".to_string(), cfg.active_number.clone());
-            if let Some(b) = &base {
-                s.insert("webhook_base".to_string(), b.clone());
-            }
-            let inst = crate::gateway_channels::create_instance(CHANNEL_TYPE, "Metalcraft Gateway", s)?;
-            crate::gateway_channels::update_instance(&inst.id, &inst.name, true, inst.settings)?
-        }
-    };
-
-    // 2. Write the channel-scoped secrets. The API key is *derived* from the pod
-    //    token at send time, so it is never stored. Drop any legacy global
-    //    PIPESTREAMR_* keys left by an older build.
+    // Write the link + secrets into the built-in `metalcraft` channel. The
+    // channel is the single source of truth for the gateway connection.
     let path = crate::paths::keys_file();
     let mut store = crate::key_store::KeyStore::load(&path);
-    store.upsert_channel(&channel.id, "BASE_URL", &cfg.base_url);
-    store.upsert_channel(&channel.id, "WEBHOOK_SECRET", &cfg.signing_secret);
-    // Adopt the audience-scoped connection token as the channel's outbound API key
-    // (replaces deriving from the broad METALCRAFT_TOKEN). The heal loop refreshes
-    // it before expiry; channel resolution falls back to METALCRAFT_TOKEN if it's
-    // ever absent (see `channels::resolve_instance`).
+    // Adopt the audience-scoped connection token as the channel's outbound bearer
+    // (else outbound falls back to the pod's broad METALCRAFT_TOKEN). Store the
+    // signing secret for inbound HMAC, and the webhook base (when we have one) so
+    // `resync` can re-register even after POD_PUBLIC_URL is lost. Drop any legacy
+    // global PIPESTREAMR_* keys left by an older build.
     if let Some(ct) = connection_token.as_deref() {
-        store.upsert_channel(&channel.id, "API_KEY", ct);
+        store.upsert_channel(crate::channels::DEFAULT_SLUG, "SECRET", ct);
+    }
+    store.upsert_channel(crate::channels::DEFAULT_SLUG, "WEBHOOK_SECRET", &cfg.signing_secret);
+    if let Some(b) = &base {
+        store.upsert_channel(crate::channels::DEFAULT_SLUG, "WEBHOOK_BASE", b);
     }
     for legacy in ["PIPESTREAMR_BASE_URL", "PIPESTREAMR_API_KEY", "PIPESTREAMR_WEBHOOK_SECRET"] {
         store.delete(legacy);
     }
     store.save(&path).map_err(|e| format!("failed to write channel secrets: {e}"))?;
 
-    // Bridge: mirror the link into the new `metalcraft` channel model so inbound
-    // routing, status and outbound resolution can read from there. (Strangler
-    // step toward removing the channel-instance layer.) Best-effort — a mirror
-    // failure must not fail an otherwise-successful connect.
-    if let Some(ct) = connection_token.as_deref() {
-        let _ = crate::channels::set_secret(crate::channels::DEFAULT_SLUG, ct);
-    }
-    let _ = crate::channels::set_webhook_secret(crate::channels::DEFAULT_SLUG, &cfg.signing_secret);
+    // Preserve any persona/model already pinned on the channel across reconnects.
+    let existing = crate::channels::get_channel(crate::channels::DEFAULT_SLUG);
     if let Err(e) = crate::channels::set_link(
         crate::channels::DEFAULT_SLUG,
         crate::channels::Link {
             integration_id: Some(cfg.integration_id.clone()),
-            persona: channel.setting("persona").map(str::to_string),
-            model: channel.setting("model").map(str::to_string),
+            persona: existing.as_ref().and_then(|c| c.persona.clone()),
+            model: existing.as_ref().and_then(|c| c.model.clone()),
             active_number: Some(cfg.active_number.clone()),
         },
     ) {
-        log::warn!("metalcraft-gateway: connected but failed to mirror link into channel model: {e}");
+        return Err(format!("connected but failed to persist the channel link: {e}"));
     }
 
     Ok(ConnectResult {
@@ -265,33 +234,20 @@ pub async fn connect(
 /// Idempotent — a no-op `Ok` when nothing is connected. The heal loop then stays
 /// quiet (no enabled channel), and inbound webhooks stop verifying.
 pub async fn disconnect() -> Result<(), String> {
-    let Some(inst) = crate::gateway_channels::load_instances()
-        .into_iter()
-        .find(|i| i.type_id == CHANNEL_TYPE)
-    else {
-        return Ok(()); // nothing to disconnect
-    };
-
-    // Disable the channel instance (keep it so re-connect preserves persona/model).
-    crate::gateway_channels::update_instance(&inst.id, &inst.name, false, inst.settings.clone())?;
-
-    // Drop the channel-scoped secrets so no stale credential lingers.
+    // Clear the metalcraft channel's link + its scoped secrets. `clear_link`
+    // already drops the WEBHOOK_SECRET; also drop the adopted outbound SECRET and
+    // the stored WEBHOOK_BASE. Idempotent.
+    crate::channels::clear_link(crate::channels::DEFAULT_SLUG)?;
     let path = crate::paths::keys_file();
     let mut store = crate::key_store::KeyStore::load(&path);
-    for k in ["BASE_URL", "WEBHOOK_SECRET", "API_KEY"] {
-        store.delete_channel_key(&inst.id, k);
+    let mut changed = false;
+    for k in ["SECRET", "WEBHOOK_BASE"] {
+        changed |= store.delete_channel_key(crate::channels::DEFAULT_SLUG, k);
     }
-    store.save(&path).map_err(|e| format!("failed to clear channel secrets: {e}"))?;
-
-    // Bridge: clear the mirrored link + adopted secret from the channel model.
-    let _ = crate::channels::clear_link(crate::channels::DEFAULT_SLUG);
-    let cpath = crate::paths::keys_file();
-    let mut cstore = crate::key_store::KeyStore::load(&cpath);
-    if cstore.delete_channel_key(crate::channels::DEFAULT_SLUG, "SECRET") {
-        let _ = cstore.save(&cpath);
+    if changed {
+        store.save(&path).map_err(|e| format!("failed to clear channel secrets: {e}"))?;
     }
-
-    log::info!("metalcraft-gateway: disconnected channel '{}'", inst.name);
+    log::info!("metalcraft-gateway: disconnected the metalcraft channel");
     Ok(())
 }
 
@@ -318,14 +274,14 @@ fn pod_slug() -> Option<String> {
 /// it was connected via the broker, not the legacy METALCRAFT_TOKEN path). Best
 /// effort: on failure the current token stands until its own expiry.
 pub async fn refresh_connection_token() -> Result<(), String> {
-    let Some(inst) = crate::gateway_channels::load_instances()
-        .into_iter()
-        .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)
-    else {
+    let connected = crate::channels::get_channel(crate::channels::DEFAULT_SLUG)
+        .map(|c| c.connected)
+        .unwrap_or(false);
+    if !connected {
         return Ok(());
-    };
-    // Only broker-connected channels carry an adopted API_KEY worth refreshing.
-    if crate::key_store::lookup_scoped(Some(&inst.id), "API_KEY").is_none() {
+    }
+    // Only broker-connected channels carry an adopted SECRET worth refreshing.
+    if crate::key_store::lookup_scoped(Some(crate::channels::DEFAULT_SLUG), "SECRET").is_none() {
         return Ok(());
     }
     let slug = pod_slug().ok_or("no POD_PUBLIC_URL — cannot identify pod for refresh")?;
@@ -351,7 +307,7 @@ pub async fn refresh_connection_token() -> Result<(), String> {
 
     let path = crate::paths::keys_file();
     let mut store = crate::key_store::KeyStore::load(&path);
-    store.upsert_channel(&inst.id, "API_KEY", r.connection_token.trim());
+    store.upsert_channel(crate::channels::DEFAULT_SLUG, "SECRET", r.connection_token.trim());
     store.save(&path).map_err(|e| format!("write refreshed token: {e}"))?;
     log::debug!("metalcraft-gateway: refreshed connection token");
     Ok(())
@@ -487,21 +443,17 @@ pub async fn register(phone_number: &str) -> Result<serde_json::Value, String> {
 }
 
 /// One-time boot migration: move legacy **global** `PIPESTREAMR_*` secrets into
-/// the `metalcraft-gateway` channel's scope (renamed `BASE_URL`/`WEBHOOK_SECRET`)
-/// and delete the globals. The old `PIPESTREAMR_API_KEY` was just a copy of the
-/// pod token, so it is dropped (the key is derived now). Idempotent.
-///
-/// If legacy keys exist but there is no `metalcraft-gateway` channel, they are
-/// left untouched — they may belong to a manual `pipestreamr` channel that still
-/// relies on the back-compat fallback (handled in a later phase).
+/// the built-in `metalcraft` channel's scope (`WEBHOOK_SECRET`) and delete the
+/// globals. The old `PIPESTREAMR_API_KEY`/`BASE_URL` are dropped (the send key is
+/// the pod token now and the url is synthesized). Idempotent.
 pub fn migrate_legacy_keys() {
     let path = crate::paths::keys_file();
     let mut store = crate::key_store::KeyStore::load(&path);
 
-    let base = store.get("PIPESTREAMR_BASE_URL").map(str::to_string);
     let secret = store.get("PIPESTREAMR_WEBHOOK_SECRET").map(str::to_string);
-    let had_legacy =
-        base.is_some() || secret.is_some() || store.get("PIPESTREAMR_API_KEY").is_some();
+    let had_legacy = store.get("PIPESTREAMR_BASE_URL").is_some()
+        || secret.is_some()
+        || store.get("PIPESTREAMR_API_KEY").is_some();
 
     // Nothing to migrate — still persist the (idempotent) v2 schema upgrade so
     // pre-v2 files get rewritten once on boot.
@@ -510,21 +462,8 @@ pub fn migrate_legacy_keys() {
         return;
     }
 
-    let Some(inst) = crate::gateway_channels::load_instances()
-        .into_iter()
-        .find(|i| i.type_id == CHANNEL_TYPE)
-    else {
-        // Legacy keys but no gateway channel: don't touch them (a manual
-        // pipestreamr channel may need them). Just upgrade the schema.
-        let _ = store.save(&path);
-        return;
-    };
-
-    if let Some(v) = base {
-        store.upsert_channel(&inst.id, "BASE_URL", &v);
-    }
     if let Some(v) = secret {
-        store.upsert_channel(&inst.id, "WEBHOOK_SECRET", &v);
+        store.upsert_channel(crate::channels::DEFAULT_SLUG, "WEBHOOK_SECRET", &v);
     }
     store.delete("PIPESTREAMR_BASE_URL");
     store.delete("PIPESTREAMR_API_KEY");
@@ -533,10 +472,7 @@ pub fn migrate_legacy_keys() {
         log::warn!("metalcraft-gateway: failed to persist legacy key migration: {e}");
         return;
     }
-    log::info!(
-        "metalcraft-gateway: migrated legacy PIPESTREAMR_* keys into channel scope for '{}'",
-        inst.name
-    );
+    log::info!("metalcraft-gateway: migrated legacy PIPESTREAMR_* keys into the metalcraft channel scope");
 }
 
 // ── Self-heal (Phase 3) ──────────────────────────────────────────────────────
@@ -547,18 +483,17 @@ pub fn migrate_legacy_keys() {
 /// webhook); otherwise it refreshes the secret + `integration_id`/`from` from
 /// `GET /api/v1/phone` without touching the webhook.
 pub async fn resync() -> Result<(), String> {
-    let Some(inst) = crate::gateway_channels::load_instances()
-        .into_iter()
-        .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)
-    else {
+    let ch = crate::channels::get_channel(crate::channels::DEFAULT_SLUG);
+    if !ch.as_ref().map(|c| c.connected).unwrap_or(false) {
         return Ok(()); // nothing connected — stay quiet
-    };
+    }
 
     // Prefer a full re-register: it re-points the gateway's `consumer_webhook_url` at
     // our current URL, healing the "connected but stale webhook" drift. Use
-    // POD_PUBLIC_URL if known, else the base captured at connect time (`webhook_base`),
-    // so heal still works after POD_PUBLIC_URL is lost across a reschedule.
-    let base = webhook_base(None).or_else(|| inst.settings.get("webhook_base").cloned());
+    // POD_PUBLIC_URL if known, else the base captured at connect time
+    // (`WEBHOOK_BASE`), so heal still works after POD_PUBLIC_URL is lost.
+    let base = webhook_base(None)
+        .or_else(|| crate::key_store::lookup_scoped(Some(crate::channels::DEFAULT_SLUG), "WEBHOOK_BASE"));
     if let Some(base) = base {
         return match connect(Some(base), None).await {
             Ok(_) => Ok(()),
@@ -568,7 +503,8 @@ pub async fn resync() -> Result<(), String> {
         };
     }
 
-    // No URL anywhere (can't fix the webhook): refresh secret + routing from /phone.
+    // No URL anywhere (can't fix the webhook): refresh secret + routing from /phone
+    // into the metalcraft channel.
     #[derive(Deserialize)]
     struct P {
         #[serde(default)]
@@ -596,22 +532,24 @@ pub async fn resync() -> Result<(), String> {
         return Ok(()); // no longer verified — leave config as-is
     }
     if let Some(secret) = p.signing_secret.filter(|s| !s.is_empty()) {
-        let path = crate::paths::keys_file();
-        let mut store = crate::key_store::KeyStore::load(&path);
-        if store.get_channel(&inst.id, "WEBHOOK_SECRET") != Some(secret.as_str()) {
-            store.upsert_channel(&inst.id, "WEBHOOK_SECRET", &secret);
-            store.delete("PIPESTREAMR_WEBHOOK_SECRET"); // retire any legacy global
-            store.save(&path).map_err(|e| format!("write keys: {e}"))?;
+        if crate::channels::webhook_secret(crate::channels::DEFAULT_SLUG).as_deref() != Some(secret.as_str()) {
+            crate::channels::set_webhook_secret(crate::channels::DEFAULT_SLUG, &secret)?;
         }
     }
     if let (Some(iid), Some(from)) = (p.integration_id, p.active_number) {
-        let drifted =
-            inst.settings.get("integration_id") != Some(&iid) || inst.settings.get("from") != Some(&from);
+        let cur = crate::channels::get_channel(crate::channels::DEFAULT_SLUG);
+        let drifted = cur.as_ref().and_then(|c| c.integration_id.as_deref()) != Some(iid.as_str())
+            || cur.as_ref().and_then(|c| c.active_number.as_deref()) != Some(from.as_str());
         if drifted {
-            let mut s = inst.settings.clone();
-            s.insert("integration_id".into(), iid);
-            s.insert("from".into(), from);
-            crate::gateway_channels::update_instance(&inst.id, &inst.name, true, s)?;
+            crate::channels::set_link(
+                crate::channels::DEFAULT_SLUG,
+                crate::channels::Link {
+                    integration_id: Some(iid),
+                    persona: cur.as_ref().and_then(|c| c.persona.clone()),
+                    model: cur.as_ref().and_then(|c| c.model.clone()),
+                    active_number: Some(from),
+                },
+            )?;
         }
     }
     Ok(())
