@@ -172,7 +172,7 @@ pub async fn connect(
     // working during the transition.
     let base = webhook_base(explicit_webhook_base);
     let body = match &base {
-        Some(b) => serde_json::json!({ "webhook_url": format!("{b}/webhook/pipestreamr") }),
+        Some(b) => serde_json::json!({ "webhook_url": format!("{b}/webhook/gateway") }),
         None => serde_json::json!({}),
     };
 
@@ -374,7 +374,7 @@ pub async fn status() -> GatewayStatus {
         .map(|c| c.connected)
         .unwrap_or(false)
         && crate::channels::webhook_secret(crate::channels::DEFAULT_SLUG).is_some();
-    let my_webhook = webhook_base(None).map(|b| format!("{b}/webhook/pipestreamr"));
+    let my_webhook = webhook_base(None).map(|b| format!("{b}/webhook/gateway"));
     let has_public_url = my_webhook.is_some();
     let streaming = is_streaming();
 

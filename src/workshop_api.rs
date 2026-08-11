@@ -464,6 +464,9 @@ pub fn build_router(api_key: String) -> Router {
         // verifies provenance its own way (signed requests). PipeStreamr is the
         // active path; the Twilio route stays mounted but no channel type ships
         // for it right now.
+        // New neutral path + the legacy alias (dual-served during the gateway/k3
+        // rollout; a later release drops /webhook/pipestreamr).
+        .route("/webhook/gateway", post(handle_pipestreamr_webhook))
         .route("/webhook/pipestreamr", post(handle_pipestreamr_webhook))
         .with_state(state)
 }
@@ -3404,8 +3407,11 @@ async fn handle_pipestreamr_webhook(
         // Not an inbound message (log/status/outbound echo) — nothing to do.
         return StatusCode::OK;
     };
+    // Accept the new header name, falling back to the legacy one during the
+    // gateway rollout window (a later release drops the fallback).
     let sig = headers
-        .get("x-pipestreamr-signature")
+        .get("x-metalcraft-signature")
+        .or_else(|| headers.get("x-pipestreamr-signature"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
