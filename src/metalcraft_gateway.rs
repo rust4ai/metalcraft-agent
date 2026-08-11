@@ -197,7 +197,8 @@ pub async fn connect(
     store.upsert_channel(&channel.id, "WEBHOOK_SECRET", &cfg.signing_secret);
     // Adopt the audience-scoped connection token as the channel's outbound API key
     // (replaces deriving from the broad METALCRAFT_TOKEN). The heal loop refreshes
-    // it before expiry; PipeCfg falls back to METALCRAFT_TOKEN if it's ever absent.
+    // it before expiry; channel resolution falls back to METALCRAFT_TOKEN if it's
+    // ever absent (see `channels::resolve_instance`).
     if let Some(ct) = connection_token.as_deref() {
         store.upsert_channel(&channel.id, "API_KEY", ct);
     }
@@ -350,7 +351,7 @@ pub async fn status() -> GatewayStatus {
     let connected = crate::gateway_channels::load_instances()
         .iter()
         .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)
-        .and_then(crate::tools::pipestreamr::channel_webhook_secret)
+        .and_then(crate::tools::gateway_webhook::channel_webhook_secret)
         .is_some();
     let my_webhook = webhook_base(None).map(|b| format!("{b}/webhook/pipestreamr"));
     let has_public_url = my_webhook.is_some();

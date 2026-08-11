@@ -3658,7 +3658,7 @@ async fn handle_pipestreamr_webhook(
         Ok(v) => v,
         Err(_) => return StatusCode::BAD_REQUEST,
     };
-    let Some(inbound) = crate::tools::pipestreamr::parse_inbound(&payload) else {
+    let Some(inbound) = crate::tools::gateway_webhook::parse_inbound(&payload) else {
         // Not an inbound message (log/status/outbound echo) — nothing to do.
         return StatusCode::OK;
     };
@@ -3677,7 +3677,7 @@ async fn handle_pipestreamr_webhook(
 /// connection token.
 async fn route_pipestreamr_inbound(
     state: Arc<ApiState>,
-    inbound: crate::tools::pipestreamr::InboundMessage,
+    inbound: crate::tools::gateway_webhook::InboundMessage,
     verify: Option<(axum::body::Bytes, String)>,
 ) -> StatusCode {
     // Route on the PipeStreamr integration UUID (`source_id`) — stable and
@@ -3721,9 +3721,9 @@ async fn route_pipestreamr_inbound(
     // the webhook (push) path. The pull long-poll passes `verify = None` because the pod
     // authenticated the connection itself, so there is no HMAC to check.
     if let Some((body, signature)) = &verify {
-        match crate::tools::pipestreamr::channel_webhook_secret(&channel) {
+        match crate::tools::gateway_webhook::channel_webhook_secret(&channel) {
             Some(secret) => {
-                if !crate::tools::pipestreamr::validate_signature(&secret, body, signature) {
+                if !crate::tools::gateway_webhook::validate_signature(&secret, body, signature) {
                     log::warn!("Rejected PipeStreamr webhook: invalid or missing X-PipeStreamr-Signature");
                     crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
                         direction: "inbound".into(),
@@ -3870,7 +3870,7 @@ async fn inbound_pull_loop(state: Arc<ApiState>) {
                         let message_id =
                             v.get("message_id").and_then(|x| x.as_str()).map(str::to_string);
                         if let Some(payload) = v.get("payload") {
-                            if let Some(inbound) = crate::tools::pipestreamr::parse_inbound(payload) {
+                            if let Some(inbound) = crate::tools::gateway_webhook::parse_inbound(payload) {
                                 let _ = route_pipestreamr_inbound(state.clone(), inbound, None).await;
                             }
                         }
@@ -4017,11 +4017,11 @@ fn gateway_reply_sink(
         let channel_name = channel_name.clone();
         Box::pin(async move {
             let result = match adapter.as_str() {
+                // Reply back out through the same gateway the message arrived on,
+                // via the unified channel sender (no adapter-specific send path).
                 "pipestreamr" => match crate::gateway_channels::get_instance(&channel_id) {
-                    Some(channel) => match crate::tools::pipestreamr::PipeCfg::for_channel(&channel) {
-                        Ok(cfg) => {
-                            crate::tools::pipestreamr::send(&recipient, &content, from.as_deref(), None, &cfg).await
-                        }
+                    Some(channel) => match crate::channels::resolve_instance(&channel) {
+                        Ok(ch) => crate::channels::send(&ch, &recipient, &content, None, from.as_deref()).await,
                         Err(e) => Err(e),
                     },
                     None => Err(format!("channel '{channel_id}' no longer exists")),

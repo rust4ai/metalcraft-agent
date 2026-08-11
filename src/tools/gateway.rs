@@ -93,14 +93,13 @@ impl metalcraft::Tool for GatewaySendMessageTool {
 }
 
 /// Map a caller-supplied `platform` to the gateway's delivery-kind hint. `"apns"`
-/// (or `"push"`) is a push; a generic/legacy transport name (`"gateway"`,
-/// `"pipestreamr"`, `"text"`, empty) resolves to the account's default
-/// integration (`None`); anything else (e.g. `"whatsapp"`, `"sms"`) is passed
-/// through as the integration kind.
+/// (or `"push"`) is a push; a generic transport name (`"gateway"`, `"text"`,
+/// empty) resolves to the account's default integration (`None`); anything else
+/// (e.g. `"whatsapp"`, `"sms"`) is passed through as the integration kind.
 fn delivery_kind(platform: &str) -> Option<&str> {
     match platform.trim().to_ascii_lowercase().as_str() {
         "apns" | "push" => Some("apns"),
-        "" | "text" | "gateway" | "pipestreamr" => None,
+        "" | "text" | "gateway" => None,
         _ => Some(platform),
     }
 }

@@ -189,6 +189,35 @@ pub fn resolve_channel(slug: Option<&str>) -> Result<ResolvedChannel, String> {
     Ok(ResolvedChannel { slug: ch.slug, url: ch.url, secret })
 }
 
+/// Resolve a legacy gateway *channel instance* (the inbound registration model
+/// in [`crate::gateway_channels`]) to a send target. Used by the inbound-reply
+/// sink so a reply goes back out through the same gateway the message arrived
+/// on. A `metalcraft-gateway`-provisioned instance uses the pod's
+/// `METALCRAFT_TOKEN` (or its adopted scoped key); a custom instance uses its
+/// scoped `API_KEY`. The URL is the instance's stored `BASE_URL`, defaulting to
+/// the first-party gateway.
+pub fn resolve_instance(
+    inst: &crate::gateway_channels::ChannelInstance,
+) -> Result<ResolvedChannel, String> {
+    let provisioner =
+        crate::gateway_channels::find_type(&inst.type_id).and_then(|t| t.provisioner);
+    let secret = if provisioner.as_deref() == Some("metalcraft-gateway") {
+        crate::key_store::lookup_scoped(Some(&inst.id), "API_KEY")
+            .filter(|s| !s.is_empty())
+            .or_else(|| crate::key_store::lookup("METALCRAFT_TOKEN").filter(|s| !s.is_empty()))
+            .ok_or("METALCRAFT_TOKEN is not set — this pod isn't linked to a Metalcraft ID account")?
+    } else {
+        crate::key_store::lookup_scoped(Some(&inst.id), "API_KEY")
+            .filter(|s| !s.is_empty())
+            .ok_or("no API key configured for this channel")?
+    };
+    let url = crate::key_store::lookup_scoped(Some(&inst.id), "BASE_URL")
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(metalcraft_url);
+    Ok(ResolvedChannel { slug: inst.id.clone(), url, secret })
+}
+
 // ── CRUD for custom channels ─────────────────────────────────────────────
 
 /// Add a custom channel and store its secret in the scoped key store. The slug
