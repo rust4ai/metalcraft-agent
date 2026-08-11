@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    extract::{Form, Path, Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{
@@ -285,9 +285,7 @@ async fn auth_middleware(
         list_scheduled_tasks, delete_scheduled_task,
         list_integration_packs, get_integration_pack, delete_integration_pack, put_pack_enabled, post_install_pack,
         get_lockfile, post_lockfile_restore,
-        list_gateway_types, list_gateway_channels, post_create_gateway_channel,
-        put_gateway_channel, delete_gateway_channel, put_gateway_channel_enabled,
-        list_gateway_channel_events, list_gateway_activity,
+        list_gateway_activity,
         list_channels, create_channel, update_channel, delete_channel, list_channel_events,
         gateway_metalcraft_status, gateway_metalcraft_register,
         gateway_metalcraft_connect, gateway_metalcraft_disconnect,
@@ -304,12 +302,11 @@ async fn auth_middleware(
         crate::lockfile::Lock, crate::lockfile::LockEntry, RestoreOutcome, RestoreResult,
         ChatSummary, ChatDetail, ChatMessageWire, CreateChatRequest, ChatTurnRequest, ChatEvent,
         IntegrationPackSummary, IntegrationPackDetail, SetEnabledRequest, InstallPackRequest, UninstallPackResult,
-        MgRegisterRequest, MgConnectRequest, CreateGatewayChannelRequest, UpdateGatewayChannelRequest,
+        MgRegisterRequest, MgConnectRequest,
         crate::channels::Channel, CreateChannelRequest, UpdateChannelRequest,
         crate::persona::Persona, crate::persona::PersonaSummary,
         crate::skill::Skill, crate::skill::SkillSummary,
-        crate::gateway_channels::ChannelType, crate::gateway_channels::SettingField,
-        crate::gateway_channels::ChannelInstance, crate::gateway_activity::GatewayEvent,
+        crate::gateway_activity::GatewayEvent,
         crate::metalcraft_gateway::GatewayStatus,
         crate::tools::http_api::HttpApiToolConfig, crate::tools::http_api::MultipartConfig,
         crate::flows::FlowPromptResult,
@@ -436,14 +433,7 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/integration-packs/{id}/enabled", put(put_pack_enabled))
         .route("/api/v1/lockfile", get(get_lockfile))
         .route("/api/v1/lockfile/restore", post(post_lockfile_restore))
-        // Gateway channels: declarative channel *types* + user-created channel
-        // *instances*. Inbound messages arrive on the unauthenticated webhook
-        // routes below; these manage configuration.
-        .route("/api/v1/gateway/types", get(list_gateway_types))
-        .route("/api/v1/gateway/channels", get(list_gateway_channels).post(post_create_gateway_channel))
-        .route("/api/v1/gateway/channels/{id}", put(put_gateway_channel).delete(delete_gateway_channel))
-        .route("/api/v1/gateway/channels/{id}/enabled", put(put_gateway_channel_enabled))
-        .route("/api/v1/gateway/channels/{id}/events", get(list_gateway_channel_events))
+        // Gateway activity feed (inbound/outbound across all channels).
         .route("/api/v1/gateway/activity", get(list_gateway_activity))
         // Channels — the simple {slug, name, url, secret} connection model. The
         // built-in `metalcraft` channel is always present; these manage customs.
@@ -475,7 +465,6 @@ pub fn build_router(api_key: String) -> Router {
         // active path; the Twilio route stays mounted but no channel type ships
         // for it right now.
         .route("/webhook/pipestreamr", post(handle_pipestreamr_webhook))
-        .route("/webhook/twilio", post(handle_twilio_webhook))
         .with_state(state)
 }
 
@@ -1134,19 +1123,15 @@ fn list_key_summaries() -> Vec<KeySummary> {
         .collect()
 }
 
-/// Whether a channel's secrets are managed by its connection (provisioner-backed
-/// types like `metalcraft-gateway`) — such secrets are read-only in the UI.
-fn is_channel_managed(channel_id: &str) -> bool {
-    crate::gateway_channels::get_instance(channel_id)
-        .and_then(|i| crate::gateway_channels::find_type(&i.type_id))
-        .and_then(|t| t.provisioner)
-        .is_some()
+/// Whether a channel's secrets are managed by its connection (the built-in
+/// `metalcraft` channel) — such secrets are read-only in the UI.
+fn is_channel_managed(channel_slug: &str) -> bool {
+    crate::channels::get_channel(channel_slug).map(|c| c.managed).unwrap_or(false)
 }
 
 /// All stored keys with scope + managed flags, for the scope-aware Keys page.
 fn list_key_entries() -> Vec<KeyEntry> {
     let store = crate::key_store::KeyStore::load(&paths::keys_file());
-    let instances = crate::gateway_channels::load_instances();
     store
         .list_scoped()
         .into_iter()
@@ -1160,18 +1145,14 @@ fn list_key_entries() -> Vec<KeyEntry> {
                 channel_name: None,
             },
             crate::key_store::KeyScope::Channel(id) => {
-                let inst = instances.iter().find(|i| i.id == id);
-                let managed = inst
-                    .and_then(|i| crate::gateway_channels::find_type(&i.type_id))
-                    .and_then(|t| t.provisioner)
-                    .is_some();
+                let ch = crate::channels::get_channel(&id);
                 KeyEntry {
                     name,
                     masked,
                     scope: "channel".into(),
-                    channel_name: inst.map(|i| i.name.clone()),
+                    channel_name: ch.as_ref().map(|c| c.name.clone()),
+                    managed: ch.map(|c| c.managed).unwrap_or(false),
                     channel_id: Some(id),
-                    managed,
                 }
             }
         })
@@ -1198,20 +1179,11 @@ async fn list_keys() -> Json<Vec<KeyEntry>> {
     responses((status = 200, body = Vec<RecommendedKey>)),
 )]
 async fn list_recommended_keys() -> Json<Vec<RecommendedKey>> {
-    // Merge recommendations from enabled integration packs and enabled gateway
-    // channel types. The `packs` field carries the source label (pack id or
-    // channel-type name) so the key-store UI can show "who wants this".
+    // Recommendations from enabled integration packs. The `packs` field carries
+    // the source label (pack id) so the key-store UI can show "who wants this".
     let mut merged: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
     for (name, sources) in crate::integration_packs::recommended_env() {
         merged.entry(name).or_default().extend(sources);
-    }
-    for (name, sources) in crate::gateway_channels::recommended_env() {
-        let entry = merged.entry(name).or_default();
-        for s in sources {
-            if !entry.contains(&s) {
-                entry.push(s);
-            }
-        }
     }
     let out = merged
         .into_iter()
@@ -1255,7 +1227,7 @@ async fn put_key(Path(name): Path<String>, Json(body): Json<KeyValueBody>) -> Re
                 );
             }
             store.upsert_channel(cid, &name, &body.value);
-            let cname = crate::gateway_channels::get_instance(cid).map(|i| i.name);
+            let cname = crate::channels::get_channel(cid).map(|c| c.name);
             ("channel".to_string(), Some(cid.to_string()), cname)
         }
         None => {
@@ -3193,48 +3165,9 @@ async fn restore_flow(e: &crate::lockfile::LockEntry) -> RestoreOutcome {
 
 // ── Gateway channel handlers ────────────────────────────────────────────
 //
-// Channel *types* are read-only declarative manifests (serialized straight from
-// `gateway_channels::ChannelType`). Channel *instances* are user-created configs
-// (`gateway_channels::ChannelInstance`) — listed, created, edited, enabled, and
-// deleted here. Inbound messages flow through the unauthenticated webhook
-// handlers further below.
-
-/// List the installed gateway channel types (with their per-instance settings
-/// schema), so the workshop can render a "new channel" form.
-#[utoipa::path(
-    get,
-    path = "/api/v1/gateway/types",
-    tag = "gateway",
-    responses((status = 200, body = Vec<crate::gateway_channels::ChannelType>)),
-)]
-async fn list_gateway_types() -> Json<Vec<crate::gateway_channels::ChannelType>> {
-    Json(crate::gateway_channels::list_types())
-}
-
-/// List all configured gateway channel instances.
-#[utoipa::path(
-    get,
-    path = "/api/v1/gateway/channels",
-    tag = "gateway",
-    responses((status = 200, body = Vec<crate::gateway_channels::ChannelInstance>)),
-)]
-async fn list_gateway_channels() -> Json<Vec<crate::gateway_channels::ChannelInstance>> {
-    Json(crate::gateway_channels::load_instances())
-}
-
-/// Recent inbound/outbound activity for a single channel (newest first).
-#[utoipa::path(
-    get,
-    path = "/api/v1/gateway/channels/{id}/events",
-    tag = "gateway",
-    params(("id" = String, Path, description = "Channel id")),
-    responses((status = 200, body = Vec<crate::gateway_activity::GatewayEvent>)),
-)]
-async fn list_gateway_channel_events(
-    Path(id): Path<String>,
-) -> Json<Vec<crate::gateway_activity::GatewayEvent>> {
-    Json(crate::gateway_activity::list(Some(&id), 200))
-}
+// The gateway link (metalcraft connect/status) lives below; channel CRUD is the
+// `/api/v1/channels` endpoints. Inbound messages flow through the unauthenticated
+// webhook handlers further below.
 
 /// Recent gateway activity across all channels, including inbound messages that
 /// matched no channel (the global Network view). Newest first.
@@ -3420,88 +3353,6 @@ async fn gateway_metalcraft_disconnect() -> Response {
     }
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
-struct CreateGatewayChannelRequest {
-    type_id: String,
-    name: String,
-    #[serde(default)]
-    settings: HashMap<String, String>,
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/v1/gateway/channels",
-    tag = "gateway",
-    request_body = CreateGatewayChannelRequest,
-    responses((status = 201, body = crate::gateway_channels::ChannelInstance), (status = 400, body = ErrorResponse)),
-)]
-async fn post_create_gateway_channel(Json(req): Json<CreateGatewayChannelRequest>) -> Response {
-    match crate::gateway_channels::create_instance(&req.type_id, &req.name, req.settings) {
-        Ok(instance) => (StatusCode::CREATED, Json(instance)).into_response(),
-        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
-    }
-}
-
-#[derive(Deserialize, utoipa::ToSchema)]
-struct UpdateGatewayChannelRequest {
-    name: String,
-    #[serde(default)]
-    enabled: bool,
-    #[serde(default)]
-    settings: HashMap<String, String>,
-}
-
-#[utoipa::path(
-    put,
-    path = "/api/v1/gateway/channels/{id}",
-    tag = "gateway",
-    params(("id" = String, Path, description = "Channel id")),
-    request_body = UpdateGatewayChannelRequest,
-    responses((status = 200, description = "Updated")),
-)]
-async fn put_gateway_channel(
-    Path(id): Path<String>,
-    Json(req): Json<UpdateGatewayChannelRequest>,
-) -> Response {
-    match crate::gateway_channels::update_instance(&id, &req.name, req.enabled, req.settings) {
-        Ok(instance) => Json(instance).into_response(),
-        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
-    }
-}
-
-#[utoipa::path(
-    put,
-    path = "/api/v1/gateway/channels/{id}/enabled",
-    tag = "gateway",
-    params(("id" = String, Path, description = "Channel id")),
-    request_body = SetEnabledRequest,
-    responses((status = 200, description = "Updated")),
-)]
-async fn put_gateway_channel_enabled(
-    Path(id): Path<String>,
-    Json(req): Json<SetEnabledRequest>,
-) -> Response {
-    match crate::gateway_channels::set_enabled(&id, req.enabled) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
-    }
-}
-
-#[utoipa::path(
-    delete,
-    path = "/api/v1/gateway/channels/{id}",
-    tag = "gateway",
-    params(("id" = String, Path, description = "Channel id")),
-    responses((status = 200, description = "Deleted")),
-)]
-async fn delete_gateway_channel(Path(id): Path<String>) -> Response {
-    match crate::gateway_channels::delete_instance(&id) {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => err_json(StatusCode::NOT_FOUND, format!("channel '{id}' not found")),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-
 // ── Inbound gateway webhooks ─────────────────────────────────────────────
 
 /// Cap concurrent agent runs triggered by inbound webhooks so a burst of
@@ -3532,113 +3383,6 @@ fn gateway_inbound_pull_enabled() -> bool {
         std::env::var("GATEWAY_INBOUND_PULL").ok().as_deref(),
         Some("1") | Some("true") | Some("yes") | Some("on")
     )
-}
-
-/// Inbound Twilio WhatsApp webhook (form-encoded). Validates Twilio's signature
-/// when `TWILIO_WEBHOOK_BASE_URL` is configured, parses the message, routes it
-/// to the enabled channel instance whose `from` number received it, and runs
-/// that channel's persona to reply (via the `whatsapp_send_message` tool).
-///
-/// Always returns 200 for accepted-but-unroutable cases so Twilio doesn't retry
-/// a message we've deliberately ignored.
-async fn handle_twilio_webhook(
-    State(state): State<Arc<ApiState>>,
-    headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
-) -> StatusCode {
-    // Optional signature verification. We can only validate against the exact
-    // public URL Twilio signed, so this is gated on TWILIO_WEBHOOK_BASE_URL
-    // being set to that URL's origin (e.g. https://agent.example.com).
-    if let Some(base) = std::env::var("TWILIO_WEBHOOK_BASE_URL").ok().filter(|s| !s.is_empty()) {
-        let token = crate::key_store::lookup("TWILIO_AUTH_TOKEN").unwrap_or_default();
-        let signature = headers
-            .get("x-twilio-signature")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        let url = format!("{}/webhook/twilio", base.trim_end_matches('/'));
-        if token.is_empty() || !crate::tools::twilio::validate_signature(&token, &url, &form, signature) {
-            log::warn!("Rejected Twilio webhook: invalid or missing X-Twilio-Signature");
-            crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
-                direction: "inbound".into(),
-                platform: "twilio".into(),
-                outcome: "signature_rejected".into(),
-                detail: Some("invalid or missing X-Twilio-Signature".into()),
-                ..Default::default()
-            });
-            return StatusCode::FORBIDDEN;
-        }
-    }
-
-    let Some(inbound) = crate::tools::twilio::parse_inbound(&form) else {
-        // Status callback or non-message payload — nothing to do.
-        return StatusCode::OK;
-    };
-
-    let Some(channel) = crate::gateway_channels::resolve_by_inbound_to(&inbound.to) else {
-        log::warn!(
-            "Twilio webhook for '{}' matched no enabled WhatsApp channel — ignoring",
-            inbound.to
-        );
-        crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
-            direction: "inbound".into(),
-            platform: "twilio".into(),
-            from: Some(inbound.from.clone()),
-            from_name: inbound.profile_name.clone(),
-            to: Some(inbound.to.clone()),
-            body: crate::gateway_activity::truncate_body(&inbound.body),
-            outcome: "no_matching_channel".into(),
-            detail: Some(format!("no enabled WhatsApp channel for number {}", inbound.to)),
-            ..Default::default()
-        });
-        return StatusCode::OK;
-    };
-
-    // Default to the orchestrator (which delegates to specialists) when a
-    // channel doesn't pin a specific persona.
-    let persona_slug = channel
-        .setting("persona")
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| "orchestrator-agent".to_string());
-    let model_name = channel
-        .setting("model")
-        .map(str::to_string)
-        .unwrap_or_else(crate::runtime::configured_default_model);
-    let reply_from = channel.setting("from").unwrap_or(&inbound.to).to_string();
-    let session_ttl_secs = channel_session_ttl_secs(&channel);
-
-    crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
-        direction: "inbound".into(),
-        platform: "twilio".into(),
-        from: Some(inbound.from.clone()),
-        from_name: inbound.profile_name.clone(),
-        to: Some(inbound.to.clone()),
-        body: crate::gateway_activity::truncate_body(&inbound.body),
-        channel_id: Some(channel.id.clone()),
-        channel_name: Some(channel.name.clone()),
-        outcome: "routed".into(),
-        detail: Some(format!("persona {persona_slug}")),
-        ..Default::default()
-    });
-
-    dispatch_inbound(
-        state,
-        NormalizedInbound {
-            // Twilio inbound (dormant, direct-BYO) — synthetic slug; the reply
-            // sink routes it via the twilio adapter, not the channel model.
-            channel_slug: format!("twilio-{}", channel.id),
-            channel_name: channel.name.clone(),
-            adapter: "twilio".into(),
-            persona_slug,
-            model_name,
-            sender: inbound.from.clone(),
-            sender_name: inbound.profile_name.clone(),
-            from: Some(reply_from),
-            body: inbound.body.clone(),
-            session_ttl_secs,
-        },
-    )
-    .await
 }
 
 /// Inbound PipeStreamr webhook (JSON `message.created`). Routes the message to
@@ -3953,7 +3697,9 @@ struct NormalizedInbound {
 /// so `load_persisted_chats` rehydrates the same conversation). Filename- and
 /// URL-safe: phone numbers reduce to digits; other ids keep ascii alphanumerics.
 fn gateway_chat_id(channel_slug: &str, sender: &str) -> String {
-    let digits = crate::gateway_channels::normalize_number(sender);
+    // Reduce a phone number to bare digits (dropping any `whatsapp:` prefix and
+    // punctuation) for a stable, filename-safe suffix.
+    let digits: String = sender.trim_start_matches("whatsapp:").chars().filter(|c| c.is_ascii_digit()).collect();
     let suffix = if digits.is_empty() {
         let s: String = sender.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
         if s.is_empty() { "anon".to_string() } else { s.to_ascii_lowercase() }
@@ -3972,19 +3718,6 @@ fn gateway_chat_id(channel_slug: &str, sender: &str) -> String {
 /// reasoning model would otherwise reject. Per-channel `session_ttl_minutes` of
 /// `0` disables the reset. Gateway-only; workshop chats never auto-reset.
 const DEFAULT_GATEWAY_SESSION_TTL_SECS: u64 = 900;
-
-/// A gateway channel's idle-reset window in seconds, from its per-channel
-/// `session_ttl_minutes` setting (edited in the Workshop). `None` when unset
-/// (caller falls back to [`DEFAULT_GATEWAY_SESSION_TTL_SECS`]); `Some(0)` when
-/// the operator set it to 0 to disable the reset.
-fn channel_session_ttl_secs(channel: &crate::gateway_channels::ChannelInstance) -> Option<u64> {
-    channel
-        .setting("session_ttl_minutes")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(|mins| mins.saturating_mul(60))
-}
 
 /// Whether the gateway conversation `chat_id` has been idle longer than `ttl`.
 /// Uses the persisted chat file's mtime — [`persist_chat`] rewrites it after every

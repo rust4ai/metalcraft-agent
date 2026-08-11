@@ -11,7 +11,6 @@ pub mod flow_install;
 pub mod flow_runs;
 pub mod flows;
 pub mod gateway_activity;
-pub mod gateway_channels;
 pub mod guard;
 pub mod hub_auth;
 pub mod inbound_dedup;

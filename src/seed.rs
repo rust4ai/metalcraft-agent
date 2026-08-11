@@ -65,7 +65,6 @@ pub fn ensure_defaults() {
         paths::flow_templates_dir(),
         paths::chats_dir(),
         paths::integration_packs_dir(),
-        paths::gateway_channels_dir(),
         paths::upload_root(),
     ];
 
@@ -92,11 +91,6 @@ pub fn ensure_defaults() {
 
     write_integration_packs();
 
-    // Gateway channel *types* — declarative manifests laid out like packs
-    // (`<id>/channel_type.json` + optional extra files), version-gated on the
-    // manifest the same way. See [`crate::gateway_channels`].
-    write_seed_tree("gateway_channels", &paths::gateway_channels_dir(), "channel_type.json");
-
     retire_obsolete_seeds();
 }
 
@@ -104,13 +98,13 @@ pub fn ensure_defaults() {
 /// replaced, so they don't linger as stale, enable-able items on upgraded
 /// installs.
 fn retire_obsolete_seeds() {
-    // The `whatsapp` integration pack became a gateway channel type (its
-    // outbound tool is now the native, generic `gateway_send_message`).
+    // The `whatsapp` integration pack became the native, generic
+    // `gateway_send_message` tool.
     retire_dir(paths::integration_packs_dir().join("whatsapp"), "'whatsapp' integration pack");
-    // The direct-Twilio `whatsapp` gateway channel type is disabled for now —
-    // all WhatsApp traffic flows through the `pipestreamr` channel type. Drop
-    // any previously-seeded copy so it stops appearing in the gateway UI.
-    retire_dir(paths::gateway_channels_dir().join("whatsapp"), "'whatsapp' (twilio) gateway channel type");
+    // The channel *type/instance* model was replaced by the simple channels
+    // connection model (channels.json); drop the seeded manifest tree so old
+    // channel types stop lingering on upgraded installs.
+    retire_dir(paths::gateway_channels_dir(), "gateway channel type manifests");
 }
 
 fn retire_dir(dir: PathBuf, label: &str) {
