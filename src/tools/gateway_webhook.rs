@@ -17,16 +17,7 @@
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use crate::gateway_channels::ChannelInstance;
-
 type HmacSha256 = Hmac<Sha256>;
-
-/// The inbound HMAC secret for `channel`: its `WEBHOOK_SECRET` secret. `None`
-/// when unconfigured.
-pub fn channel_webhook_secret(channel: &ChannelInstance) -> Option<String> {
-    crate::key_store::lookup_scoped(Some(&channel.id), "WEBHOOK_SECRET")
-        .filter(|s| !s.is_empty())
-}
 
 // ── Inbound webhook helpers ──────────────────────────────────────────────
 

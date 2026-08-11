@@ -3669,57 +3669,11 @@ async fn handle_pipestreamr_webhook(
 }
 
 /// Resolve the channel an inbound message routes to, by its gateway
-/// `integration_id` (`source_id`). Prefers the channel model; during migration,
-/// if only a legacy channel *instance* matches, mirror it into the channel model
-/// once (best-effort) and use that. `None` when nothing matches.
+/// `integration_id` (`source_id`). The `metalcraft` channel's link is populated
+/// at boot (`migrate_instance_to_channel`) and on every connect/resync. `None`
+/// when nothing matches.
 fn resolve_inbound_channel(source_id: &str) -> Option<crate::channels::Channel> {
-    if let Some(ch) = crate::channels::resolve_by_integration(source_id) {
-        return Some(ch);
-    }
-    let inst = crate::gateway_channels::resolve_by_setting("integration_id", source_id)?;
-    backfill_channel_from_instance(&inst);
     crate::channels::resolve_by_integration(source_id)
-}
-
-/// One-time migration mirror: copy a legacy gateway channel *instance*'s link +
-/// secrets into the channel model so inbound routing/verify/reply run off the
-/// channel. The first-party gateway instance maps to the built-in `metalcraft`
-/// channel; a custom instance maps to a slug derived from its name.
-fn backfill_channel_from_instance(inst: &crate::gateway_channels::ChannelInstance) {
-    let is_managed = crate::gateway_channels::find_type(&inst.type_id)
-        .and_then(|t| t.provisioner)
-        .as_deref()
-        == Some("metalcraft-gateway");
-    let slug = if is_managed {
-        crate::channels::DEFAULT_SLUG.to_string()
-    } else {
-        crate::channels::slugify(&inst.name)
-    };
-    if slug.is_empty() {
-        return;
-    }
-    if let Some(ws) = crate::key_store::lookup_scoped(Some(&inst.id), "WEBHOOK_SECRET") {
-        let _ = crate::channels::set_webhook_secret(&slug, &ws);
-    }
-    // A custom channel also needs its own url + outbound secret to send replies;
-    // seed a channel record from the instance's scoped BASE_URL/API_KEY.
-    if !is_managed && crate::channels::get_channel(&slug).is_none() {
-        if let (Some(base), Some(api)) = (
-            crate::key_store::lookup_scoped(Some(&inst.id), "BASE_URL"),
-            crate::key_store::lookup_scoped(Some(&inst.id), "API_KEY"),
-        ) {
-            let _ = crate::channels::create_channel(&inst.name, &base, &api, Some(&slug));
-        }
-    }
-    let _ = crate::channels::set_link(
-        &slug,
-        crate::channels::Link {
-            integration_id: inst.setting("integration_id").map(str::to_string),
-            persona: inst.setting("persona").map(str::to_string),
-            model: inst.setting("model").map(str::to_string),
-            active_number: inst.setting("from").map(str::to_string),
-        },
-    );
 }
 
 /// Route + run one inbound `message.created`, shared by the unauthenticated

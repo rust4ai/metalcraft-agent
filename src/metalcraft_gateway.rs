@@ -53,10 +53,21 @@ pub fn migrate_instance_to_channel() {
     if crate::channels::get_channel(crate::channels::DEFAULT_SLUG).map(|c| c.connected).unwrap_or(false) {
         return; // already linked
     }
-    let Some(inst) = crate::gateway_channels::load_instances()
-        .into_iter()
-        .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)
-    else {
+    // Read the legacy instance store directly (no dependency on the retiring
+    // gateway_channels module). Its scoped secrets live under the instance id.
+    #[derive(serde::Deserialize)]
+    struct LegacyInstance {
+        id: String,
+        #[serde(default)]
+        type_id: String,
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default)]
+        settings: std::collections::HashMap<String, String>,
+    }
+    let raw = std::fs::read_to_string(crate::paths::gateway_channels_state_file()).unwrap_or_default();
+    let insts: Vec<LegacyInstance> = serde_json::from_str(&raw).unwrap_or_default();
+    let Some(inst) = insts.into_iter().find(|i| i.type_id == CHANNEL_TYPE && i.enabled) else {
         return;
     };
     if let Some(ws) = crate::key_store::lookup_scoped(Some(&inst.id), "WEBHOOK_SECRET") {
@@ -65,13 +76,14 @@ pub fn migrate_instance_to_channel() {
     if let Some(api) = crate::key_store::lookup_scoped(Some(&inst.id), "API_KEY") {
         let _ = crate::channels::set_secret(crate::channels::DEFAULT_SLUG, &api);
     }
+    let get = |k: &str| inst.settings.get(k).map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_string);
     let _ = crate::channels::set_link(
         crate::channels::DEFAULT_SLUG,
         crate::channels::Link {
-            integration_id: inst.setting("integration_id").map(str::to_string),
-            persona: inst.setting("persona").map(str::to_string),
-            model: inst.setting("model").map(str::to_string),
-            active_number: inst.setting("from").map(str::to_string),
+            integration_id: get("integration_id"),
+            persona: get("persona"),
+            model: get("model"),
+            active_number: get("from"),
         },
     );
     log::info!("metalcraft-gateway: migrated legacy channel instance into the metalcraft channel model");
