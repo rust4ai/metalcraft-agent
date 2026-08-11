@@ -377,7 +377,7 @@ pub fn build_router(api_key: String) -> Router {
     });
 
     // Inbound is now delivered by the gateway PUSHING to this pod's signed
-    // `/webhook/pipestreamr` endpoint (route resolved live from k3 — see the gateway's
+    // `/webhook/gateway` endpoint (route resolved live from k3 — see the gateway's
     // PUSH_VIA_K3_ROUTE_PLAN.md), so the pod no longer holds a long-poll by default. The
     // legacy Inbound Pull loop stays available for a dual-transport bake: set
     // `GATEWAY_INBOUND_PULL=1` to re-enable it.
@@ -460,14 +460,9 @@ pub fn build_router(api_key: String) -> Router {
         // ingress host in a browser shows a friendly status page instead of a
         // 401 or a bare JSON blob. No secrets — just "this agent is alive".
         .route("/", get(landing))
-        // Inbound gateway webhooks — unauthenticated like /health; each adapter
-        // verifies provenance its own way (signed requests). PipeStreamr is the
-        // active path; the Twilio route stays mounted but no channel type ships
-        // for it right now.
-        // New neutral path + the legacy alias (dual-served during the gateway/k3
-        // rollout; a later release drops /webhook/pipestreamr).
-        .route("/webhook/gateway", post(handle_pipestreamr_webhook))
-        .route("/webhook/pipestreamr", post(handle_pipestreamr_webhook))
+        // Inbound gateway webhook — unauthenticated like /health; provenance is
+        // verified by the per-channel HMAC signature on the request.
+        .route("/webhook/gateway", post(handle_gateway_webhook))
         .with_state(state)
 }
 
@@ -3379,7 +3374,7 @@ fn allow_unsigned_webhooks() -> bool {
 }
 
 /// Whether to run the legacy Inbound Pull long-poll. Off by default — inbound now arrives
-/// via the gateway's push to `/webhook/pipestreamr`. Set `GATEWAY_INBOUND_PULL=1` to
+/// via the gateway's push to `/webhook/gateway`. Set `GATEWAY_INBOUND_PULL=1` to
 /// re-enable pulling for a dual-transport rollout bake.
 fn gateway_inbound_pull_enabled() -> bool {
     matches!(
@@ -3388,13 +3383,13 @@ fn gateway_inbound_pull_enabled() -> bool {
     )
 }
 
-/// Inbound PipeStreamr webhook (JSON `message.created`). Routes the message to
+/// Inbound gateway webhook (JSON `message.created`). Routes the message to
 /// the enabled channel whose `integration_id` matches the payload `source_id`,
-/// validates the `X-PipeStreamr-Signature` (HMAC-SHA256 over the raw body)
+/// validates the `X-Metalcraft-Signature` (HMAC-SHA256 over the raw body)
 /// against *that channel's* `WEBHOOK_SECRET`, then runs the channel's persona to
-/// reply (via `gateway_send_message` with platform "pipestreamr"). Returns 200
-/// for accepted-but-unroutable cases so PipeStreamr doesn't retry.
-async fn handle_pipestreamr_webhook(
+/// reply (via the channel's send). Returns 200 for accepted-but-unroutable cases
+/// so the gateway doesn't retry.
+async fn handle_gateway_webhook(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
@@ -3407,15 +3402,12 @@ async fn handle_pipestreamr_webhook(
         // Not an inbound message (log/status/outbound echo) — nothing to do.
         return StatusCode::OK;
     };
-    // Accept the new header name, falling back to the legacy one during the
-    // gateway rollout window (a later release drops the fallback).
     let sig = headers
         .get("x-metalcraft-signature")
-        .or_else(|| headers.get("x-pipestreamr-signature"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    route_pipestreamr_inbound(state, inbound, Some((body, sig))).await
+    route_gateway_inbound(state, inbound, Some((body, sig))).await
 }
 
 /// Resolve the channel an inbound message routes to, by its gateway
@@ -3431,21 +3423,21 @@ fn resolve_inbound_channel(source_id: &str) -> Option<crate::channels::Channel> 
 /// `verify = Some((body, sig))` enforces the per-channel HMAC for the webhook path;
 /// `None` skips it because the pull transport already authenticated the pod via its
 /// connection token.
-async fn route_pipestreamr_inbound(
+async fn route_gateway_inbound(
     state: Arc<ApiState>,
     inbound: crate::tools::gateway_webhook::InboundMessage,
     verify: Option<(axum::body::Bytes, String)>,
 ) -> StatusCode {
-    // Route on the PipeStreamr integration UUID (`source_id`) — stable and
+    // Route on the gateway integration UUID (`source_id`) — stable and
     // unique, unlike phone-number matching — against each channel's
     // `integration_id` setting. Resolving the channel first lets us verify the
     // signature against *that channel's* webhook secret (secrets are per-channel
     // now, so there's no single global secret to check against up front).
     let Some(source_id) = inbound.source_id.clone() else {
-        log::warn!("PipeStreamr webhook has no source_id; cannot route — ignoring");
+        log::warn!("gateway webhook has no source_id; cannot route — ignoring");
         crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
             direction: "inbound".into(),
-            platform: "pipestreamr".into(),
+            platform: "text".into(),
             from: Some(inbound.from.clone()),
             from_name: inbound.from_name.clone(),
             body: crate::gateway_activity::truncate_body(&inbound.body),
@@ -3621,7 +3613,7 @@ async fn inbound_pull_loop(state: Arc<ApiState>) {
                             v.get("message_id").and_then(|x| x.as_str()).map(str::to_string);
                         if let Some(payload) = v.get("payload") {
                             if let Some(inbound) = crate::tools::gateway_webhook::parse_inbound(payload) {
-                                let _ = route_pipestreamr_inbound(state.clone(), inbound, None).await;
+                                let _ = route_gateway_inbound(state.clone(), inbound, None).await;
                             }
                         }
                         // ACK regardless of routing outcome: an unroutable message (no

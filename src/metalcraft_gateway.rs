@@ -6,9 +6,9 @@
 //! `POST {gateway}/api/v1/agent/connect` returns the base URL, integration id, webhook
 //! secret, and active number, and registers the agent's inbound webhook — then we
 //! write the channel-scoped secrets (`BASE_URL`, `WEBHOOK_SECRET`) and enable a
-//! `metalcraft-gateway` channel instance. The API key is *derived* from the pod
-//! token at send time, never stored. The message path itself reuses the existing
-//! `pipestreamr` adapter unchanged.
+//! built-in `metalcraft` channel. The API key is the adopted connection token
+//! (or the pod's `METALCRAFT_TOKEN`), resolved at send time by
+//! [`crate::channels`]; outbound and inbound both flow through the channel model.
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};

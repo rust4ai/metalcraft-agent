@@ -1,9 +1,9 @@
 //! Idempotency for inbound gateway messages, keyed by a stable id (the gateway's
 //! `messages.id` UUID, falling back to the carrier SID).
 //!
-//! Both inbound transports — the webhook push (`/webhook/pipestreamr`) and the
+//! Both inbound transports — the webhook push (`/webhook/gateway`) and the
 //! long-poll pull (`GET /inbound/next`) — funnel through one check
-//! ([`crate::workshop_api::route_pipestreamr_inbound`]), so a message delivered on
+//! ([`crate::workshop_api::route_gateway_inbound`]), so a message delivered on
 //! both paths (the gateway's `dual` mode) runs the agent only once. It is also
 //! **persistent** (on the pod's data dir), so a message re-delivered after a pod
 //! restart — e.g. a long-poll pull that wasn't ACKed before the pod rolled — is

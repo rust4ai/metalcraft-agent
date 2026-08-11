@@ -31,7 +31,7 @@ use metalcraft::ToolRegistry;
 /// Where a session's user-facing reply is delivered. The agent always replies
 /// through the channel-agnostic `say_to_user` tool; the *caller* that builds the
 /// runtime supplies this closure to route that text to the right place — the SSE
-/// stream for a workshop chat, or a gateway adapter (PipeStreamr/Twilio) for a
+/// stream for a workshop chat, or a gateway adapter (gateway/Twilio) for a
 /// gateway session. Takes the message text, returns Ok on delivery.
 pub type ReplySink =
     Arc<dyn Fn(String) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;

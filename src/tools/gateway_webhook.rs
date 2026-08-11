@@ -1,7 +1,7 @@
 //! Inbound gateway webhooks.
 //!
 //! The messaging gateway relays inbound messages (WhatsApp/SMS, etc.) to the pod
-//! as JSON `message.created` webhooks on the daemon's `/webhook/pipestreamr`
+//! as JSON `message.created` webhooks on the daemon's `/webhook/gateway`
 //! route. This module parses those payloads ([`parse_inbound`]) and verifies
 //! their HMAC-SHA256 signature ([`validate_signature`]) so we only accept
 //! messages that really came from the gateway.
@@ -78,7 +78,7 @@ pub fn parse_inbound(payload: &serde_json::Value) -> Option<InboundMessage> {
     })
 }
 
-/// Validate the `X-PipeStreamr-Signature` header: hex-encoded HMAC-SHA256 of the
+/// Validate the `X-Metalcraft-Signature` header: hex-encoded HMAC-SHA256 of the
 /// raw request body, keyed by the webhook secret. The body MUST be the exact
 /// bytes received (the gateway signs its serialized payload).
 pub fn validate_signature(secret: &str, body: &[u8], signature_hex: &str) -> bool {

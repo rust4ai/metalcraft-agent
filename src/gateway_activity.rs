@@ -164,7 +164,7 @@ mod tests {
 
         record(GatewayEvent {
             direction: "inbound".into(),
-            platform: "pipestreamr".into(),
+            platform: "text".into(),
             from: Some("+15551230000".into()),
             body: "hi".into(),
             channel_id: Some("chan-1".into()),
@@ -173,7 +173,7 @@ mod tests {
         });
         record(GatewayEvent {
             direction: "inbound".into(),
-            platform: "pipestreamr".into(),
+            platform: "text".into(),
             source_id: Some("missing-int".into()),
             channel_id: None,
             outcome: "no_matching_channel".into(),

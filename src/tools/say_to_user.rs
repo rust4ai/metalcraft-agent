@@ -3,7 +3,7 @@
 //! `say_to_user` is the single way an agent delivers a user-facing reply,
 //! regardless of channel. The session's I/O preset decides where the text goes:
 //! a workshop chat streams it over SSE, a gateway session sends it out through
-//! the bound adapter (PipeStreamr/Twilio). That routing lives in the injected
+//! the bound adapter (gateway/Twilio). That routing lives in the injected
 //! [`ReplySink`] — the tool itself is platform-agnostic and never names a
 //! channel. It is also registered as a *terminal* tool (see
 //! [`crate::runtime`]), so calling it ends the turn.

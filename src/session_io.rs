@@ -7,7 +7,7 @@
 //!
 //! - [`SessionPreset::Workshop`] → streamed to the workshop UI over SSE.
 //! - [`SessionPreset::Gateway`] → sent out through the bound channel adapter
-//!   (PipeStreamr/Twilio) to the original sender.
+//!   (gateway/Twilio) to the original sender.
 //!
 //! The preset is persisted with the chat (see `PersistedChat`) so a gateway
 //! conversation rehydrates with its routing intact after a restart.
