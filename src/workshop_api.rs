@@ -288,6 +288,7 @@ async fn auth_middleware(
         list_gateway_types, list_gateway_channels, post_create_gateway_channel,
         put_gateway_channel, delete_gateway_channel, put_gateway_channel_enabled,
         list_gateway_channel_events, list_gateway_activity,
+        list_channels, create_channel, update_channel, delete_channel, list_channel_events,
         gateway_metalcraft_status, gateway_metalcraft_register,
         gateway_metalcraft_connect, gateway_metalcraft_disconnect,
     ),
@@ -304,6 +305,7 @@ async fn auth_middleware(
         ChatSummary, ChatDetail, ChatMessageWire, CreateChatRequest, ChatTurnRequest, ChatEvent,
         IntegrationPackSummary, IntegrationPackDetail, SetEnabledRequest, InstallPackRequest, UninstallPackResult,
         MgRegisterRequest, MgConnectRequest, CreateGatewayChannelRequest, UpdateGatewayChannelRequest,
+        crate::channels::Channel, CreateChannelRequest, UpdateChannelRequest,
         crate::persona::Persona, crate::persona::PersonaSummary,
         crate::skill::Skill, crate::skill::SkillSummary,
         crate::gateway_channels::ChannelType, crate::gateway_channels::SettingField,
@@ -443,6 +445,11 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/gateway/channels/{id}/enabled", put(put_gateway_channel_enabled))
         .route("/api/v1/gateway/channels/{id}/events", get(list_gateway_channel_events))
         .route("/api/v1/gateway/activity", get(list_gateway_activity))
+        // Channels — the simple {slug, name, url, secret} connection model. The
+        // built-in `metalcraft` channel is always present; these manage customs.
+        .route("/api/v1/channels", get(list_channels).post(create_channel))
+        .route("/api/v1/channels/{slug}", put(update_channel).delete(delete_channel))
+        .route("/api/v1/channels/{slug}/events", get(list_channel_events))
         // Metalcraft Gateway — zero-copy connect (status / inline register / connect).
         .route("/api/v1/gateway/metalcraft/status", get(gateway_metalcraft_status))
         .route("/api/v1/gateway/metalcraft/register", post(gateway_metalcraft_register))
@@ -3239,6 +3246,102 @@ async fn list_gateway_channel_events(
 )]
 async fn list_gateway_activity() -> Json<Vec<crate::gateway_activity::GatewayEvent>> {
     Json(crate::gateway_activity::list(None, 300))
+}
+
+// ── Channels: the simple {slug, name, url, secret} connection model ───────────
+
+/// List all channels — the built-in `metalcraft` default first, then custom
+/// channels. Secrets are never included.
+#[utoipa::path(
+    get,
+    path = "/api/v1/channels",
+    tag = "gateway",
+    responses((status = 200, body = Vec<crate::channels::Channel>)),
+)]
+async fn list_channels() -> Json<Vec<crate::channels::Channel>> {
+    Json(crate::channels::list_channels())
+}
+
+/// Recent activity for a single channel (by slug), newest first.
+#[utoipa::path(
+    get,
+    path = "/api/v1/channels/{slug}/events",
+    tag = "gateway",
+    params(("slug" = String, Path, description = "Channel slug")),
+    responses((status = 200, body = Vec<crate::gateway_activity::GatewayEvent>)),
+)]
+async fn list_channel_events(
+    Path(slug): Path<String>,
+) -> Json<Vec<crate::gateway_activity::GatewayEvent>> {
+    Json(crate::gateway_activity::list(Some(&slug), 200))
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct CreateChannelRequest {
+    name: String,
+    url: String,
+    secret: String,
+    #[serde(default)]
+    slug: Option<String>,
+}
+
+/// Add a custom channel (its own gateway url + secret). The `metalcraft` slug is
+/// reserved for the built-in channel.
+#[utoipa::path(
+    post,
+    path = "/api/v1/channels",
+    tag = "gateway",
+    request_body = CreateChannelRequest,
+    responses((status = 201, body = crate::channels::Channel), (status = 400, body = ErrorResponse)),
+)]
+async fn create_channel(Json(req): Json<CreateChannelRequest>) -> Response {
+    match crate::channels::create_channel(&req.name, &req.url, &req.secret, req.slug.as_deref()) {
+        Ok(ch) => (StatusCode::CREATED, Json(ch)).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct UpdateChannelRequest {
+    name: String,
+    url: String,
+    #[serde(default = "crate::channels::default_enabled")]
+    enabled: bool,
+    /// New secret; omit or leave empty to keep the existing one.
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+/// Update a custom channel. The built-in `metalcraft` channel can't be edited.
+#[utoipa::path(
+    put,
+    path = "/api/v1/channels/{slug}",
+    tag = "gateway",
+    params(("slug" = String, Path, description = "Channel slug")),
+    request_body = UpdateChannelRequest,
+    responses((status = 200, body = crate::channels::Channel), (status = 400, body = ErrorResponse)),
+)]
+async fn update_channel(Path(slug): Path<String>, Json(req): Json<UpdateChannelRequest>) -> Response {
+    match crate::channels::update_channel(&slug, &req.name, &req.url, req.enabled, req.secret.as_deref()) {
+        Ok(ch) => Json(ch).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// Delete a custom channel and its secret. The built-in `metalcraft` channel
+/// can't be deleted.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/channels/{slug}",
+    tag = "gateway",
+    params(("slug" = String, Path, description = "Channel slug")),
+    responses((status = 200, description = "Deleted"), (status = 400, body = ErrorResponse)),
+)]
+async fn delete_channel(Path(slug): Path<String>) -> Response {
+    match crate::channels::delete_channel(&slug) {
+        Ok(removed) => Json(serde_json::json!({ "deleted": removed })).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
 }
 
 // ── Metalcraft Gateway: zero-copy connect ────────────────────────────────────

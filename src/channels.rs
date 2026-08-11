@@ -34,7 +34,7 @@ const SEND_TIMEOUT_SECS: u64 = 30;
 /// A channel as surfaced to callers/UI: a named connection. `managed` marks the
 /// built-in `metalcraft` channel (secret is the pod token; not user-editable).
 /// The secret value itself is never included here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Channel {
     pub slug: String,
     pub name: String,
@@ -58,6 +58,12 @@ struct StoredChannel {
 }
 
 fn default_true() -> bool {
+    true
+}
+
+/// serde default for an update request's `enabled` flag (keeps a channel enabled
+/// when the field is omitted).
+pub fn default_enabled() -> bool {
     true
 }
 
