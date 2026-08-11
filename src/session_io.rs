@@ -23,9 +23,10 @@ pub enum SessionPreset {
     /// A gateway conversation bound to one sender on one channel instance.
     /// Replies are sent back out through the channel's adapter.
     Gateway {
-        /// The `ChannelInstance` id this conversation belongs to.
-        channel_instance_id: String,
-        /// The native send adapter (e.g. `"pipestreamr"`, `"twilio"`).
+        /// The channel this conversation belongs to (channels-model slug; a
+        /// synthetic id for the dormant twilio path).
+        channel_slug: String,
+        /// The reply route: `"gateway"` (channels model) or `"twilio"`.
         adapter: String,
         /// The counterparty — where replies go (the inbound message's `from`).
         recipient: String,
@@ -72,8 +73,8 @@ mod tests {
     #[test]
     fn gateway_preset_round_trips() {
         let preset = SessionPreset::Gateway {
-            channel_instance_id: "abc".into(),
-            adapter: "pipestreamr".into(),
+            channel_slug: "metalcraft".into(),
+            adapter: "gateway".into(),
             recipient: "+15550001234".into(),
             from: Some("integration-uuid".into()),
         };
@@ -82,7 +83,7 @@ mod tests {
         let back: SessionPreset = serde_json::from_str(&json).unwrap();
         match back {
             SessionPreset::Gateway { adapter, recipient, .. } => {
-                assert_eq!(adapter, "pipestreamr");
+                assert_eq!(adapter, "gateway");
                 assert_eq!(recipient, "+15550001234");
             }
             _ => panic!("expected gateway preset"),

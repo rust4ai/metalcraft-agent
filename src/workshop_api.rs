@@ -3621,16 +3621,14 @@ async fn handle_twilio_webhook(
         ..Default::default()
     });
 
-    let adapter = crate::gateway_channels::find_type(&channel.type_id)
-        .map(|t| t.adapter)
-        .unwrap_or_else(|| channel.type_id.clone());
-
     dispatch_inbound(
         state,
         NormalizedInbound {
-            channel_instance_id: channel.id.clone(),
+            // Twilio inbound (dormant, direct-BYO) — synthetic slug; the reply
+            // sink routes it via the twilio adapter, not the channel model.
+            channel_slug: format!("twilio-{}", channel.id),
             channel_name: channel.name.clone(),
-            adapter,
+            adapter: "twilio".into(),
             persona_slug,
             model_name,
             sender: inbound.from.clone(),
@@ -3670,7 +3668,61 @@ async fn handle_pipestreamr_webhook(
     route_pipestreamr_inbound(state, inbound, Some((body, sig))).await
 }
 
-/// Route + run one inbound PipeStreamr `message.created`, shared by the unauthenticated
+/// Resolve the channel an inbound message routes to, by its gateway
+/// `integration_id` (`source_id`). Prefers the channel model; during migration,
+/// if only a legacy channel *instance* matches, mirror it into the channel model
+/// once (best-effort) and use that. `None` when nothing matches.
+fn resolve_inbound_channel(source_id: &str) -> Option<crate::channels::Channel> {
+    if let Some(ch) = crate::channels::resolve_by_integration(source_id) {
+        return Some(ch);
+    }
+    let inst = crate::gateway_channels::resolve_by_setting("integration_id", source_id)?;
+    backfill_channel_from_instance(&inst);
+    crate::channels::resolve_by_integration(source_id)
+}
+
+/// One-time migration mirror: copy a legacy gateway channel *instance*'s link +
+/// secrets into the channel model so inbound routing/verify/reply run off the
+/// channel. The first-party gateway instance maps to the built-in `metalcraft`
+/// channel; a custom instance maps to a slug derived from its name.
+fn backfill_channel_from_instance(inst: &crate::gateway_channels::ChannelInstance) {
+    let is_managed = crate::gateway_channels::find_type(&inst.type_id)
+        .and_then(|t| t.provisioner)
+        .as_deref()
+        == Some("metalcraft-gateway");
+    let slug = if is_managed {
+        crate::channels::DEFAULT_SLUG.to_string()
+    } else {
+        crate::channels::slugify(&inst.name)
+    };
+    if slug.is_empty() {
+        return;
+    }
+    if let Some(ws) = crate::key_store::lookup_scoped(Some(&inst.id), "WEBHOOK_SECRET") {
+        let _ = crate::channels::set_webhook_secret(&slug, &ws);
+    }
+    // A custom channel also needs its own url + outbound secret to send replies;
+    // seed a channel record from the instance's scoped BASE_URL/API_KEY.
+    if !is_managed && crate::channels::get_channel(&slug).is_none() {
+        if let (Some(base), Some(api)) = (
+            crate::key_store::lookup_scoped(Some(&inst.id), "BASE_URL"),
+            crate::key_store::lookup_scoped(Some(&inst.id), "API_KEY"),
+        ) {
+            let _ = crate::channels::create_channel(&inst.name, &base, &api, Some(&slug));
+        }
+    }
+    let _ = crate::channels::set_link(
+        &slug,
+        crate::channels::Link {
+            integration_id: inst.setting("integration_id").map(str::to_string),
+            persona: inst.setting("persona").map(str::to_string),
+            model: inst.setting("model").map(str::to_string),
+            active_number: inst.setting("from").map(str::to_string),
+        },
+    );
+}
+
+/// Route + run one inbound `message.created`, shared by the unauthenticated
 /// webhook (push) and the authenticated long-poll (pull, see [`inbound_pull_loop`]).
 /// `verify = Some((body, sig))` enforces the per-channel HMAC for the webhook path;
 /// `None` skips it because the pull transport already authenticated the pod via its
@@ -3699,19 +3751,17 @@ async fn route_pipestreamr_inbound(
         });
         return StatusCode::OK;
     };
-    let Some(channel) = crate::gateway_channels::resolve_by_setting("integration_id", &source_id) else {
-        log::warn!("PipeStreamr webhook for integration '{source_id}' matched no enabled channel — ignoring");
+    let Some(channel) = resolve_inbound_channel(&source_id) else {
+        log::warn!("gateway webhook for integration '{source_id}' matched no channel — ignoring");
         crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
             direction: "inbound".into(),
-            platform: "pipestreamr".into(),
+            platform: "text".into(),
             from: Some(inbound.from.clone()),
             from_name: inbound.from_name.clone(),
             body: crate::gateway_activity::truncate_body(&inbound.body),
             source_id: Some(source_id.clone()),
             outcome: "no_matching_channel".into(),
-            detail: Some(format!(
-                "no enabled channel has integration_id = {source_id}"
-            )),
+            detail: Some(format!("no channel has integration_id = {source_id}")),
             ..Default::default()
         });
         return StatusCode::OK;
@@ -3721,18 +3771,18 @@ async fn route_pipestreamr_inbound(
     // the webhook (push) path. The pull long-poll passes `verify = None` because the pod
     // authenticated the connection itself, so there is no HMAC to check.
     if let Some((body, signature)) = &verify {
-        match crate::tools::gateway_webhook::channel_webhook_secret(&channel) {
+        match crate::channels::webhook_secret(&channel.slug) {
             Some(secret) => {
                 if !crate::tools::gateway_webhook::validate_signature(&secret, body, signature) {
-                    log::warn!("Rejected PipeStreamr webhook: invalid or missing X-PipeStreamr-Signature");
+                    log::warn!("Rejected gateway webhook: invalid or missing signature");
                     crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
                         direction: "inbound".into(),
-                        platform: "pipestreamr".into(),
+                        platform: "text".into(),
                         source_id: Some(source_id.clone()),
-                        channel_id: Some(channel.id.clone()),
+                        channel_id: Some(channel.slug.clone()),
                         channel_name: Some(channel.name.clone()),
                         outcome: "signature_rejected".into(),
-                        detail: Some("invalid or missing X-PipeStreamr-Signature".into()),
+                        detail: Some("invalid or missing signature".into()),
                         ..Default::default()
                     });
                     // A rotated gateway secret is the usual cause — self-heal (rate-limited).
@@ -3743,14 +3793,14 @@ async fn route_pipestreamr_inbound(
             None => {
                 if !allow_unsigned_webhooks() {
                     log::warn!(
-                        "Rejected PipeStreamr webhook: no WEBHOOK_SECRET configured for channel '{}'. \
+                        "Rejected gateway webhook: no WEBHOOK_SECRET configured for channel '{}'. \
                          Reconnect the gateway (or set GATEWAY_ALLOW_UNSIGNED=1 for local testing only).",
                         channel.name
                     );
                     return StatusCode::FORBIDDEN;
                 }
                 log::warn!(
-                    "Accepting UNSIGNED PipeStreamr webhook because GATEWAY_ALLOW_UNSIGNED is set — \
+                    "Accepting UNSIGNED gateway webhook because GATEWAY_ALLOW_UNSIGNED is set — \
                      do not use this in production."
                 );
             }
@@ -3771,12 +3821,12 @@ async fn route_pipestreamr_inbound(
         log::info!("duplicate inbound (id={}); skipping — already processed", dedup_key.unwrap_or("?"));
         crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
             direction: "inbound".into(),
-            platform: "pipestreamr".into(),
+            platform: "text".into(),
             from: Some(inbound.from.clone()),
             from_name: inbound.from_name.clone(),
             body: crate::gateway_activity::truncate_body(&inbound.body),
             source_id: Some(source_id.clone()),
-            channel_id: Some(channel.id.clone()),
+            channel_id: Some(channel.slug.clone()),
             channel_name: Some(channel.name.clone()),
             outcome: "duplicate".into(),
             detail: Some("already processed (dedup)".into()),
@@ -3788,39 +3838,35 @@ async fn route_pipestreamr_inbound(
     // The orchestrator delegates to specialist personas as needed, so it's the
     // sensible default when a channel doesn't pin a specific persona.
     let persona_slug = channel
-        .setting("persona")
+        .persona
+        .clone()
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
         .unwrap_or_else(|| "orchestrator-agent".to_string());
     let model_name = channel
-        .setting("model")
-        .map(str::to_string)
+        .model
+        .clone()
         .unwrap_or_else(crate::runtime::configured_default_model);
 
     crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
         direction: "inbound".into(),
-        platform: "pipestreamr".into(),
+        platform: "text".into(),
         from: Some(inbound.from.clone()),
         from_name: inbound.from_name.clone(),
         body: crate::gateway_activity::truncate_body(&inbound.body),
         source_id: Some(source_id.clone()),
-        channel_id: Some(channel.id.clone()),
+        channel_id: Some(channel.slug.clone()),
         channel_name: Some(channel.name.clone()),
         outcome: "routed".into(),
         detail: Some(format!("persona {persona_slug}")),
         ..Default::default()
     });
 
-    let adapter = crate::gateway_channels::find_type(&channel.type_id)
-        .map(|t| t.adapter)
-        .unwrap_or_else(|| channel.type_id.clone());
-
     dispatch_inbound(
         state,
         NormalizedInbound {
-            channel_instance_id: channel.id.clone(),
+            channel_slug: channel.slug.clone(),
             channel_name: channel.name.clone(),
-            adapter,
+            adapter: "gateway".into(),
             persona_slug,
             model_name,
             sender: inbound.from.clone(),
@@ -3828,7 +3874,7 @@ async fn route_pipestreamr_inbound(
             // Reply back through the same integration that received the message.
             from: Some(source_id.clone()),
             body: inbound.body.clone(),
-            session_ttl_secs: channel_session_ttl_secs(&channel),
+            session_ttl_secs: None,
         },
     )
     .await
@@ -3927,17 +3973,19 @@ async fn ack_inbound(client: &reqwest::Client, base: &str, bearer: &str, message
 /// message. The agent loop downstream is identical for every channel; only the
 /// reply sink (built from these fields) differs.
 struct NormalizedInbound {
-    channel_instance_id: String,
+    /// Channel the reply is sent through. `"gateway"` adapter → a channels-model
+    /// slug (e.g. `"metalcraft"`); `"twilio"` adapter → a synthetic id.
+    channel_slug: String,
     channel_name: String,
-    /// Native send adapter, e.g. `"pipestreamr"` / `"twilio"`.
+    /// Reply route: `"gateway"` (via `channels::send`) or `"twilio"`.
     adapter: String,
     persona_slug: String,
     model_name: String,
     /// The sender — the counterparty replies are sent back to.
     sender: String,
     sender_name: Option<String>,
-    /// Outbound sender identity (integration id for PipeStreamr, our number for
-    /// Twilio). Passed to the adapter's `send`.
+    /// Outbound sender identity (integration id for the gateway, our number for
+    /// Twilio). Passed to the sender.
     from: Option<String>,
     body: String,
     /// Idle window (seconds) after which a dormant conversation restarts fresh,
@@ -3950,7 +3998,7 @@ struct NormalizedInbound {
 /// channel instance, stable across restarts (the persisted file is named by id,
 /// so `load_persisted_chats` rehydrates the same conversation). Filename- and
 /// URL-safe: phone numbers reduce to digits; other ids keep ascii alphanumerics.
-fn gateway_chat_id(channel_instance_id: &str, sender: &str) -> String {
+fn gateway_chat_id(channel_slug: &str, sender: &str) -> String {
     let digits = crate::gateway_channels::normalize_number(sender);
     let suffix = if digits.is_empty() {
         let s: String = sender.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
@@ -3958,7 +4006,7 @@ fn gateway_chat_id(channel_instance_id: &str, sender: &str) -> String {
     } else {
         digits
     };
-    format!("gw-{channel_instance_id}-{suffix}")
+    format!("gw-{channel_slug}-{suffix}")
 }
 
 /// Default idle window before a gateway conversation starts fresh, used when a
@@ -4006,30 +4054,25 @@ fn gateway_reply_sink(
     adapter: String,
     recipient: String,
     from: Option<String>,
-    channel_id: String,
+    channel_slug: String,
     channel_name: String,
 ) -> crate::tools::ReplySink {
     Arc::new(move |content: String| {
         let adapter = adapter.clone();
         let recipient = recipient.clone();
         let from = from.clone();
-        let channel_id = channel_id.clone();
+        let channel_slug = channel_slug.clone();
         let channel_name = channel_name.clone();
         Box::pin(async move {
             let result = match adapter.as_str() {
-                // Reply back out through the same gateway the message arrived on,
-                // via the unified channel sender (no adapter-specific send path).
-                "pipestreamr" => match crate::gateway_channels::get_instance(&channel_id) {
-                    Some(channel) => match crate::channels::resolve_instance(&channel) {
-                        Ok(ch) => crate::channels::send(&ch, &recipient, &content, None, from.as_deref()).await,
-                        Err(e) => Err(e),
-                    },
-                    None => Err(format!("channel '{channel_id}' no longer exists")),
-                },
+                // Reply back out through the channel the message arrived on.
                 "twilio" => {
                     crate::tools::twilio::send_whatsapp(&recipient, &content, from.as_deref()).await
                 }
-                other => Err(format!("no send adapter for '{other}'")),
+                _ => match crate::channels::resolve_channel(Some(&channel_slug)) {
+                    Ok(ch) => crate::channels::send(&ch, &recipient, &content, None, from.as_deref()).await,
+                    Err(e) => Err(e),
+                },
             };
             let (outcome, detail) = match &result {
                 Ok(_) => ("sent", None),
@@ -4037,12 +4080,12 @@ fn gateway_reply_sink(
             };
             crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
                 direction: "outbound".into(),
-                platform: adapter.clone(),
+                platform: "text".into(),
                 from: from.clone(),
                 to: Some(recipient.clone()),
                 body: crate::gateway_activity::truncate_body(&content),
                 source_id: from.clone(),
-                channel_id: Some(channel_id.clone()),
+                channel_id: Some(channel_slug.clone()),
                 channel_name: Some(channel_name.clone()),
                 outcome: outcome.into(),
                 detail,
@@ -4090,7 +4133,7 @@ async fn get_or_create_gateway_session(
         model_name: n.model_name.clone(),
         cwd: state.cwd.clone(),
         preset: SessionPreset::Gateway {
-            channel_instance_id: n.channel_instance_id.clone(),
+            channel_slug: n.channel_slug.clone(),
             adapter: n.adapter.clone(),
             recipient: n.sender.clone(),
             from: n.from.clone(),
@@ -4256,7 +4299,7 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
         }
     };
 
-    let chat_id = gateway_chat_id(&n.channel_instance_id, &n.sender);
+    let chat_id = gateway_chat_id(&n.channel_slug, &n.sender);
     let session = get_or_create_gateway_session(&state, &n, &chat_id).await;
 
     // Claim the turn. If one is already running for this sender, enqueue the
@@ -4268,11 +4311,11 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
             log::info!("Inbound from {} queued — chat {chat_id} is mid-turn", n.sender);
             crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
                 direction: "inbound".into(),
-                platform: n.adapter.clone(),
+                platform: "text".into(),
                 from: Some(n.sender.clone()),
                 from_name: n.sender_name.clone(),
                 body: crate::gateway_activity::truncate_body(&n.body),
-                channel_id: Some(n.channel_instance_id.clone()),
+                channel_id: Some(n.channel_slug.clone()),
                 channel_name: Some(n.channel_name.clone()),
                 outcome: "queued".into(),
                 detail: Some("a turn is already in flight for this sender".into()),
@@ -4321,7 +4364,7 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
         n.adapter.clone(),
         n.sender.clone(),
         n.from.clone(),
-        n.channel_instance_id.clone(),
+        n.channel_slug.clone(),
         n.channel_name.clone(),
     );
     tokio::spawn(async move {
