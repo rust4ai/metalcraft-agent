@@ -14,8 +14,8 @@ use metalcraft_flows::{
     evaluate,
     next_by_handle,
     nodes::{
-        ApprovalData, BranchData, BranchOutput, ConditionalData, EntryData, HttpData, PromptData,
-        SetVariableData, SubAgentData, ToolData, WaitData,
+        ApprovalData, BranchData, BranchOutput, ConditionalData, EndData, EntryData, HttpData,
+        PromptData, SetVariableData, SubAgentData, ToolData, WaitData,
     },
     resolve_template, BRANCH_ERROR_HANDLE, CoreNodeType, FlowNode, FlowNodeType, Operator,
     SavedFlow, Variables,
@@ -253,7 +253,7 @@ impl<'a> FlowExecutor<'a> {
 
             match route {
                 Ok(Route::End(status)) => {
-                    self.record_step(&current, &node_type, "completed".into(), None);
+                    self.record_step(&current, &node_type, status.clone(), None);
                     self.mark_terminal(&status);
                     return Ok(self.into_summary(status));
                 }
@@ -263,9 +263,19 @@ impl<'a> FlowExecutor<'a> {
                         Some(h) => format!("routed:{h}"),
                         None => "advanced".into(),
                     };
+                    // On an error route, surface the error text (stashed in
+                    // `_last` by the failing node) as the step detail so the
+                    // failure is diagnosable from the flow_step alone — even
+                    // when an `error` edge exists and the run continues to a
+                    // handler node rather than aborting.
+                    let detail = if handle.as_deref() == Some("error") {
+                        self.variables.get("_last").and_then(|v| v.as_str()).map(str::to_string)
+                    } else {
+                        None
+                    };
                     match next {
                         Some(n) => {
-                            self.record_step(&current, &node_type, outcome, None);
+                            self.record_step(&current, &node_type, outcome, detail);
                             current = n;
                         }
                         None => {
@@ -274,16 +284,11 @@ impl<'a> FlowExecutor<'a> {
                             // the failure is unhandled — fail the run loudly
                             // rather than silently reporting success.
                             if handle.as_deref() == Some("error") {
-                                let detail = self
-                                    .variables
-                                    .get("_last")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string);
                                 self.record_step(&current, &node_type, "failed".into(), detail);
                                 self.mark_terminal("failed");
                                 return Ok(self.into_summary("failed".into()));
                             }
-                            self.record_step(&current, &node_type, outcome, None);
+                            self.record_step(&current, &node_type, outcome, detail);
                             self.mark_terminal("completed");
                             return Ok(self.into_summary("completed".into()));
                         }
@@ -402,7 +407,18 @@ impl<'a> FlowExecutor<'a> {
     async fn run_node(&mut self, node: &FlowNode) -> Result<Route, String> {
         match &node.node_type {
             FlowNodeType::Core(CoreNodeType::Entry) => Ok(Route::Handle(None)),
-            FlowNodeType::Core(CoreNodeType::End) => Ok(Route::End("completed".into())),
+            FlowNodeType::Core(CoreNodeType::End) => {
+                // The terminal status is the end node's declared `status` label
+                // (e.g. "sent"/"failed"), defaulting to "completed". Honoring it
+                // is what lets a run that routes to a "failed" end node actually
+                // report "failed" instead of a blanket "completed". A malformed
+                // `data` falls back to the default rather than aborting the run.
+                let status = parse_data::<EndData>(node)
+                    .ok()
+                    .and_then(|d| d.status)
+                    .unwrap_or_else(|| "completed".into());
+                Ok(Route::End(status))
+            }
             FlowNodeType::Core(CoreNodeType::SetVariable) => self.run_set_variable(node),
             FlowNodeType::Core(CoreNodeType::Conditional) => self.run_conditional(node),
             FlowNodeType::Core(CoreNodeType::Prompt) => self.run_prompt(node).await,
@@ -961,7 +977,7 @@ pub async fn run_flow_v2(
     context: &AgentRuntimeContext,
     flow: SavedFlow,
     cwd: &str,
-    persona_slug: &str,
+    persona_override: Option<&str>,
     model_name: &str,
     args: &Value,
 ) -> Result<FlowRunSummary, String> {
@@ -973,15 +989,28 @@ pub async fn run_flow_v2(
         ));
     }
 
+    // A v2 flow owns its persona: the entry node's `data.persona` IS the flow's
+    // persona. `persona_override` is only a fallback for a flow that declares
+    // none, and "coding-agent" is the last resort. Resolve it here — the SAME
+    // precedence FlowExecutor::new applies — so the session is labeled with the
+    // persona the flow actually runs as, not whatever a caller/UI passed. (A
+    // run-request persona used to leak in as the label, so a morning-brief run
+    // showed "coding-agent" even though every prompt node ran as morning-briefer.)
+    let effective_persona = entry_node(&flow)
+        .ok()
+        .and_then(|e| e.data.get("persona").and_then(|v| v.as_str()).map(str::to_string))
+        .or_else(|| persona_override.map(str::to_string))
+        .unwrap_or_else(crate::runtime::configured_default_persona);
+
     // One flow-tagged session so the run shows up in the Sessions list; the
     // executor's prompt/branch runners log their turns into it.
     let logger = match DiagnosticsLogger::new() {
         Ok(l) => {
-            if let Ok(persona) = Persona::load(persona_slug, &context.personas_dir) {
+            if let Ok(persona) = Persona::load(&effective_persona, &context.personas_dir) {
                 let system_prompt = persona.build_system_prompt(&context.skills_dir, cwd);
                 l.log_session_info(
                     &persona.name,
-                    persona_slug,
+                    &effective_persona,
                     model_name,
                     cwd,
                     &system_prompt,
@@ -999,7 +1028,7 @@ pub async fn run_flow_v2(
         }
     };
 
-    let exec = FlowExecutor::new(context, flow, cwd, persona_slug, model_name, args, logger)?;
+    let exec = FlowExecutor::new(context, flow, cwd, &effective_persona, model_name, args, logger)?;
     exec.run().await
 }
 
@@ -1441,10 +1470,12 @@ mod tests {
             ],
         );
         let summary = run_pure(flow, json!({})).await;
-        assert_eq!(summary.status, "completed");
-        // 18 is not > 50, so it must route cold.
+        // 18 is not > 50, so it must route cold — and the run's terminal status
+        // reflects the end node's declared label rather than a blanket "completed".
+        assert_eq!(summary.status, "cold");
         let last = summary.steps.last().unwrap();
         assert_eq!(last.node_id, "cold");
+        assert_eq!(last.outcome, "cold");
         assert_eq!(summary.variables["temp"], json!(18));
     }
 
@@ -1524,10 +1555,21 @@ mod tests {
         );
         let summary = run_pure(flow, json!({})).await;
         assert_eq!(summary.steps.last().unwrap().node_id, "err");
+        // The terminal status reflects the "err" end node's label, not "completed".
+        assert_eq!(summary.status, "err");
         assert!(
             summary.variables["_last"].as_str().unwrap_or("").contains("scheme"),
             "_last = {}",
             summary.variables["_last"]
+        );
+        // The failing node's step carries the error text as `detail`, so the
+        // failure is diagnosable from the flow_step alone.
+        let errored = summary.steps.iter().find(|s| s.node_id == "call").unwrap();
+        assert_eq!(errored.outcome, "routed:error");
+        assert!(
+            errored.detail.as_deref().unwrap_or("").contains("scheme"),
+            "detail = {:?}",
+            errored.detail
         );
     }
 
