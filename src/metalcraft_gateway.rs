@@ -86,6 +86,19 @@ pub fn migrate_instance_to_channel() {
             active_number: get("from"),
         },
     );
+
+    // Clean up the migrated legacy instance so nothing stale lingers (e.g. the
+    // old instance-UUID-scoped secrets showing as unnamed Keys entries): drop its
+    // scoped secrets and remove the now-dead instance store. Best-effort.
+    let kpath = crate::paths::keys_file();
+    let mut kstore = crate::key_store::KeyStore::load(&kpath);
+    if kstore.delete_channel(&inst.id) {
+        if let Err(e) = kstore.save(&kpath) {
+            log::warn!("migrate: mirrored channel but failed to prune legacy instance secrets: {e}");
+        }
+    }
+    let _ = std::fs::remove_file(crate::paths::gateway_channels_state_file());
+
     log::info!("metalcraft-gateway: migrated legacy channel instance into the metalcraft channel model");
 }
 
