@@ -34,7 +34,7 @@ pub struct GatewayEvent {
     pub ts: String,
     /// `"inbound"` or `"outbound"`.
     pub direction: String,
-    /// Channel type / platform, e.g. `"pipestreamr"` or `"twilio"`.
+    /// Delivery kind, e.g. `"apns"`, `"whatsapp"`, or `"text"`.
     pub platform: String,
     /// Sender identifier (phone number for WhatsApp).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,7 +48,7 @@ pub struct GatewayEvent {
     /// Message body (truncated to [`MAX_BODY_CHARS`]).
     #[serde(default)]
     pub body: String,
-    /// Upstream integration UUID (PipeStreamr `source_id`), when known.
+    /// Upstream gateway integration UUID (`source_id`), when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
     /// The matched gateway channel's id, or `None` if unrouted.
