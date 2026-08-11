@@ -29,6 +29,7 @@ use crate::paths;
 pub const DEFAULT_SLUG: &str = "metalcraft";
 const DEFAULT_GATEWAY_URL: &str = "https://gateway.metalcraftai.com";
 const SECRET_KEY: &str = "SECRET";
+const WEBHOOK_SECRET_KEY: &str = "WEBHOOK_SECRET";
 const SEND_TIMEOUT_SECS: u64 = 30;
 
 /// A channel as surfaced to callers/UI: a named connection. `managed` marks the
@@ -44,17 +45,49 @@ pub struct Channel {
     /// True only for the built-in `metalcraft` channel.
     #[serde(default)]
     pub managed: bool,
+    // ── Link fields — set when the channel is connected to a gateway
+    // integration (used for inbound routing + replies). Absent until connected.
+    /// The gateway integration UUID this channel is bound to. Inbound messages
+    /// carrying this `source_id` route here; also the send-time sender selector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_id: Option<String>,
+    /// Persona that answers inbound on this channel (default: orchestrator).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// Model override for inbound runs on this channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The gateway number bound to this channel, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_number: Option<String>,
+    /// Whether the channel has completed a gateway connect (link fields present).
+    #[serde(default)]
+    pub connected: bool,
 }
 
-/// On-disk record for a *custom* channel (the managed `metalcraft` channel is
-/// synthesized, never stored). Secrets are kept out of this file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// On-disk record. Custom channels store the full record; the managed
+/// `metalcraft` channel is synthesized but may still have a stored entry that
+/// carries only its *link* fields (written on connect). Secrets are kept out of
+/// this file (scoped key store).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct StoredChannel {
     slug: String,
+    #[serde(default)]
     name: String,
+    #[serde(default)]
     url: String,
     #[serde(default = "default_true")]
     enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    integration_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    persona: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_number: Option<String>,
+    #[serde(default)]
+    connected: bool,
 }
 
 fn default_true() -> bool {
@@ -87,7 +120,8 @@ fn metalcraft_url() -> String {
         .unwrap_or_else(|| DEFAULT_GATEWAY_URL.to_string())
 }
 
-/// The synthesized `metalcraft` channel record (always present).
+/// The synthesized `metalcraft` channel record (always present), before any
+/// stored link fields are overlaid.
 fn metalcraft_channel() -> Channel {
     Channel {
         slug: DEFAULT_SLUG.to_string(),
@@ -95,6 +129,11 @@ fn metalcraft_channel() -> Channel {
         url: metalcraft_url(),
         enabled: true,
         managed: true,
+        integration_id: None,
+        persona: None,
+        model: None,
+        active_number: None,
+        connected: false,
     }
 }
 
@@ -128,18 +167,114 @@ fn save_stored(channels: &[StoredChannel]) -> std::io::Result<()> {
 
 // ── Listing / lookup ─────────────────────────────────────────────────────
 
-/// All channels: the managed `metalcraft` default first, then custom channels in
-/// stored order.
+/// All channels: the managed `metalcraft` default first (with any stored link
+/// fields overlaid), then custom channels in stored order.
 pub fn list_channels() -> Vec<Channel> {
-    let mut out = vec![metalcraft_channel()];
-    out.extend(load_stored().into_iter().map(|s| Channel {
+    let stored = load_stored();
+    let mut mc = metalcraft_channel();
+    if let Some(s) = stored.iter().find(|s| s.slug == DEFAULT_SLUG) {
+        mc.integration_id = s.integration_id.clone();
+        mc.persona = s.persona.clone();
+        mc.model = s.model.clone();
+        mc.active_number = s.active_number.clone();
+        mc.connected = s.connected;
+    }
+    let mut out = vec![mc];
+    out.extend(stored.into_iter().filter(|s| s.slug != DEFAULT_SLUG).map(|s| Channel {
         slug: s.slug,
         name: s.name,
         url: s.url,
         enabled: s.enabled,
         managed: false,
+        integration_id: s.integration_id,
+        persona: s.persona,
+        model: s.model,
+        active_number: s.active_number,
+        connected: s.connected,
     }));
     out
+}
+
+/// Find the channel bound to a gateway integration id — the inbound routing key
+/// (an inbound message's `source_id` is matched against each channel's
+/// `integration_id`).
+pub fn resolve_by_integration(integration_id: &str) -> Option<Channel> {
+    let id = integration_id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    list_channels().into_iter().find(|c| c.integration_id.as_deref() == Some(id))
+}
+
+/// The inbound HMAC secret for a channel (scoped `WEBHOOK_SECRET`), or `None`.
+pub fn webhook_secret(slug: &str) -> Option<String> {
+    crate::key_store::lookup_scoped(Some(slug), WEBHOOK_SECRET_KEY).filter(|s| !s.is_empty())
+}
+
+/// Store a channel's inbound HMAC secret (scoped).
+pub fn set_webhook_secret(slug: &str, secret: &str) -> Result<(), String> {
+    let path = paths::keys_file();
+    let mut store = crate::key_store::KeyStore::load(&path);
+    store.upsert_channel(slug, WEBHOOK_SECRET_KEY, secret);
+    store.save(&path).map_err(|e| format!("failed to store webhook secret: {e}"))
+}
+
+/// Gateway link fields written on connect.
+#[derive(Debug, Clone, Default)]
+pub struct Link {
+    pub integration_id: Option<String>,
+    pub persona: Option<String>,
+    pub model: Option<String>,
+    pub active_number: Option<String>,
+}
+
+/// Bind a channel to a gateway integration (upsert its link fields), marking it
+/// connected. Creates the stored entry if absent — e.g. the synthesized
+/// `metalcraft` channel's first connect writes a link-only record.
+pub fn set_link(slug: &str, link: Link) -> Result<(), String> {
+    let mut stored = load_stored();
+    match stored.iter_mut().find(|s| s.slug == slug) {
+        Some(s) => {
+            s.integration_id = link.integration_id;
+            s.persona = link.persona;
+            s.model = link.model;
+            s.active_number = link.active_number;
+            s.connected = true;
+        }
+        None => stored.push(StoredChannel {
+            slug: slug.to_string(),
+            enabled: true,
+            integration_id: link.integration_id,
+            persona: link.persona,
+            model: link.model,
+            active_number: link.active_number,
+            connected: true,
+            ..Default::default()
+        }),
+    }
+    save_stored(&stored).map_err(|e| format!("failed to write channels: {e}"))
+}
+
+/// Clear a channel's gateway link (disconnect) and drop its inbound secret. A
+/// managed link-only entry is removed; a custom channel keeps its record.
+pub fn clear_link(slug: &str) -> Result<(), String> {
+    let mut stored = load_stored();
+    if slug == DEFAULT_SLUG {
+        stored.retain(|s| s.slug != DEFAULT_SLUG);
+    } else if let Some(s) = stored.iter_mut().find(|s| s.slug == slug) {
+        s.integration_id = None;
+        s.persona = None;
+        s.model = None;
+        s.active_number = None;
+        s.connected = false;
+    }
+    save_stored(&stored).map_err(|e| format!("failed to write channels: {e}"))?;
+    let path = paths::keys_file();
+    let mut store = crate::key_store::KeyStore::load(&path);
+    if store.delete_channel_key(slug, WEBHOOK_SECRET_KEY) {
+        let _ = store.save(&path);
+    }
+    Ok(())
 }
 
 /// A channel's public record by slug, or `None`.
@@ -173,8 +308,11 @@ pub fn resolve_channel(slug: Option<&str>) -> Result<ResolvedChannel, String> {
     let slug = slug.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SLUG);
 
     if slug == DEFAULT_SLUG {
-        let secret = crate::key_store::lookup("METALCRAFT_TOKEN")
+        // Prefer an adopted audience-scoped token (written at connect), falling
+        // back to the pod's broad METALCRAFT_TOKEN.
+        let secret = crate::key_store::lookup_scoped(Some(DEFAULT_SLUG), SECRET_KEY)
             .filter(|s| !s.is_empty())
+            .or_else(|| crate::key_store::lookup("METALCRAFT_TOKEN").filter(|s| !s.is_empty()))
             .ok_or("METALCRAFT_TOKEN is not set — this pod isn't linked to a Metalcraft ID account")?;
         return Ok(ResolvedChannel { slug: DEFAULT_SLUG.to_string(), url: metalcraft_url(), secret });
     }
@@ -252,10 +390,27 @@ pub fn create_channel(
     if stored.iter().any(|c| c.slug == slug) {
         return Err(format!("a channel with slug '{slug}' already exists"));
     }
-    stored.push(StoredChannel { slug: slug.clone(), name: name.to_string(), url: url.to_string(), enabled: true });
+    stored.push(StoredChannel {
+        slug: slug.clone(),
+        name: name.to_string(),
+        url: url.to_string(),
+        enabled: true,
+        ..Default::default()
+    });
     save_stored(&stored).map_err(|e| format!("failed to write channels: {e}"))?;
-    store_secret(&slug, secret)?;
-    Ok(Channel { slug, name: name.to_string(), url: url.to_string(), enabled: true, managed: false })
+    set_secret(&slug, secret)?;
+    Ok(Channel {
+        slug,
+        name: name.to_string(),
+        url: url.to_string(),
+        enabled: true,
+        managed: false,
+        integration_id: None,
+        persona: None,
+        model: None,
+        active_number: None,
+        connected: false,
+    })
 }
 
 /// Update a custom channel's name/url/enabled, and its secret when a non-empty
@@ -286,11 +441,23 @@ pub fn update_channel(
     stored[idx].name = name.to_string();
     stored[idx].url = url.to_string();
     stored[idx].enabled = enabled;
+    let updated = stored[idx].clone();
     save_stored(&stored).map_err(|e| format!("failed to write channels: {e}"))?;
     if let Some(s) = secret.map(str::trim).filter(|s| !s.is_empty()) {
-        store_secret(slug, s)?;
+        set_secret(slug, s)?;
     }
-    Ok(Channel { slug: slug.to_string(), name: name.to_string(), url: url.to_string(), enabled, managed: false })
+    Ok(Channel {
+        slug: slug.to_string(),
+        name: name.to_string(),
+        url: url.to_string(),
+        enabled,
+        managed: false,
+        integration_id: updated.integration_id,
+        persona: updated.persona,
+        model: updated.model,
+        active_number: updated.active_number,
+        connected: updated.connected,
+    })
 }
 
 /// Delete a custom channel and its scoped secret. Returns `true` if it existed.
@@ -316,7 +483,9 @@ pub fn delete_channel(slug: &str) -> Result<bool, String> {
     Ok(removed)
 }
 
-fn store_secret(slug: &str, secret: &str) -> Result<(), String> {
+/// Store a channel's outbound bearer secret (scoped). Used by custom-channel
+/// CRUD and by the gateway connect to adopt an audience-scoped token.
+pub fn set_secret(slug: &str, secret: &str) -> Result<(), String> {
     let path = paths::keys_file();
     let mut store = crate::key_store::KeyStore::load(&path);
     store.upsert_channel(slug, SECRET_KEY, secret);

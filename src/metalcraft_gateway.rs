@@ -207,6 +207,26 @@ pub async fn connect(
     }
     store.save(&path).map_err(|e| format!("failed to write channel secrets: {e}"))?;
 
+    // Bridge: mirror the link into the new `metalcraft` channel model so inbound
+    // routing, status and outbound resolution can read from there. (Strangler
+    // step toward removing the channel-instance layer.) Best-effort — a mirror
+    // failure must not fail an otherwise-successful connect.
+    if let Some(ct) = connection_token.as_deref() {
+        let _ = crate::channels::set_secret(crate::channels::DEFAULT_SLUG, ct);
+    }
+    let _ = crate::channels::set_webhook_secret(crate::channels::DEFAULT_SLUG, &cfg.signing_secret);
+    if let Err(e) = crate::channels::set_link(
+        crate::channels::DEFAULT_SLUG,
+        crate::channels::Link {
+            integration_id: Some(cfg.integration_id.clone()),
+            persona: channel.setting("persona").map(str::to_string),
+            model: channel.setting("model").map(str::to_string),
+            active_number: Some(cfg.active_number.clone()),
+        },
+    ) {
+        log::warn!("metalcraft-gateway: connected but failed to mirror link into channel model: {e}");
+    }
+
     Ok(ConnectResult {
         connected: true,
         active_number: cfg.active_number,
@@ -237,6 +257,15 @@ pub async fn disconnect() -> Result<(), String> {
         store.delete_channel_key(&inst.id, k);
     }
     store.save(&path).map_err(|e| format!("failed to clear channel secrets: {e}"))?;
+
+    // Bridge: clear the mirrored link + adopted secret from the channel model.
+    let _ = crate::channels::clear_link(crate::channels::DEFAULT_SLUG);
+    let cpath = crate::paths::keys_file();
+    let mut cstore = crate::key_store::KeyStore::load(&cpath);
+    if cstore.delete_channel_key(crate::channels::DEFAULT_SLUG, "SECRET") {
+        let _ = cstore.save(&cpath);
+    }
+
     log::info!("metalcraft-gateway: disconnected channel '{}'", inst.name);
     Ok(())
 }
