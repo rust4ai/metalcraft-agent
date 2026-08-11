@@ -106,6 +106,14 @@ pub fn gateway_channels_state_file() -> PathBuf {
     data_dir().join("gateway_channels.json")
 }
 
+/// Outbound **channels** — the simple connection model `{ slug, name, url }`
+/// that outbound sends resolve against (see [`crate::channels`]). The default
+/// `metalcraft` channel is synthesized, not stored; this file holds only the
+/// user-added custom channels. A JSON array at `<data>/channels.json`.
+pub fn channels_state_file() -> PathBuf {
+    data_dir().join("channels.json")
+}
+
 /// Plaintext API-key / secret store (see [`crate::key_store`]).
 pub fn keys_file() -> PathBuf {
     data_dir().join("keys.json")
