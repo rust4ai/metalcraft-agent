@@ -38,19 +38,44 @@ pub fn is_streaming() -> bool {
 /// long-poll then stays idle). The base URL prefers the channel's stored `BASE_URL` (what
 /// the gateway told us at connect) and falls back to the configured gateway origin.
 pub fn pull_target() -> Option<(String, String)> {
-    let inst = crate::gateway_channels::load_instances()
+    let ch = crate::channels::get_channel(crate::channels::DEFAULT_SLUG)?;
+    if !ch.connected {
+        return None;
+    }
+    let resolved = crate::channels::resolve_channel(Some(crate::channels::DEFAULT_SLUG)).ok()?;
+    Some((resolved.url, resolved.secret))
+}
+
+/// One-time boot migration: if a legacy `metalcraft-gateway` channel *instance*
+/// exists but the `metalcraft` channel isn't linked yet, mirror its link +
+/// secrets into the channel model so the pull loop / status / inbound routing all
+/// work from the channel before the first post-deploy resync runs.
+pub fn migrate_instance_to_channel() {
+    if crate::channels::get_channel(crate::channels::DEFAULT_SLUG).map(|c| c.connected).unwrap_or(false) {
+        return; // already linked
+    }
+    let Some(inst) = crate::gateway_channels::load_instances()
         .into_iter()
-        .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)?;
-    let bearer = crate::key_store::lookup_scoped(Some(&inst.id), "API_KEY")
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| crate::key_store::lookup("METALCRAFT_TOKEN"))
-        .filter(|s| !s.trim().is_empty())?;
-    let base = crate::key_store::lookup_scoped(Some(&inst.id), "BASE_URL")
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(gateway_url)
-        .trim_end_matches('/')
-        .to_string();
-    Some((base, bearer))
+        .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)
+    else {
+        return;
+    };
+    if let Some(ws) = crate::key_store::lookup_scoped(Some(&inst.id), "WEBHOOK_SECRET") {
+        let _ = crate::channels::set_webhook_secret(crate::channels::DEFAULT_SLUG, &ws);
+    }
+    if let Some(api) = crate::key_store::lookup_scoped(Some(&inst.id), "API_KEY") {
+        let _ = crate::channels::set_secret(crate::channels::DEFAULT_SLUG, &api);
+    }
+    let _ = crate::channels::set_link(
+        crate::channels::DEFAULT_SLUG,
+        crate::channels::Link {
+            integration_id: inst.setting("integration_id").map(str::to_string),
+            persona: inst.setting("persona").map(str::to_string),
+            model: inst.setting("model").map(str::to_string),
+            active_number: inst.setting("from").map(str::to_string),
+        },
+    );
+    log::info!("metalcraft-gateway: migrated legacy channel instance into the metalcraft channel model");
 }
 
 /// The gateway base URL — override with the `METALCRAFT_GATEWAY_URL` key.
@@ -377,11 +402,10 @@ pub struct GatewayStatus {
 
 /// Report registration/verification/connection state for the workshop.
 pub async fn status() -> GatewayStatus {
-    let connected = crate::gateway_channels::load_instances()
-        .iter()
-        .find(|i| i.type_id == CHANNEL_TYPE && i.enabled)
-        .and_then(crate::tools::gateway_webhook::channel_webhook_secret)
-        .is_some();
+    let connected = crate::channels::get_channel(crate::channels::DEFAULT_SLUG)
+        .map(|c| c.connected)
+        .unwrap_or(false)
+        && crate::channels::webhook_secret(crate::channels::DEFAULT_SLUG).is_some();
     let my_webhook = webhook_base(None).map(|b| format!("{b}/webhook/pipestreamr"));
     let has_public_url = my_webhook.is_some();
     let streaming = is_streaming();

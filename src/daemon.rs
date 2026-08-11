@@ -222,6 +222,10 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
         log::info!("Workshop API spawned on port {port}");
     }
 
+    // One-time migration: mirror any legacy gateway channel instance into the
+    // channel model so the pull loop / status / inbound routing read from it.
+    crate::metalcraft_gateway::migrate_instance_to_channel();
+
     // Self-heal the Metalcraft Gateway connection (rotated secret / reassigned
     // number) — no-op while nothing is connected.
     tokio::spawn(async move { crate::metalcraft_gateway::heal_loop().await });
