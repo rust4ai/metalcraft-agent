@@ -377,6 +377,22 @@ pub async fn install_flow_from_registry(slug: &str) -> Result<InstallResult, Str
         }
     }
 
+    // Non-destructive upgrade: if the flow is already installed and the user has
+    // customized its schedules, keep their schedules rather than clobbering them
+    // with the published defaults. The published `schedules` seed only a *fresh*
+    // install (or an upgrade the user never touched the schedule on). Mirrors how
+    // we treat an author `requires` block without overwriting user intent.
+    if let Some(existing) = metalcraft_flows::load_flow(&paths::flows_dir(), &flow.id) {
+        if !existing.schedules.is_empty() {
+            log::info!(
+                "Preserving {} existing schedule(s) on re-install of flow '{}'",
+                existing.schedules.len(),
+                flow.id
+            );
+            flow.schedules = existing.schedules;
+        }
+    }
+
     let dependencies = dependency_report(&flow);
 
     metalcraft_flows::save_flow(&paths::flows_dir(), &flow).map_err(|e| e.to_string())?;

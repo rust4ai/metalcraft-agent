@@ -275,6 +275,8 @@ async fn auth_middleware(
         get_persona, put_persona, delete_persona,
         get_skill, put_skill, delete_skill,
         get_flow, put_flow, delete_flow, post_run_flow, post_install_flow,
+        get_flow_schedules, put_flow_schedules, post_flow_schedule, delete_flow_schedule,
+        get_flow_schedules_preview,
         post_install_flow_dependencies,
         list_flow_runs, get_flow_run, post_resume_flow_run,
         list_flow_templates, get_flow_template,
@@ -294,7 +296,7 @@ async fn auth_middleware(
         ErrorResponse, ProjectSnapshot, ProjectLayout, ApiToolSummary,
         KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
         FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, RunFlowOutput, ResumeFlowRunRequest,
-        InstallFlowRequest, InstallDependenciesResponse,
+        InstallFlowRequest, InstallDependenciesResponse, SchedulePreview,
         crate::flow_exec::FlowRunSummary, crate::flow_exec::FlowStep,
         crate::flow_runs::FlowRun, crate::flow_runs::PauseInfo,
         crate::flow_install::InstallResult, crate::flow_install::InstalledFlow,
@@ -402,6 +404,13 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/flows/{id}", put(put_flow))
         .route("/api/v1/flows/{id}", delete(delete_flow))
         .route("/api/v1/flows/{id}/run", post(post_run_flow))
+        // Flow schedules — the literal `schedules/preview` before the `{sid}`
+        // param so matchit prefers the static segment.
+        .route("/api/v1/flows/{id}/schedules", get(get_flow_schedules))
+        .route("/api/v1/flows/{id}/schedules", put(put_flow_schedules))
+        .route("/api/v1/flows/{id}/schedules", post(post_flow_schedule))
+        .route("/api/v1/flows/{id}/schedules/preview", get(get_flow_schedules_preview))
+        .route("/api/v1/flows/{id}/schedules/{sid}", delete(delete_flow_schedule))
         .route("/api/v1/flows/{id}/install-dependencies", post(post_install_flow_dependencies))
         .route("/api/v1/flow-runs", get(list_flow_runs))
         .route("/api/v1/flow-runs/{run_id}", get(get_flow_run))
@@ -871,6 +880,230 @@ async fn delete_flow(Path(id): Path<String>) -> Response {
         StatusCode::NO_CONTENT.into_response()
     } else {
         err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"))
+    }
+}
+
+// ---- Flow schedules -------------------------------------------------------
+//
+// Scheduling lives in the flow-level `schedules` array (see metalcraft-flows
+// §1.3). These endpoints let a UI edit just the schedules without rewriting the
+// graph. GET returns the *effective* schedules (materializing a legacy entry-node
+// trigger), so a client can GET → edit → PUT and the first save migrates the flow
+// onto the array form.
+
+/// One upcoming-fire preview for a schedule.
+#[derive(Serialize, utoipa::ToSchema)]
+struct SchedulePreview {
+    /// The schedule's id.
+    schedule_id: String,
+    /// Human-readable description of the cadence.
+    description: String,
+    /// Up to a few upcoming fire times, RFC-3339. Empty for `manual`.
+    next_runs: Vec<String>,
+}
+
+/// Persist `schedules` onto flow `id`, validating shape + cron syntax first.
+/// Returns the saved list on success.
+fn save_flow_schedules(
+    id: &str,
+    schedules: Vec<metalcraft_flows::FlowScheduleSpec>,
+) -> Response {
+    let Some(mut flow) = metalcraft_flows::load_flow(&paths::flows_dir(), id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
+    };
+    flow.schedules = schedules;
+    // parse_schedules runs full validation (unique ids, positive intervals) and
+    // parses every enabled cron expression, so a bad cron is a 400 here rather
+    // than a silent daemon-log warning later.
+    if let Err(e) = crate::flows::parse_schedules(&flow) {
+        return err_json(StatusCode::BAD_REQUEST, e);
+    }
+    match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
+        Ok(()) => Json(flow.schedules).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/flows/{id}/schedules",
+    tag = "flows",
+    params(("id" = String, Path, description = "Flow id")),
+    responses(
+        (status = 200, description = "Effective schedules (array of FlowScheduleSpec)", body = Object),
+        (status = 404, body = ErrorResponse),
+    ),
+)]
+async fn get_flow_schedules(Path(id): Path<String>) -> Response {
+    match metalcraft_flows::load_flow(&paths::flows_dir(), &id) {
+        Some(flow) => Json(flow.effective_schedules()).into_response(),
+        None => err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found")),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/flows/{id}/schedules",
+    tag = "flows",
+    params(("id" = String, Path, description = "Flow id")),
+    request_body = Object,
+    responses(
+        (status = 200, description = "Saved schedules", body = Object),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+    ),
+)]
+async fn put_flow_schedules(
+    Path(id): Path<String>,
+    Json(schedules): Json<Vec<metalcraft_flows::FlowScheduleSpec>>,
+) -> Response {
+    save_flow_schedules(&id, schedules)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/flows/{id}/schedules",
+    tag = "flows",
+    params(("id" = String, Path, description = "Flow id")),
+    request_body = Object,
+    responses(
+        (status = 200, description = "Schedule added; returns the full list", body = Object),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 409, description = "A schedule with that id already exists", body = ErrorResponse),
+    ),
+)]
+async fn post_flow_schedule(
+    Path(id): Path<String>,
+    Json(spec): Json<metalcraft_flows::FlowScheduleSpec>,
+) -> Response {
+    let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
+    };
+    // Materialize the effective list so appending to a legacy flow keeps its
+    // existing trigger instead of silently dropping it.
+    let mut schedules = if flow.schedules.is_empty() {
+        flow.effective_schedules()
+    } else {
+        flow.schedules
+    };
+    if schedules.iter().any(|s| s.id == spec.id) {
+        return err_json(
+            StatusCode::CONFLICT,
+            format!("schedule '{}' already exists", spec.id),
+        );
+    }
+    schedules.push(spec);
+    save_flow_schedules(&id, schedules)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/flows/{id}/schedules/{sid}",
+    tag = "flows",
+    params(
+        ("id" = String, Path, description = "Flow id"),
+        ("sid" = String, Path, description = "Schedule id"),
+    ),
+    responses(
+        (status = 200, description = "Removed; returns the remaining list", body = Object),
+        (status = 404, body = ErrorResponse),
+    ),
+)]
+async fn delete_flow_schedule(Path((id, sid)): Path<(String, String)>) -> Response {
+    let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
+    };
+    let mut schedules = if flow.schedules.is_empty() {
+        flow.effective_schedules()
+    } else {
+        flow.schedules
+    };
+    let before = schedules.len();
+    schedules.retain(|s| s.id != sid);
+    if schedules.len() == before {
+        return err_json(StatusCode::NOT_FOUND, format!("schedule '{sid}' not found"));
+    }
+    save_flow_schedules(&id, schedules)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/flows/{id}/schedules/preview",
+    tag = "flows",
+    params(("id" = String, Path, description = "Flow id")),
+    responses(
+        (status = 200, description = "Upcoming fire times per schedule", body = [SchedulePreview]),
+        (status = 404, body = ErrorResponse),
+    ),
+)]
+async fn get_flow_schedules_preview(Path(id): Path<String>) -> Response {
+    let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
+    };
+    let previews: Vec<SchedulePreview> = flow
+        .effective_schedules()
+        .iter()
+        .map(schedule_preview)
+        .collect();
+    Json(previews).into_response()
+}
+
+/// Best-effort upcoming-fire preview for one schedule. Cron times are exact;
+/// interval schedules are projected from now (the daemon's real last-run clock is
+/// in-memory and not known here).
+fn schedule_preview(spec: &metalcraft_flows::FlowScheduleSpec) -> SchedulePreview {
+    use chrono::Utc;
+    use metalcraft_flows::ScheduleTrigger;
+    const N: usize = 3;
+
+    let (description, next_runs) = match &spec.trigger {
+        ScheduleTrigger::Manual => ("Manual (runs only when triggered)".to_string(), vec![]),
+        ScheduleTrigger::Minutes { interval } => {
+            let now = Utc::now();
+            let runs = (1..=N as i64)
+                .filter_map(|k| now.checked_add_signed(chrono::TimeDelta::minutes(k * *interval as i64)))
+                .map(|t| t.to_rfc3339())
+                .collect();
+            (format!("Every {interval} minute(s)"), runs)
+        }
+        ScheduleTrigger::Hours { interval } => {
+            let now = Utc::now();
+            let runs = (1..=N as i64)
+                .filter_map(|k| now.checked_add_signed(chrono::TimeDelta::hours(k * *interval as i64)))
+                .map(|t| t.to_rfc3339())
+                .collect();
+            (format!("Every {interval} hour(s)"), runs)
+        }
+        ScheduleTrigger::Cron { cron } => match std::str::FromStr::from_str(cron) {
+            Ok(sched) => {
+                let sched: cron::Schedule = sched;
+                let runs: Vec<String> = match spec
+                    .timezone
+                    .as_deref()
+                    .and_then(|z| z.parse::<chrono_tz::Tz>().ok())
+                {
+                    Some(zone) => sched
+                        .upcoming(zone)
+                        .take(N)
+                        .map(|t| t.to_rfc3339())
+                        .collect(),
+                    None => sched
+                        .upcoming(chrono::Local)
+                        .take(N)
+                        .map(|t| t.to_rfc3339())
+                        .collect(),
+                };
+                let tz = spec.timezone.as_deref().unwrap_or("local time");
+                (format!("Cron `{cron}` ({tz})"), runs)
+            }
+            Err(e) => (format!("Invalid cron `{cron}`: {e}"), vec![]),
+        },
+    };
+    SchedulePreview {
+        schedule_id: spec.id.clone(),
+        description,
+        next_runs,
     }
 }
 

@@ -20,10 +20,29 @@ pub enum FlowSchedule {
     Cron(String),
 }
 
+/// One resolved, *enabled* schedule of a flow — a single trigger plus the
+/// overrides applied when it fires. A flow may yield several of these.
+#[derive(Debug, Clone)]
+pub struct ScheduledTrigger {
+    /// The schedule's stable id within the flow (unique per flow).
+    pub schedule_id: String,
+    /// The parsed trigger.
+    pub schedule: FlowSchedule,
+    /// IANA timezone a `Cron` trigger is evaluated in. `None` = host local time.
+    pub timezone: Option<String>,
+    /// Inputs handed to `run_flow_v2` when this schedule fires.
+    pub inputs: Option<serde_json::Value>,
+    /// Persona override for runs from this schedule.
+    pub persona: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunnableFlow {
     pub saved: SavedFlow,
-    pub schedule: FlowSchedule,
+    /// The flow's enabled, non-manual triggers. Empty when the flow has only
+    /// manual/disabled schedules (it stays loadable for manual runs but never
+    /// fires on its own).
+    pub triggers: Vec<ScheduledTrigger>,
 }
 
 pub fn load_enabled_flows(dir: &Path) -> Vec<RunnableFlow> {
@@ -32,8 +51,8 @@ pub fn load_enabled_flows(dir: &Path) -> Vec<RunnableFlow> {
         .into_iter()
         .filter(|summary| summary.enabled)
         .filter_map(|summary| metalcraft_flows::load_flow(dir, &summary.id))
-        .filter_map(|saved| match parse_schedule(&saved) {
-            Ok(schedule) => Some(RunnableFlow { saved, schedule }),
+        .filter_map(|saved| match parse_schedules(&saved) {
+            Ok(triggers) => Some(RunnableFlow { saved, triggers }),
             Err(err) => {
                 log::warn!("Skipping flow due to invalid schedule: {err}");
                 None
@@ -42,7 +61,14 @@ pub fn load_enabled_flows(dir: &Path) -> Vec<RunnableFlow> {
         .collect()
 }
 
-pub fn parse_schedule(flow: &SavedFlow) -> Result<FlowSchedule, String> {
+/// Resolve a flow's enabled, non-manual schedules into runnable triggers.
+///
+/// Reads the flow-level `schedules` array, falling back to the legacy entry-node
+/// `schedule_type` (see [`metalcraft_flows::SavedFlow::effective_schedules`]).
+/// Disabled and `manual` schedules are dropped — they never fire on their own.
+/// A single invalid schedule (bad cron / zero interval) fails the whole flow so
+/// the daemon log makes the misconfiguration obvious.
+pub fn parse_schedules(flow: &SavedFlow) -> Result<Vec<ScheduledTrigger>, String> {
     let validation_errors = validate(flow);
     if !validation_errors.is_empty() {
         let joined = validation_errors
@@ -53,28 +79,50 @@ pub fn parse_schedule(flow: &SavedFlow) -> Result<FlowSchedule, String> {
         return Err(format!("flow '{}' failed validation: {joined}", flow.id));
     }
 
-    let entry = entry_node(flow)?;
-    let schedule_type = entry
-        .data
-        .get("schedule_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("manual");
-
-    match schedule_type {
-        "manual" => Ok(FlowSchedule::Manual),
-        "minutes" => Ok(FlowSchedule::EveryMinutes(read_positive_interval(entry.data.get("interval"), flow)?)),
-        "hours" => Ok(FlowSchedule::EveryHours(read_positive_interval(entry.data.get("interval"), flow)?)),
-        "cron" => {
-            let expr = entry
-                .data
-                .get("cron")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("flow '{}' is missing entry.data.cron", flow.id))?;
-            cron::Schedule::from_str(expr)
-                .map_err(|e| format!("flow '{}' has invalid cron expression '{}': {}", flow.id, expr, e))?;
-            Ok(FlowSchedule::Cron(expr.to_string()))
+    let mut triggers = Vec::new();
+    for spec in flow.effective_schedules() {
+        if !spec.enabled {
+            continue;
         }
-        other => Err(format!("flow '{}' has unsupported schedule_type '{other}'", flow.id)),
+        let schedule = match &spec.trigger {
+            metalcraft_flows::ScheduleTrigger::Manual => continue,
+            metalcraft_flows::ScheduleTrigger::Minutes { interval } => {
+                positive(*interval, &spec.id, flow)?;
+                FlowSchedule::EveryMinutes(*interval)
+            }
+            metalcraft_flows::ScheduleTrigger::Hours { interval } => {
+                positive(*interval, &spec.id, flow)?;
+                FlowSchedule::EveryHours(*interval)
+            }
+            metalcraft_flows::ScheduleTrigger::Cron { cron } => {
+                cron::Schedule::from_str(cron).map_err(|e| {
+                    format!(
+                        "flow '{}' schedule '{}' has invalid cron expression '{}': {}",
+                        flow.id, spec.id, cron, e
+                    )
+                })?;
+                FlowSchedule::Cron(cron.clone())
+            }
+        };
+        triggers.push(ScheduledTrigger {
+            schedule_id: spec.id.clone(),
+            schedule,
+            timezone: spec.timezone.clone(),
+            inputs: spec.inputs.clone(),
+            persona: spec.persona.clone(),
+        });
+    }
+    Ok(triggers)
+}
+
+fn positive(interval: u64, schedule_id: &str, flow: &SavedFlow) -> Result<(), String> {
+    if interval == 0 {
+        Err(format!(
+            "flow '{}' schedule '{}' has interval 0; expected > 0",
+            flow.id, schedule_id
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -293,18 +341,6 @@ fn entry_node(flow: &SavedFlow) -> Result<&metalcraft_flows::FlowNode, String> {
     }
 }
 
-fn read_positive_interval(value: Option<&serde_json::Value>, flow: &SavedFlow) -> Result<u64, String> {
-    let interval = value
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| format!("flow '{}' is missing a positive numeric entry.data.interval", flow.id))?;
-
-    if interval == 0 {
-        Err(format!("flow '{}' has interval 0; expected > 0", flow.id))
-    } else {
-        Ok(interval)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +370,62 @@ mod tests {
             }}"#
         );
         serde_json::from_str(&json).expect("valid flow json")
+    }
+
+    #[test]
+    fn parse_schedules_yields_enabled_non_manual_triggers() {
+        // Two crons + one disabled + one manual → only the two enabled crons run.
+        let json = r#"{
+            "spec_version": "2",
+            "id": "t", "name": "T",
+            "created_at": "2026-05-28T00:00:00Z", "updated_at": "2026-05-28T00:00:00Z",
+            "enabled": true,
+            "schedules": [
+                { "id": "morning", "type": "cron", "cron": "0 0 8 * * *", "timezone": "America/Detroit" },
+                { "id": "evening", "type": "cron", "cron": "0 0 18 * * *" },
+                { "id": "off", "type": "cron", "cron": "0 0 12 * * *", "enabled": false },
+                { "id": "manual", "type": "manual" }
+            ],
+            "flow": { "nodes": [
+                { "id": "entry", "node_type": "entry", "data": {}, "position": [0,0] },
+                { "id": "p", "node_type": "prompt", "data": { "prompt": "hi" }, "position": [1,0] }
+            ], "edges": [ { "id": "e", "source": "entry", "target": "p" } ] }
+        }"#;
+        let flow: SavedFlow = serde_json::from_str(json).unwrap();
+        let triggers = parse_schedules(&flow).expect("valid schedules");
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(triggers[0].schedule_id, "morning");
+        assert_eq!(triggers[0].timezone.as_deref(), Some("America/Detroit"));
+        assert!(matches!(triggers[1].schedule, FlowSchedule::Cron(_)));
+    }
+
+    #[test]
+    fn parse_schedules_rejects_bad_cron() {
+        let json = r#"{
+            "spec_version": "2", "id": "t", "name": "T",
+            "created_at": "2026-05-28T00:00:00Z", "updated_at": "2026-05-28T00:00:00Z",
+            "enabled": true,
+            "schedules": [ { "id": "bad", "type": "cron", "cron": "not a cron" } ],
+            "flow": { "nodes": [ { "id": "entry", "node_type": "entry", "data": {}, "position": [0,0] } ], "edges": [] }
+        }"#;
+        let flow: SavedFlow = serde_json::from_str(json).unwrap();
+        assert!(parse_schedules(&flow).is_err());
+    }
+
+    #[test]
+    fn parse_schedules_falls_back_to_legacy_entry_cron() {
+        let json = r#"{
+            "spec_version": "1", "id": "t", "name": "T",
+            "created_at": "2026-05-28T00:00:00Z", "updated_at": "2026-05-28T00:00:00Z",
+            "enabled": true,
+            "flow": { "nodes": [
+                { "id": "entry", "node_type": "entry", "data": { "schedule_type": "cron", "cron": "0 0 9 * * *" }, "position": [0,0] }
+            ], "edges": [] }
+        }"#;
+        let flow: SavedFlow = serde_json::from_str(json).unwrap();
+        let triggers = parse_schedules(&flow).expect("valid");
+        assert_eq!(triggers.len(), 1);
+        assert!(matches!(&triggers[0].schedule, FlowSchedule::Cron(c) if c == "0 0 9 * * *"));
     }
 
     #[test]

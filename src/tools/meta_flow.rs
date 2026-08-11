@@ -153,6 +153,65 @@ impl metalcraft::Tool for FlowWriteTool {
     }
 }
 
+pub struct FlowSetSchedulesTool;
+
+#[async_trait]
+impl metalcraft::Tool for FlowSetSchedulesTool {
+    fn name(&self) -> &str {
+        "flow_set_schedules"
+    }
+    fn description(&self) -> &str {
+        "Set WHEN a flow runs by replacing its `schedules` array (flow-level, not on the entry node). A flow may have MANY schedules — e.g. run at 8am AND 6pm are two entries. Each schedule is `{ \"id\": \"morning\", \"type\": \"cron\"|\"minutes\"|\"hours\"|\"manual\", \"cron\"?: \"0 8 * * *\", \"interval\"?: number, \"enabled\"?: true, \"name\"?: string, \"timezone\"?: \"America/Detroit\", \"persona\"?: string, \"inputs\"?: object }`. Replaces the whole array. The flow must already be `enabled` for schedules to fire."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Flow id" },
+                "schedules": { "type": "string", "description": "A JSON array of schedule objects, as a JSON string." }
+            },
+            "required": ["id", "schedules"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = id_arg(&args, "flow_set_schedules")?;
+        let raw = args
+            .get("schedules")
+            .ok_or_else(|| missing_param("flow_set_schedules", "schedules"))?;
+        // Accept a JSON string (what strict function schemas force) or an inline array.
+        let value: serde_json::Value = if let Some(s) = raw.as_str() {
+            match serde_json::from_str(s) {
+                Ok(v) => v,
+                Err(e) => return Ok(serde_json::json!({ "error": format!("invalid schedules JSON: {e}") })),
+            }
+        } else {
+            raw.clone()
+        };
+        let schedules: Vec<metalcraft_flows::FlowScheduleSpec> = match serde_json::from_value(value) {
+            Ok(s) => s,
+            Err(e) => return Ok(serde_json::json!({ "error": format!("invalid schedule spec: {e}") })),
+        };
+        let Some(mut flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
+            return Ok(serde_json::json!({ "error": format!("flow '{id}' not found") }));
+        };
+        flow.schedules = schedules;
+        // Full validation + cron parsing; a bad cron or duplicate id is reported
+        // here rather than failing silently in the daemon.
+        if let Err(e) = crate::flows::parse_schedules(&flow) {
+            return Ok(serde_json::json!({ "saved": false, "error": e }));
+        }
+        match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
+            Ok(()) => Ok(serde_json::json!({
+                "saved": true,
+                "id": flow.id,
+                "schedules": flow.schedules,
+                "enabled": flow.enabled,
+            })),
+            Err(e) => Ok(serde_json::json!({ "error": e.to_string() })),
+        }
+    }
+}
+
 pub struct FlowInstallTool;
 
 #[async_trait]

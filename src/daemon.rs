@@ -21,7 +21,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -257,8 +257,11 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     }
     println!("──────────────────────────────────────────────");
 
-    // Flow polling loop.
-    let mut state_by_flow: HashMap<String, FlowRunState> = HashMap::new();
+    // Flow polling loop. Tracks the last start time per (flow_id, schedule_id)
+    // so each schedule of a flow fires independently. Flow runs execute inline
+    // and sequentially within an iteration, so no cross-flow concurrency guard is
+    // needed.
+    let mut last_started: HashMap<(String, String), DateTime<Local>> = HashMap::new();
 
     loop {
         // Run one polling iteration, but let Ctrl+C cancel it. The workshop API
@@ -270,35 +273,34 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
             let runnable = flows::load_enabled_flows(&flows_dir);
             for flow in runnable {
                 let flow_id = flow.saved.id.clone();
-                let due = is_due(state_by_flow.get(&flow_id), &flow.schedule);
+              for trigger in &flow.triggers {
+                let key = (flow_id.clone(), trigger.schedule_id.clone());
+                let due = is_due(last_started.get(&key), &trigger.schedule, trigger.timezone.as_deref());
                 if !due {
                     continue;
                 }
+                last_started.insert(key, Local::now());
 
-                let state = state_by_flow.entry(flow_id.clone()).or_insert(FlowRunState {
-                    last_started_at: None,
-                    is_running: false,
-                });
+                // Per-schedule persona override, falling back to the daemon default.
+                let default_persona = trigger.persona.as_deref().unwrap_or(persona_slug.as_str());
 
-                if state.is_running {
-                    log::warn!("Skipping flow '{}' because a previous run is still marked active", flow_id);
-                    continue;
-                }
-
-                state.is_running = true;
-                state.last_started_at = Some(Local::now());
-
-                log::info!("Running flow '{}' ({})", flow.saved.id, flow.saved.name);
+                log::info!(
+                    "Running flow '{}' ({}) [schedule '{}']",
+                    flow.saved.id,
+                    flow.saved.name,
+                    trigger.schedule_id
+                );
 
                 if crate::flow_exec::is_v2_flow(&flow.saved) {
                     // v2 flows run on the stateful state-machine executor.
+                    let inputs = trigger.inputs.clone().unwrap_or_else(|| serde_json::json!({}));
                     match crate::flow_exec::run_flow_v2(
                         &context,
                         flow.saved.clone(),
                         &cwd,
-                        Some(persona_slug.as_str()),
+                        Some(default_persona),
                         &model_name,
-                        &serde_json::json!({}),
+                        &inputs,
                     )
                     .await
                     {
@@ -309,9 +311,6 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                             summary.steps.len()
                         ),
                         Err(e) => log::error!("Flow '{}' failed: {}", flow.saved.id, e),
-                    }
-                    if let Some(state) = state_by_flow.get_mut(&flow_id) {
-                        state.is_running = false;
                     }
                     continue;
                 }
@@ -329,8 +328,9 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                             log::warn!("Flow '{}' has no reachable prompt nodes", flow.saved.id);
                         }
                         for (index, prompt) in prompts.iter().enumerate() {
-                            // Per-prompt/flow persona wins; otherwise fall back to the daemon persona.
-                            let effective_persona = prompt.persona.as_deref().unwrap_or(&persona_slug);
+                            // Per-prompt/flow persona wins; otherwise fall back to the
+                            // schedule's persona (or the daemon default).
+                            let effective_persona = prompt.persona.as_deref().unwrap_or(default_persona);
                             log::info!(
                                 "Flow '{}' prompt {}/{} (persona: {})",
                                 flow.saved.id,
@@ -397,10 +397,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                         log::error!("Flow '{}' is not runnable: {}", flow.saved.id, err);
                     }
                 }
-
-                if let Some(state) = state_by_flow.get_mut(&flow_id) {
-                    state.is_running = false;
-                }
+              } // for trigger in &flow.triggers
             }
 
             // Auto-resume any paused run whose wake time has arrived: `wait`
@@ -564,11 +561,6 @@ async fn run_due_scheduled_tasks(
     }
 }
 
-struct FlowRunState {
-    last_started_at: Option<chrono::DateTime<Local>>,
-    is_running: bool,
-}
-
 fn env_flag(key: &str, default: bool) -> bool {
     match std::env::var(key) {
         Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
@@ -576,11 +568,14 @@ fn env_flag(key: &str, default: bool) -> bool {
     }
 }
 
-fn is_due(state: Option<&FlowRunState>, schedule: &FlowSchedule) -> bool {
+/// Whether a schedule is due to fire, given when it last started. `tz` is the
+/// IANA timezone a `Cron` trigger is evaluated in; `None` (or an unparseable
+/// name) falls back to the host's local time.
+fn is_due(last_started: Option<&DateTime<Local>>, schedule: &FlowSchedule, tz: Option<&str>) -> bool {
     match schedule {
         FlowSchedule::Manual => false,
-        FlowSchedule::EveryMinutes(minutes) => elapsed_due(state, Duration::from_secs(minutes * 60)),
-        FlowSchedule::EveryHours(hours) => elapsed_due(state, Duration::from_secs(hours * 60 * 60)),
+        FlowSchedule::EveryMinutes(minutes) => elapsed_due(last_started, Duration::from_secs(minutes * 60)),
+        FlowSchedule::EveryHours(hours) => elapsed_due(last_started, Duration::from_secs(hours * 60 * 60)),
         FlowSchedule::Cron(expr) => {
             let schedule = match cron::Schedule::from_str(expr) {
                 Ok(s) => s,
@@ -589,20 +584,33 @@ fn is_due(state: Option<&FlowRunState>, schedule: &FlowSchedule) -> bool {
                     return false;
                 }
             };
-            let now = Local::now();
-            let after = state
-                .and_then(|s| s.last_started_at)
-                .unwrap_or(now - chrono::TimeDelta::seconds(1));
-            schedule.after(&after).next().map_or(false, |next| next <= now)
+            // Evaluate the cron in its declared timezone when one is given and
+            // parses; otherwise use the host's local zone (legacy behavior).
+            match tz.and_then(|name| name.parse::<chrono_tz::Tz>().ok()) {
+                Some(zone) => {
+                    let now = Utc::now().with_timezone(&zone);
+                    let after = last_started
+                        .map(|t| t.with_timezone(&zone))
+                        .unwrap_or(now - chrono::TimeDelta::seconds(1));
+                    schedule.after(&after).next().map_or(false, |next| next <= now)
+                }
+                None => {
+                    let now = Local::now();
+                    let after = last_started
+                        .copied()
+                        .unwrap_or(now - chrono::TimeDelta::seconds(1));
+                    schedule.after(&after).next().map_or(false, |next| next <= now)
+                }
+            }
         }
     }
 }
 
-fn elapsed_due(state: Option<&FlowRunState>, interval: Duration) -> bool {
-    match state.and_then(|s| s.last_started_at) {
+fn elapsed_due(last_started: Option<&DateTime<Local>>, interval: Duration) -> bool {
+    match last_started {
         None => true,
         Some(last) => {
-            let elapsed = Local::now() - last;
+            let elapsed = Local::now() - *last;
             match chrono::TimeDelta::from_std(interval) {
                 Ok(td) => elapsed >= td,
                 Err(_) => true,
