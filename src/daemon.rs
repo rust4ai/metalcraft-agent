@@ -56,8 +56,7 @@ impl DaemonConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|_| paths::flows_dir());
 
-        let persona_slug =
-            std::env::var("STARKBOT_PERSONA").unwrap_or_else(|_| "coding-agent".to_string());
+        let persona_slug = runtime::configured_default_persona();
 
         let model_name = runtime::configured_default_model();
 
@@ -293,7 +292,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                         &context,
                         flow.saved.clone(),
                         &cwd,
-                        &persona_slug,
+                        Some(persona_slug.as_str()),
                         &model_name,
                         &serde_json::json!({}),
                     )

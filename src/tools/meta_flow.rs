@@ -260,7 +260,9 @@ impl metalcraft::Tool for FlowRunTool {
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
         let id = id_arg(&args, "flow_run")?;
-        let persona = args["persona"].as_str().unwrap_or("coding-agent");
+        // Optional override only: a v2 flow declares its own persona on the entry
+        // node. v1 flows fall back to "coding-agent" below.
+        let persona_override = args["persona"].as_str().filter(|s| !s.trim().is_empty());
         let model = args["model"].as_str().unwrap_or(DEFAULT_MODEL);
         let inputs: serde_json::Value = match args["inputs"].as_str() {
             Some(s) => serde_json::from_str(s)
@@ -281,12 +283,15 @@ impl metalcraft::Tool for FlowRunTool {
         };
 
         if crate::flow_exec::is_v2_flow(&flow) {
-            match crate::flow_exec::run_flow_v2(&context, flow, &cwd, persona, model, &inputs).await {
+            match crate::flow_exec::run_flow_v2(&context, flow, &cwd, persona_override, model, &inputs).await {
                 Ok(summary) => Ok(serde_json::to_value(summary).unwrap_or(serde_json::Value::Null)),
                 Err(e) => Ok(serde_json::json!({ "error": e })),
             }
         } else {
-            match crate::flows::run_flow(&context, &id, &cwd, persona, model).await {
+            let persona = persona_override
+                .map(str::to_string)
+                .unwrap_or_else(crate::runtime::configured_default_persona);
+            match crate::flows::run_flow(&context, &id, &cwd, &persona, model).await {
                 Ok(results) => Ok(serde_json::json!({ "flow_id": id, "prompts": results })),
                 Err(e) => Ok(serde_json::json!({ "error": e })),
             }

@@ -21,6 +21,11 @@ use std::sync::Arc;
 pub const DEFAULT_MODEL: &str = "gpt-5.4";
 pub const AVAILABLE_MODELS: &[&str] = &["gpt-5.4-mini", "gpt-5.4", "gpt-5.5"];
 
+/// The persona used when a run doesn't specify one. The orchestrator delegates
+/// to specialists, so it's the correct catch-all default — a bare `coding-agent`
+/// is wrong for non-coding flows (e.g. a calendar morning brief).
+pub const DEFAULT_PERSONA: &str = "orchestrator-agent";
+
 /// The model name to use when a caller (Workshop chat, daemon, a flow node)
 /// doesn't specify one. Resolution order:
 ///   1. `METALCRAFT_MODEL` — set by the control plane on managed pods; typically
@@ -43,6 +48,26 @@ pub fn configured_default_model() -> String {
         }
     }
     DEFAULT_MODEL.to_string()
+}
+
+/// The persona to use when a caller (Workshop force-run, daemon-scheduled flow,
+/// direct API) doesn't specify one. Mirrors [`configured_default_model`] so every
+/// unspecified-persona path resolves the same way instead of hard-coding a slug.
+/// Resolution order: `METALCRAFT_PERSONA` → `METALCRAFT_DEFAULT_PERSONA` →
+/// `STARKBOT_PERSONA` (legacy) → [`DEFAULT_PERSONA`] (the orchestrator).
+///
+/// A flow's prompt nodes that declare their own `persona` always override this;
+/// it is only the fallback for nodes that don't.
+pub fn configured_default_persona() -> String {
+    for key in ["METALCRAFT_PERSONA", "METALCRAFT_DEFAULT_PERSONA", "STARKBOT_PERSONA"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    DEFAULT_PERSONA.to_string()
 }
 
 /// Maximum executor steps for a single agent turn. Single source of truth so no

@@ -98,6 +98,17 @@ impl metalcraft::Tool for GatewaySendMessageTool {
             // the owner's registered devices server-side.
             "apns" => match resolve_pipestreamr_channel(None) {
                 Ok(channel) => match crate::tools::pipestreamr::PipeCfg::for_channel(&channel) {
+                    // A push can only be delivered by a connected Metalcraft
+                    // gateway. If the channel has no BASE_URL it would target the
+                    // public pipestreamr.com, which doesn't handle push — fail
+                    // loud instead of POSTing an apns request into a black hole
+                    // (the failure would otherwise be invisible on both ends).
+                    Ok(cfg) if cfg.is_public_default() => Err(
+                        "APNs push requires a connected Metalcraft gateway, but this channel has no \
+                         BASE_URL set — it would POST to the public pipestreamr.com, which does not \
+                         deliver push. Connect the pod to your gateway (or set the channel's BASE_URL)."
+                            .to_string(),
+                    ),
                     Ok(cfg) => {
                         crate::tools::pipestreamr::send(channel_id, content, None, Some("apns"), &cfg)
                             .await

@@ -80,7 +80,7 @@ async fn pause_and_resume_approval_and_wait() {
     save_flow(&paths::flows_dir(), &approval_flow()).unwrap();
 
     // Approve path.
-    let paused = run_flow_v2(&ctx, approval_flow(), ".", "coding-agent", "m", &json!({}))
+    let paused = run_flow_v2(&ctx, approval_flow(), ".", Some("coding-agent"), "m", &json!({}))
         .await
         .unwrap();
     assert_eq!(paused.status, "paused", "trace: {:?}", paused.steps);
@@ -114,13 +114,14 @@ async fn pause_and_resume_approval_and_wait() {
     assert!(logged_flow_steps, "flow run should log flow_step events into a session");
 
     let approved = resume_flow(&ctx, &paused.run_id, "approve", None).await.unwrap();
-    assert_eq!(approved.status, "completed");
+    // Run status is the terminal end node's declared label, not a blanket "completed".
+    assert_eq!(approved.status, "approved");
     assert_eq!(approved.steps.last().unwrap().node_id, "approved");
     // Resuming again is refused (no longer paused).
     assert!(resume_flow(&ctx, &paused.run_id, "approve", None).await.is_err());
 
     // Reject path (a fresh run of the same flow).
-    let paused2 = run_flow_v2(&ctx, approval_flow(), ".", "coding-agent", "m", &json!({}))
+    let paused2 = run_flow_v2(&ctx, approval_flow(), ".", Some("coding-agent"), "m", &json!({}))
         .await
         .unwrap();
     let rejected = resume_flow(&ctx, &paused2.run_id, "reject", None).await.unwrap();
@@ -128,7 +129,7 @@ async fn pause_and_resume_approval_and_wait() {
 
     // --- wait: pauses with a wake_at, resumes via "after" --------------------
     save_flow(&paths::flows_dir(), &wait_flow()).unwrap();
-    let waited = run_flow_v2(&ctx, wait_flow(), ".", "coding-agent", "m", &json!({}))
+    let waited = run_flow_v2(&ctx, wait_flow(), ".", Some("coding-agent"), "m", &json!({}))
         .await
         .unwrap();
     assert_eq!(waited.status, "paused");
@@ -137,21 +138,21 @@ async fn pause_and_resume_approval_and_wait() {
     assert!(wrun.pause.unwrap().wake_at.is_some());
 
     let resumed = resume_flow(&ctx, &waited.run_id, "after", None).await.unwrap();
-    assert_eq!(resumed.status, "completed");
+    assert_eq!(resumed.status, "done");
     assert_eq!(resumed.steps.last().unwrap().node_id, "done");
 
     // --- snapshot: resume works even after the on-disk flow is deleted -------
-    let paused3 = run_flow_v2(&ctx, approval_flow(), ".", "coding-agent", "m", &json!({}))
+    let paused3 = run_flow_v2(&ctx, approval_flow(), ".", Some("coding-agent"), "m", &json!({}))
         .await
         .unwrap();
     assert!(metalcraft_flows::delete_flow(&paths::flows_dir(), "approval-test"));
     let after = resume_flow(&ctx, &paused3.run_id, "approve", None).await.unwrap();
-    assert_eq!(after.status, "completed");
+    assert_eq!(after.status, "approved");
     assert_eq!(after.steps.last().unwrap().node_id, "approved");
 
     // --- approval timeout persists a wake_at and resumes via `timeout` -------
     save_flow(&paths::flows_dir(), &timeout_flow()).unwrap();
-    let tpaused = run_flow_v2(&ctx, timeout_flow(), ".", "coding-agent", "m", &json!({}))
+    let tpaused = run_flow_v2(&ctx, timeout_flow(), ".", Some("coding-agent"), "m", &json!({}))
         .await
         .unwrap();
     let trun = metalcraft_agent::flow_runs::load_run(&paths::runs_dir(), &tpaused.run_id).unwrap();

@@ -116,7 +116,8 @@ async fn madrid_branch_routes_by_reported_temperature() {
     // Cold day: mock reports 18°F. The branch must call report_temp(18); the
     // conditional (18 > 50 == false) routes to say_cold.
     let cold = run_madrid(&ctx, 18).await;
-    assert_eq!(cold.status, "completed", "trace: {:?}", cold.steps);
+    // Run status is the terminal end node's declared label ("cold"), not a blanket "completed".
+    assert_eq!(cold.status, "cold", "trace: {:?}", cold.steps);
     assert_eq!(
         terminal_node(&cold),
         "say_cold",
@@ -127,7 +128,7 @@ async fn madrid_branch_routes_by_reported_temperature() {
 
     // Warm day: mock reports 75°F → report_temp(75) → 75 > 50 → say_hot.
     let hot = run_madrid(&ctx, 75).await;
-    assert_eq!(hot.status, "completed", "trace: {:?}", hot.steps);
+    assert_eq!(hot.status, "hot", "trace: {:?}", hot.steps);
     assert_eq!(
         terminal_node(&hot),
         "say_hot",

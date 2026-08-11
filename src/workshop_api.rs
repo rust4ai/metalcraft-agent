@@ -568,10 +568,7 @@ async fn landing() -> impl IntoResponse {
     responses((status = 200, description = "Agent name, version, and default persona")),
 )]
 async fn agent_info() -> impl IntoResponse {
-    let default_persona = std::env::var("METALCRAFT_DEFAULT_PERSONA")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "orchestrator-agent".to_string());
+    let default_persona = crate::runtime::configured_default_persona();
     Json(serde_json::json!({
         "name": env!("CARGO_PKG_NAME"),
         "version": env!("CARGO_PKG_VERSION"),
@@ -1446,8 +1443,10 @@ async fn get_flow_template(Path(slug): Path<String>) -> Response {
 
 #[derive(Deserialize, Default, utoipa::ToSchema)]
 struct RunFlowRequest {
-    /// Persona to run the flow's prompts as. Defaults to `coding-agent` if
-    /// the caller doesn't specify one.
+    /// Optional persona override. A v2 flow owns its persona via the entry node,
+    /// so this is normally omitted and left to the flow. It is only a fallback for
+    /// a flow that declares none (and for legacy v1 flows). Prompt nodes that
+    /// declare their own persona override it regardless.
     #[serde(default)]
     persona_slug: Option<String>,
     #[serde(default)]
@@ -1501,9 +1500,10 @@ async fn post_run_flow(
             );
         }
     };
-    let persona_slug = req
-        .persona_slug
-        .unwrap_or_else(|| "coding-agent".to_string());
+    // A v2 flow owns its persona (the entry node declares it); the request slug
+    // is only an optional override, so don't manufacture a default here — that
+    // would mislabel the run's session. v1 flows still fall back below.
+    let persona_override = req.persona_slug.clone().filter(|s| !s.trim().is_empty());
     let model_name = req.model_name.unwrap_or_else(crate::runtime::configured_default_model);
 
     let Some(flow) = metalcraft_flows::load_flow(&crate::paths::flows_dir(), &id) else {
@@ -1518,7 +1518,7 @@ async fn post_run_flow(
             &context,
             flow,
             &state.cwd,
-            &persona_slug,
+            persona_override.as_deref(),
             &model_name,
             &inputs,
         )
@@ -1529,6 +1529,8 @@ async fn post_run_flow(
         };
     }
 
+    let persona_slug =
+        persona_override.unwrap_or_else(crate::runtime::configured_default_persona);
     match flows::run_flow(&context, &id, &state.cwd, &persona_slug, &model_name).await {
         Ok(results) => Json(RunFlowResponse {
             flow_id: id,

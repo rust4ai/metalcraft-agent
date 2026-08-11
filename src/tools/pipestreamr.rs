@@ -73,6 +73,14 @@ impl PipeCfg {
             .unwrap_or_else(|| DEFAULT_BASE.to_string());
         Ok(Self { api_key, base_url })
     }
+
+    /// True when no `BASE_URL` was configured, so this config targets the hosted
+    /// public `pipestreamr.com`. First-party push (apns) is a Metalcraft-gateway
+    /// feature the public service can't fulfil — callers delivering a push must
+    /// reject this rather than silently POST into a black hole.
+    pub fn is_public_default(&self) -> bool {
+        self.base_url == DEFAULT_BASE
+    }
 }
 
 /// The inbound HMAC secret for `channel`: its `WEBHOOK_SECRET` secret. `None`
