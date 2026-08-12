@@ -489,6 +489,139 @@ impl NotesStore {
         };
         Ok(rows)
     }
+
+    // ── export / import (Obsidian-compatible markdown) ───────────────────────
+
+    async fn category_names(&self, note_id: &str) -> NotesResult<Vec<String>> {
+        Ok(self.categories_for_note(note_id).await?.into_iter().map(|c| c.name).collect())
+    }
+
+    /// All notes as `(filename, contents)` markdown files (one flat `.md` each).
+    pub async fn export_all(&self) -> NotesResult<Vec<(String, String)>> {
+        let notes = sqlx::query_as::<_, NoteRow>("SELECT * FROM notes ORDER BY created_at")
+            .fetch_all(&self.pool)
+            .await?;
+        let ids: Vec<String> = notes.iter().map(|n| n.id.clone()).collect();
+        let mut cats = self.categories_for_notes(&ids).await?;
+        let items: Vec<_> = notes
+            .into_iter()
+            .map(|n| {
+                let names: Vec<String> =
+                    cats.remove(&n.id).unwrap_or_default().into_iter().map(|c| c.name).collect();
+                (n.title, n.slug, n.body, n.is_favorite != 0, n.created_at, n.updated_at, names)
+            })
+            .collect();
+        Ok(super::portable::note_files(&items))
+    }
+
+    /// One note as `(filename, contents)`.
+    pub async fn export_one(&self, slug: &str) -> NotesResult<(String, String)> {
+        let n = self.note_by_slug(slug).await?;
+        let names = self.category_names(&n.id).await?;
+        let md = super::portable::serialize_note(
+            &n.title,
+            &n.slug,
+            &n.body,
+            n.is_favorite != 0,
+            &n.created_at,
+            &n.updated_at,
+            &names,
+        );
+        Ok((format!("{}.md", n.slug), md))
+    }
+
+    /// Import markdown entries as flat notes. **Additive**: slugs are deduped so
+    /// importing never clobbers existing notes. Returns the count created.
+    pub async fn import_markdown(&self, entries: Vec<(String, String)>) -> NotesResult<usize> {
+        let nodes = super::portable::parse_import(entries);
+        let mut cache: HashMap<String, String> = HashMap::new();
+        let mut imported = 0usize;
+        for node in nodes {
+            let base = node
+                .preferred_slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(slugify)
+                .unwrap_or_else(|| slugify(&node.title));
+            let slug = self.free_slug(&base).await?;
+            let title = if node.title.trim().is_empty() { "Untitled" } else { node.title.trim() };
+            let now = now_iso();
+            let note = sqlx::query_as::<_, NoteRow>(
+                "INSERT INTO notes (id, title, slug, body, is_favorite, created_at, updated_at, last_accessed_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
+            )
+            .bind(uuid())
+            .bind(title)
+            .bind(&slug)
+            .bind(&node.body)
+            .bind(node.favorite as i64)
+            .bind(&now)
+            .bind(&now)
+            .bind(&now)
+            .fetch_one(&self.pool)
+            .await?;
+            let cat_ids = self.resolve_import_categories(&node.categories, &mut cache).await?;
+            if !cat_ids.is_empty() {
+                self.set_note_categories(&note.id, &cat_ids).await?;
+            }
+            let view = self.note_view(note).await?;
+            self.publish_note(&view);
+            imported += 1;
+        }
+        Ok(imported)
+    }
+
+    /// Resolve category names → ids on import: reuse existing (case-insensitive),
+    /// else create while the palette allows; names past the cap are skipped.
+    async fn resolve_import_categories(
+        &self,
+        names: &[String],
+        cache: &mut HashMap<String, String>,
+    ) -> NotesResult<Vec<String>> {
+        let mut ids = Vec::new();
+        for raw in names {
+            let name = raw.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let key = name.to_lowercase();
+            if let Some(id) = cache.get(&key) {
+                ids.push(id.clone());
+                continue;
+            }
+            if let Some(id) = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM categories WHERE name = ? COLLATE NOCASE",
+            )
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?
+            {
+                cache.insert(key, id.clone());
+                ids.push(id);
+                continue;
+            }
+            let used: Vec<String> = sqlx::query_scalar("SELECT color FROM categories")
+                .fetch_all(&self.pool)
+                .await?;
+            let Some(color) = palette::pick_unused(&used) else { continue };
+            let cat = sqlx::query_as::<_, CategoryRow>(
+                "INSERT INTO categories (id, name, color, created_at) VALUES (?, ?, ?, ?)
+                 RETURNING id, name, color, created_at",
+            )
+            .bind(uuid())
+            .bind(name)
+            .bind(color)
+            .bind(now_iso())
+            .fetch_one(&self.pool)
+            .await?;
+            let cat = Category::from(cat);
+            self.publish_category(&cat);
+            cache.insert(key, cat.id.clone());
+            ids.push(cat.id);
+        }
+        Ok(ids)
+    }
 }
 
 #[cfg(test)]
@@ -558,6 +691,26 @@ mod tests {
             .unwrap();
         assert_eq!(status, 409);
         assert_eq!(view.body, "v1"); // unchanged; caller must merge
+    }
+
+    #[tokio::test]
+    async fn export_then_import_round_trips() {
+        let s = store().await;
+        let c = s.create_category("proj").await.unwrap();
+        s.create_note(Some("Alpha"), Some("# A\nbody"), Some(vec![c.id.clone()])).await.unwrap();
+        s.create_note(Some("Beta"), Some("B"), None).await.unwrap();
+
+        let files = s.export_all().await.unwrap();
+        assert_eq!(files.len(), 2);
+
+        // Import the export into a fresh pod → notes, bodies, and the category
+        // tag are preserved (the cloud→pod migration path).
+        let s2 = store().await;
+        assert_eq!(s2.import_markdown(files).await.unwrap(), 2);
+        assert_eq!(s2.list_notes(None, None).await.unwrap().len(), 2);
+        let alpha = s2.get_note("alpha").await.unwrap();
+        assert_eq!(alpha.body, "# A\nbody");
+        assert!(alpha.categories.iter().any(|c| c.name == "proj"));
     }
 
     #[tokio::test]

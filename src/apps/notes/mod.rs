@@ -18,6 +18,7 @@ use super::{App, AppContext, AppResult};
 mod http;
 mod models;
 mod palette;
+mod portable;
 mod schema;
 mod store;
 mod tools;

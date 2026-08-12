@@ -16,8 +16,8 @@
 use std::collections::HashMap;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Multipart, Path, Query, Request, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -46,9 +46,79 @@ pub fn router(store: NotesStore) -> Router {
         .route("/api/v1/notes/{slug}/favorite", post(favorite_note))
         .route("/api/v1/favorites", get(list_favorites))
         .route("/api/v1/search", get(search))
+        .route("/api/v1/export", get(export))
+        .route("/api/v1/import", post(import))
         .route("/ws", get(ws))
         .layer(axum::middleware::from_fn(require_pod_auth))
         .with_state(store)
+}
+
+/// A file-download response (markdown or zip) for export.
+fn attachment(content_type: &'static str, filename: &str, bytes: Vec<u8>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\"")),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// `GET /api/v1/export[?note=slug]` — one note as `.md`, or all notes as a zip.
+async fn export(State(s): State<NotesStore>, Query(q): Query<HashMap<String, String>>) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    if let Some(slug) = q.get("note").filter(|s| !s.is_empty()) {
+        return match s.export_one(slug).await {
+            Ok((name, md)) => attachment("text/markdown; charset=utf-8", &name, md.into_bytes()),
+            Err(e) => e.into_response(),
+        };
+    }
+    match s.export_all().await {
+        Ok(files) => match super::portable::zip_files(&files) {
+            Ok(bytes) => attachment("application/zip", "metalcraft-notes-export.zip", bytes),
+            Err(e) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response()
+            }
+        },
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `POST /api/v1/import` — multipart upload of a `.zip` vault or a bare `.md`.
+/// Additive: slugs are deduped so existing notes are never clobbered. This is
+/// how the one-time cloud→pod migration lands (cloud `/export` → pod `/import`).
+async fn import(State(s): State<NotesStore>, mut multipart: Multipart) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    let mut file: Option<(String, Vec<u8>)> = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("file") {
+            let name = field.file_name().unwrap_or("upload").to_string();
+            match field.bytes().await {
+                Ok(b) => file = Some((name, b.to_vec())),
+                Err(_) => {
+                    return (StatusCode::BAD_REQUEST, Json(json!({ "error": "failed to read upload" })))
+                        .into_response()
+                }
+            }
+            break;
+        }
+    }
+    let Some((name, data)) = file else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "no file in upload" }))).into_response();
+    };
+    let entries = match super::portable::markdown_entries(&name, &data) {
+        Ok(e) => e,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    };
+    match s.import_markdown(entries).await {
+        Ok(n) => Json(json!({ "imported": n })).into_response(),
+        Err(e) => e.into_response(),
+    }
 }
 
 /// Live-push WebSocket. Subscribes to the app's event hub and forwards each

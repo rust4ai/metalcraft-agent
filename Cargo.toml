@@ -39,7 +39,7 @@ include_dir = "0.7"
 # In-memory unzip of registry pack downloads (see `registry` + `install_from_zip`).
 # No default features (no time/bzip2/zstd) — pack zips are plain Deflate.
 zip = { version = "2", default-features = false, features = ["deflate"] }
-axum = { version = "0.8", features = ["macros", "ws"] }
+axum = { version = "0.8", features = ["macros", "ws", "multipart"] }
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
 utoipa-scalar = { version = "0.3", features = ["axum"] }
 uuid = { version = "1", features = ["v4"] }
