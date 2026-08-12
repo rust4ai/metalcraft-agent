@@ -14,6 +14,7 @@ use metalcraft::ToolRegistry;
 
 use super::{App, AppContext, AppResult};
 
+mod http;
 mod models;
 mod palette;
 mod schema;
@@ -85,6 +86,11 @@ impl App for NotesApp {
     fn register_tools(&self, reg: ToolRegistry, ctx: &AppContext) -> ToolRegistry {
         let store = NotesStore::new(ctx.store.pool().clone(), ctx.owner.clone());
         tools::register(reg, store)
+    }
+
+    fn router(&self, ctx: &AppContext) -> axum::Router {
+        let store = NotesStore::new(ctx.store.pool().clone(), ctx.owner.clone());
+        http::router(store)
     }
 
     async fn init(&self, ctx: &AppContext) -> AppResult<()> {

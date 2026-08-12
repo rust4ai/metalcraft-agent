@@ -44,6 +44,18 @@ pub fn placeholders(n: usize) -> String {
     std::iter::repeat("?").take(n).collect::<Vec<_>>().join(",")
 }
 
+/// Build a safe FTS5 `MATCH` query from raw user input: each whitespace-split
+/// term is double-quoted (quotes escaped) and given a `*` prefix wildcard, so
+/// `hello wor` matches `hello world`. Quoting neutralizes FTS operator syntax,
+/// so arbitrary input can't inject an FTS expression. Empty input → empty.
+pub fn fts_query(raw: &str) -> String {
+    raw.split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{}\"*", t.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

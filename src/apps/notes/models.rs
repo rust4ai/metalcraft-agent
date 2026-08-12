@@ -34,6 +34,14 @@ pub struct NoteSummaryRow {
     pub last_accessed_at: String,
 }
 
+/// A search / favorites hit — slug + title + updated_at, no body.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct NoteHit {
+    pub slug: String,
+    pub title: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct CategoryRow {
     pub id: String,

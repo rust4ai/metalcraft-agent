@@ -338,6 +338,117 @@ impl NotesStore {
             .await?;
         Ok(())
     }
+
+    // ── category update / delete (used by the web UI) ────────────────────────
+
+    pub async fn update_category(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        color: Option<&str>,
+    ) -> NotesResult<Category> {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM categories WHERE id = ?)")
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await?;
+        if exists == 0 {
+            return Err(NotesError::not_found("category not found"));
+        }
+        let name = name.map(str::trim).filter(|s| !s.is_empty());
+        let color = match color.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(c) if !palette::is_valid(c) => {
+                return Err(NotesError::bad_request("color is not a valid palette color"));
+            }
+            other => other,
+        };
+        let res = sqlx::query_as::<_, CategoryRow>(
+            "UPDATE categories SET name = COALESCE(?, name), color = COALESCE(?, color)
+             WHERE id = ? RETURNING id, name, color, created_at",
+        )
+        .bind(name)
+        .bind(color)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await;
+        match res {
+            Ok(Some(cat)) => Ok(Category::from(cat)),
+            Ok(None) => Err(NotesError::new(500, "update failed")),
+            Err(e) if e.to_string().to_uppercase().contains("UNIQUE") => {
+                Err(NotesError::conflict("that name or color is already in use"))
+            }
+            Err(e) => Err(NotesError::from(e)),
+        }
+    }
+
+    pub async fn delete_category(&self, id: &str) -> NotesResult<()> {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM categories WHERE id = ?)")
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await?;
+        if exists == 0 {
+            return Err(NotesError::not_found("category not found"));
+        }
+        // note_categories rows cascade away via the FK.
+        sqlx::query("DELETE FROM categories WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ── favorites & search (used by the web UI) ──────────────────────────────
+
+    pub async fn favorite_note(&self, slug: &str, on: bool) -> NotesResult<NoteView> {
+        let note = self.note_by_slug(slug).await?;
+        let note = sqlx::query_as::<_, NoteRow>(
+            "UPDATE notes SET is_favorite = ? WHERE id = ? RETURNING *",
+        )
+        .bind(on as i64)
+        .bind(&note.id)
+        .fetch_one(&self.pool)
+        .await?;
+        self.note_view(note).await
+    }
+
+    pub async fn list_favorites(&self) -> NotesResult<Vec<NoteHit>> {
+        Ok(sqlx::query_as::<_, NoteHit>(
+            "SELECT slug, title, updated_at FROM notes WHERE is_favorite = 1 ORDER BY updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn search(&self, q: &str, category: Option<&str>) -> NotesResult<Vec<NoteHit>> {
+        let query = super::util::fts_query(q);
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = if let Some(cat) = category.filter(|c| !c.is_empty()) {
+            sqlx::query_as::<_, NoteHit>(
+                "SELECT n.slug, n.title, n.updated_at
+                 FROM notes_fts f JOIN notes n ON n.rowid = f.rowid
+                 WHERE notes_fts MATCH ?
+                   AND n.id IN (SELECT note_id FROM note_categories WHERE category_id = ?)
+                 ORDER BY bm25(notes_fts) LIMIT 50",
+            )
+            .bind(&query)
+            .bind(cat)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, NoteHit>(
+                "SELECT n.slug, n.title, n.updated_at
+                 FROM notes_fts f JOIN notes n ON n.rowid = f.rowid
+                 WHERE notes_fts MATCH ? ORDER BY bm25(notes_fts) LIMIT 50",
+            )
+            .bind(&query)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
@@ -407,6 +518,33 @@ mod tests {
             .unwrap();
         assert_eq!(status, 409);
         assert_eq!(view.body, "v1"); // unchanged; caller must merge
+    }
+
+    #[tokio::test]
+    async fn favorite_search_and_category_edit() {
+        let s = store().await;
+        s.create_note(Some("Grocery list"), Some("milk eggs bread"), None).await.unwrap();
+        s.create_note(Some("Trip plan"), Some("flights and hotels"), None).await.unwrap();
+
+        // favorite toggles and lists
+        s.favorite_note("grocery-list", true).await.unwrap();
+        let favs = s.list_favorites().await.unwrap();
+        assert_eq!(favs.len(), 1);
+        assert_eq!(favs[0].slug, "grocery-list");
+
+        // FTS prefix search finds by body/title
+        let hits = s.search("gro", None).await.unwrap();
+        assert!(hits.iter().any(|h| h.slug == "grocery-list"));
+        let body_hits = s.search("hotel", None).await.unwrap();
+        assert!(body_hits.iter().any(|h| h.slug == "trip-plan"));
+        assert!(s.search("   ", None).await.unwrap().is_empty());
+
+        // category rename + delete
+        let c = s.create_category("misc").await.unwrap();
+        let renamed = s.update_category(&c.id, Some("miscellaneous"), None).await.unwrap();
+        assert_eq!(renamed.name, "miscellaneous");
+        s.delete_category(&c.id).await.unwrap();
+        assert!(s.update_category(&c.id, Some("x"), None).await.is_err());
     }
 
     #[tokio::test]

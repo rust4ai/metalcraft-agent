@@ -63,3 +63,5 @@ path = "src/bin/metalcraft-daemon.rs"
 [dev-dependencies]
 spice-framework = "0.1"
 tempfile = "3"
+# Router-level tests via `ServiceExt::oneshot` (axum 0.8 rides tower 0.5).
+tower = "0.5"
