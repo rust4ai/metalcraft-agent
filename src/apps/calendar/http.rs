@@ -9,7 +9,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::sync::broadcast::error::RecvError;
@@ -35,6 +35,8 @@ pub fn router(store: CalendarStore) -> Router {
             "/api/v1/calendars/{slug}/events/{id}",
             get(get_event).patch(update_event).delete(delete_event),
         )
+        .route("/api/v1/calendars/{slug}/events/{id}/guests", post(add_guests))
+        .route("/api/v1/calendars/{slug}/events/{id}/guests/{email}", axum::routing::delete(remove_guest))
         .route("/ws", get(ws))
         .layer(axum::middleware::from_fn(crate::apps::require_pod_auth))
         .with_state(store)
@@ -151,8 +153,46 @@ async fn get_event(State(s): State<CalendarStore>, Path((slug, id)): Path<(Strin
     if let Err(r) = ready(&s).await {
         return r;
     }
-    match s.get_event(&slug, &id).await {
+    match s.event_with_guests(&slug, &id).await {
         Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn add_guests(
+    State(s): State<CalendarStore>,
+    Path((slug, id)): Path<(String, String)>,
+    Json(b): Json<Value>,
+) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    let emails: Vec<String> = b
+        .get("guests")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|g| {
+                    g.as_str().map(String::from).or_else(|| g.get("email").and_then(|e| e.as_str()).map(String::from))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    match s.add_guests(&slug, &id, &emails).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn remove_guest(
+    State(s): State<CalendarStore>,
+    Path((slug, id, email)): Path<(String, String, String)>,
+) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    match s.remove_guest(&slug, &id, &email).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => e.into_response(),
     }
 }

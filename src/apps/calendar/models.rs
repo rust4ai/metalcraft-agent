@@ -78,6 +78,26 @@ pub struct EventView {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct GuestRow {
+    pub email: String,
+    pub name: Option<String>,
+    pub rsvp: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GuestView {
+    pub email: String,
+    pub name: Option<String>,
+    pub rsvp: String,
+}
+
+impl From<GuestRow> for GuestView {
+    fn from(r: GuestRow) -> Self {
+        GuestView { email: r.email, name: r.name, rsvp: r.rsvp }
+    }
+}
+
 impl From<EventRow> for EventView {
     fn from(r: EventRow) -> Self {
         EventView {

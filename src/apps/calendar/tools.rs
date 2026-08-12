@@ -16,7 +16,9 @@ pub fn register(reg: metalcraft::ToolRegistry, store: CalendarStore) -> metalcra
         .register(GetEvent(store.clone()))
         .register(CreateEvent(store.clone()))
         .register(UpdateEvent(store.clone()))
-        .register(DeleteEvent(store))
+        .register(DeleteEvent(store.clone()))
+        .register(AddGuests(store.clone()))
+        .register(RemoveGuest(store))
 }
 
 fn ok(status: u16, data: Value) -> Value {
@@ -172,11 +174,97 @@ impl metalcraft::Tool for GetEvent {
     async fn call(&self, a: Value) -> metalcraft::Result<Value> {
         if let Err(e) = ready(&self.0).await { return Ok(e); }
         match (sa(&a, "calendar"), sa(&a, "id")) {
-            (Some(c), Some(id)) => match self.0.get_event(c, id).await {
-                Ok(v) => Ok(ok(200, serde_json::to_value(v).unwrap_or(Value::Null))),
+            (Some(c), Some(id)) => match self.0.event_with_guests(c, id).await {
+                Ok(v) => Ok(ok(200, v)),
                 Err(e) => Ok(err(e)),
             },
             _ => Ok(err(CalError::bad_request("calendar and id are required"))),
+        }
+    }
+}
+
+/// Extract guest emails from a `guests` param (array of `{email,name?}` objects
+/// or plain email strings).
+fn guest_emails(a: &Value) -> Vec<String> {
+    a.get("guests")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|g| {
+                    g.as_str()
+                        .map(String::from)
+                        .or_else(|| g.get("email").and_then(|e| e.as_str()).map(String::from))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ── mcal_add_guests ──────────────────────────────────────────────────────────
+pub struct AddGuests(CalendarStore);
+#[async_trait]
+impl metalcraft::Tool for AddGuests {
+    fn name(&self) -> &str { "mcal_add_guests" }
+    fn description(&self) -> &str {
+        "Invite external guests to an event by email. They receive an emailed RSVP link (via the coordinator); their responses appear as each guest's `rsvp` in mcal_get_event. Requires a configured coordinator. Returns the guest list."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "calendar": { "type": "string", "description": "Calendar slug." },
+                "id": { "type": "string", "description": "Event id to add guests to." },
+                "guests": {
+                    "type": "array",
+                    "description": "Guests to invite.",
+                    "items": { "type": "object", "properties": {
+                        "email": { "type": "string", "description": "Guest email address." },
+                        "name": { "type": "string", "description": "Optional display name." }
+                    }, "required": ["email"] }
+                }
+            },
+            "required": ["calendar", "id", "guests"]
+        })
+    }
+    async fn call(&self, a: Value) -> metalcraft::Result<Value> {
+        if let Err(e) = ready(&self.0).await { return Ok(e); }
+        let (Some(c), Some(id)) = (sa(&a, "calendar"), sa(&a, "id")) else {
+            return Ok(err(CalError::bad_request("calendar and id are required")));
+        };
+        match self.0.add_guests(c, id, &guest_emails(&a)).await {
+            Ok(v) => Ok(ok(200, serde_json::to_value(v).unwrap_or(Value::Null))),
+            Err(e) => Ok(err(e)),
+        }
+    }
+}
+
+// ── mcal_remove_guest ────────────────────────────────────────────────────────
+pub struct RemoveGuest(CalendarStore);
+#[async_trait]
+impl metalcraft::Tool for RemoveGuest {
+    fn name(&self) -> &str { "mcal_remove_guest" }
+    fn description(&self) -> &str {
+        "Remove a guest from an event by email (drops the local invite mirror)."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "calendar": { "type": "string", "description": "Calendar slug." },
+                "id": { "type": "string", "description": "Event id." },
+                "email": { "type": "string", "description": "Email of the guest to remove." }
+            },
+            "required": ["calendar", "id", "email"]
+        })
+    }
+    async fn call(&self, a: Value) -> metalcraft::Result<Value> {
+        if let Err(e) = ready(&self.0).await { return Ok(e); }
+        match (sa(&a, "calendar"), sa(&a, "id"), sa(&a, "email")) {
+            (Some(c), Some(id), Some(email)) => match self.0.remove_guest(c, id, email).await {
+                Ok(()) => Ok(ok(204, json!({ "removed": true }))),
+                Err(e) => Ok(err(e)),
+            },
+            _ => Ok(err(CalError::bad_request("calendar, id and email are required"))),
         }
     }
 }

@@ -220,6 +220,124 @@ impl CalendarStore {
         Ok(EventView::from(row))
     }
 
+    /// An event plus its guest list (with last-known RSVP, refreshed best-effort
+    /// from the coordinator) — the shape `mcal_get_event` returns.
+    pub async fn event_with_guests(&self, slug: &str, id: &str) -> CalResult<serde_json::Value> {
+        let ev = self.get_event(slug, id).await?;
+        self.refresh_rsvps(&ev.id).await; // best-effort
+        let guests = self.guests_for_event(&ev.id).await?;
+        let mut v = serde_json::to_value(&ev).unwrap_or(json!({}));
+        v["guests"] = serde_json::to_value(guests).unwrap_or(json!([]));
+        Ok(v)
+    }
+
+    // ── external-guest invites (C2, via the coordinator) ─────────────────────
+
+    pub async fn guests_for_event(&self, event_id: &str) -> CalResult<Vec<GuestView>> {
+        let rows = sqlx::query_as::<_, GuestRow>(
+            "SELECT email, name, rsvp FROM event_guests WHERE event_id = ? ORDER BY email",
+        )
+        .bind(event_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(GuestView::from).collect())
+    }
+
+    /// Pull current RSVP statuses from the coordinator and mirror them locally.
+    /// Best-effort: silently does nothing if no coordinator is configured.
+    pub async fn refresh_rsvps(&self, event_id: &str) {
+        if let Some(pairs) = crate::apps::coordinator::fetch_rsvps(event_id).await {
+            for (email, rsvp) in pairs {
+                let _ = sqlx::query("UPDATE event_guests SET rsvp = ? WHERE event_id = ? AND email = ?")
+                    .bind(&rsvp)
+                    .bind(event_id)
+                    .bind(&email)
+                    .execute(&self.pool)
+                    .await;
+            }
+        }
+    }
+
+    /// Invite external guests to an event: register with the coordinator (which
+    /// emails them RSVP links) and mirror the invites locally. Requires a
+    /// configured coordinator (invites are cross-tenant). Returns the guest list.
+    pub async fn add_guests(&self, slug: &str, event_id: &str, emails: &[String]) -> CalResult<Vec<GuestView>> {
+        let cal = self.resolve(slug).await?;
+        let event = sqlx::query_as::<_, EventRow>(
+            "SELECT * FROM calendar_events WHERE id = ? AND calendar_id = ?",
+        )
+        .bind(event_id)
+        .bind(&cal.id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| CalError::not_found("event not found"))?;
+
+        let emails: Vec<String> = emails
+            .iter()
+            .map(|e| e.trim().to_string())
+            .filter(|e| e.contains('@'))
+            .collect();
+        if emails.is_empty() {
+            return Err(CalError::bad_request("at least one valid guest email is required"));
+        }
+        if !crate::apps::coordinator::is_configured() {
+            return Err(CalError::new(
+                503,
+                "external invites require a configured coordinator (COORDINATOR_URL)",
+            ));
+        }
+        let results = crate::apps::coordinator::register_invites(
+            &event.id,
+            self.owner.email.as_deref(),
+            &event.title,
+            &event.starts_at,
+            Some(&event.ends_at),
+            event.location.as_deref(),
+            &cal.timezone,
+            &emails,
+        )
+        .await
+        .ok_or_else(|| CalError::new(502, "coordinator did not accept the invites"))?;
+
+        for r in results {
+            sqlx::query(
+                "INSERT INTO event_guests (id, event_id, email, rsvp, invite_token, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (event_id, email) DO UPDATE SET rsvp = excluded.rsvp, invite_token = excluded.invite_token",
+            )
+            .bind(uuid())
+            .bind(&event.id)
+            .bind(&r.email)
+            .bind(&r.rsvp)
+            .bind(&r.token)
+            .bind(now_iso())
+            .execute(&self.pool)
+            .await?;
+        }
+        self.guests_for_event(&event.id).await
+    }
+
+    pub async fn remove_guest(&self, slug: &str, event_id: &str, email: &str) -> CalResult<()> {
+        let cal = self.resolve(slug).await?;
+        // Ensure the event belongs to this calendar.
+        let owns: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM calendar_events WHERE id = ? AND calendar_id = ?)",
+        )
+        .bind(event_id)
+        .bind(&cal.id)
+        .fetch_one(&self.pool)
+        .await?;
+        if owns == 0 {
+            return Err(CalError::not_found("event not found"));
+        }
+        sqlx::query("DELETE FROM event_guests WHERE event_id = ? AND email = ?")
+            .bind(event_id)
+            .bind(email.trim())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn create_event(&self, slug: &str, input: EventInput<'_>) -> CalResult<EventView> {
         let cal = self.resolve(slug).await?;
         let (title, starts, ends) = self.validate_event(&input)?;

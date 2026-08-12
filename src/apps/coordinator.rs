@@ -63,3 +63,85 @@ pub async fn unregister_share(token: &str) {
         log::warn!("coordinator unregister_share failed: {e}");
     }
 }
+
+/// True if a coordinator is configured (invites require it — they're cross-tenant).
+pub fn is_configured() -> bool {
+    configured().is_some()
+}
+
+/// One guest's invite result from the coordinator.
+pub struct InviteResult {
+    pub email: String,
+    pub token: String,
+    pub rsvp: String,
+}
+
+/// Register calendar invites for an event's guests. Returns per-guest tokens, or
+/// `None` if no coordinator is configured / the call fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn register_invites(
+    event_id: &str,
+    organizer_email: Option<&str>,
+    title: &str,
+    starts_at: &str,
+    ends_at: Option<&str>,
+    location: Option<&str>,
+    timezone: &str,
+    guests: &[String],
+) -> Option<Vec<InviteResult>> {
+    let (url, secret) = configured()?;
+    let body = json!({
+        "event_id": event_id,
+        "organizer_pod": pod_slug(),
+        "organizer_email": organizer_email,
+        "title": title,
+        "starts_at": starts_at,
+        "ends_at": ends_at,
+        "location": location,
+        "timezone": timezone,
+        "guests": guests,
+    });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{url}/api/v1/invites"))
+        .header("X-Metalcraft-Service-Secret", secret)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| log::warn!("coordinator register_invites failed: {e}"))
+        .ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let arr = v.get("invites")?.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|i| {
+                Some(InviteResult {
+                    email: i.get("email")?.as_str()?.to_string(),
+                    token: i.get("token")?.as_str()?.to_string(),
+                    rsvp: i.get("rsvp").and_then(|r| r.as_str()).unwrap_or("pending").to_string(),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Fetch current RSVP statuses for an event (best-effort). `(email, rsvp)` pairs.
+pub async fn fetch_rsvps(event_id: &str) -> Option<Vec<(String, String)>> {
+    let (url, secret) = configured()?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{url}/api/v1/events/{event_id}/rsvps"))
+        .header("X-Metalcraft-Service-Secret", secret)
+        .send()
+        .await
+        .ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let arr = v.get("rsvps")?.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|r| {
+                Some((r.get("email")?.as_str()?.to_string(), r.get("rsvp")?.as_str()?.to_string()))
+            })
+            .collect(),
+    )
+}

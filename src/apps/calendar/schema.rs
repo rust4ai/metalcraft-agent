@@ -46,6 +46,19 @@ pub const STATEMENTS: &[&str] = &[
      )",
     "CREATE INDEX IF NOT EXISTS idx_events_calendar
        ON calendar_events (calendar_id, starts_at, ends_at)",
+    // External-guest invites (C2). The event stays pod-local; the invite/RSVP is
+    // coordinated by the cloud relay, and its last-known status is mirrored here.
+    "CREATE TABLE IF NOT EXISTS event_guests (
+       id           TEXT PRIMARY KEY,
+       event_id     TEXT NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+       email        TEXT NOT NULL,
+       name         TEXT,
+       rsvp         TEXT NOT NULL DEFAULT 'pending',
+       invite_token TEXT,
+       created_at   TEXT NOT NULL,
+       UNIQUE (event_id, email)
+     )",
+    "CREATE INDEX IF NOT EXISTS idx_guests_event ON event_guests (event_id)",
     "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)",
 ];
 
