@@ -29,6 +29,7 @@ pub fn router(store: CalendarStore) -> Router {
         .route("/api/v1/whoami", get(whoami))
         .route("/api/v1/now", get(now))
         .route("/api/v1/calendars", get(list_calendars).post(create_calendar))
+        .route("/api/v1/calendars/{slug}", axum::routing::patch(update_calendar))
         .route("/api/v1/calendars/{slug}/events", get(list_events).post(create_event))
         .route(
             "/api/v1/calendars/{slug}/events/{id}",
@@ -88,6 +89,31 @@ async fn create_calendar(State(s): State<CalendarStore>, Json(b): Json<Value>) -
         return r;
     }
     match s.create_calendar(b_str(&b, "name").unwrap_or(""), b_str(&b, "timezone").unwrap_or(""), b_str(&b, "slug")).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// PATCH a calendar's settings — including `reminders_enabled` /
+/// `reminder_lead_minutes` (the reminder scheduler's config; default on/60).
+async fn update_calendar(
+    State(s): State<CalendarStore>,
+    Path(slug): Path<String>,
+    Json(b): Json<Value>,
+) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    match s
+        .update_calendar(
+            &slug,
+            b_str(&b, "name"),
+            b_str(&b, "timezone"),
+            b.get("reminders_enabled").and_then(|v| v.as_bool()),
+            b.get("reminder_lead_minutes").and_then(|v| v.as_i64()),
+        )
+        .await
+    {
         Ok(v) => Json(v).into_response(),
         Err(e) => e.into_response(),
     }

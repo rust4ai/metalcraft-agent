@@ -14,12 +14,15 @@ use super::{CalError, CalResult};
 
 pub const STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS calendars (
-       id         TEXT PRIMARY KEY,
-       name       TEXT NOT NULL,
-       slug       TEXT NOT NULL UNIQUE,
-       timezone   TEXT NOT NULL,
-       is_default INTEGER NOT NULL DEFAULT 0,
-       created_at TEXT NOT NULL
+       id                    TEXT PRIMARY KEY,
+       name                  TEXT NOT NULL,
+       slug                  TEXT NOT NULL UNIQUE,
+       timezone              TEXT NOT NULL,
+       is_default            INTEGER NOT NULL DEFAULT 0,
+       -- Per-calendar reminders: default ON, 60 minutes, delivered via APNs.
+       reminders_enabled     INTEGER NOT NULL DEFAULT 1,
+       reminder_lead_minutes INTEGER NOT NULL DEFAULT 60,
+       created_at            TEXT NOT NULL
      )",
     // At most one default calendar (the cloud's `uq_calendars_one_default`).
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_calendars_one_default
@@ -35,6 +38,9 @@ pub const STATEMENTS: &[&str] = &[
        all_day     INTEGER NOT NULL DEFAULT 0,
        source      TEXT NOT NULL DEFAULT 'portal',
        status      TEXT NOT NULL DEFAULT 'confirmed',
+       -- One-shot 'starting soon' reminder marker (NULL = not yet sent; cleared
+       -- on edit so a moved start re-arms). Drives the pod reminder scheduler.
+       reminded_at TEXT,
        created_at  TEXT NOT NULL,
        updated_at  TEXT NOT NULL
      )",

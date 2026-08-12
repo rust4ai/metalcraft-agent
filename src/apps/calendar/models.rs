@@ -12,6 +12,8 @@ pub struct CalendarRow {
     pub slug: String,
     pub timezone: String,
     pub is_default: i64,
+    pub reminders_enabled: i64,
+    pub reminder_lead_minutes: i64,
     pub created_at: String,
 }
 
@@ -22,6 +24,8 @@ pub struct CalendarView {
     pub slug: String,
     pub timezone: String,
     pub is_default: bool,
+    pub reminders_enabled: bool,
+    pub reminder_lead_minutes: i64,
     pub created_at: String,
 }
 
@@ -33,6 +37,8 @@ impl From<CalendarRow> for CalendarView {
             slug: r.slug,
             timezone: r.timezone,
             is_default: r.is_default != 0,
+            reminders_enabled: r.reminders_enabled != 0,
+            reminder_lead_minutes: r.reminder_lead_minutes,
             created_at: r.created_at,
         }
     }
@@ -50,6 +56,8 @@ pub struct EventRow {
     pub all_day: i64,
     pub source: String,
     pub status: String,
+    /// One-shot reminder marker (not serialized to clients).
+    pub reminded_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

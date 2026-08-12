@@ -9,7 +9,7 @@ use super::{tz, CalError};
 
 pub fn register(reg: metalcraft::ToolRegistry, store: CalendarStore) -> metalcraft::ToolRegistry {
     reg.register(Whoami(store.clone()))
-        .register(Now(store.clone()))
+        .register(Now) // pure clock — no store
         .register(ListCalendars(store.clone()))
         .register(CreateCalendar(store.clone()))
         .register(ListEvents(store.clone()))
@@ -49,7 +49,7 @@ impl metalcraft::Tool for Whoami {
 }
 
 // ── mcal_now ─────────────────────────────────────────────────────────────────
-pub struct Now(CalendarStore);
+pub struct Now;
 #[async_trait]
 impl metalcraft::Tool for Now {
     fn name(&self) -> &str { "mcal_now" }

@@ -6,11 +6,6 @@ pub fn uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// A public-share token: 32 hex chars (matches metalcraft-notes' `Uuid::simple()`).
-pub fn token() -> String {
-    uuid::Uuid::new_v4().simple().to_string()
-}
-
 /// RFC3339 UTC timestamp with millisecond precision and a trailing `Z`
 /// (replaces Postgres `now()`; string-sortable, matches the SPA's expectations).
 pub fn now_iso() -> String {
@@ -72,7 +67,6 @@ mod tests {
     #[test]
     fn ids_have_expected_shape() {
         assert_eq!(uuid().len(), 36);
-        assert_eq!(token().len(), 32);
         assert!(now_iso().ends_with('Z'));
     }
 }

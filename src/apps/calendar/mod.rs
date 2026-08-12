@@ -18,6 +18,7 @@ use super::{App, AppContext, AppResult};
 
 mod http;
 mod models;
+pub mod reminders;
 mod schema;
 mod store;
 mod tools;

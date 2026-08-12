@@ -230,6 +230,11 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     // number) — no-op while nothing is connected.
     tokio::spawn(async move { crate::metalcraft_gateway::heal_loop().await });
 
+    // Pod-scheduled calendar reminders (APNs ~1h before an event). No-op unless
+    // the metalcraft-calendar pack is enabled; ticks over pod-local events, so
+    // no cloud DB is involved. See CALENDAR_APNS_REMINDERS_PLAN.md.
+    tokio::spawn(async move { crate::apps::calendar::reminders::reminders_loop().await });
+
     // Always-visible startup banner, printed regardless of RUST_LOG.
     println!("──────────────────────────────────────────────");
     println!("  metalcraft-daemon running");

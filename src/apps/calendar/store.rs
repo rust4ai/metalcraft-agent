@@ -22,6 +22,29 @@ pub struct EventInput<'a> {
     pub location: Option<&'a str>,
 }
 
+/// Joined row backing the reminder query (event + its calendar's settings).
+#[derive(sqlx::FromRow)]
+struct DueRow {
+    event_id: String,
+    title: String,
+    starts_at: String,
+    location: Option<String>,
+    calendar_name: String,
+    timezone: String,
+    lead: i64,
+}
+
+/// An event whose reminder is due to fire.
+pub struct DueReminder {
+    pub event_id: String,
+    pub title: String,
+    pub starts_at: chrono::DateTime<chrono::Utc>,
+    pub location: Option<String>,
+    pub calendar_name: String,
+    pub timezone: String,
+    pub lead: i64,
+}
+
 #[derive(Clone)]
 pub struct CalendarStore {
     pool: SqlitePool,
@@ -236,9 +259,10 @@ impl CalendarStore {
         self.get_event(slug, id).await?;
         let (title, starts, ends) = self.validate_event(&input)?;
         let row = sqlx::query_as::<_, EventRow>(
+            // Clear reminded_at so a moved start re-arms the reminder.
             "UPDATE calendar_events
              SET title = ?, description = ?, location = ?, starts_at = ?, ends_at = ?,
-                 all_day = ?, updated_at = ?
+                 all_day = ?, reminded_at = NULL, updated_at = ?
              WHERE id = ? AND calendar_id = ? RETURNING *",
         )
         .bind(&title)
@@ -266,6 +290,101 @@ impl CalendarStore {
             .execute(&self.pool)
             .await?;
         self.publish_event_deleted(id, &cal.id);
+        Ok(())
+    }
+
+    // ── reminders ────────────────────────────────────────────────────────────
+
+    /// Update a calendar's mutable settings (any `Some` field). Used by the REST
+    /// PATCH; `enabled`/`lead` drive the reminder scheduler.
+    pub async fn update_calendar(
+        &self,
+        slug: &str,
+        name: Option<&str>,
+        timezone: Option<&str>,
+        reminders_enabled: Option<bool>,
+        reminder_lead_minutes: Option<i64>,
+    ) -> CalResult<CalendarView> {
+        self.resolve(slug).await?; // 404 if absent
+        let name = name.map(str::trim).filter(|s| !s.is_empty());
+        let tz = match timezone.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(t) => {
+                tz::validate_tz(t)?;
+                Some(t)
+            }
+            None => None,
+        };
+        if let Some(l) = reminder_lead_minutes {
+            if !(1..=10_080).contains(&l) {
+                return Err(CalError::bad_request("reminder_lead_minutes must be 1..=10080"));
+            }
+        }
+        let row = sqlx::query_as::<_, CalendarRow>(
+            "UPDATE calendars SET
+               name = COALESCE(?, name),
+               timezone = COALESCE(?, timezone),
+               reminders_enabled = COALESCE(?, reminders_enabled),
+               reminder_lead_minutes = COALESCE(?, reminder_lead_minutes)
+             WHERE slug = ? RETURNING *",
+        )
+        .bind(name)
+        .bind(tz)
+        .bind(reminders_enabled.map(|b| b as i64))
+        .bind(reminder_lead_minutes)
+        .bind(slug)
+        .fetch_one(&self.pool)
+        .await?;
+        let view = CalendarView::from(row);
+        self.publish_calendar(&view);
+        Ok(view)
+    }
+
+    /// Events whose reminder is due at `now`: reminders enabled, not yet sent,
+    /// still upcoming, and `now >= starts_at - lead`. The final lead check is in
+    /// Rust (per-calendar lead over canonical-ISO TEXT).
+    pub async fn due_reminders(&self, now: chrono::DateTime<chrono::Utc>) -> CalResult<Vec<DueReminder>> {
+        let now_c = canon(now);
+        let rows = sqlx::query_as::<_, DueRow>(
+            "SELECT e.id AS event_id, e.title AS title, e.starts_at AS starts_at,
+                    e.location AS location, c.name AS calendar_name, c.timezone AS timezone,
+                    c.reminder_lead_minutes AS lead
+             FROM calendar_events e JOIN calendars c ON c.id = e.calendar_id
+             WHERE c.reminders_enabled = 1
+               AND e.reminded_at IS NULL
+               AND e.starts_at > ?
+             ORDER BY e.starts_at",
+        )
+        .bind(&now_c)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut due = Vec::new();
+        for r in rows {
+            let Ok(starts) = chrono::DateTime::parse_from_rfc3339(&r.starts_at) else { continue };
+            let starts = starts.with_timezone(&chrono::Utc);
+            let reminder_time = starts - chrono::Duration::minutes(r.lead.max(0));
+            if now >= reminder_time {
+                due.push(DueReminder {
+                    event_id: r.event_id,
+                    title: r.title,
+                    starts_at: starts,
+                    location: r.location,
+                    calendar_name: r.calendar_name,
+                    timezone: r.timezone,
+                    lead: r.lead,
+                });
+            }
+        }
+        Ok(due)
+    }
+
+    /// Stamp an event as reminded so it never fires twice.
+    pub async fn mark_reminded(&self, event_id: &str) -> CalResult<()> {
+        sqlx::query("UPDATE calendar_events SET reminded_at = ? WHERE id = ?")
+            .bind(now_iso())
+            .bind(event_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -354,6 +473,34 @@ mod tests {
         let day = s.list_events(&ny.slug, Some("2026-08-12"), None, None).await.unwrap();
         let titles: Vec<&str> = day.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, vec!["mid"]);
+    }
+
+    #[tokio::test]
+    async fn due_reminders_respect_lead_enabled_and_marker() {
+        let s = store().await; // personal: reminders on, lead 60
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-12T13:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // 14:00 event, lead 60 → reminder_time 13:00 ≤ now → due.
+        let soon = s.create_event("personal", ev("Soon", "2026-08-12T14:00:00Z", "2026-08-12T14:30:00Z")).await.unwrap();
+        // 20:00 event → reminder_time 19:00 > now → not due yet.
+        s.create_event("personal", ev("Later", "2026-08-12T20:00:00Z", "2026-08-12T20:30:00Z")).await.unwrap();
+
+        let due = s.due_reminders(now).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].title, "Soon");
+
+        // Marking it removes it from the due set (no double-send).
+        s.mark_reminded(&soon.id).await.unwrap();
+        assert!(s.due_reminders(now).await.unwrap().is_empty());
+
+        // Editing the start clears the marker (re-arms).
+        s.update_event("personal", &soon.id, ev("Soon", "2026-08-12T14:00:00Z", "2026-08-12T14:45:00Z")).await.unwrap();
+        assert_eq!(s.due_reminders(now).await.unwrap().len(), 1);
+
+        // Disabling reminders on the calendar drops it.
+        s.update_calendar("personal", None, None, Some(false), None).await.unwrap();
+        assert!(s.due_reminders(now).await.unwrap().is_empty());
     }
 
     #[tokio::test]
