@@ -36,6 +36,7 @@ use metalcraft::ToolRegistry;
 
 pub mod blobs;
 pub mod events;
+pub mod notes;
 pub mod storage;
 
 pub use blobs::{BlobStore, LocalBlobStore};
@@ -129,7 +130,7 @@ pub trait App: Send + Sync {
 /// phases (notes, then calendar, then drive). Keeping this the single source of
 /// truth means the router/tool/schedule seams are all driven off one list.
 pub fn builtin_apps() -> Vec<Box<dyn App>> {
-    Vec::new()
+    vec![Box::new(notes::NotesApp)]
 }
 
 /// Built-in apps whose integration pack is currently enabled. Enable-state is
@@ -205,11 +206,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn phase0_ships_no_apps() {
-        // Phase 0 invariant: the SDK compiles and wires in, but no app is live
-        // yet, so behavior is unchanged.
-        assert!(builtin_apps().is_empty());
-        assert!(enabled_builtin_apps().is_empty());
+    fn notes_is_registered_but_gated_by_enable_state() {
+        // Notes is compiled in...
+        assert!(builtin_apps().iter().any(|a| a.id() == "metalcraft-notes"));
+        // ...but only active when its integration pack is enabled, so on a fresh
+        // process with no enabled packs, nothing is live (behavior unchanged).
+        assert!(enabled_builtin_apps().iter().all(|a| crate::integration_packs::is_enabled(a.id())));
+    }
+
+    #[test]
+    fn app_owns_its_tool_names() {
+        let owner = builtin_apps().into_iter().find(|a| a.id() == "metalcraft-notes").unwrap();
+        assert!(owner.tool_names().contains(&"mnote_create_note".to_string()));
     }
 
     #[test]
