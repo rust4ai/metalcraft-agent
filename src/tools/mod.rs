@@ -176,12 +176,20 @@ pub fn create_registry_for_with_config(
                 }
             }
             unknown => {
-                // Try loading as a user-defined HTTP API tool
-                if let Some(api_tool) = http_api::HttpApiTool::try_load(unknown) {
-                    registry.register(api_tool)
-                } else {
-                    log::warn!("Unknown tool '{}' in persona, skipping", unknown);
-                    registry
+                // First: a native pod-app tool (Plan B "agent OS" apps register
+                // their own Tools). Returns Ok(reg) if claimed, else Err(reg)
+                // unchanged. No-op until an app is wired in.
+                match crate::apps::try_register_app_tool(registry, unknown) {
+                    Ok(reg) => reg,
+                    Err(reg) => {
+                        // Otherwise: a user-defined declarative HTTP API tool.
+                        if let Some(api_tool) = http_api::HttpApiTool::try_load(unknown) {
+                            reg.register(api_tool)
+                        } else {
+                            log::warn!("Unknown tool '{}' in persona, skipping", unknown);
+                            reg
+                        }
+                    }
                 }
             }
         };

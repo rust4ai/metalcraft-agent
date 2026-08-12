@@ -44,6 +44,18 @@ pub fn flows_dir() -> PathBuf {
     data_dir().join("flows")
 }
 
+/// Root for pod-native "agent OS" apps (Plan B). Each app owns
+/// `<data>/apps/<id>/` for its SQLite database, blob store, and scratch —
+/// isolated from the agent's own JSON state and from other apps.
+pub fn apps_dir() -> PathBuf {
+    data_dir().join("apps")
+}
+
+/// This app's private data directory, `<data>/apps/<id>/`.
+pub fn app_data_dir(app_id: &str) -> PathBuf {
+    apps_dir().join(app_id)
+}
+
 /// Directory holding in-flight and finished flow runs (one JSON per run),
 /// used by the v2 executor for pause/resume checkpointing.
 pub fn runs_dir() -> PathBuf {

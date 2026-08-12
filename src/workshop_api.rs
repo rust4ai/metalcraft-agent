@@ -388,7 +388,7 @@ pub fn build_router(api_key: String) -> Router {
         tokio::spawn(async move { inbound_pull_loop(state).await });
     }
 
-    Router::new()
+    let router = Router::new()
         .route("/api/v1/info", get(agent_info))
         .route("/api/v1/snapshot", get(get_snapshot))
         .route("/api/v1/personas/{slug}", get(get_persona))
@@ -472,7 +472,11 @@ pub fn build_router(api_key: String) -> Router {
         // Inbound gateway webhook — unauthenticated like /health; provenance is
         // verified by the per-channel HMAC signature on the request.
         .route("/webhook/gateway", post(handle_gateway_webhook))
-        .with_state(state)
+        .with_state(state);
+
+    // Nest any enabled pod-native "agent OS" apps at `/apps/<id>` (Plan B).
+    // No-op until an app is wired into `apps::builtin_apps()`.
+    crate::apps::mount_app_routers(router)
 }
 
 /// Liveness/readiness probe. Returns 200 with a small JSON body. Not behind

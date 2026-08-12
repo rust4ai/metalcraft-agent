@@ -48,6 +48,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 imap = "2"
 mail-parser = "0.11"
 native-tls = "0.2"
+# Pod-native "agent OS" apps (Plan B): per-app embedded SQLite on the pod disk.
+# Bundled libsqlite3 so the container/self-host build needs no system sqlite.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 
 [[bin]]
 name = "metalcraft-agent"
