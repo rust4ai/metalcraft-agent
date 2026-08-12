@@ -60,6 +60,11 @@ path = "src/main.rs"
 name = "metalcraft-daemon"
 path = "src/bin/metalcraft-daemon.rs"
 
+# One-time data migration tool: cloud app export → pod import + reconcile.
+[[bin]]
+name = "metalcraft-migrate"
+path = "src/bin/migrate.rs"
+
 [dev-dependencies]
 spice-framework = "0.1"
 tempfile = "3"
