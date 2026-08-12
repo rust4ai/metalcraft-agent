@@ -16,9 +16,8 @@
 use std::collections::HashMap;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Multipart, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::middleware::Next;
+use axum::extract::{Multipart, Path, Query, State};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
@@ -49,7 +48,7 @@ pub fn router(store: NotesStore) -> Router {
         .route("/api/v1/export", get(export))
         .route("/api/v1/import", post(import))
         .route("/ws", get(ws))
-        .layer(axum::middleware::from_fn(require_pod_auth))
+        .layer(axum::middleware::from_fn(crate::apps::require_pod_auth))
         .with_state(store)
 }
 
@@ -150,23 +149,6 @@ async fn pump(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<Va
             },
         }
     }
-}
-
-/// Reject requests without a valid pod Bearer token (mirrors the Workshop
-/// `auth_middleware`; the static key is read from the pod's environment).
-async fn require_pod_auth(headers: HeaderMap, req: Request, next: Next) -> Response {
-    let provided = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or_default();
-    let static_key = std::env::var("WORKSHOP_API_KEY").unwrap_or_default();
-    let ok = (!static_key.is_empty() && provided == static_key)
-        || crate::hub_auth::verify_pod_bearer(provided).await;
-    if !ok {
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response();
-    }
-    next.run(req).await
 }
 
 // ── request-body helpers ─────────────────────────────────────────────────────

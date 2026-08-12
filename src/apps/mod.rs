@@ -36,6 +36,7 @@ use async_trait::async_trait;
 use metalcraft::ToolRegistry;
 
 pub mod blobs;
+pub mod calendar;
 pub mod events;
 pub mod notes;
 pub mod storage;
@@ -131,7 +132,36 @@ pub trait App: Send + Sync {
 /// phases (notes, then calendar, then drive). Keeping this the single source of
 /// truth means the router/tool/schedule seams are all driven off one list.
 pub fn builtin_apps() -> Vec<Box<dyn App>> {
-    vec![Box::new(notes::NotesApp)]
+    vec![Box::new(notes::NotesApp), Box::new(calendar::CalendarApp)]
+}
+
+/// Shared pod-token auth middleware for app routers. Apps mount **outside** the
+/// main Workshop auth layer, so each re-checks the pod Bearer token: the static
+/// `WORKSHOP_API_KEY` or a hub `mck_` token scoped to this pod
+/// ([`crate::hub_auth::verify_pod_bearer`]). External clients set the header (or
+/// the workshop proxy injects it).
+pub async fn require_pod_auth(
+    headers: axum::http::HeaderMap,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let provided = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    let static_key = std::env::var("WORKSHOP_API_KEY").unwrap_or_default();
+    let ok = (!static_key.is_empty() && provided == static_key)
+        || crate::hub_auth::verify_pod_bearer(provided).await;
+    if !ok {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 /// Built-in apps whose integration pack is currently enabled. Enable-state is
