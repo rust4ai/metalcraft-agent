@@ -37,6 +37,7 @@ use metalcraft::ToolRegistry;
 
 pub mod blobs;
 pub mod calendar;
+pub mod drive;
 pub mod events;
 pub mod notes;
 pub mod storage;
@@ -82,8 +83,9 @@ pub struct AppSchedule {
 pub struct AppContext {
     /// Structured/hot state — SQLite on the pod disk.
     pub store: SqliteStore,
-    /// Large/durable bytes — object storage (local dir today).
-    pub blobs: Box<dyn BlobStore>,
+    /// Large/durable bytes — object storage (local dir today). `Arc` so an app's
+    /// store/tools can share one handle.
+    pub blobs: std::sync::Arc<dyn BlobStore>,
     /// Pub/sub hub for pushing events to the app's web UI.
     pub events: AppEventHub,
     /// The pod's owner ("the pod is the user").
@@ -132,7 +134,11 @@ pub trait App: Send + Sync {
 /// phases (notes, then calendar, then drive). Keeping this the single source of
 /// truth means the router/tool/schedule seams are all driven off one list.
 pub fn builtin_apps() -> Vec<Box<dyn App>> {
-    vec![Box::new(notes::NotesApp), Box::new(calendar::CalendarApp)]
+    vec![
+        Box::new(notes::NotesApp),
+        Box::new(calendar::CalendarApp),
+        Box::new(drive::DriveApp),
+    ]
 }
 
 /// Shared pod-token auth middleware for app routers. Apps mount **outside** the
@@ -181,7 +187,8 @@ pub fn ctx_for(app: &dyn App) -> AppResult<AppContext> {
     let data_dir = crate::paths::app_data_dir(app.id());
     std::fs::create_dir_all(&data_dir)?;
     let store = SqliteStore::open(&data_dir.join(format!("{}.db", app.id())))?;
-    let blobs: Box<dyn BlobStore> = Box::new(LocalBlobStore::new(data_dir.join("blobs")));
+    let blobs: std::sync::Arc<dyn BlobStore> =
+        std::sync::Arc::new(LocalBlobStore::new(data_dir.join("blobs")));
     Ok(AppContext {
         store,
         blobs,
