@@ -56,6 +56,8 @@ pub struct EventRow {
     pub all_day: i64,
     pub source: String,
     pub status: String,
+    /// Organizer's event id for an accepted-invite mirror (not serialized).
+    pub origin_event_id: Option<String>,
     /// One-shot reminder marker (not serialized to clients).
     pub reminded_at: Option<String>,
     pub created_at: String,

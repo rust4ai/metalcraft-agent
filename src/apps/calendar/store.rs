@@ -349,9 +349,83 @@ impl CalendarStore {
         let Some(email) = self.owner.email.as_deref().filter(|s| !s.is_empty()) else {
             return Err(CalError::new(409, "user email not configured; cannot respond"));
         };
-        crate::apps::coordinator::respond_invite(email, event_id, choice)
+        let result = crate::apps::coordinator::respond_invite(email, event_id, choice)
             .await
-            .ok_or_else(|| CalError::new(502, "coordinator did not accept the response"))
+            .ok_or_else(|| CalError::new(502, "coordinator did not accept the response"))?;
+        // Reflect the response on the local calendar: accepting places a
+        // read-only mirror (source='invite') on the default calendar; declining
+        // removes any mirror. Best-effort — the RSVP itself already succeeded.
+        if choice == "accepted" {
+            if let Some(inv) = self.find_invite(email, event_id).await {
+                let _ = self.place_mirror(event_id, &inv).await;
+            }
+        } else {
+            let _ = self.remove_mirror(event_id).await;
+        }
+        Ok(result)
+    }
+
+    /// Find the snapshot of an invite addressed to `email` by event id (from the
+    /// coordinator mailbox).
+    async fn find_invite(&self, email: &str, event_id: &str) -> Option<serde_json::Value> {
+        let list = crate::apps::coordinator::list_invites(email).await?;
+        list.get("invites")?
+            .as_array()?
+            .iter()
+            .find(|i| i.get("event_id").and_then(|v| v.as_str()) == Some(event_id))
+            .cloned()
+    }
+
+    /// Upsert a read-only mirror event for an accepted invite on the default
+    /// calendar (replacing any prior mirror for the same origin event).
+    async fn place_mirror(&self, event_id: &str, inv: &serde_json::Value) -> CalResult<()> {
+        let Some(cal_id) = self.default_calendar_id().await? else { return Ok(()) };
+        let s = |k: &str| inv.get(k).and_then(|v| v.as_str());
+        let title = s("title").unwrap_or("(invited event)");
+        let starts = match s("starts_at") {
+            Some(v) => canon(parse_ts(v, "starts_at")?),
+            None => return Ok(()),
+        };
+        let ends = match s("ends_at") {
+            Some(v) => canon(parse_ts(v, "ends_at")?),
+            None => starts.clone(),
+        };
+        self.remove_mirror(event_id).await?;
+        let now = now_iso();
+        sqlx::query(
+            "INSERT INTO calendar_events
+               (id, calendar_id, title, description, location, starts_at, ends_at, all_day,
+                source, status, origin_event_id, created_at, updated_at)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, 0, 'invite', 'confirmed', ?, ?, ?)",
+        )
+        .bind(uuid())
+        .bind(&cal_id)
+        .bind(title)
+        .bind(s("location"))
+        .bind(&starts)
+        .bind(&ends)
+        .bind(event_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_mirror(&self, event_id: &str) -> CalResult<()> {
+        sqlx::query("DELETE FROM calendar_events WHERE origin_event_id = ?")
+            .bind(event_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn default_calendar_id(&self) -> CalResult<Option<String>> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT id FROM calendars ORDER BY is_default DESC, created_at LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     pub async fn remove_guest(&self, slug: &str, event_id: &str, email: &str) -> CalResult<()> {
@@ -372,6 +446,9 @@ impl CalendarStore {
             .bind(email.trim())
             .execute(&self.pool)
             .await?;
+        // Revoke the guest's invite on the coordinator too (kills their RSVP
+        // link + mailbox entry). Best-effort.
+        crate::apps::coordinator::revoke_invite(event_id, email.trim()).await;
         Ok(())
     }
 

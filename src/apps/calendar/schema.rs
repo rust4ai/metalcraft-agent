@@ -38,6 +38,9 @@ pub const STATEMENTS: &[&str] = &[
        all_day     INTEGER NOT NULL DEFAULT 0,
        source      TEXT NOT NULL DEFAULT 'portal',
        status      TEXT NOT NULL DEFAULT 'confirmed',
+       -- For accepted-invite mirrors: the organizer's event id (NULL otherwise).
+       -- Lets a decline remove exactly the mirror this invite placed.
+       origin_event_id TEXT,
        -- One-shot 'starting soon' reminder marker (NULL = not yet sent; cleared
        -- on edit so a moved start re-arms). Drives the pod reminder scheduler.
        reminded_at TEXT,

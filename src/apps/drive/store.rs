@@ -203,6 +203,51 @@ impl DriveStore {
         Ok((FileView::from(row), bytes))
     }
 
+    // ── public sharing (C4) ──────────────────────────────────────────────────
+
+    /// Mark a file public and return its share token (idempotent).
+    pub async fn share(&self, id: &str) -> DrvResult<String> {
+        let row = self.file_row(id).await?;
+        if let Some(t) = row.public_token {
+            return Ok(t);
+        }
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        sqlx::query("UPDATE files SET public_token = ? WHERE id = ?")
+            .bind(&token)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(token)
+    }
+
+    /// Remove a file's public link; returns the token that was cleared, if any.
+    pub async fn unshare(&self, id: &str) -> DrvResult<Option<String>> {
+        let row = self.file_row(id).await?;
+        sqlx::query("UPDATE files SET public_token = NULL WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(row.public_token)
+    }
+
+    /// Resolve a share token to a downloadable file: `(content_type, name, bytes)`.
+    pub async fn public_file(&self, token: &str) -> DrvResult<(String, String, Vec<u8>)> {
+        let row = sqlx::query_as::<_, FileRow>(
+            "SELECT * FROM files WHERE public_token = ? AND trashed_at IS NULL",
+        )
+        .bind(token)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| DrvError::not_found("not found"))?;
+        let bytes = self
+            .blobs
+            .get(&row.blob_key)
+            .await
+            .map_err(|e| DrvError::new(500, format!("blob read failed: {e}")))?
+            .ok_or_else(|| DrvError::not_found("file bytes missing"))?;
+        Ok((row.content_type, row.name, bytes))
+    }
+
     /// Rename / move / star / trash / restore (any provided field).
     pub async fn update_file(
         &self,
@@ -318,6 +363,25 @@ mod tests {
         let (view, bytes) = s.download(&f.id).await.unwrap();
         assert_eq!(view.name, "hello.txt");
         assert_eq!(bytes, b"hi there");
+    }
+
+    #[tokio::test]
+    async fn share_public_download_and_unshare() {
+        let s = store().await;
+        let f = s.upload("report.pdf", b"%PDF-1.4 data".to_vec(), Some("application/pdf"), None).await.unwrap();
+        let token = s.share(&f.id).await.unwrap();
+        assert_eq!(token.len(), 32);
+        // Idempotent — same token.
+        assert_eq!(s.share(&f.id).await.unwrap(), token);
+
+        let (ct, name, bytes) = s.public_file(&token).await.unwrap();
+        assert_eq!(ct, "application/pdf");
+        assert_eq!(name, "report.pdf");
+        assert_eq!(bytes, b"%PDF-1.4 data");
+
+        let cleared = s.unshare(&f.id).await.unwrap();
+        assert_eq!(cleared.as_deref(), Some(token.as_str()));
+        assert!(s.public_file(&token).await.is_err()); // token no longer resolves
     }
 
     #[tokio::test]

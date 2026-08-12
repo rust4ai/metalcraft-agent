@@ -38,6 +38,7 @@ pub struct FileRow {
     pub size_bytes: i64,
     pub starred: i64,
     pub trashed_at: Option<String>,
+    pub public_token: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

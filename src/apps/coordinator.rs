@@ -164,6 +164,23 @@ pub async fn respond_invite(email: &str, event_id: &str, rsvp: &str) -> Option<s
     }
 }
 
+/// Revoke a guest's invite on the coordinator (organizer removed the guest).
+/// Best-effort.
+pub async fn revoke_invite(event_id: &str, email: &str) {
+    let Some((url, secret)) = configured() else { return };
+    let client = reqwest::Client::new();
+    let body = json!({ "event_id": event_id, "email": email });
+    if let Err(e) = client
+        .post(format!("{url}/api/v1/invites/revoke"))
+        .header("X-Metalcraft-Service-Secret", secret)
+        .json(&body)
+        .send()
+        .await
+    {
+        log::warn!("coordinator revoke_invite failed: {e}");
+    }
+}
+
 /// The shared secret the coordinator presents on push-back webhooks.
 pub fn service_secret() -> String {
     std::env::var("COORDINATOR_SECRET").unwrap_or_default()

@@ -31,11 +31,65 @@ pub fn router(store: DriveStore) -> Router {
         .route("/api/v1/files", post(upload))
         .route("/api/v1/files/{id}", get(get_file).patch(update_file).delete(delete_file))
         .route("/api/v1/files/{id}/download", get(download))
+        .route("/api/v1/files/{id}/share", post(share).delete(unshare))
         .route("/api/v1/starred", get(list_starred))
         .route("/api/v1/trash", get(list_trash))
         .route("/ws", get(ws))
         .layer(axum::middleware::from_fn(crate::apps::require_pod_auth))
+        // Public share passthrough (C4) — after the auth layer (unauthenticated;
+        // the unguessable token authorizes). The coordinator fetches this and
+        // relays it under a neutral domain.
+        .route("/p/{token}", get(public_page))
         .with_state(store)
+}
+
+/// Share a file: mark it public, register the token with the coordinator, and
+/// return the neutral share URL.
+async fn share(State(s): State<DriveStore>, Path(id): Path<String>) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    match s.share(&id).await {
+        Ok(token) => {
+            crate::apps::coordinator::register_share(&token, "file", &id).await;
+            let url = crate::apps::coordinator::share_url("metalcraft-drive", &token);
+            Json(json!({ "url": url, "token": token })).into_response()
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn unshare(State(s): State<DriveStore>, Path(id): Path<String>) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    match s.unshare(&id).await {
+        Ok(token) => {
+            if let Some(t) = token {
+                crate::apps::coordinator::unregister_share(&t).await;
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Public: serve a shared file's bytes by token (content-type + download name).
+async fn public_page(State(s): State<DriveStore>, Path(token): Path<String>) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    match s.public_file(&token).await {
+        Ok((content_type, name, bytes)) => (
+            [
+                (header::CONTENT_TYPE, content_type),
+                (header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", name.replace('"', ""))),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => e.into_response(),
+    }
 }
 
 async fn ready(s: &DriveStore) -> Result<(), Response> {

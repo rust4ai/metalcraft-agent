@@ -29,6 +29,7 @@ pub const STATEMENTS: &[&str] = &[
        size_bytes   INTEGER NOT NULL DEFAULT 0,
        starred      INTEGER NOT NULL DEFAULT 0,
        trashed_at   TEXT,
+       public_token TEXT UNIQUE,          -- set ⇒ shared via the coordinator
        created_at   TEXT NOT NULL,
        updated_at   TEXT NOT NULL
      )",
