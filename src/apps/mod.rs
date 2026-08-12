@@ -16,8 +16,9 @@
 //! * [`BlobStore`] — a private object-storage namespace for large/durable bytes
 //!   (uploads, attachments, backups). Local-filesystem-backed today; an
 //!   S3/Spaces/R2-backed impl arrives with the Drive app.
-//! * [`AppEventHub`] — a publish/subscribe hub that drives WebSocket push to the
-//!   app's embedded web UI.
+//! * [`AppEventHub`] — a publish/subscribe hub that drives `/ws` push to
+//!   external clients (pod-native apps are backend-only; any UI lives outside
+//!   the pod).
 //! * [`OwnerIdentity`] — the pod's single owner ("the pod *is* the user").
 //! * a private scratch `data_dir` under `<data>/apps/<id>/`.
 //!
@@ -109,8 +110,8 @@ pub trait App: Send + Sync {
         reg
     }
 
-    /// The app's REST + embedded-SPA router, nested at `/apps/<id>`. Default:
-    /// empty router.
+    /// The app's REST + `/ws` router (backend-only; consumed by external
+    /// clients), nested at `/apps/<id>`. Default: empty router.
     fn router(&self, _ctx: &AppContext) -> axum::Router {
         axum::Router::new()
     }

@@ -5,9 +5,10 @@
 //! agent tools keep their exact names and JSON shapes, so the notes persona and
 //! skill are unchanged — only the storage moves in-process.
 //!
-//! This module ships the **agent-facing** surface (native tools + store). The
-//! REST + embedded-SPA router (`App::router`) and export/import land in a
-//! follow-up so this stays a reviewable slice; `App::init` seeds the schema.
+//! Pod-native apps are **backend-only**: this app exposes the 8 agent tools, a
+//! REST API, and a `/ws` live-push feed — all consumed by *external* clients
+//! (the workshop proxy, the mobile app). No UI is embedded in the pod.
+//! (export/import for the cloud→pod migration is a follow-up.)
 
 use async_trait::async_trait;
 use metalcraft::ToolRegistry;

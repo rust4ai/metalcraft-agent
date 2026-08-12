@@ -1,14 +1,17 @@
 //! The Notes REST API, nested at `/apps/metalcraft-notes` on the pod's Workshop
-//! server. Same paths and shapes as the cloud `metalcraft-notes` service, so the
-//! existing SPA and clients work unchanged once pointed at the mount path.
+//! server. Same paths and shapes as the cloud `metalcraft-notes` service, so
+//! external clients work unchanged once pointed at the mount path.
+//!
+//! Pod-native apps are **backend-only** — the pod serves the REST API + the
+//! `/ws` live-push + the agent tools; any UI is an *external* client (the
+//! workshop reverse-proxy, the mobile app, …) that talks to this API. There is
+//! no UI embedded in the pod.
 //!
 //! These routes carry their **own auth layer** — the pod mounts app routers
 //! outside the main Workshop auth middleware, so each app re-checks the pod
 //! Bearer token (static `WORKSHOP_API_KEY` or a hub `mck_` token scoped to this
-//! pod, via [`crate::hub_auth::verify_pod_bearer`]).
-//!
-//! The embedded SPA + WebSocket live-push land in a follow-up; this is the REST
-//! backend the UI talks to.
+//! pod, via [`crate::hub_auth::verify_pod_bearer`]). External clients set the
+//! header (or the workshop proxy injects it).
 
 use std::collections::HashMap;
 
@@ -49,9 +52,10 @@ pub fn router(store: NotesStore) -> Router {
 }
 
 /// Live-push WebSocket. Subscribes to the app's event hub and forwards each
-/// event (`note.upserted` / `note.deleted` / `category.*`) as a text frame so
-/// an open editor updates without polling. Clients don't send; frames are
-/// ignored. (Browser auth for WS — cookie/query-token — lands with the SPA.)
+/// event (`note.upserted` / `note.deleted` / `category.*`) as a text frame so an
+/// external client updates without polling. Clients don't send; frames are
+/// ignored. Auth is the app's pod-token layer (an external client sets the
+/// Bearer header, or the workshop proxy injects it).
 async fn ws(State(s): State<NotesStore>, upgrade: WebSocketUpgrade) -> Response {
     let rx = s.events().subscribe();
     upgrade.on_upgrade(move |socket| pump(socket, rx))
