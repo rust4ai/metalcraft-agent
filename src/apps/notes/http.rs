@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
@@ -19,6 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
+use tokio::sync::broadcast::error::RecvError;
 
 use super::store::NotesStore;
 use super::NotesError;
@@ -41,8 +43,39 @@ pub fn router(store: NotesStore) -> Router {
         .route("/api/v1/notes/{slug}/favorite", post(favorite_note))
         .route("/api/v1/favorites", get(list_favorites))
         .route("/api/v1/search", get(search))
+        .route("/ws", get(ws))
         .layer(axum::middleware::from_fn(require_pod_auth))
         .with_state(store)
+}
+
+/// Live-push WebSocket. Subscribes to the app's event hub and forwards each
+/// event (`note.upserted` / `note.deleted` / `category.*`) as a text frame so
+/// an open editor updates without polling. Clients don't send; frames are
+/// ignored. (Browser auth for WS — cookie/query-token — lands with the SPA.)
+async fn ws(State(s): State<NotesStore>, upgrade: WebSocketUpgrade) -> Response {
+    let rx = s.events().subscribe();
+    upgrade.on_upgrade(move |socket| pump(socket, rx))
+}
+
+async fn pump(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<Value>) {
+    loop {
+        tokio::select! {
+            event = rx.recv() => match event {
+                Ok(v) => {
+                    if socket.send(Message::Text(v.to_string().into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => continue, // client resyncs from REST
+                Err(RecvError::Closed) => break,
+            },
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => {} // clients don't send
+                Some(Err(_)) => break,
+            },
+        }
+    }
 }
 
 /// Reject requests without a valid pod Bearer token (mirrors the Workshop
@@ -240,7 +273,7 @@ async fn search(State(s): State<NotesStore>, Query(q): Query<HashMap<String, Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apps::OwnerIdentity;
+    use crate::apps::{AppEventHub, OwnerIdentity};
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;
@@ -251,7 +284,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        let store = NotesStore::new(pool, OwnerIdentity::default());
+        let store = NotesStore::new(pool, OwnerIdentity::default(), AppEventHub::new());
         store.ensure_ready().await.unwrap();
         router(store)
     }

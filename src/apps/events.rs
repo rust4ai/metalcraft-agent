@@ -5,11 +5,20 @@
 //! user, this is a single in-process `broadcast` channel — no per-user keying,
 //! no Redis, no cross-process fan-out.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use tokio::sync::broadcast;
 
 /// Capacity of the broadcast ring buffer. Slow subscribers that lag past this
 /// receive a `RecvError::Lagged` and resync from REST — acceptable for a UI hub.
 const CAPACITY: usize = 256;
+
+/// Process-global hubs keyed by app id, so an app's mutating tools and its
+/// `/ws` subscribers share one channel even though they build separate
+/// [`super::AppContext`]s. Without this, a tool write would never reach a
+/// WebSocket opened through the app's router.
+static HUBS: OnceLock<Mutex<HashMap<String, AppEventHub>>> = OnceLock::new();
 
 /// A cloneable handle to one app's event stream.
 #[derive(Clone)]
@@ -31,6 +40,14 @@ impl AppEventHub {
     /// Subscribe to the event stream (e.g. from a WebSocket handler).
     pub fn subscribe(&self) -> broadcast::Receiver<serde_json::Value> {
         self.tx.subscribe()
+    }
+
+    /// The process-global hub for `app_id` (created on first use). All callers
+    /// for the same app share one channel.
+    pub fn shared(app_id: &str) -> AppEventHub {
+        let map = HUBS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        guard.entry(app_id.to_string()).or_insert_with(AppEventHub::new).clone()
     }
 }
 

@@ -154,7 +154,9 @@ pub fn ctx_for(app: &dyn App) -> AppResult<AppContext> {
     Ok(AppContext {
         store,
         blobs,
-        events: AppEventHub::new(),
+        // Shared per-app hub so tool writes reach WebSocket subscribers opened
+        // through the app's router.
+        events: AppEventHub::shared(app.id()),
         owner: OwnerIdentity::from_env(),
         data_dir,
     })

@@ -84,17 +84,17 @@ impl App for NotesApp {
     }
 
     fn register_tools(&self, reg: ToolRegistry, ctx: &AppContext) -> ToolRegistry {
-        let store = NotesStore::new(ctx.store.pool().clone(), ctx.owner.clone());
+        let store = NotesStore::new(ctx.store.pool().clone(), ctx.owner.clone(), ctx.events.clone());
         tools::register(reg, store)
     }
 
     fn router(&self, ctx: &AppContext) -> axum::Router {
-        let store = NotesStore::new(ctx.store.pool().clone(), ctx.owner.clone());
+        let store = NotesStore::new(ctx.store.pool().clone(), ctx.owner.clone(), ctx.events.clone());
         http::router(store)
     }
 
     async fn init(&self, ctx: &AppContext) -> AppResult<()> {
-        let store = NotesStore::new(ctx.store.pool().clone(), ctx.owner.clone());
+        let store = NotesStore::new(ctx.store.pool().clone(), ctx.owner.clone(), ctx.events.clone());
         store
             .ensure_ready()
             .await

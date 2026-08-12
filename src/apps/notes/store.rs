@@ -10,26 +10,52 @@ use std::collections::{HashMap, HashSet};
 
 use sqlx::SqlitePool;
 
+use serde_json::json;
+
 use super::models::*;
 use super::palette::{self, MAX_CATEGORIES};
 use super::util::{now_iso, placeholders, slugify, uuid};
 use super::{NotesError, NotesResult};
-use crate::apps::OwnerIdentity;
+use crate::apps::{AppEventHub, OwnerIdentity};
 
-/// A cloneable handle (the pool is `Arc` inside) bound to the pod owner.
+/// A cloneable handle (the pool is `Arc` inside) bound to the pod owner and the
+/// app's shared event hub.
 #[derive(Clone)]
 pub struct NotesStore {
     pool: SqlitePool,
     owner: OwnerIdentity,
+    events: AppEventHub,
 }
 
 impl NotesStore {
-    pub fn new(pool: SqlitePool, owner: OwnerIdentity) -> Self {
-        Self { pool, owner }
+    pub fn new(pool: SqlitePool, owner: OwnerIdentity, events: AppEventHub) -> Self {
+        Self { pool, owner, events }
+    }
+
+    /// The app's event hub (for WebSocket subscribers).
+    pub fn events(&self) -> &AppEventHub {
+        &self.events
     }
 
     fn owner_id(&self) -> String {
         self.owner.user_id.clone().unwrap_or_else(|| "owner".to_string())
+    }
+
+    fn publish_note(&self, view: &NoteView) {
+        if let Ok(v) = serde_json::to_value(view) {
+            self.events.publish(json!({ "type": "note.upserted", "note": v }));
+        }
+    }
+    fn publish_note_deleted(&self, id: &str) {
+        self.events.publish(json!({ "type": "note.deleted", "id": id }));
+    }
+    fn publish_category(&self, cat: &Category) {
+        if let Ok(v) = serde_json::to_value(cat) {
+            self.events.publish(json!({ "type": "category.upserted", "category": v }));
+        }
+    }
+    fn publish_category_deleted(&self, id: &str) {
+        self.events.publish(json!({ "type": "category.deleted", "id": id }));
     }
 
     /// Idempotent: apply schema + seed defaults (guarded by a `meta` marker).
@@ -198,7 +224,9 @@ impl NotesStore {
         .bind(now_iso())
         .fetch_one(&self.pool)
         .await?;
-        Ok(Category::from(cat))
+        let cat = Category::from(cat);
+        self.publish_category(&cat);
+        Ok(cat)
     }
 
     // ── notes ────────────────────────────────────────────────────────────────
@@ -264,7 +292,9 @@ impl NotesStore {
         if let Some(ids) = categories {
             self.set_note_categories(&note.id, &ids).await?;
         }
-        self.note_view(note).await
+        let view = self.note_view(note).await?;
+        self.publish_note(&view);
+        Ok(view)
     }
 
     /// Opening a note bumps `last_accessed_at` only (never version/updated_at —
@@ -327,7 +357,9 @@ impl NotesStore {
         if let Some(ids) = categories {
             self.set_note_categories(&note.id, &ids).await?;
         }
-        Ok((200, self.note_view(note).await?))
+        let view = self.note_view(note).await?;
+        self.publish_note(&view);
+        Ok((200, view))
     }
 
     pub async fn delete_note(&self, slug: &str) -> NotesResult<()> {
@@ -336,6 +368,7 @@ impl NotesStore {
             .bind(&note.id)
             .execute(&self.pool)
             .await?;
+        self.publish_note_deleted(&note.id);
         Ok(())
     }
 
@@ -372,7 +405,11 @@ impl NotesStore {
         .fetch_optional(&self.pool)
         .await;
         match res {
-            Ok(Some(cat)) => Ok(Category::from(cat)),
+            Ok(Some(cat)) => {
+                let cat = Category::from(cat);
+                self.publish_category(&cat);
+                Ok(cat)
+            }
             Ok(None) => Err(NotesError::new(500, "update failed")),
             Err(e) if e.to_string().to_uppercase().contains("UNIQUE") => {
                 Err(NotesError::conflict("that name or color is already in use"))
@@ -395,6 +432,7 @@ impl NotesStore {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        self.publish_category_deleted(id);
         Ok(())
     }
 
@@ -409,7 +447,9 @@ impl NotesStore {
         .bind(&note.id)
         .fetch_one(&self.pool)
         .await?;
-        self.note_view(note).await
+        let view = self.note_view(note).await?;
+        self.publish_note(&view);
+        Ok(view)
     }
 
     pub async fn list_favorites(&self) -> NotesResult<Vec<NoteHit>> {
@@ -463,7 +503,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        let s = NotesStore::new(pool, OwnerIdentity::default());
+        let s = NotesStore::new(pool, OwnerIdentity::default(), AppEventHub::new());
         s.ensure_ready().await.unwrap();
         s
     }
@@ -518,6 +558,24 @@ mod tests {
             .unwrap();
         assert_eq!(status, 409);
         assert_eq!(view.body, "v1"); // unchanged; caller must merge
+    }
+
+    #[tokio::test]
+    async fn mutations_broadcast_events() {
+        let s = store().await;
+        let mut rx = s.events().subscribe();
+
+        s.create_note(Some("Live"), Some("body"), None).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap()["type"], "note.upserted");
+
+        let c = s.create_category("live-cat").await.unwrap();
+        assert_eq!(rx.recv().await.unwrap()["type"], "category.upserted");
+
+        s.delete_note("live").await.unwrap();
+        assert_eq!(rx.recv().await.unwrap()["type"], "note.deleted");
+
+        s.delete_category(&c.id).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap()["type"], "category.deleted");
     }
 
     #[tokio::test]
