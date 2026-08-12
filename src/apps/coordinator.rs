@@ -125,6 +125,50 @@ pub async fn register_invites(
     )
 }
 
+/// List invites addressed to `email` (the guest mailbox). Returns the raw
+/// `{ invites: [...] }` value, or `None` if no coordinator / the call fails.
+pub async fn list_invites(email: &str) -> Option<serde_json::Value> {
+    let (url, secret) = configured()?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{url}/api/v1/invites"))
+        .query(&[("email", email)])
+        .header("X-Metalcraft-Service-Secret", secret)
+        .send()
+        .await
+        .ok()?;
+    if resp.status().is_success() {
+        resp.json().await.ok()
+    } else {
+        None
+    }
+}
+
+/// Record the owner's RSVP to an invite (as a guest). Returns the coordinator's
+/// `{ ok, rsvp }`, or `None` if not configured / failed.
+pub async fn respond_invite(email: &str, event_id: &str, rsvp: &str) -> Option<serde_json::Value> {
+    let (url, secret) = configured()?;
+    let body = json!({ "email": email, "event_id": event_id, "rsvp": rsvp });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{url}/api/v1/invites/rsvp"))
+        .header("X-Metalcraft-Service-Secret", secret)
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+    if resp.status().is_success() {
+        resp.json().await.ok()
+    } else {
+        None
+    }
+}
+
+/// The shared secret the coordinator presents on push-back webhooks.
+pub fn service_secret() -> String {
+    std::env::var("COORDINATOR_SECRET").unwrap_or_default()
+}
+
 /// Fetch current RSVP statuses for an event (best-effort). `(email, rsvp)` pairs.
 pub async fn fetch_rsvps(event_id: &str) -> Option<Vec<(String, String)>> {
     let (url, secret) = configured()?;

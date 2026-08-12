@@ -44,6 +44,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "mcal_delete_event",
     "mcal_add_guests",
     "mcal_remove_guest",
+    "mcal_list_invites",
+    "mcal_respond_invite",
 ];
 
 /// A handler error with an HTTP-style status, surfaced in the `{status, data}`

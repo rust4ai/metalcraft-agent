@@ -18,7 +18,9 @@ pub fn register(reg: metalcraft::ToolRegistry, store: CalendarStore) -> metalcra
         .register(UpdateEvent(store.clone()))
         .register(DeleteEvent(store.clone()))
         .register(AddGuests(store.clone()))
-        .register(RemoveGuest(store))
+        .register(RemoveGuest(store.clone()))
+        .register(ListInvites(store.clone()))
+        .register(RespondInvite(store))
 }
 
 fn ok(status: u16, data: Value) -> Value {
@@ -265,6 +267,56 @@ impl metalcraft::Tool for RemoveGuest {
                 Err(e) => Ok(err(e)),
             },
             _ => Ok(err(CalError::bad_request("calendar, id and email are required"))),
+        }
+    }
+}
+
+// ── mcal_list_invites ────────────────────────────────────────────────────────
+pub struct ListInvites(CalendarStore);
+#[async_trait]
+impl metalcraft::Tool for ListInvites {
+    fn name(&self) -> &str { "mcal_list_invites" }
+    fn description(&self) -> &str {
+        "List invitations sent to you (as a guest) by other people — matched by your email. Each has event_id (pass to mcal_respond_invite), title, start/end, location, organizer_email, and your current rsvp. Takes no parameters."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+    async fn call(&self, _a: Value) -> metalcraft::Result<Value> {
+        if let Err(e) = ready(&self.0).await { return Ok(e); }
+        match self.0.list_invites().await {
+            Ok(v) => Ok(ok(200, v)),
+            Err(e) => Ok(err(e)),
+        }
+    }
+}
+
+// ── mcal_respond_invite ──────────────────────────────────────────────────────
+pub struct RespondInvite(CalendarStore);
+#[async_trait]
+impl metalcraft::Tool for RespondInvite {
+    fn name(&self) -> &str { "mcal_respond_invite" }
+    fn description(&self) -> &str {
+        "Respond to an invitation you received. `event_id` is from mcal_list_invites; `rsvp` is 'accepted' or 'declined'. The organizer is notified."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "event_id": { "type": "string", "description": "The invite's event_id (from mcal_list_invites)." },
+                "rsvp": { "type": "string", "enum": ["accepted", "declined"], "description": "Your response." }
+            },
+            "required": ["event_id", "rsvp"]
+        })
+    }
+    async fn call(&self, a: Value) -> metalcraft::Result<Value> {
+        if let Err(e) = ready(&self.0).await { return Ok(e); }
+        match (sa(&a, "event_id"), sa(&a, "rsvp")) {
+            (Some(id), Some(rsvp)) => match self.0.respond_invite(id, rsvp).await {
+                Ok(v) => Ok(ok(200, v)),
+                Err(e) => Ok(err(e)),
+            },
+            _ => Ok(err(CalError::bad_request("event_id and rsvp are required"))),
         }
     }
 }

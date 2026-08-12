@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -37,9 +37,59 @@ pub fn router(store: CalendarStore) -> Router {
         )
         .route("/api/v1/calendars/{slug}/events/{id}/guests", post(add_guests))
         .route("/api/v1/calendars/{slug}/events/{id}/guests/{email}", axum::routing::delete(remove_guest))
+        // Guest-side invite mailbox (the owner as a guest).
+        .route("/api/v1/invites", get(list_invites))
+        .route("/api/v1/invites/{event_id}/rsvp", post(respond_invite))
         .route("/ws", get(ws))
         .layer(axum::middleware::from_fn(crate::apps::require_pod_auth))
+        // Coordinator → pod RSVP push-back (C3). Mounted OUTSIDE the Bearer auth
+        // layer; authed instead by the shared coordinator service secret.
+        .route("/api/v1/rsvp-webhook", post(rsvp_webhook))
         .with_state(store)
+}
+
+async fn list_invites(State(s): State<CalendarStore>) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    match s.list_invites().await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn respond_invite(State(s): State<CalendarStore>, Path(event_id): Path<String>, Json(b): Json<Value>) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    match s.respond_invite(&event_id, b_str(&b, "rsvp").unwrap_or("")).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Receive an RSVP update pushed by the coordinator. Authed by
+/// `X-Metalcraft-Service-Secret` (== `COORDINATOR_SECRET`), not a user token.
+async fn rsvp_webhook(State(s): State<CalendarStore>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+    let secret = crate::apps::coordinator::service_secret();
+    let provided = headers
+        .get("x-metalcraft-service-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if secret.is_empty() || provided != secret {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response();
+    }
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    let (Some(event_id), Some(email), Some(rsvp)) =
+        (b_str(&b, "event_id"), b_str(&b, "email"), b_str(&b, "rsvp"))
+    else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "event_id, email, rsvp required" }))).into_response();
+    };
+    let _ = s.apply_rsvp(event_id, email, rsvp).await;
+    log::info!("rsvp-webhook: {email} -> {rsvp} on event {event_id}");
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn ready(s: &CalendarStore) -> Result<(), Response> {

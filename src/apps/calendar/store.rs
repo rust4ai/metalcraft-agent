@@ -317,6 +317,43 @@ impl CalendarStore {
         self.guests_for_event(&event.id).await
     }
 
+    /// Apply an RSVP pushed from the coordinator (C3 webhook) to the local mirror.
+    pub async fn apply_rsvp(&self, event_id: &str, email: &str, rsvp: &str) -> CalResult<()> {
+        sqlx::query("UPDATE event_guests SET rsvp = ? WHERE event_id = ? AND email = ?")
+            .bind(rsvp.trim())
+            .bind(event_id)
+            .bind(email.trim())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The owner's invite mailbox (as a guest) — proxied from the coordinator,
+    /// matched by the owner's email.
+    pub async fn list_invites(&self) -> CalResult<serde_json::Value> {
+        let Some(email) = self.owner.email.as_deref().filter(|s| !s.is_empty()) else {
+            return Err(CalError::new(409, "user email not configured; cannot list invites"));
+        };
+        crate::apps::coordinator::list_invites(email)
+            .await
+            .ok_or_else(|| CalError::new(503, "external invites require a configured coordinator"))
+    }
+
+    /// Respond to an invite the owner received (accept/decline). Placing an
+    /// accepted invite as a local calendar mirror is a follow-up.
+    pub async fn respond_invite(&self, event_id: &str, rsvp: &str) -> CalResult<serde_json::Value> {
+        let choice = match rsvp.trim() {
+            "accepted" | "declined" => rsvp.trim(),
+            _ => return Err(CalError::bad_request("rsvp must be 'accepted' or 'declined'")),
+        };
+        let Some(email) = self.owner.email.as_deref().filter(|s| !s.is_empty()) else {
+            return Err(CalError::new(409, "user email not configured; cannot respond"));
+        };
+        crate::apps::coordinator::respond_invite(email, event_id, choice)
+            .await
+            .ok_or_else(|| CalError::new(502, "coordinator did not accept the response"))
+    }
+
     pub async fn remove_guest(&self, slug: &str, event_id: &str, email: &str) -> CalResult<()> {
         let cal = self.resolve(slug).await?;
         // Ensure the event belongs to this calendar.
