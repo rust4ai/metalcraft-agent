@@ -47,9 +47,55 @@ pub fn router(store: NotesStore) -> Router {
         .route("/api/v1/search", get(search))
         .route("/api/v1/export", get(export))
         .route("/api/v1/import", post(import))
+        .route("/api/v1/notes/{slug}/share", post(share).delete(unshare))
         .route("/ws", get(ws))
         .layer(axum::middleware::from_fn(crate::apps::require_pod_auth))
+        // Public share page — added AFTER the auth layer so it stays
+        // unauthenticated (anyone with the unguessable token can read it).
+        .route("/p/{token}", get(public_page))
         .with_state(store)
+}
+
+/// Make a note public; returns `{ url, token }`. The URL is absolute when
+/// `POD_PUBLIC_URL` is set, else a relative path.
+async fn share(State(s): State<NotesStore>, Path(slug): Path<String>) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    match s.share(&slug).await {
+        Ok(token) => {
+            let base = std::env::var("POD_PUBLIC_URL").unwrap_or_default();
+            let url = format!("{base}/apps/metalcraft-notes/p/{token}");
+            Json(json!({ "url": url, "token": token })).into_response()
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn unshare(State(s): State<NotesStore>, Path(slug): Path<String>) -> Response {
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    match s.unshare(&slug).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The public, unauthenticated share page: token → rendered note.
+async fn public_page(State(s): State<NotesStore>, Path(token): Path<String>) -> Response {
+    use axum::response::Html;
+    if let Err(r) = ready(&s).await {
+        return r;
+    }
+    match s.note_by_token(&token).await {
+        Ok((title, body)) => Html(super::render::shared_page_html(&title, &body)).into_response(),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Html("<!doctype html><meta charset=utf-8><title>Not found</title><h1>Note not found</h1>".to_string()),
+        )
+            .into_response(),
+    }
 }
 
 /// A file-download response (markdown or zip) for export.

@@ -372,6 +372,45 @@ impl NotesStore {
         Ok(())
     }
 
+    // ── public sharing (pod-local; the owner's own shares) ───────────────────
+
+    /// Make a note public (idempotent): set a `public_token` if absent, return it.
+    pub async fn share(&self, slug: &str) -> NotesResult<String> {
+        let note = self.note_by_slug(slug).await?;
+        if let Some(t) = note.public_token {
+            return Ok(t);
+        }
+        let t = super::util::token();
+        sqlx::query("UPDATE notes SET public_token = ? WHERE id = ?")
+            .bind(&t)
+            .bind(&note.id)
+            .execute(&self.pool)
+            .await?;
+        Ok(t)
+    }
+
+    /// Revoke a note's public share.
+    pub async fn unshare(&self, slug: &str) -> NotesResult<()> {
+        let note = self.note_by_slug(slug).await?;
+        sqlx::query("UPDATE notes SET public_token = NULL WHERE id = ?")
+            .bind(&note.id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Resolve a public token → `(title, body)` for the render page.
+    pub async fn note_by_token(&self, token: &str) -> NotesResult<(String, String)> {
+        let row = sqlx::query_as::<_, NoteRow>(
+            "SELECT * FROM notes WHERE public_token = ? AND public_token IS NOT NULL",
+        )
+        .bind(token)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| NotesError::not_found("not found"))?;
+        Ok((row.title, row.body))
+    }
+
     // ── category update / delete (used by the web UI) ────────────────────────
 
     pub async fn update_category(
@@ -691,6 +730,22 @@ mod tests {
             .unwrap();
         assert_eq!(status, 409);
         assert_eq!(view.body, "v1"); // unchanged; caller must merge
+    }
+
+    #[tokio::test]
+    async fn share_and_public_lookup() {
+        let s = store().await;
+        s.create_note(Some("Shared"), Some("# public\nbody"), None).await.unwrap();
+        let token = s.share("shared").await.unwrap();
+        assert_eq!(token.len(), 32);
+        assert_eq!(s.share("shared").await.unwrap(), token); // idempotent
+
+        let (title, body) = s.note_by_token(&token).await.unwrap();
+        assert_eq!(title, "Shared");
+        assert!(body.contains("public"));
+
+        s.unshare("shared").await.unwrap();
+        assert!(s.note_by_token(&token).await.is_err());
     }
 
     #[tokio::test]

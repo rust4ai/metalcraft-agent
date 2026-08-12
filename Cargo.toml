@@ -51,6 +51,9 @@ native-tls = "0.2"
 # Pod-native "agent OS" apps (Plan B): per-app embedded SQLite on the pod disk.
 # Bundled libsqlite3 so the container/self-host build needs no system sqlite.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
+# Public note-share page: markdown → sanitized HTML (both pure-Rust).
+comrak = "0.29"
+ammonia = "4"
 
 [[bin]]
 name = "metalcraft-agent"

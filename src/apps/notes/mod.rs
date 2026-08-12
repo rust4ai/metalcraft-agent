@@ -19,6 +19,7 @@ mod http;
 mod models;
 mod palette;
 mod portable;
+mod render;
 mod schema;
 mod store;
 mod tools;
