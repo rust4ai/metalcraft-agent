@@ -389,14 +389,16 @@ impl NotesStore {
         Ok(t)
     }
 
-    /// Revoke a note's public share.
-    pub async fn unshare(&self, slug: &str) -> NotesResult<()> {
+    /// Revoke a note's public share; returns the token that was cleared (if any)
+    /// so the caller can deregister it from the coordinator.
+    pub async fn unshare(&self, slug: &str) -> NotesResult<Option<String>> {
         let note = self.note_by_slug(slug).await?;
+        let old = note.public_token.clone();
         sqlx::query("UPDATE notes SET public_token = NULL WHERE id = ?")
             .bind(&note.id)
             .execute(&self.pool)
             .await?;
-        Ok(())
+        Ok(old)
     }
 
     /// Resolve a public token → `(title, body)` for the render page.

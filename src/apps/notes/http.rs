@@ -64,8 +64,10 @@ async fn share(State(s): State<NotesStore>, Path(slug): Path<String>) -> Respons
     }
     match s.share(&slug).await {
         Ok(token) => {
-            let base = std::env::var("POD_PUBLIC_URL").unwrap_or_default();
-            let url = format!("{base}/apps/metalcraft-notes/p/{token}");
+            // Register with the coordinator (best-effort) so a neutral public URL
+            // routes to this pod; the URL is the coordinator's when configured.
+            crate::apps::coordinator::register_share(&token, "note", &slug).await;
+            let url = crate::apps::coordinator::share_url("metalcraft-notes", &token);
             Json(json!({ "url": url, "token": token })).into_response()
         }
         Err(e) => e.into_response(),
@@ -77,7 +79,12 @@ async fn unshare(State(s): State<NotesStore>, Path(slug): Path<String>) -> Respo
         return r;
     }
     match s.unshare(&slug).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(old_token) => {
+            if let Some(t) = old_token {
+                crate::apps::coordinator::unregister_share(&t).await;
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => e.into_response(),
     }
 }

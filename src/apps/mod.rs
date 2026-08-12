@@ -37,6 +37,7 @@ use metalcraft::ToolRegistry;
 
 pub mod blobs;
 pub mod calendar;
+pub mod coordinator;
 pub mod drive;
 pub mod events;
 pub mod notes;
