@@ -165,7 +165,8 @@ impl OperationKind {
             "persona_write" | "persona_delete" | "skill_write" | "skill_delete" | "flow_write"
             | "flow_set_schedules" | "flow_install" | "flow_install_dependencies"
             | "flow_delete" => Self::MetaWrite,
-            "agentpack_install" | "agentpack_uninstall" | "agentpack_export" => {
+            "agentpack_install" | "agentpack_update" | "agentpack_uninstall"
+            | "agentpack_export" => {
                 Self::AgentPackWrite
             }
             "agentpack_list" | "agentpack_read" => Self::MetaRead,

@@ -299,6 +299,7 @@ async fn auth_middleware(
         post_export_agent_pack,
         list_agent_presets, get_agent_preset, put_agent_preset, delete_agent_preset,
         list_agent_instances, get_agent_instance, post_create_agent_instance,
+        get_agent_instance_flows,
         patch_agent_instance, delete_agent_instance,
         get_agent_instance_memory, post_instance_conversation,
         get_persona, put_persona, delete_persona,
@@ -306,7 +307,7 @@ async fn auth_middleware(
         get_flow, put_flow, delete_flow, post_run_flow, post_install_flow,
         get_flow_schedules, put_flow_schedules, post_flow_schedule, delete_flow_schedule,
         get_flow_binding, put_flow_binding, post_arm_schedule, delete_arm_schedule,
-        post_inspect_agent_pack, get_agent_pack_registries,
+        post_inspect_agent_pack, get_agent_pack_registries, post_update_agent_pack,
         get_flow_schedules_preview,
         post_install_flow_dependencies,
         list_flow_runs, get_flow_run, post_resume_flow_run,
@@ -344,15 +345,18 @@ async fn auth_middleware(
         crate::agent_instance::AgentInstance, crate::agent_instance::InstanceOrigin,
         crate::agent_packs::InstalledAgentPack, crate::agent_packs::InstallReport,
         crate::agent_packs::UninstallReport, crate::agent_packs::AgentPackManifest,
+        crate::agent_packs::UpdateReport, crate::agent_packs::PersonaFallback,
+        crate::agent_packs::Orphaned,
         crate::agent_packs::ConsentSummary, crate::agent_packs::manifest::Provides,
         crate::agent_packs::manifest::PackRef, crate::agent_packs::manifest::Author,
         crate::agent_packs::manifest::Parent, crate::agent_packs::manifest::EnvRequirement,
         ExportAgentPackRequest,
         crate::memory::InstanceMemoryView, crate::memory::MemorySample,
         InstanceDetail, CreateInstanceRequest, PatchInstanceRequest, NewConversationRequest,
-        ScheduledFlowRef, PresetDetail, RosterPersona, InstanceList, InstanceListItem,
-        AgentPackPreview, Registries,
-        FlowBindingView, FlowPersonaCheck, ArmedSchedule, BindFlowRequest, ArmScheduleRequest,
+        ScheduledFlowRef, InstanceFlows, PresetDetail, RosterPersona, InstanceList, InstanceListItem,
+        AgentPackPreview, Registries, RegistryView, crate::agent_registry::Trust,
+        FlowBindingView, FlowPersonaCheck, ArmedSchedule, ArmConsent,
+        BindFlowRequest, ArmScheduleRequest,
         crate::skill::Skill, crate::skill::SkillSummary,
         crate::gateway_activity::GatewayEvent,
         crate::metalcraft_gateway::GatewayStatus,
@@ -447,11 +451,13 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/agent-packs/export", post(post_export_agent_pack))
         .route("/api/v1/agent-packs/{id}", get(get_agent_pack))
         .route("/api/v1/agent-packs/{id}", delete(delete_agent_pack))
+        .route("/api/v1/agent-packs/{id}/update", post(post_update_agent_pack))
         .route("/api/v1/agents/instances", get(list_agent_instances))
         .route("/api/v1/agents/instances", post(post_create_agent_instance))
         .route("/api/v1/agents/instances/{id}", get(get_agent_instance))
         .route("/api/v1/agents/instances/{id}", patch(patch_agent_instance))
         .route("/api/v1/agents/instances/{id}/memory", get(get_agent_instance_memory))
+        .route("/api/v1/agents/instances/{id}/flows", get(get_agent_instance_flows))
         .route(
             "/api/v1/agents/instances/{id}/conversations",
             post(post_instance_conversation),
@@ -787,10 +793,19 @@ struct InstallAgentPackQuery {
     /// archive as the request body instead.
     #[serde(default)]
     path: Option<String>,
-    /// Download from a registry. The origin must be allowlisted — see
+    /// Download from a registry. The origin must be configured — see
     /// [`crate::agent_registry`] and `GET /api/v1/agent-packs/registries`.
     #[serde(default)]
     url: Option<String>,
+    /// A registry reference: `@amy_kitchen`, or `axoniac:@amy_kitchen` to say which
+    /// host. A bare reference published on two configured registries is an **error**
+    /// rather than a first match — see `specs/AGENT_PACK_FORMAT.md` §11.3.
+    #[serde(default, rename = "ref")]
+    reference: Option<String>,
+    /// Install from a `verified-only` host even though the pack is not verified.
+    /// The operator is the one being asked, so they are allowed to say yes.
+    #[serde(default)]
+    allow_unverified: Option<bool>,
 }
 
 /// Where the archive for this request comes from.
@@ -803,6 +818,21 @@ async fn agent_pack_bytes(
     q: &InstallAgentPackQuery,
     body: &axum::body::Bytes,
 ) -> Result<(Vec<u8>, String), Response> {
+    if let Some(reference) = q.reference.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        let resolved = crate::agent_registry::resolve(reference)
+            .await
+            .map_err(|e| err_json(StatusCode::BAD_REQUEST, e))?;
+        crate::agent_registry::trust_permits(&resolved, q.allow_unverified.unwrap_or(false))
+            // 403 rather than 400: the request is well-formed and the pack exists;
+            // this pod is declining it on policy.
+            .map_err(|e| err_json(StatusCode::FORBIDDEN, e))?;
+        return match crate::agent_registry::fetch(&resolved.download_url).await {
+            // Record the *resolved* origin, not the reference the user typed, so the
+            // lockfile pins where the bytes actually came from.
+            Ok(b) => Ok((b, resolved.download_url)),
+            Err(e) => Err(err_json(StatusCode::BAD_GATEWAY, e)),
+        };
+    }
     if let Some(url) = q.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
         return match crate::agent_registry::fetch(url).await {
             Ok(b) => Ok((b, url.to_string())),
@@ -928,6 +958,53 @@ async fn post_inspect_agent_pack(
     .into_response()
 }
 
+/// `POST /api/v1/agent-packs/{id}/update`
+///
+/// Separate from install because the *consequences* are different: install adds an
+/// agent, update changes agents that already exist and that somebody may be talking
+/// to right now. The report says what followed — and, crucially, names any agent
+/// whose persona or preset the new version withdrew, so the two silent failure modes
+/// become two lines in a dialog.
+#[utoipa::path(
+    post,
+    path = "/api/v1/agent-packs/{id}/update",
+    tag = "agent-packs",
+    params(("id" = String, Path, description = "The installed agent pack to update")),
+    request_body(content = Vec<u8>, description = "The newer .agentpack, or use ?url=/?ref=/?path="),
+    responses(
+        (status = 200, description = "Update report", body = crate::agent_packs::UpdateReport),
+        (status = 400, description = "Not installed, older, or invalid"),
+    ),
+)]
+async fn post_update_agent_pack(
+    Path(id): Path<String>,
+    Query(q): Query<InstallAgentPackQuery>,
+    body: axum::body::Bytes,
+) -> Response {
+    let (bytes, source) = match agent_pack_bytes(&q, &body).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    // Check the archive is the pack the caller named *before* updating, not after:
+    // a mismatched id must not be discovered once the new version is already on
+    // disk. `Bundle::read` is pure, so this costs a parse and nothing else.
+    match crate::agent_packs::Bundle::read(&bytes) {
+        Ok(b) if b.manifest.id != id => {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                format!("that archive is agent pack '{}', not '{id}'", b.manifest.id),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
+    }
+
+    match crate::agent_packs::update(&bytes, &source) {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/agent-packs/registries",
@@ -935,16 +1012,43 @@ async fn post_inspect_agent_pack(
     responses((status = 200, description = "Origins this pod will download an agent pack from", body = Registries)),
 )]
 async fn get_agent_pack_registries() -> Response {
-    Json(Registries { origins: crate::agent_registry::allowed_origins() }).into_response()
+    let cfg = crate::agent_registry::load();
+    Json(Registries {
+        origins: cfg.origins(),
+        default: cfg.default.clone(),
+        registries: cfg
+            .registries
+            .iter()
+            .map(|(name, r)| RegistryView {
+                name: name.clone(),
+                url: r.url.clone(),
+                trust: r.trust,
+                is_default: *name == cfg.default,
+            })
+            .collect(),
+    })
+    .into_response()
 }
 
 /// Where this pod is willing to fetch an agent pack from.
 ///
 /// Returned rather than only enforced so a UI can say what it accepts *before* the
-/// user pastes a link and gets refused.
+/// user pastes a link and gets refused — and so a picker can offer the configured
+/// hosts by name rather than making somebody remember an origin.
 #[derive(Serialize, utoipa::ToSchema)]
 struct Registries {
+    /// Bare origins, kept for clients written against the earlier shape.
     origins: Vec<String>,
+    default: String,
+    registries: Vec<RegistryView>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct RegistryView {
+    name: String,
+    url: String,
+    trust: crate::agent_registry::Trust,
+    is_default: bool,
 }
 
 #[utoipa::path(
@@ -1072,6 +1176,34 @@ fn scheduled_for(instance_id: &str) -> Vec<ScheduledFlowRef> {
             }
         })
         .collect()
+}
+
+/// `GET /api/v1/agents/instances/{id}/flows` — what this agent is scheduled to do.
+///
+/// The same list `GET …/instances/{id}` embeds, on its own route. It is worth its own
+/// endpoint because it is the question somebody asks right before they decide whether
+/// to trust a background agent, and answering it should not mean fetching an agent's
+/// whole conversation index.
+#[utoipa::path(
+    get,
+    path = "/api/v1/agents/instances/{id}/flows",
+    tag = "agent-instances",
+    params(("id" = String, Path, description = "Agent instance id")),
+    responses(
+        (status = 200, description = "Flow schedules armed to this agent", body = InstanceFlows),
+        (status = 404, description = "No such agent"),
+    ),
+)]
+async fn get_agent_instance_flows(Path(id): Path<String>) -> Response {
+    if crate::agent_instance::load(&id).is_err() {
+        return err_json(StatusCode::NOT_FOUND, format!("no agent '{id}'"));
+    }
+    Json(InstanceFlows { scheduled: scheduled_for(&id) }).into_response()
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct InstanceFlows {
+    scheduled: Vec<ScheduledFlowRef>,
 }
 
 fn conversations_of(instance_id: &str) -> Vec<ChatSummary> {
@@ -1883,6 +2015,63 @@ struct FlowBindingView {
     personas: Vec<FlowPersonaCheck>,
     /// `schedule id -> agent instance`, for schedules that have been armed.
     armed: Vec<ArmedSchedule>,
+    /// Everything the arm dialog needs to state what arming this actually permits.
+    ///
+    /// Arming is the second consent moment, and the sharper one: a scheduled flow
+    /// acts **while nobody is watching**, so a mutating tool inside one is a bigger
+    /// commitment than the same tool in a chat where an approval prompt exists.
+    consent: ArmConsent,
+}
+
+/// The resolved content of the arm dialog.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct ArmConsent {
+    /// Display name of the preset this flow runs as.
+    preset_name: String,
+    /// Origins its tools can reach.
+    domains: Vec<String>,
+    /// Credentials it will use.
+    requires_env: Vec<String>,
+    /// Credentials the pod does not have — those tools will fail at 3am rather than
+    /// at a moment anyone is looking.
+    missing_env: Vec<String>,
+    /// Tools that can change something on the other end.
+    mutating_tools: Vec<String>,
+    tool_count: usize,
+    /// Seed memories the agent starts from. It accumulates more on every run.
+    base_memories: usize,
+}
+
+fn arm_consent(preset: Option<&crate::agent_preset::AgentPreset>) -> ArmConsent {
+    let Some(preset) = preset else {
+        return ArmConsent {
+            preset_name: String::new(),
+            domains: Vec::new(),
+            requires_env: Vec::new(),
+            missing_env: Vec::new(),
+            mutating_tools: Vec::new(),
+            tool_count: 0,
+            base_memories: 0,
+        };
+    };
+    let consent = crate::agent_packs::consent_for_preset(preset);
+    let requires_env: Vec<String> = consent.requires_env.iter().map(|e| e.name.clone()).collect();
+    ArmConsent {
+        preset_name: preset.name.clone(),
+        missing_env: requires_env
+            .iter()
+            .filter(|n| crate::key_store::lookup(n).is_none())
+            .cloned()
+            .collect(),
+        requires_env,
+        domains: consent.domains,
+        mutating_tools: consent.mutating_tools,
+        tool_count: consent.tools.len(),
+        base_memories: crate::memory::instance::current_base_version(&preset.slug)
+            .and_then(|v| crate::memory::instance::load_base(&preset.slug, &v).ok())
+            .and_then(|b| b.try_read().map(|b| b.len()).ok())
+            .unwrap_or(0),
+    }
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -1929,6 +2118,7 @@ fn binding_view(flow: &metalcraft_flows::SavedFlow) -> FlowBindingView {
             v.sort_by(|a, b| a.schedule_id.cmp(&b.schedule_id));
             v
         },
+        consent: arm_consent(preset.as_ref()),
     }
 }
 

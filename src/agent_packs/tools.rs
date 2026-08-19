@@ -17,6 +17,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "agentpack_list",
     "agentpack_read",
     "agentpack_install",
+    "agentpack_update",
     "agentpack_uninstall",
     "agentpack_export",
 ];
@@ -126,6 +127,66 @@ impl metalcraft::Tool for AgentPackInstallTool {
                  will error until you add them with key_set.",
                 report.missing_env.join(", ")
             ));
+        }
+        Ok(out)
+    }
+}
+
+pub struct AgentPackUpdateTool;
+
+#[async_trait]
+impl metalcraft::Tool for AgentPackUpdateTool {
+    fn name(&self) -> &str {
+        "agentpack_update"
+    }
+    fn description(&self) -> &str {
+        "Update an installed agent pack to a newer .agentpack, then report what \
+         followed. Live agents made from it pick up the new personas, tools, skills \
+         and shipped knowledge; what they have learned, their conversations and their \
+         names are never touched. Says explicitly when an agent's persona was \
+         withdrawn (it falls back to the preset's default) or its whole preset was \
+         (it is orphaned, keeping its memory, and flagged)."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the newer .agentpack file on this machine."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+    async fn call(&self, args: Value) -> metalcraft::Result<Value> {
+        let path = args["path"]
+            .as_str()
+            .ok_or_else(|| crate::tools::missing_param("agentpack_update", "path"))?;
+        let bytes = std::fs::read(path)
+            .map_err(|e| fail("agentpack_update", format!("reading {path}: {e}")))?;
+        let report = super::update(&bytes, "bundle").map_err(|e| fail("agentpack_update", e))?;
+        let mut out = serde_json::to_value(&report)
+            .map_err(|e| fail("agentpack_update", e.to_string()))?;
+
+        // The two edge cases are the whole reason this tool is separate from
+        // install, so they get said in words rather than left in a struct.
+        let mut notes: Vec<String> = Vec::new();
+        for f in &report.personas_fell_back {
+            notes.push(format!(
+                "'{}' was using persona '{}', which this version removed — it is now using '{}'.",
+                f.name, f.from, f.to
+            ));
+        }
+        for o in &report.orphaned {
+            notes.push(format!(
+                "'{}' was made from preset '{}', which this version removed. It keeps its memory \
+                 and conversations and now runs from a local copy of that preset.",
+                o.name, o.agent_preset
+            ));
+        }
+        if !notes.is_empty() {
+            out["note"] = json!(notes.join(" "));
         }
         Ok(out)
     }
@@ -242,14 +303,15 @@ mod tests {
 
     #[test]
     fn every_declared_tool_name_has_an_implementation() {
-        let (a, b, c, d, e) = (
+        let (a, b, c, d, e, f) = (
             AgentPackListTool,
             AgentPackReadTool,
             AgentPackInstallTool,
+            AgentPackUpdateTool,
             AgentPackUninstallTool,
             AgentPackExportTool,
         );
-        let built: Vec<&str> = vec![a.name(), b.name(), c.name(), d.name(), e.name()];
+        let built: Vec<&str> = vec![a.name(), b.name(), c.name(), d.name(), e.name(), f.name()];
         assert_eq!(built, TOOL_NAMES);
     }
 
@@ -257,7 +319,9 @@ mod tests {
     fn writes_are_approval_gated_and_reads_are_not() {
         use crate::approval::{OperationKind, PermissionLevel};
         let args = json!({});
-        for t in ["agentpack_install", "agentpack_uninstall", "agentpack_export"] {
+        for t in
+            ["agentpack_install", "agentpack_update", "agentpack_uninstall", "agentpack_export"]
+        {
             assert_eq!(OperationKind::classify(t, &args), OperationKind::AgentPackWrite, "{t}");
         }
         assert_eq!(

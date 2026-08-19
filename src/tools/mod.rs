@@ -101,6 +101,9 @@ pub fn create_registry_for_with_config(
             "agentpack_install" => {
                 registry.register(crate::agent_packs::tools::AgentPackInstallTool)
             }
+            "agentpack_update" => {
+                registry.register(crate::agent_packs::tools::AgentPackUpdateTool)
+            }
             "agentpack_uninstall" => {
                 registry.register(crate::agent_packs::tools::AgentPackUninstallTool)
             }

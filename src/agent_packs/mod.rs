@@ -133,6 +133,11 @@ pub struct InstallReport {
     /// Preset slugs already provided by another installed pack.
     pub preset_collisions: Vec<String>,
     pub memories_indexed: usize,
+    /// Flows the pack shipped. **Every one lands disabled and unarmed** — installing
+    /// an identity must not start background work, and arming is the separate consent
+    /// moment that mints the agent to run it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flows_installed_unscheduled: Vec<String>,
     pub consent: ConsentSummary,
 }
 
@@ -288,7 +293,16 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
         .filter(|r| !r.starts_with("integration_packs/"))
         .collect();
     for rel in &previous {
-        if rel == "agent_pack.json" || shipped.contains(rel.as_str()) {
+        // Pod-managed files are not "withdrawn content" — the installer writes them
+        // itself and no archive ever contains them, so a naive "not in the new
+        // archive" test deletes them on every upgrade.
+        //
+        // For `integration_packs.json` that was silent and expensive: the refs file
+        // is written just above, deleted here, and then `gc` below sees an agent
+        // pack referencing nothing and collects every integration pack it vendors.
+        // Upgrading an agent lost all of its tools, with the only trace a store
+        // directory that had quietly emptied.
+        if is_pod_managed(rel) || shipped.contains(rel.as_str()) {
             continue;
         }
         let stale = root.join(rel);
@@ -332,6 +346,22 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
         }
     }
 
+    // 3b. flows the pack ships — installed, disabled, unarmed, and bound to the
+    // pack's preset so the roster check has something to check against.
+    if let Some(preset_slug) = bundle.preset_slug() {
+        for (rel, bytes) in &bundle.files {
+            let Some(name) = rel.strip_prefix("flows/").and_then(|f| f.strip_suffix(".json")) else {
+                continue;
+            };
+            match install_flow_unscheduled(name, bytes, preset_slug) {
+                Ok(id) => report.flows_installed_unscheduled.push(id),
+                // A flow that will not parse costs the pack its automation, not its
+                // install — the agent itself is still perfectly usable.
+                Err(e) => log::warn!("agent pack '{id}': skipping flow '{name}': {e}"),
+            }
+        }
+    }
+
     // 4. credentials the pod is missing
     for req in &bundle.consent.requires_env {
         // `lookup` already resolves the store *and* the environment, so a key
@@ -359,6 +389,276 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
     }
 
     Ok(report)
+}
+
+/// What an *installed* preset can reach, derived the same way an install-time
+/// summary is: from the vendored integration packs' own tool definitions.
+///
+/// Needed because the second consent moment — arming a flow — happens long after
+/// install, and a scheduled agent acts while nobody is watching. "This flow can reach
+/// api.instacart.com and 2 of its 9 tools write" is only sayable if it is computed
+/// from the bytes at the time you ask, not remembered from a dialog.
+pub fn consent_for_preset(preset: &crate::agent_preset::AgentPreset) -> ConsentSummary {
+    let mut packs: HashMap<String, (Vec<u8>, Vec<(String, Vec<u8>)>)> = HashMap::new();
+
+    for id in &preset.integration_packs {
+        let Some(dir) = store::resolve(id) else { continue };
+        let Ok(manifest) = std::fs::read(dir.join("pack.json")) else { continue };
+        let mut api_tools = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir.join("api_tools")) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                let (Some(name), Ok(bytes)) =
+                    (p.file_name().and_then(|n| n.to_str()), std::fs::read(&p))
+                else {
+                    continue;
+                };
+                api_tools.push((name.to_string(), bytes));
+            }
+        }
+        api_tools.sort_by(|a, b| a.0.cmp(&b.0));
+        packs.insert(id.clone(), (manifest, api_tools));
+    }
+
+    manifest::derive_consent(&packs.into_iter().collect())
+}
+
+/// One agent whose persona was withdrawn by an update.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct PersonaFallback {
+    pub instance: String,
+    pub name: String,
+    /// The persona the new version no longer provides.
+    pub from: String,
+    /// The preset's new default, which it now uses instead.
+    pub to: String,
+}
+
+/// One agent whose preset was withdrawn by an update.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct Orphaned {
+    pub instance: String,
+    pub name: String,
+    pub agent_preset: String,
+    /// Personas and skills copied into the user-local layer so the agent still runs.
+    pub frozen: Vec<String>,
+}
+
+/// What an update did, beyond what the install did.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct UpdateReport {
+    pub id: String,
+    pub from_version: String,
+    pub to_version: String,
+    pub install: InstallReport,
+    /// Live agents whose persona was withdrawn and fell back (§12.3).
+    pub personas_fell_back: Vec<PersonaFallback>,
+    /// Live agents whose preset was withdrawn (§12.3).
+    pub orphaned: Vec<Orphaned>,
+    /// Agents whose shipped knowledge now points at the new version's base layer.
+    pub memory_bases_repointed: Vec<String>,
+}
+
+/// Update an installed agent pack, then reconcile the agents made from it.
+///
+/// **Updating is explicit.** There is no auto-update path into here: nothing changes
+/// underneath a running agent because somebody published. That matters more than it
+/// sounds — a pack's personas are prompts the model follows and its integration packs
+/// run on the operator's credentials, so "the author pushed a change" must never be
+/// the same event as "your agent started behaving differently".
+///
+/// Once the operator *has* said yes, live agents follow: prompts, tools, skills,
+/// roster and seed memories all resolve against the new version, while learned
+/// memories, conversations, names and `persistent` are never touched. The two edge
+/// cases are what this function exists for — an install alone would leave an agent
+/// pointing at a persona or a preset that no longer exists.
+pub fn update(bytes: &[u8], source: &str) -> Result<UpdateReport, String> {
+    let bundle = Bundle::read(bytes)?;
+    let id = bundle.manifest.id.clone();
+    let previous = find(&id)
+        .ok_or_else(|| format!("agent pack '{id}' is not installed; install it first"))?;
+    let from_version = previous.manifest.version.clone();
+    let old_presets = previous.manifest.presets.clone();
+
+    // Snapshot the old version's **bytes** before the install replaces them.
+    //
+    // Paths would not do: the install retires whatever the new version no longer
+    // ships, so by the time an orphan needs a frozen copy the file it would be
+    // copied from has already been deleted.
+    let old_tree: Vec<(String, Vec<u8>)> = read_tree_all(&pack_dir(&id)).unwrap_or_default();
+
+    let install = install(bytes, source)?;
+
+    let mut report = UpdateReport {
+        id: id.clone(),
+        from_version,
+        to_version: bundle.manifest.version.clone(),
+        install,
+        personas_fell_back: Vec::new(),
+        orphaned: Vec::new(),
+        memory_bases_repointed: Vec::new(),
+    };
+
+    let presets_dir = paths::agent_presets_dir();
+    for mut inst in crate::agent_instance::list() {
+        if !old_presets.contains(&inst.agent_preset) {
+            continue;
+        }
+
+        // The preset survived: the agent follows it. Only its persona can have gone.
+        if bundle.manifest.presets.contains(&inst.agent_preset) {
+            let Ok(preset) = crate::agent_preset::AgentPreset::load(&inst.agent_preset, &presets_dir)
+            else {
+                continue;
+            };
+            if !preset.allows_persona(&inst.persona) {
+                report.personas_fell_back.push(PersonaFallback {
+                    instance: inst.id.clone(),
+                    name: inst.name.clone(),
+                    from: inst.persona.clone(),
+                    to: preset.default_persona.clone(),
+                });
+                inst.persona_fallback_from = Some(inst.persona.clone());
+                inst.persona = preset.default_persona.clone();
+                if let Err(e) = inst.save() {
+                    log::warn!("update: could not record persona fallback for {}: {e}", inst.id);
+                }
+            }
+        } else {
+            // The preset is gone. Never delete the agent — somebody's memory and
+            // conversations are in there. Materialize what it needs into the
+            // user-local layer, which is top precedence and always resolvable, so
+            // every existing call site keeps working without a special case.
+            let frozen = freeze_preset(&inst.agent_preset, &old_tree);
+            report.orphaned.push(Orphaned {
+                instance: inst.id.clone(),
+                name: inst.name.clone(),
+                agent_preset: inst.agent_preset.clone(),
+                frozen,
+            });
+            inst.orphaned_from = Some(id.clone());
+            if let Err(e) = inst.save() {
+                log::warn!("update: could not flag orphaned agent {}: {e}", inst.id);
+            }
+        }
+
+        // Drop it from the resident set so the next turn loads the new base layer.
+        // Without this the agent keeps recalling the *old* version's seed memories
+        // from an `Arc` nothing else can reach, until the process restarts — the
+        // update would appear to have done nothing.
+        crate::memory::instance::evict(&inst.id);
+        report.memory_bases_repointed.push(inst.id.clone());
+    }
+
+    // The old version's base layers have no referents left.
+    for slug in &old_presets {
+        crate::memory::instance::release_base(slug, &report.from_version);
+    }
+
+    Ok(report)
+}
+
+/// Copy an orphaned agent's preset — and any persona or skill it names that nothing
+/// else provides — into the user-local layer.
+///
+/// The operator inherits them: they were part of an agent that is still running, and
+/// the alternative is a preset that resolves to nothing the first time somebody sends
+/// it a message.
+fn freeze_preset(slug: &str, old_tree: &[(String, Vec<u8>)]) -> Vec<String> {
+    let mut frozen = Vec::new();
+
+    let want = format!("agent_presets/{slug}.json");
+    let Some((_, raw)) = old_tree.iter().find(|(p, _)| *p == want) else { return frozen };
+    let Ok(preset) = serde_json::from_slice::<crate::agent_preset::AgentPreset>(raw) else {
+        return frozen;
+    };
+
+    let dest = paths::agent_presets_dir().join(format!("{slug}.json"));
+    // Never clobber a preset the operator already authored under this slug — theirs
+    // wins, and it is already resolvable, which is all the orphan needed.
+    if !dest.is_file() {
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&dest, raw).is_ok() {
+            frozen.push(format!("agent_presets/{slug}.json"));
+        }
+    }
+
+    let mut wanted: Vec<String> =
+        preset.callable_personas().iter().map(|p| format!("personas/{p}.json")).collect();
+    wanted.extend(preset.skills.iter().map(|s| format!("skills/{s}.md")));
+
+    for rel in wanted {
+        let Some((_, bytes)) = old_tree.iter().find(|(p, _)| *p == rel) else { continue };
+        let dest = paths::data_dir().join(&rel);
+        if dest.is_file() {
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&dest, bytes).is_ok() {
+            frozen.push(rel);
+        }
+    }
+
+    frozen
+}
+
+/// Files inside `<data>/agent_packs/<id>/` that the pod writes rather than the
+/// archive supplying them.
+///
+/// They must survive an in-place upgrade: they are not part of any version's
+/// content, so "the new archive doesn't contain it" says nothing about whether it
+/// is still wanted.
+fn is_pod_managed(rel: &str) -> bool {
+    matches!(rel, "agent_pack.json" | "integration_packs.json")
+}
+
+/// Write one packaged flow to `<data>/flows/`, disabled and unarmed.
+///
+/// Three things are forced regardless of what the author shipped:
+///
+/// * `enabled = false` — the master switch. Installing an identity must not start
+///   background work, and a pack that arrived with it on would do exactly that.
+/// * every `schedules[].enabled = false` — belt and braces, so enabling the flow by
+///   hand later still doesn't fire a trigger nobody looked at.
+/// * the flow is **bound to the pack's preset**, which is what makes the arm dialog's
+///   consent summary constructible: personas, domains and credentials all resolve
+///   through the preset that owns the flow.
+///
+/// A schedule's `instance` is never carried — it lives in `flow_bindings.json`, which
+/// this never populates. `arm()` is the only thing that mints an instance.
+fn install_flow_unscheduled(name: &str, bytes: &[u8], preset_slug: &str) -> Result<String, String> {
+    let mut flow: metalcraft_flows::SavedFlow =
+        serde_json::from_slice(bytes).map_err(|e| format!("not a valid flow document: {e}"))?;
+
+    flow.enabled = false;
+    for s in &mut flow.schedules {
+        s.enabled = false;
+    }
+    if flow.id.is_empty() {
+        flow.id = name.to_string();
+    }
+
+    // Don't clobber a flow the operator already has under this id. Their edits are
+    // theirs; a pack upgrade that silently reverted them would be indistinguishable
+    // from data loss.
+    if metalcraft_flows::load_flow(&paths::flows_dir(), &flow.id).is_some() {
+        return Err(format!("a flow with id '{}' already exists; leaving it alone", flow.id));
+    }
+
+    metalcraft_flows::save_flow(&paths::flows_dir(), &flow).map_err(|e| e.to_string())?;
+    // Bind after saving: the binding names a flow, and a binding pointing at nothing
+    // is worse than no binding.
+    if let Err(e) = crate::flow_bindings::bind_preset(&flow, preset_slug) {
+        log::warn!("agent pack: saved flow '{}' but could not bind it: {e}", flow.id);
+    }
+    Ok(flow.id)
 }
 
 /// Uninstall an agent pack.
@@ -634,7 +934,8 @@ fn find_pack_dir(id: &str) -> Option<PathBuf> {
 }
 
 /// Read a directory tree into `(relative path, bytes)` pairs.
-fn read_tree(root: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+/// Every file under `root`, with archive-style relative paths.
+fn read_tree_all(root: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -646,13 +947,8 @@ fn read_tree(root: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, String> {
                 stack.push(path);
                 continue;
             }
-            // Personas and skills moved out of integration packs; an old pack that
-            // still carries them must not smuggle them back in through an export.
             let Ok(rel) = path.strip_prefix(root) else { continue };
             let rel = rel.to_string_lossy().replace('\\', "/");
-            if rel.starts_with("personas/") || rel.starts_with("skills/") {
-                continue;
-            }
             let bytes = std::fs::read(&path)
                 .map_err(|e| format!("reading {}: {e}", path.display()))?;
             out.push((rel, bytes));
@@ -660,4 +956,17 @@ fn read_tree(root: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+/// [`read_tree_all`] minus `personas/` and `skills/`.
+///
+/// For **export only**: personas and skills moved out of integration packs, and an
+/// old pack that still carries them must not smuggle them back in through an export.
+/// Anything that needs the pack as it actually is on disk — the orphan snapshot, for
+/// one — wants [`read_tree_all`] instead.
+fn read_tree(root: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    Ok(read_tree_all(root)?
+        .into_iter()
+        .filter(|(rel, _)| !rel.starts_with("personas/") && !rel.starts_with("skills/"))
+        .collect())
 }

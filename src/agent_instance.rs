@@ -73,6 +73,18 @@ pub struct AgentInstance {
     /// memory, and are reaped after a TTL. Naming one makes it persistent.
     #[serde(default)]
     pub persistent: bool,
+    /// Set when the agent pack that provided this agent's preset withdrew it — on
+    /// update or on a forced uninstall. The agent keeps its memory and its
+    /// conversations and goes on working against a frozen copy of the preset; this
+    /// records what happened, so a UI can say so rather than presenting a
+    /// pack-provided agent that is quietly no longer pack-provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orphaned_from: Option<String>,
+    /// Set when an update withdrew the persona this agent was using and it fell back
+    /// to the preset's default. Reported rather than silent: the agent's voice
+    /// changed, and nobody asked for that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_fallback_from: Option<String>,
     pub created_at: String,
     #[serde(default)]
     pub last_active_at: String,
@@ -92,6 +104,8 @@ impl AgentInstance {
             persona: preset.default_persona.clone(),
             persistent: origin.defaults_persistent(),
             origin,
+            orphaned_from: None,
+            persona_fallback_from: None,
             created_at: now.clone(),
             last_active_at: now,
         }

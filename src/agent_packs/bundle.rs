@@ -24,6 +24,11 @@ use super::manifest::{AgentPackManifest, ConsentSummary, derive_consent};
 /// still small. This is a zip-bomb guard, not a feature budget.
 pub const MAX_BUNDLE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Seed memories per preset (`specs/AGENT_PACK_FORMAT.md` §6). A registry refuses
+/// past this; a pod warns, because the operator already has the bytes and a noisier
+/// agent beats a failed install.
+pub const MAX_SEED_MEMORIES: usize = 5_000;
+
 /// An archive read into memory and structurally checked, but not yet written
 /// anywhere. Nothing touches disk until verification passes.
 #[derive(Debug)]
@@ -202,6 +207,42 @@ impl Bundle {
                     ));
                 }
             }
+
+            // A shipped flow is background work, so the containment rule that scopes
+            // `sub_agent` has to reach it too: a flow may only name personas from the
+            // preset that owns it. Without this the consent summary shown before
+            // arming could not be complete, because the graph could reach anywhere.
+            let roster = preset.callable_personas();
+            for (path, raw) in self.files.iter().filter(|(p, _)| p.starts_with("flows/")) {
+                let Ok(flow) = serde_json::from_slice::<serde_json::Value>(raw) else {
+                    problems.push(format!("flow '{path}' is unreadable"));
+                    continue;
+                };
+                for p in flow_personas(&flow) {
+                    if !roster.contains(&p) {
+                        problems.push(format!(
+                            "flow '{path}' names persona '{p}', which preset '{slug}' does not \
+                             include (roster: {})",
+                            roster.join(", ")
+                        ));
+                    }
+                }
+            }
+
+            // Seed memories are capped so a corpus stays reviewable and its base
+            // stays cheap to build. A pod warns rather than refusing: the operator
+            // already has the bytes, and a smaller agent beats a failed install.
+            if let Some(raw) = self.files.get(&format!("agent_presets/{slug}/memories.jsonl")) {
+                let count = String::from_utf8_lossy(raw).lines().filter(|l| !l.trim().is_empty()).count();
+                if count > MAX_SEED_MEMORIES {
+                    log::warn!(
+                        "agent pack '{}': preset '{slug}' ships {count} seed memories, above the \
+                         {MAX_SEED_MEMORIES} limit — the excess will be indexed but the registry \
+                         that served this should have refused it",
+                        self.manifest.id
+                    );
+                }
+            }
         }
 
         // Vendored pack hashes are pins, not decoration.
@@ -234,6 +275,42 @@ impl Bundle {
     pub fn preset_slug(&self) -> Option<&str> {
         self.manifest.presets.first().map(String::as_str)
     }
+}
+
+/// Every persona a flow document names: the flow-level default, each node's
+/// `data.persona`, and each schedule's `persona`.
+///
+/// Read from JSON rather than from `SavedFlow` on purpose — this runs during
+/// validation, before we have committed to the document being a flow we can parse,
+/// and an unknown node shape should contribute nothing rather than fail the install.
+/// The rule is "nothing outside the roster"; anything this misses, `arm()` catches.
+pub fn flow_personas(flow: &serde_json::Value) -> Vec<String> {
+    use serde_json::Value;
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |v: Option<&Value>| {
+        if let Some(s) = v.and_then(Value::as_str)
+            && !s.is_empty()
+            && !out.iter().any(|p| p == s)
+        {
+            out.push(s.to_string());
+        }
+    };
+
+    push(flow.get("persona"));
+    for s in flow.get("schedules").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+        push(s.get("persona"));
+    }
+    let nodes = flow
+        .get("flow")
+        .and_then(|f| f.get("nodes"))
+        .or_else(|| flow.get("nodes"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    for n in nodes {
+        push(n.get("data").and_then(|d| d.get("persona")));
+    }
+    out
 }
 
 /// Hash of every file except the manifest — what `content_sha256` pins.

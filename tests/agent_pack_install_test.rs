@@ -174,6 +174,19 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     let err = build_and_read(two, good_files()).expect_err("multi-preset must be refused");
     assert!(err.contains("exactly one"), "{err}");
 
+    // Spec §10 V15 — a vendored pack that does not match its pin. The registry runs
+    // the same check under the same test name; see specs/AGENT_PACK_FORMAT.md §10.1.
+    let mut lying = good_manifest();
+    lying.provides.integration_packs[0].content_sha256 = Some("00".repeat(32));
+    let err = build_and_read(lying, good_files()).expect_err("a false pin must be refused");
+    assert!(err.contains("hashes to"), "{err}");
+
+    // Spec §10 V16 — a shipped flow naming a persona outside the preset's roster.
+    let mut stray = good_files();
+    stray.insert("flows/brief.json".into(), flow_doc("brief", "stranger", true));
+    let err = build_and_read(good_manifest(), stray).expect_err("flow containment must hold");
+    assert!(err.contains("names persona 'stranger'"), "{err}");
+
     // ── install ─────────────────────────────────────────────────────────────
     let report = agent_packs::install(&archive, "bundle").expect("install");
     assert_eq!(report.id, "amy-kitchen-agent");
@@ -202,6 +215,60 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     let base = metalcraft_agent::memory::instance::load_base("amy-kitchen", "1.4.0")
         .expect("base built at install");
     assert_eq!(base.try_read().map(|b| b.len()).unwrap_or(0), 2);
+
+    // ── a pack that ships flows arms exactly zero schedules ─────────────────
+    //
+    // The acceptance test from AGENT_PRESETS_PLAN §5.5. The archive below declares
+    // its flow enabled *and* its schedule enabled — an author shipping exactly what
+    // they run — and the installer must land both switched off, because installing
+    // an identity must never start background work.
+    {
+        let mut with_flow = good_files();
+        with_flow.insert("flows/sunday-prep.json".into(), flow_doc("sunday-prep", "amy", true));
+        let mut m = good_manifest();
+        m.version = "1.5.0".into();
+        let archive = bundle::write(m, with_flow).expect("write flow pack");
+        let report = agent_packs::install(&archive, "bundle").expect("install flow pack");
+
+        assert_eq!(report.flows_installed_unscheduled, vec!["sunday-prep"]);
+
+        let saved = metalcraft_flows::load_flow(
+            &metalcraft_agent::paths::flows_dir(),
+            "sunday-prep",
+        )
+        .expect("the flow was written");
+        assert!(!saved.enabled, "install must never arm a flow's master switch");
+        assert!(
+            saved.schedules.iter().all(|s| !s.enabled),
+            "install must never arm an individual schedule either"
+        );
+
+        // And it is bound to the pack's preset, which is what makes the arm dialog's
+        // consent summary constructible at all.
+        assert_eq!(
+            metalcraft_agent::flow_bindings::preset_for("sunday-prep"),
+            "amy-kitchen"
+        );
+
+        // ── an upgrade must not lose the pack's vendored tools ──────────────
+        //
+        // This was the install above's other job: it is the first *in-place*
+        // upgrade in this test, and it used to end with the agent holding no
+        // integration packs at all. `integration_packs.json` is written by the
+        // installer, so it is never in the incoming archive; the retire pass read
+        // that as "withdrawn" and deleted it, and the store gc that follows then
+        // saw a pack referencing nothing and collected everything it vendored.
+        // Silent, and only visible later as an agent whose tools had vanished.
+        let refs = agent_packs::store::read_refs("amy-kitchen-agent");
+        assert!(
+            refs.contains_key("metalcraft-calendar"),
+            "an upgrade must keep the pack's vendored refs, not treat them as withdrawn"
+        );
+        assert!(
+            agent_packs::store::resolve("metalcraft-calendar").is_some(),
+            "and the store entry those refs point at must survive the post-upgrade gc"
+        );
+    }
 
     // ── dedup: a second pack vendoring identical bytes is free ──────────────
     let mut second = good_manifest();
@@ -246,6 +313,32 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     assert!(agent_packs::store::refcounts().is_empty());
 
     let _ = fs::remove_dir_all(&data_dir);
+}
+
+/// A flow document naming `persona` in every place a persona can appear, shipped
+/// `enabled` so the installer has something real to switch off.
+fn flow_doc(id: &str, persona: &str, enabled: bool) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "spec_version": "2",
+        "id": id,
+        "name": id,
+        "created_at": "2026-08-19T00:00:00Z",
+        "updated_at": "2026-08-19T00:00:00Z",
+        "enabled": enabled,
+        "schedules": [{
+            "id": "morning", "enabled": enabled, "type": "cron", "cron": "0 8 * * *",
+            "persona": persona,
+        }],
+        "flow": {
+            "nodes": [
+                { "id": "entry", "node_type": "entry", "data": {} },
+                { "id": "n1", "node_type": "prompt",
+                  "data": { "persona": persona, "prompt": "What is on today?" } }
+            ],
+            "edges": [{ "id": "e1", "source": "entry", "target": "n1" }]
+        },
+    }))
+    .unwrap()
 }
 
 fn build_and_read(m: AgentPackManifest, files: BTreeMap<String, Vec<u8>>) -> Result<Bundle, String> {
