@@ -306,6 +306,7 @@ async fn auth_middleware(
         get_flow, put_flow, delete_flow, post_run_flow, post_install_flow,
         get_flow_schedules, put_flow_schedules, post_flow_schedule, delete_flow_schedule,
         get_flow_binding, put_flow_binding, post_arm_schedule, delete_arm_schedule,
+        post_inspect_agent_pack, get_agent_pack_registries,
         get_flow_schedules_preview,
         post_install_flow_dependencies,
         list_flow_runs, get_flow_run, post_resume_flow_run,
@@ -350,6 +351,7 @@ async fn auth_middleware(
         crate::memory::InstanceMemoryView, crate::memory::MemorySample,
         InstanceDetail, CreateInstanceRequest, PatchInstanceRequest, NewConversationRequest,
         ScheduledFlowRef, PresetDetail, RosterPersona, InstanceList, InstanceListItem,
+        AgentPackPreview, Registries,
         FlowBindingView, FlowPersonaCheck, ArmedSchedule, BindFlowRequest, ArmScheduleRequest,
         crate::skill::Skill, crate::skill::SkillSummary,
         crate::gateway_activity::GatewayEvent,
@@ -440,6 +442,8 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/snapshot", get(get_snapshot))
         .route("/api/v1/agent-packs", get(list_agent_packs))
         .route("/api/v1/agent-packs/install", post(post_install_agent_pack))
+        .route("/api/v1/agent-packs/inspect", post(post_inspect_agent_pack))
+        .route("/api/v1/agent-packs/registries", get(get_agent_pack_registries))
         .route("/api/v1/agent-packs/export", post(post_export_agent_pack))
         .route("/api/v1/agent-packs/{id}", get(get_agent_pack))
         .route("/api/v1/agent-packs/{id}", delete(delete_agent_pack))
@@ -783,6 +787,164 @@ struct InstallAgentPackQuery {
     /// archive as the request body instead.
     #[serde(default)]
     path: Option<String>,
+    /// Download from a registry. The origin must be allowlisted — see
+    /// [`crate::agent_registry`] and `GET /api/v1/agent-packs/registries`.
+    #[serde(default)]
+    url: Option<String>,
+}
+
+/// Where the archive for this request comes from.
+///
+/// The three sources are the same for `/inspect` and `/install`, deliberately: a
+/// dialog inspects a thing and then installs *that same thing*, and any difference
+/// between the two paths would be a difference between what was approved and what
+/// was done.
+async fn agent_pack_bytes(
+    q: &InstallAgentPackQuery,
+    body: &axum::body::Bytes,
+) -> Result<(Vec<u8>, String), Response> {
+    if let Some(url) = q.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        return match crate::agent_registry::fetch(url).await {
+            Ok(b) => Ok((b, url.to_string())),
+            // A refused origin is the caller's mistake (400); a registry that failed
+            // to answer is not (502).
+            Err(e) if e.contains("will not download") => {
+                Err(err_json(StatusCode::BAD_REQUEST, e))
+            }
+            Err(e) => Err(err_json(StatusCode::BAD_GATEWAY, e)),
+        };
+    }
+    if let Some(path) = q.path.as_deref() {
+        return match std::fs::read(path) {
+            Ok(b) => Ok((b, path.to_string())),
+            Err(e) => Err(err_json(StatusCode::BAD_REQUEST, format!("reading {path}: {e}"))),
+        };
+    }
+    if !body.is_empty() {
+        return Ok((body.to_vec(), "upload".to_string()));
+    }
+    Err(err_json(
+        StatusCode::BAD_REQUEST,
+        "provide ?url=, ?path=, or upload the .agentpack as the request body".to_string(),
+    ))
+}
+
+/// What installing this pack would grant, and what it would change.
+///
+/// The install dialog's whole reason to exist. Without this a client could only
+/// show a permission summary *after* installing, which is not consent — or parse the
+/// archive itself, duplicating the validator that has to be authoritative anyway.
+///
+/// Everything here is derived from the archive's own bytes. The consent summary
+/// never comes from what the author wrote about their pack.
+#[derive(Serialize, utoipa::ToSchema)]
+struct AgentPackPreview {
+    manifest: crate::agent_packs::AgentPackManifest,
+    consent: crate::agent_packs::ConsentSummary,
+    /// The single preset this pack provides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preset: Option<String>,
+    /// Content hash of the archive as received, so a UI can show what it is about to
+    /// install and compare it against what a registry advertised.
+    content_sha256: String,
+    /// Where the bytes came from — a URL, a path, or `"upload"`.
+    source: String,
+    /// The version already installed under this id, if any. Present means this is an
+    /// upgrade (or a downgrade), not a first install, and the dialog should say so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    installed_version: Option<String>,
+    /// Credentials the pod does not have yet. A warning, not a blocker: the pack
+    /// installs and its tools fail clearly at call time until `key_set` fixes it.
+    missing_env: Vec<String>,
+    /// Preset slugs another installed pack already provides.
+    preset_collisions: Vec<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/agent-packs/inspect",
+    tag = "agent-packs",
+    params(
+        ("url" = Option<String>, Query, description = "Registry URL to download from"),
+        ("path" = Option<String>, Query, description = "Local .agentpack path"),
+    ),
+    request_body(content = Vec<u8>, description = "The .agentpack archive", content_type = "application/octet-stream"),
+    responses(
+        (status = 200, description = "What installing this would grant", body = AgentPackPreview),
+        (status = 400, description = "Not a valid agent pack", body = ErrorResponse),
+        (status = 502, description = "The registry could not be reached", body = ErrorResponse),
+    ),
+)]
+async fn post_inspect_agent_pack(
+    Query(q): Query<InstallAgentPackQuery>,
+    body: axum::body::Bytes,
+) -> Response {
+    let (bytes, source) = match agent_pack_bytes(&q, &body).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    // The same read the installer performs — traversal guard, size cap, hash check,
+    // containment. An archive that fails here is one that would fail to install, and
+    // saying so now is the point.
+    let bundle = match crate::agent_packs::Bundle::read(&bytes) {
+        Ok(b) => b,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
+    };
+
+    let installed = crate::agent_packs::find(&bundle.manifest.id);
+    let preset = bundle.preset_slug().map(str::to_string);
+    // A slug that already resolves on this pod — from a seeded preset, a local one, or
+    // another pack. Installing over it does not merely shadow the existing agent: the
+    // loader treats ambiguity as an error rather than picking one, so both become
+    // unusable. That is worth saying before, not after.
+    let existing = crate::agent_preset::AgentPreset::list_summaries(&paths::agent_presets_dir());
+    let preset_collisions: Vec<String> = preset
+        .iter()
+        .filter(|slug| {
+            existing
+                .iter()
+                .any(|p| &&p.slug == slug && p.pack_id.as_deref() != Some(&bundle.manifest.id))
+        })
+        .cloned()
+        .collect();
+    let missing_env: Vec<String> = bundle
+        .consent
+        .requires_env
+        .iter()
+        .filter(|e| e.required && crate::key_store::lookup(&e.name).is_none())
+        .map(|e| e.name.clone())
+        .collect();
+
+    Json(AgentPackPreview {
+        content_sha256: crate::agent_packs::bundle::content_hash(&bundle.files),
+        installed_version: installed.map(|p| p.manifest.version),
+        preset,
+        consent: bundle.consent,
+        manifest: bundle.manifest,
+        source,
+        missing_env,
+        preset_collisions,
+    })
+    .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent-packs/registries",
+    tag = "agent-packs",
+    responses((status = 200, description = "Origins this pod will download an agent pack from", body = Registries)),
+)]
+async fn get_agent_pack_registries() -> Response {
+    Json(Registries { origins: crate::agent_registry::allowed_origins() }).into_response()
+}
+
+/// Where this pod is willing to fetch an agent pack from.
+///
+/// Returned rather than only enforced so a UI can say what it accepts *before* the
+/// user pastes a link and gets refused.
+#[derive(Serialize, utoipa::ToSchema)]
+struct Registries {
+    origins: Vec<String>,
 }
 
 #[utoipa::path(
@@ -797,18 +959,9 @@ async fn post_install_agent_pack(
     Query(q): Query<InstallAgentPackQuery>,
     body: axum::body::Bytes,
 ) -> Response {
-    let (bytes, source) = match &q.path {
-        Some(path) => match std::fs::read(path) {
-            Ok(b) => (b, path.clone()),
-            Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("reading {path}: {e}")),
-        },
-        None if !body.is_empty() => (body.to_vec(), "upload".to_string()),
-        None => {
-            return err_json(
-                StatusCode::BAD_REQUEST,
-                "provide ?path=<file> or upload the .agentpack as the request body".to_string(),
-            );
-        }
+    let (bytes, source) = match agent_pack_bytes(&q, &body).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
     };
     match crate::agent_packs::install(&bytes, &source) {
         Ok(report) => Json(report).into_response(),

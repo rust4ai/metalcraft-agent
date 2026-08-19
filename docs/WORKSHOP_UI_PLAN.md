@@ -127,7 +127,14 @@ longer matches the model. Flag it; don't let it silently drift.
 | **W5** | Agent-pack browser + install dialog with the permission summary | agent **AP6** |
 | **W6** | Per-instance memory view — what this agent knows, base vs learned | `…/instances/{id}/memory` (shipped, §6) |
 
-W1–W4 **and W6** are shippable now against `prime`. Only W5 waits on the agent.
+**All six are done on `prime`.** W5 needed three things the agent did not have, all
+now shipped: `POST /agent-packs/inspect` (validate and derive the consent summary
+*without* installing — a dialog that could only show permissions after the fact was
+not offering consent), `?url=` on inspect and install with an origin allowlist
+(`AGENT_PACK_REGISTRIES`, since agent-pack registries are peers and a pod fetching
+arbitrary URLs is a request made from inside someone's network), and
+`GET /agent-packs/registries` so a UI can say what it accepts before someone pastes
+a link and gets refused.
 
 Do **desktop first**: it has both data sources (local dir + pod), so it flushes out
 model problems the web client would hit later. Then port to web, where the views are
@@ -173,10 +180,20 @@ Also confirmed in the spec: **`CreateChatRequest.persona_slug` is no longer requ
 (`required: None`), and `agent_preset` / `instance_id` / `name` are present — which is
 precisely the contract W2's picker needs.
 
+### Also shipped, found by building the clients
+
+Four gaps only a client generating types from the spec could find:
+
+| Was missing | Now |
+|---|---|
+| `ChatSummary`/`ChatDetail` had no `instance_id` | Present — without it no client can group conversations by agent, which is the shape of a chat list once agents exist |
+| `GET /agent-presets/{slug}` described its response in prose only | Typed `PresetDetail` + `RosterPersona`, so the resolved roster the picker is built on actually generates |
+| The instance list patched `conversation_count` into a `serde_json::Value` | Typed `InstanceListItem` — a field on the wire that no generated client could see |
+| A diagnostics session did not record which agent produced it | `instance_id` on `SessionInfo` and the summary. Matters most for a background agent, whose failures arrive with nobody watching |
+
 ### Still genuinely outstanding
 
-- **Agent-pack install** (agent AP5/AP6) — blocks W5.
-- **Flow ↔ preset binding** (`docs/FLOWS_AND_AGENT_PRESETS_PLAN.md`) — until it lands,
-  a flow's persona list is still pod-wide, so any flow editor UI shows a roster that
-  the preset model says shouldn't exist.
 - **`metalcraft-mobile`** will show a persona picker that no longer matches the model.
+- **A registry browser.** Both clients install from a pasted URL or a file; neither
+  can *search* axoniac. That is a real feature, not a gap in this plan — it needs a
+  search API on the registry side first.

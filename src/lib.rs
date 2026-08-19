@@ -1,6 +1,7 @@
 pub mod agent_instance;
 pub mod agent_packs;
 pub mod agent_preset;
+pub mod agent_registry;
 pub mod approval;
 pub mod channels;
 pub mod cli;
