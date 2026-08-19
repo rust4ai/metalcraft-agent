@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.29.0"
+    "version": "0.30.0"
   },
   "paths": {
     "/api/v1/agent-packs": {
@@ -42,6 +42,82 @@
         "responses": {
           "200": {
             "description": "The .agentpack bytes, or a report if `out` was given"
+          }
+        }
+      }
+    },
+    "/api/v1/agent-packs/inspect": {
+      "post": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "post_inspect_agent_pack",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "description": "Registry URL to download from",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Local .agentpack path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The .agentpack archive",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What installing this would grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPackPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a valid agent pack",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The registry could not be reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -85,6 +161,26 @@
           },
           "400": {
             "description": "Rejected"
+          }
+        }
+      }
+    },
+    "/api/v1/agent-packs/registries": {
+      "get": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "get_agent_pack_registries",
+        "responses": {
+          "200": {
+            "description": "Origins this pod will download an agent pack from",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Registries"
+                }
+              }
+            }
           }
         }
       }
@@ -150,6 +246,58 @@
         }
       }
     },
+    "/api/v1/agent-packs/{id}/update": {
+      "post": {
+        "tags": [
+          "agent-packs"
+        ],
+        "summary": "`POST /api/v1/agent-packs/{id}/update`",
+        "description": "Separate from install because the *consequences* are different: install adds an\nagent, update changes agents that already exist and that somebody may be talking\nto right now. The report says what followed — and, crucially, names any agent\nwhose persona or preset the new version withdrew, so the two silent failure modes\nbecome two lines in a dialog.",
+        "operationId": "post_update_agent_pack",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The installed agent pack to update",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The newer .agentpack, or use ?url=/?ref=/?path=",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Update report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not installed, older, or invalid"
+          }
+        }
+      }
+    },
     "/api/v1/agent-presets": {
       "get": {
         "tags": [
@@ -182,10 +330,24 @@
         ],
         "responses": {
           "200": {
-            "description": "The preset, with its roster resolved"
+            "description": "The preset, with its roster resolved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetDetail"
+                }
+              }
+            }
           },
           "404": {
-            "description": "Not found"
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -258,7 +420,14 @@
         "operationId": "list_agent_instances",
         "responses": {
           "200": {
-            "description": "Live agents on this pod"
+            "description": "Live agents on this pod",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceList"
+                }
+              }
+            }
           }
         }
       },
@@ -415,6 +584,42 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/instances/{id}/flows": {
+      "get": {
+        "tags": [
+          "agent-instances"
+        ],
+        "summary": "`GET /api/v1/agents/instances/{id}/flows` — what this agent is scheduled to do.",
+        "description": "The same list `GET …/instances/{id}` embeds, on its own route. It is worth its own\nendpoint because it is the question somebody asks right before they decide whether\nto trust a background agent, and answering it should not mean fetching an agent's\nwhole conversation index.",
+        "operationId": "get_agent_instance_flows",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Flow schedules armed to this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceFlows"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent"
           }
         }
       }
@@ -1314,6 +1519,106 @@
         }
       }
     },
+    "/api/v1/flows/{id}/binding": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "get_flow_binding",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowBindingView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "put_flow_binding",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BindFlowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowBindingView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Flow names personas outside the roster",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/flows/{id}/install-dependencies": {
       "post": {
         "tags": [
@@ -1660,6 +1965,107 @@
         }
       }
     },
+    "/api/v1/flows/{id}/schedules/{sid}/arm": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "post_arm_schedule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "description": "Schedule id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArmScheduleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The agent this schedule now runs as",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentInstance"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "delete_arm_schedule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "description": "Schedule id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Disarmed; the agent and its memory are kept"
+          }
+        }
+      }
+    },
     "/api/v1/gateway/activity": {
       "get": {
         "tags": [
@@ -1950,6 +2356,8 @@
         "tags": [
           "integration-packs"
         ],
+        "summary": "Retired. An integration pack is no longer independently enabled or disabled —\nan agent pack is the install unit, and the packs it vendors are simply present\n(see `docs/AGENT_PACKS_PLAN.md`).",
+        "description": "This answers 410 rather than quietly succeeding: a toggle that returns 204 and\nchanges nothing is worse than one that says it is gone, because the UI would go\non showing a state the runtime does not honour.",
         "operationId": "put_pack_enabled",
         "parameters": [
           {
@@ -1973,8 +2381,15 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Updated"
+          "410": {
+            "description": "Retired — uninstall the agent pack instead",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -2488,6 +2903,13 @@
           "origin": {
             "$ref": "#/components/schemas/InstanceOrigin"
           },
+          "orphaned_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the agent pack that provided this agent's preset withdrew it — on\nupdate or on a forced uninstall. The agent keeps its memory and its\nconversations and goes on working against a frozen copy of the preset; this\nrecords what happened, so a UI can say so rather than presenting a\npack-provided agent that is quietly no longer pack-provided."
+          },
           "persistent": {
             "type": "boolean",
             "description": "Ephemeral instances recall against the preset but never accrue a durable\nmemory, and are reaped after a TTL. Naming one makes it persistent."
@@ -2495,6 +2917,13 @@
           "persona": {
             "type": "string",
             "description": "The instance's current persona — starts at the preset's default and moves\nwithin its roster."
+          },
+          "persona_fallback_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when an update withdrew the persona this agent was using and it fell back\nto the preset's default. Reported rather than silent: the agent's voice\nchanged, and nobody asked for that."
           }
         }
       },
@@ -2598,6 +3027,62 @@
           },
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "AgentPackPreview": {
+        "type": "object",
+        "description": "What installing this pack would grant, and what it would change.\n\nThe install dialog's whole reason to exist. Without this a client could only\nshow a permission summary *after* installing, which is not consent — or parse the\narchive itself, duplicating the validator that has to be authoritative anyway.\n\nEverything here is derived from the archive's own bytes. The consent summary\nnever comes from what the author wrote about their pack.",
+        "required": [
+          "manifest",
+          "consent",
+          "content_sha256",
+          "source",
+          "missing_env",
+          "preset_collisions"
+        ],
+        "properties": {
+          "consent": {
+            "$ref": "#/components/schemas/ConsentSummary"
+          },
+          "content_sha256": {
+            "type": "string",
+            "description": "Content hash of the archive as received, so a UI can show what it is about to\ninstall and compare it against what a registry advertised."
+          },
+          "installed_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The version already installed under this id, if any. Present means this is an\nupgrade (or a downgrade), not a first install, and the dialog should say so."
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/AgentPackManifest"
+          },
+          "missing_env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Credentials the pod does not have yet. A warning, not a blocker: the pack\ninstalls and its tools fail clearly at call time until `key_set` fixes it."
+          },
+          "preset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The single preset this pack provides."
+          },
+          "preset_collisions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Preset slugs another installed pack already provides."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the bytes came from — a URL, a path, or `\"upload\"`."
           }
         }
       },
@@ -2714,6 +3199,96 @@
           }
         }
       },
+      "ArmConsent": {
+        "type": "object",
+        "description": "The resolved content of the arm dialog.",
+        "required": [
+          "preset_name",
+          "domains",
+          "requires_env",
+          "missing_env",
+          "mutating_tools",
+          "tool_count",
+          "base_memories"
+        ],
+        "properties": {
+          "base_memories": {
+            "type": "integer",
+            "description": "Seed memories the agent starts from. It accumulates more on every run.",
+            "minimum": 0
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Origins its tools can reach."
+          },
+          "missing_env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Credentials the pod does not have — those tools will fail at 3am rather than\nat a moment anyone is looking."
+          },
+          "mutating_tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tools that can change something on the other end."
+          },
+          "preset_name": {
+            "type": "string",
+            "description": "Display name of the preset this flow runs as."
+          },
+          "requires_env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Credentials it will use."
+          },
+          "tool_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ArmScheduleRequest": {
+        "type": "object",
+        "properties": {
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Attach to an existing agent instead of minting one — e.g. run the briefer as\nthe same agent you chat with."
+          }
+        }
+      },
+      "ArmedSchedule": {
+        "type": "object",
+        "required": [
+          "schedule_id",
+          "instance_id"
+        ],
+        "properties": {
+          "instance_id": {
+            "type": "string"
+          },
+          "instance_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absent if the instance was deleted out from under the binding."
+          },
+          "schedule_id": {
+            "type": "string"
+          }
+        }
+      },
       "Author": {
         "type": "object",
         "required": [
@@ -2738,6 +3313,18 @@
           }
         }
       },
+      "BindFlowRequest": {
+        "type": "object",
+        "properties": {
+          "preset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The preset slug. `null` clears the binding back to the default agent."
+          }
+        }
+      },
       "Channel": {
         "type": "object",
         "description": "A channel as surfaced to callers/UI: a named connection. `managed` marks the\nbuilt-in `metalcraft` channel (secret is the pod token; not user-editable).\nThe secret value itself is never included here.",
@@ -2753,6 +3340,13 @@
               "null"
             ],
             "description": "The gateway number bound to this channel, if any."
+          },
+          "agent_preset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent that answers inbound on this channel. Its instance — and everything\nthat instance remembers — is what gives the channel continuity across idle\nresets. Absent means the pod default.\n\nWithout this a channel could only ever be the default agent: installing an\nagent pack and pointing an SMS number at it was not expressible, and the\nchannel's memory base was one that had never been built."
           },
           "connected": {
             "type": "boolean",
@@ -2787,7 +3381,7 @@
               "string",
               "null"
             ],
-            "description": "Persona that answers inbound on this channel (default: orchestrator)."
+            "description": "Persona that answers inbound on this channel (default: the agent's own)."
           },
           "slug": {
             "type": "string"
@@ -2812,6 +3406,12 @@
           },
           "id": {
             "type": "string"
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "messages": {
             "type": "array",
@@ -3177,6 +3777,13 @@
           "id": {
             "type": "string"
           },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent this conversation belongs to. `None` only on records written before\ninstances existed, until the startup backfill reaches them.\n\nExposed because a client cannot group conversations by agent without it —\nwhich is the whole shape of the chat list once agents exist, and the summary\nwas the one place it was missing."
+          },
           "model_name": {
             "type": "string"
           },
@@ -3424,6 +4031,13 @@
           "id": {
             "type": "string"
           },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent this session belongs to. Absent on sessions written before agents\nexisted, and on CLI runs, which have no agent.\n\nThis is what lets a Sessions list answer \"which agent produced this?\" — the\nquestion that matters most for a background agent, whose failures arrive here\nwith nobody watching."
+          },
           "kind": {
             "type": [
               "string",
@@ -3509,6 +4123,64 @@
           }
         }
       },
+      "FlowBindingView": {
+        "type": "object",
+        "description": "The binding for one flow, resolved for display.",
+        "required": [
+          "flow_id",
+          "preset",
+          "bound",
+          "personas",
+          "armed",
+          "consent"
+        ],
+        "properties": {
+          "armed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArmedSchedule"
+            },
+            "description": "`schedule id -> agent instance`, for schedules that have been armed."
+          },
+          "bound": {
+            "type": "boolean",
+            "description": "True when the preset was chosen deliberately rather than defaulted."
+          },
+          "consent": {
+            "$ref": "#/components/schemas/ArmConsent",
+            "description": "Everything the arm dialog needs to state what arming this actually permits.\n\nArming is the second consent moment, and the sharper one: a scheduled flow\nacts **while nobody is watching**, so a mutating tool inside one is a bigger\ncommitment than the same tool in a chat where an approval prompt exists."
+          },
+          "flow_id": {
+            "type": "string"
+          },
+          "personas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowPersonaCheck"
+            },
+            "description": "Personas the flow names, and whether the preset can reach each one."
+          },
+          "preset": {
+            "type": "string",
+            "description": "The preset the flow runs as. Always populated — an unbound flow resolves to\nthe default agent, which is what it effectively already was."
+          }
+        }
+      },
+      "FlowPersonaCheck": {
+        "type": "object",
+        "required": [
+          "slug",
+          "allowed"
+        ],
+        "properties": {
+          "allowed": {
+            "type": "boolean"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
       "FlowPromptResult": {
         "type": "object",
         "description": "Result of running one prompt node of a flow.",
@@ -3582,6 +4254,13 @@
           "id": {
             "type": "string",
             "description": "Unique run id (the `runs/{id}.json` filename)."
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent instance this run belongs to, when a schedule armed one. Pod-local\nand never published — see [`crate::flow_bindings`]. Absent on ad-hoc runs and\non records written before agent instances existed, which resume as before."
           },
           "model": {
             "type": "string",
@@ -4046,6 +4725,13 @@
           "consent": {
             "$ref": "#/components/schemas/ConsentSummary"
           },
+          "flows_installed_unscheduled": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Flows the pack shipped. **Every one lands disabled and unarmed** — installing\nan identity must not start background work, and arming is the separate consent\nmoment that mints the agent to run it."
+          },
           "id": {
             "type": "string"
           },
@@ -4112,6 +4798,13 @@
           "dependencies"
         ],
         "properties": {
+          "agent_preset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent preset this flow was bound to, chosen because its roster covers\nevery persona the flow names. `None` means no installed preset can reach them\nall — the flow is saved and runnable by hand, but cannot be armed until one\ncan, which is worth saying at install rather than discovering later."
+          },
           "dependencies": {
             "$ref": "#/components/schemas/DependencyReport"
           },
@@ -4174,7 +4867,8 @@
           {
             "type": "object",
             "required": [
-              "conversations"
+              "conversations",
+              "scheduled"
             ],
             "properties": {
               "conversations": {
@@ -4182,10 +4876,65 @@
                 "items": {
                   "$ref": "#/components/schemas/ChatSummary"
                 }
+              },
+              "scheduled": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ScheduledFlowRef"
+                },
+                "description": "What this agent is scheduled to do — the flow schedules armed to it. A pod\ncould not previously answer that question about a background agent."
               }
             }
           }
         ]
+      },
+      "InstanceFlows": {
+        "type": "object",
+        "required": [
+          "scheduled"
+        ],
+        "properties": {
+          "scheduled": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScheduledFlowRef"
+            }
+          }
+        }
+      },
+      "InstanceList": {
+        "type": "object",
+        "required": [
+          "instances"
+        ],
+        "properties": {
+          "instances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InstanceListItem"
+            }
+          }
+        }
+      },
+      "InstanceListItem": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AgentInstance"
+          },
+          {
+            "type": "object",
+            "required": [
+              "conversation_count"
+            ],
+            "properties": {
+              "conversation_count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "An agent in a list, with the one derived number a list actually needs.\n\nTyped rather than patched into a `serde_json::Value` so it reaches the spec —\n`conversation_count` was invisible to both generated clients, which is how a\nfield that exists on the wire can still be unusable."
       },
       "InstanceMemoryView": {
         "type": "object",
@@ -4740,6 +5489,34 @@
           }
         }
       },
+      "Orphaned": {
+        "type": "object",
+        "description": "One agent whose preset was withdrawn by an update.",
+        "required": [
+          "instance",
+          "name",
+          "agent_preset",
+          "frozen"
+        ],
+        "properties": {
+          "agent_preset": {
+            "type": "string"
+          },
+          "frozen": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Personas and skills copied into the user-local layer so the agent still runs."
+          },
+          "instance": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "PackInstallOutcome": {
         "type": "object",
         "description": "Outcome of trying to satisfy one pack requirement of a flow.",
@@ -4928,6 +5705,32 @@
           }
         }
       },
+      "PersonaFallback": {
+        "type": "object",
+        "description": "One agent whose persona was withdrawn by an update.",
+        "required": [
+          "instance",
+          "name",
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "The persona the new version no longer provides."
+          },
+          "instance": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string",
+            "description": "The preset's new default, which it now uses instead."
+          }
+        }
+      },
       "PersonaRole": {
         "type": "string",
         "description": "What a persona is allowed to do inside a preset.",
@@ -4964,6 +5767,25 @@
           },
           "slug": {
             "type": "string"
+          }
+        }
+      },
+      "PresetDetail": {
+        "type": "object",
+        "description": "A preset with its roster resolved against what this pod actually has.\n\nTyped rather than assembled ad hoc so it reaches `openapi.json`: both Workshop\nfrontends generate their client types from the spec, and a response described only\nby a prose `description` gives them nothing to generate.",
+        "required": [
+          "preset",
+          "personas"
+        ],
+        "properties": {
+          "personas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RosterPersona"
+            }
+          },
+          "preset": {
+            "$ref": "#/components/schemas/AgentPreset"
           }
         }
       },
@@ -5194,6 +6016,56 @@
           }
         }
       },
+      "Registries": {
+        "type": "object",
+        "description": "Where this pod is willing to fetch an agent pack from.\n\nReturned rather than only enforced so a UI can say what it accepts *before* the\nuser pastes a link and gets refused — and so a picker can offer the configured\nhosts by name rather than making somebody remember an origin.",
+        "required": [
+          "origins",
+          "default",
+          "registries"
+        ],
+        "properties": {
+          "default": {
+            "type": "string"
+          },
+          "origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Bare origins, kept for clients written against the earlier shape."
+          },
+          "registries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RegistryView"
+            }
+          }
+        }
+      },
+      "RegistryView": {
+        "type": "object",
+        "required": [
+          "name",
+          "url",
+          "trust",
+          "is_default"
+        ],
+        "properties": {
+          "is_default": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "trust": {
+            "$ref": "#/components/schemas/Trust"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
       "RestoreOutcome": {
         "type": "object",
         "required": [
@@ -5251,6 +6123,47 @@
           "handle": {
             "type": "string",
             "description": "Handle to take (an approval decision, or `\"after\"` for a wait)."
+          }
+        }
+      },
+      "RosterPersona": {
+        "type": "object",
+        "description": "One entry in a preset's roster.\n\n`installed: false` is the interesting case: the preset names a persona this pod\ndoes not have. A UI should render it disabled with its `error` rather than\nsilently omit it — omission looks like the preset is smaller than it is.",
+        "required": [
+          "slug",
+          "installed"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it could not be resolved. Present only when `installed` is false."
+          },
+          "installed": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "slug": {
+            "type": "string"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -5330,8 +6243,34 @@
           }
         }
       },
+      "ScheduledFlowRef": {
+        "type": "object",
+        "required": [
+          "flow_id",
+          "schedule_ids"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string"
+          },
+          "flow_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absent when the flow file is gone but the binding is not — worth surfacing\nrather than hiding, since it means a stale binding."
+          },
+          "schedule_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "SetEnabledRequest": {
         "type": "object",
+        "description": "Kept only so the retired endpoint below still documents the body clients used\nto send; the value is ignored.",
         "required": [
           "enabled"
         ],
@@ -5414,6 +6353,15 @@
           }
         }
       },
+      "Trust": {
+        "type": "string",
+        "description": "How much a host's word is worth.",
+        "enum": [
+          "first-party",
+          "verified-only",
+          "explicit"
+        ]
+      },
       "UninstallPackResult": {
         "type": "object",
         "required": [
@@ -5482,6 +6430,54 @@
             "description": "New secret; omit or leave empty to keep the existing one."
           },
           "url": {
+            "type": "string"
+          }
+        }
+      },
+      "UpdateReport": {
+        "type": "object",
+        "description": "What an update did, beyond what the install did.",
+        "required": [
+          "id",
+          "from_version",
+          "to_version",
+          "install",
+          "personas_fell_back",
+          "orphaned",
+          "memory_bases_repointed"
+        ],
+        "properties": {
+          "from_version": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "install": {
+            "$ref": "#/components/schemas/InstallReport"
+          },
+          "memory_bases_repointed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Agents whose shipped knowledge now points at the new version's base layer."
+          },
+          "orphaned": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Orphaned"
+            },
+            "description": "Live agents whose preset was withdrawn (§12.3)."
+          },
+          "personas_fell_back": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonaFallback"
+            },
+            "description": "Live agents whose persona was withdrawn and fell back (§12.3)."
+          },
+          "to_version": {
             "type": "string"
           }
         }
