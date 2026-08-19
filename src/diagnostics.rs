@@ -16,6 +16,27 @@ pub struct DiagnosticsLogger {
     turn_counter: AtomicUsize,
 }
 
+/// What a session was started as.
+///
+/// `Default` gives the common shape (no flow, no agent), so a caller sets only what
+/// it actually knows.
+#[derive(Debug, Clone, Default)]
+pub struct SessionInfo<'a> {
+    pub persona_name: &'a str,
+    pub persona_slug: &'a str,
+    pub model_name: &'a str,
+    pub cwd: &'a str,
+    pub system_prompt: &'a str,
+    pub tools: &'a [String],
+    pub skills: &'a [String],
+    pub auto_approve: bool,
+    /// Set for a flow run; also what makes `kind` read `"flow"`.
+    pub flow_id: Option<&'a str>,
+    /// The agent this session belongs to, so a background run's logs can be traced
+    /// back to which agent produced them — the question Sessions could not answer.
+    pub instance_id: Option<&'a str>,
+}
+
 impl DiagnosticsLogger {
     /// Create a new diagnostics logger. Creates the session directory immediately.
     pub fn new() -> std::io::Result<Self> {
@@ -34,33 +55,28 @@ impl DiagnosticsLogger {
     }
 
     /// Write session_info.json with startup configuration.
-    pub fn log_session_info(
-        &self,
-        persona_name: &str,
-        persona_slug: &str,
-        model_name: &str,
-        cwd: &str,
-        system_prompt: &str,
-        tools: &[String],
-        skills: &[String],
-        auto_approve: bool,
-        flow_id: Option<&str>,
-    ) {
-        let info = json!({
+    ///
+    /// Takes a struct rather than a positional list: this had grown to nine
+    /// arguments, six of them `&str`, which is a swap waiting to happen — and the
+    /// two optional ones (`flow_id`, `instance_id`) are exactly the pair a caller is
+    /// most likely to get backwards.
+    pub fn log_session_info(&self, info: SessionInfo<'_>) {
+        let doc = json!({
             "timestamp": chrono_timestamp(),
-            "persona_name": persona_name,
-            "persona_slug": persona_slug,
-            "model_name": model_name,
-            "cwd": cwd,
-            "system_prompt": system_prompt,
-            "tools": tools,
-            "skills": skills,
-            "auto_approve": auto_approve,
-            "kind": if flow_id.is_some() { "flow" } else { "session" },
-            "flow_id": flow_id,
+            "persona_name": info.persona_name,
+            "persona_slug": info.persona_slug,
+            "model_name": info.model_name,
+            "cwd": info.cwd,
+            "system_prompt": info.system_prompt,
+            "tools": info.tools,
+            "skills": info.skills,
+            "auto_approve": info.auto_approve,
+            "kind": if info.flow_id.is_some() { "flow" } else { "session" },
+            "flow_id": info.flow_id,
+            "instance_id": info.instance_id,
         });
         let path = self.session_dir.join("session_info.json");
-        if let Err(e) = write_json(&path, &info) {
+        if let Err(e) = write_json(&path, &doc) {
             eprintln!("diagnostics: failed to write session_info.json: {e}");
         }
     }

@@ -2,7 +2,7 @@ use metalcraft::{AgentState, LlmCallHook, RunOutcome};
 use metalcraft_agent::approval::ApprovalMode;
 use metalcraft_agent::cli;
 use metalcraft_agent::context;
-use metalcraft_agent::diagnostics::DiagnosticsLogger;
+use metalcraft_agent::diagnostics::{DiagnosticsLogger, SessionInfo};
 use metalcraft_agent::guard;
 use metalcraft_agent::agent_preset::{AgentPreset, DEFAULT_PRESET};
 use metalcraft_agent::persona::Persona;
@@ -248,17 +248,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let diagnostics: Arc<DiagnosticsLogger> = match DiagnosticsLogger::new() {
         Ok(logger) => {
             let system_prompt = persona.build_system_prompt(&runtime_context.skills_dir, &cwd);
-            logger.log_session_info(
-                &persona.name,
+            logger.log_session_info(SessionInfo {
+                persona_name: &persona.name,
                 persona_slug,
-                &model_name,
-                &cwd,
-                &system_prompt,
-                &persona.tools,
-                &persona.skills,
+                model_name: &model_name,
+                cwd: &cwd,
+                system_prompt: &system_prompt,
+                tools: &persona.tools,
+                skills: &persona.skills,
                 auto_approve,
-                None,
-            );
+                // The CLI runs against the pod-global memory, not an agent instance.
+                flow_id: None,
+                instance_id: None,
+            });
             println!("  {} {}\n", ui::label("Session:"), ui::path(logger.session_dir().display().to_string()));
             Arc::new(logger)
         }

@@ -8,7 +8,7 @@
 //! workshop API + event listener, then run the flow polling loop).
 
 use crate::approval::ApprovalMode;
-use crate::diagnostics::DiagnosticsLogger;
+use crate::diagnostics::{DiagnosticsLogger, SessionInfo};
 use crate::flows::{self, FlowSchedule};
 use crate::paths;
 use crate::persona::Persona;
@@ -344,21 +344,33 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                                 effective_persona
                             );
 
+                            // A v1 flow's schedule can still be armed; if it is, its
+                            // prompts run as that agent and remember across firings
+                            // like a v2 flow's do. Resolved before the logger so the
+                            // session records which agent produced it.
+                            let instance_id = crate::flow_bindings::instance_for(
+                                &flow.saved.id,
+                                &trigger.schedule_id,
+                            );
                             let logger = DiagnosticsLogger::new().ok().map(Arc::new);
                             if let Some(ref diagnostics) = logger {
                                 if let Ok(persona) = Persona::load(effective_persona, &context.personas_dir) {
                                     let system_prompt = persona.build_system_prompt(&context.skills_dir, &cwd);
-                                    diagnostics.log_session_info(
-                                        &persona.name,
-                                        effective_persona,
-                                        &model_name,
-                                        &cwd,
-                                        &system_prompt,
-                                        &persona.tools,
-                                        &persona.skills,
-                                        matches!(approval_mode, ApprovalMode::AutoApprove),
-                                        Some(&flow.saved.id),
-                                    );
+                                    diagnostics.log_session_info(SessionInfo {
+                                        persona_name: &persona.name,
+                                        persona_slug: effective_persona,
+                                        model_name: &model_name,
+                                        cwd: &cwd,
+                                        system_prompt: &system_prompt,
+                                        tools: &persona.tools,
+                                        skills: &persona.skills,
+                                        auto_approve: matches!(
+                                            approval_mode,
+                                            ApprovalMode::AutoApprove
+                                        ),
+                                        flow_id: Some(&flow.saved.id),
+                                        instance_id: instance_id.as_deref(),
+                                    });
                                 }
                             }
 
@@ -371,13 +383,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                                     task: &prompt.prompt,
                                     approval_mode: approval_mode.clone(),
                                     diagnostics: logger,
-                                    // A v1 flow's schedule can still be armed; if it
-                                    // is, its prompts run as that agent and remember
-                                    // across firings like a v2 flow's do.
-                                    instance_id: crate::flow_bindings::instance_for(
-                                        &flow.saved.id,
-                                        &trigger.schedule_id,
-                                    ),
+                                    instance_id: instance_id.clone(),
                                     preset_personas: None,
                                 },
                             )

@@ -36,7 +36,7 @@ use crate::flow_runs::{FlowRun, PauseInfo};
 use rig::client::CompletionClient;
 
 use crate::approval::{self, ApprovalMode};
-use crate::diagnostics::DiagnosticsLogger;
+use crate::diagnostics::{DiagnosticsLogger, SessionInfo};
 use crate::persona::Persona;
 use crate::runtime::{self, AgentRuntimeContext, RunOneShotRequest};
 
@@ -1077,17 +1077,18 @@ pub async fn run_flow_v2_as(
         Ok(l) => {
             if let Ok(persona) = Persona::load(&effective_persona, &context.personas_dir) {
                 let system_prompt = persona.build_system_prompt(&context.skills_dir, cwd);
-                l.log_session_info(
-                    &persona.name,
-                    &effective_persona,
+                l.log_session_info(SessionInfo {
+                    persona_name: &persona.name,
+                    persona_slug: &effective_persona,
                     model_name,
                     cwd,
-                    &system_prompt,
-                    &persona.resolved_tool_names(),
-                    &persona.skills,
-                    true,
-                    Some(&flow.id),
-                );
+                    system_prompt: &system_prompt,
+                    tools: &persona.resolved_tool_names(),
+                    skills: &persona.skills,
+                    auto_approve: true,
+                    flow_id: Some(&flow.id),
+                    instance_id: instance_id.as_deref(),
+                });
             }
             Some(Arc::new(l))
         }
@@ -1130,17 +1131,19 @@ pub async fn resume_flow(
         Ok(l) => {
             if let Ok(persona) = Persona::load(&run.persona, &context.personas_dir) {
                 let system_prompt = persona.build_system_prompt(&context.skills_dir, &run.cwd);
-                l.log_session_info(
-                    &persona.name,
-                    &run.persona,
-                    &run.model,
-                    &run.cwd,
-                    &system_prompt,
-                    &persona.resolved_tool_names(),
-                    &persona.skills,
-                    true,
-                    Some(&run.flow_id),
-                );
+                l.log_session_info(SessionInfo {
+                    persona_name: &persona.name,
+                    persona_slug: &run.persona,
+                    model_name: &run.model,
+                    cwd: &run.cwd,
+                    system_prompt: &system_prompt,
+                    tools: &persona.resolved_tool_names(),
+                    skills: &persona.skills,
+                    auto_approve: true,
+                    flow_id: Some(&run.flow_id),
+                    // A resumed run belongs to the same agent the paused one did.
+                    instance_id: run.instance_id.as_deref(),
+                });
             }
             Some(Arc::new(l))
         }

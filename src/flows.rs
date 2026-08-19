@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::approval::ApprovalMode;
-use crate::diagnostics::DiagnosticsLogger;
+use crate::diagnostics::{DiagnosticsLogger, SessionInfo};
 use crate::persona::Persona;
 use crate::runtime::{self, AgentRuntimeContext, RunOneShotRequest};
 use metalcraft::RunOutcome;
@@ -251,17 +251,19 @@ pub async fn run_flow(
         Ok(l) => {
             if let Ok(persona) = Persona::load(persona_slug, &context.personas_dir) {
                 let system_prompt = persona.build_system_prompt(&context.skills_dir, cwd);
-                l.log_session_info(
-                    &persona.name,
+                l.log_session_info(SessionInfo {
+                    persona_name: &persona.name,
                     persona_slug,
                     model_name,
                     cwd,
-                    &system_prompt,
-                    &persona.resolved_tool_names(),
-                    &persona.skills,
-                    true,
-                    Some(flow_id),
-                );
+                    system_prompt: &system_prompt,
+                    tools: &persona.resolved_tool_names(),
+                    skills: &persona.skills,
+                    auto_approve: true,
+                    flow_id: Some(flow_id),
+                    // v1 flows predate agents and are never bound to one.
+                    instance_id: None,
+                });
             }
             Some(Arc::new(l))
         }

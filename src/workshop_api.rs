@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::approval::ApprovalMode;
-use crate::diagnostics::DiagnosticsLogger;
+use crate::diagnostics::{DiagnosticsLogger, SessionInfo};
 use crate::trace::TraceLogger;
 use crate::flows;
 use crate::paths;
@@ -349,6 +349,8 @@ async fn auth_middleware(
         ExportAgentPackRequest,
         crate::memory::InstanceMemoryView, crate::memory::MemorySample,
         InstanceDetail, CreateInstanceRequest, PatchInstanceRequest, NewConversationRequest,
+        ScheduledFlowRef, PresetDetail, RosterPersona, InstanceList, InstanceListItem,
+        FlowBindingView, FlowPersonaCheck, ArmedSchedule, BindFlowRequest, ArmScheduleRequest,
         crate::skill::Skill, crate::skill::SkillSummary,
         crate::gateway_activity::GatewayEvent,
         crate::metalcraft_gateway::GatewayStatus,
@@ -925,6 +927,7 @@ fn conversations_of(instance_id: &str) -> Vec<ChatSummary> {
         .filter(|c| c.instance_id.as_deref() == Some(instance_id))
         .map(|c| ChatSummary {
             id: c.id,
+            instance_id: c.instance_id,
             persona_slug: c.persona_slug,
             model_name: c.model_name,
             created_at: c.created_at,
@@ -935,26 +938,38 @@ fn conversations_of(instance_id: &str) -> Vec<ChatSummary> {
     out
 }
 
+/// An agent in a list, with the one derived number a list actually needs.
+///
+/// Typed rather than patched into a `serde_json::Value` so it reaches the spec —
+/// `conversation_count` was invisible to both generated clients, which is how a
+/// field that exists on the wire can still be unusable.
+#[derive(Serialize, utoipa::ToSchema)]
+struct InstanceListItem {
+    #[serde(flatten)]
+    instance: crate::agent_instance::AgentInstance,
+    conversation_count: usize,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct InstanceList {
+    instances: Vec<InstanceListItem>,
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/agents/instances",
     tag = "agent-instances",
-    responses((status = 200, description = "Live agents on this pod")),
+    responses((status = 200, description = "Live agents on this pod", body = InstanceList)),
 )]
 async fn list_agent_instances() -> Response {
-    let instances = crate::agent_instance::list();
-    let with_counts: Vec<serde_json::Value> = instances
+    let instances: Vec<InstanceListItem> = crate::agent_instance::list()
         .into_iter()
-        .map(|i| {
-            let count = conversations_of(&i.id).len();
-            let mut v = serde_json::to_value(&i).unwrap_or_default();
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("conversation_count".into(), serde_json::json!(count));
-            }
-            v
+        .map(|i| InstanceListItem {
+            conversation_count: conversations_of(&i.id).len(),
+            instance: i,
         })
         .collect();
-    Json(serde_json::json!({ "instances": with_counts })).into_response()
+    Json(InstanceList { instances }).into_response()
 }
 
 #[utoipa::path(
@@ -1188,12 +1203,45 @@ async fn list_agent_presets() -> Response {
     .into_response()
 }
 
+/// A preset with its roster resolved against what this pod actually has.
+///
+/// Typed rather than assembled ad hoc so it reaches `openapi.json`: both Workshop
+/// frontends generate their client types from the spec, and a response described only
+/// by a prose `description` gives them nothing to generate.
+#[derive(Serialize, utoipa::ToSchema)]
+struct PresetDetail {
+    preset: crate::agent_preset::AgentPreset,
+    personas: Vec<RosterPersona>,
+}
+
+/// One entry in a preset's roster.
+///
+/// `installed: false` is the interesting case: the preset names a persona this pod
+/// does not have. A UI should render it disabled with its `error` rather than
+/// silently omit it — omission looks like the preset is smaller than it is.
+#[derive(Serialize, utoipa::ToSchema)]
+struct RosterPersona {
+    slug: String,
+    installed: bool,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    tools: Vec<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    /// Why it could not be resolved. Present only when `installed` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/agent-presets/{slug}",
     params(("slug" = String, Path, description = "Preset slug")),
-    responses((status = 200, description = "The preset, with its roster resolved"),
-              (status = 404, description = "Not found")),
+    responses((status = 200, description = "The preset, with its roster resolved", body = PresetDetail),
+              (status = 404, body = ErrorResponse)),
     tag = "agent-presets"
 )]
 async fn get_agent_preset(Path(slug): Path<String>) -> Response {
@@ -1203,18 +1251,33 @@ async fn get_agent_preset(Path(slug): Path<String>) -> Response {
     };
     // Resolve the roster so the caller can render it without N more round-trips,
     // and so a preset naming a persona that isn't installed is visible as such.
-    let personas: Vec<serde_json::Value> = preset
+    let personas: Vec<RosterPersona> = preset
         .callable_personas()
         .iter()
         .map(|slug| match Persona::load(slug, &paths::personas_dir()) {
-            Ok(p) => serde_json::json!({
-                "slug": slug, "name": p.name, "description": p.description,
-                "tools": p.resolved_tool_names(), "skills": p.skills, "installed": true,
-            }),
-            Err(e) => serde_json::json!({ "slug": slug, "installed": false, "error": e }),
+            Ok(p) => RosterPersona {
+                slug: slug.clone(),
+                installed: true,
+                name: p.name.clone(),
+                description: p.description.clone(),
+                tools: p.resolved_tool_names(),
+                skills: p.skills.clone(),
+                error: None,
+            },
+            Err(e) => RosterPersona {
+                // Name it after its slug rather than leaving it blank: a disabled row
+                // reading "morning-briefer — not installed" says more than an empty one.
+                name: slug.clone(),
+                slug: slug.clone(),
+                installed: false,
+                description: String::new(),
+                tools: Vec::new(),
+                skills: Vec::new(),
+                error: Some(e),
+            },
         })
         .collect();
-    Json(serde_json::json!({ "preset": preset, "personas": personas })).into_response()
+    Json(PresetDetail { preset, personas }).into_response()
 }
 
 #[utoipa::path(
@@ -2620,6 +2683,14 @@ async fn post_resume_flow_run(
 #[derive(Serialize, utoipa::ToSchema)]
 struct ChatSummary {
     id: String,
+    /// The agent this conversation belongs to. `None` only on records written before
+    /// instances existed, until the startup backfill reaches them.
+    ///
+    /// Exposed because a client cannot group conversations by agent without it —
+    /// which is the whole shape of the chat list once agents exist, and the summary
+    /// was the one place it was missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
     persona_slug: String,
     model_name: String,
     created_at: String,
@@ -2629,6 +2700,8 @@ struct ChatSummary {
 #[derive(Serialize, utoipa::ToSchema)]
 struct ChatDetail {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
     persona_slug: String,
     model_name: String,
     created_at: String,
@@ -2893,6 +2966,7 @@ async fn list_chats(State(_state): State<Arc<ApiState>>) -> Response {
         .into_iter()
         .map(|pc| ChatSummary {
             id: pc.id,
+            instance_id: pc.instance_id,
             persona_slug: pc.persona_slug,
             model_name: pc.model_name,
             created_at: pc.created_at,
@@ -3026,17 +3100,18 @@ async fn post_create_chat(
         if let Some(logger) = &s.diagnostics {
             if let Ok(persona) = Persona::load(&s.persona_slug, &paths::personas_dir()) {
                 let system_prompt = persona.build_system_prompt(&paths::skills_dir(), &s.cwd);
-                logger.log_session_info(
-                    &persona.name,
-                    &s.persona_slug,
-                    &s.model_name,
-                    &s.cwd,
-                    &system_prompt,
-                    &persona.resolved_tool_names(),
-                    &persona.skills,
-                    true,
-                    None,
-                );
+                logger.log_session_info(SessionInfo {
+                    persona_name: &persona.name,
+                    persona_slug: &s.persona_slug,
+                    model_name: &s.model_name,
+                    cwd: &s.cwd,
+                    system_prompt: &system_prompt,
+                    tools: &persona.resolved_tool_names(),
+                    skills: &persona.skills,
+                    auto_approve: true,
+                    flow_id: None,
+                    instance_id: s.instance_id.as_deref(),
+                });
             }
         }
     }
@@ -3045,6 +3120,7 @@ async fn post_create_chat(
     let s = session_arc.lock().await;
     Json(ChatSummary {
         id: s.id.clone(),
+        instance_id: s.instance_id.clone(),
         persona_slug: s.persona_slug.clone(),
         model_name: s.model_name.clone(),
         created_at: s.created_at.clone(),
@@ -3074,6 +3150,7 @@ async fn get_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) ->
         .unwrap_or_default();
     Json(ChatDetail {
         id: s.id.clone(),
+        instance_id: s.instance_id.clone(),
         persona_slug: s.persona_slug.clone(),
         model_name: s.model_name.clone(),
         created_at: s.created_at.clone(),
@@ -3224,17 +3301,18 @@ async fn post_chat_turn(
             if let Some(logger) = DiagnosticsLogger::new().ok().map(Arc::new) {
                 if let Ok(persona) = Persona::load(&s.persona_slug, &paths::personas_dir()) {
                     let system_prompt = persona.build_system_prompt(&paths::skills_dir(), &s.cwd);
-                    logger.log_session_info(
-                        &persona.name,
-                        &s.persona_slug,
-                        &s.model_name,
-                        &s.cwd,
-                        &system_prompt,
-                        &persona.tools,
-                        &persona.skills,
-                        true,
-                        None,
-                    );
+                    logger.log_session_info(SessionInfo {
+                        persona_name: &persona.name,
+                        persona_slug: &s.persona_slug,
+                        model_name: &s.model_name,
+                        cwd: &s.cwd,
+                        system_prompt: &system_prompt,
+                        tools: &persona.tools,
+                        skills: &persona.skills,
+                        auto_approve: true,
+                        flow_id: None,
+                        instance_id: s.instance_id.as_deref(),
+                    });
                 }
                 s.diagnostics = Some(logger);
             }
@@ -4933,25 +5011,9 @@ async fn get_or_create_gateway_session(
             return existing.clone();
         }
     }
-    let diagnostics = DiagnosticsLogger::new().ok().map(Arc::new);
-    if let Some(logger) = &diagnostics {
-        if let Ok(persona) = Persona::load(&n.persona_slug, &paths::personas_dir()) {
-            let system_prompt = persona.build_system_prompt(&paths::skills_dir(), &state.cwd);
-            logger.log_session_info(
-                &persona.name,
-                &n.persona_slug,
-                &n.model_name,
-                &state.cwd,
-                &system_prompt,
-                &persona.resolved_tool_names(),
-                &persona.skills,
-                true,
-                None,
-            );
-        }
-    }
-    // Bind this channel to a persistent agent. The idle TTL ends a *conversation*;
-    // the instance — and everything it remembers — carries across them.
+    // Bind this channel to a persistent agent first, so the diagnostics session can
+    // record which agent it belongs to. The idle TTL ends a *conversation*; the
+    // instance — and everything it remembers — carries across them.
     let instance_id = match crate::agent_instance::for_channel(
         &n.channel_slug,
         crate::agent_preset::DEFAULT_PRESET,
@@ -4962,6 +5024,24 @@ async fn get_or_create_gateway_session(
             None
         }
     };
+    let diagnostics = DiagnosticsLogger::new().ok().map(Arc::new);
+    if let Some(logger) = &diagnostics {
+        if let Ok(persona) = Persona::load(&n.persona_slug, &paths::personas_dir()) {
+            let system_prompt = persona.build_system_prompt(&paths::skills_dir(), &state.cwd);
+            logger.log_session_info(SessionInfo {
+                persona_name: &persona.name,
+                persona_slug: &n.persona_slug,
+                model_name: &n.model_name,
+                cwd: &state.cwd,
+                system_prompt: &system_prompt,
+                tools: &persona.resolved_tool_names(),
+                skills: &persona.skills,
+                auto_approve: true,
+                flow_id: None,
+                instance_id: instance_id.as_deref(),
+            });
+        }
+    }
     let session = ChatSession {
         id: chat_id.to_string(),
         instance_id,
@@ -5015,17 +5095,18 @@ async fn run_one_gateway_turn(
             if let Some(logger) = DiagnosticsLogger::new().ok().map(Arc::new) {
                 if let Ok(persona) = Persona::load(&s.persona_slug, &paths::personas_dir()) {
                     let system_prompt = persona.build_system_prompt(&paths::skills_dir(), &s.cwd);
-                    logger.log_session_info(
-                        &persona.name,
-                        &s.persona_slug,
-                        &s.model_name,
-                        &s.cwd,
-                        &system_prompt,
-                        &persona.resolved_tool_names(),
-                        &persona.skills,
-                        true,
-                        None,
-                    );
+                    logger.log_session_info(SessionInfo {
+                        persona_name: &persona.name,
+                        persona_slug: &s.persona_slug,
+                        model_name: &s.model_name,
+                        cwd: &s.cwd,
+                        system_prompt: &system_prompt,
+                        tools: &persona.resolved_tool_names(),
+                        skills: &persona.skills,
+                        auto_approve: true,
+                        flow_id: None,
+                        instance_id: s.instance_id.as_deref(),
+                    });
                 }
                 s.diagnostics = Some(logger);
             }

@@ -23,6 +23,14 @@ pub struct DiagnosticsSessionSummary {
     /// Present (and `kind == "flow"`) when produced by a flow run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flow_id: Option<String>,
+    /// The agent this session belongs to. Absent on sessions written before agents
+    /// existed, and on CLI runs, which have no agent.
+    ///
+    /// This is what lets a Sessions list answer "which agent produced this?" — the
+    /// question that matters most for a background agent, whose failures arrive here
+    /// with nobody watching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
     /// Count of `turn_NNN.json` files — how far the run actually got.
     pub turn_count: usize,
 }
@@ -62,18 +70,22 @@ pub fn list_diagnostics_sessions() -> Vec<DiagnosticsSessionSummary> {
             let dir_name = path.file_name()?.to_str()?.to_string();
 
             let info_path = path.join("session_info.json");
-            let (persona_slug, model_name, kind, flow_id) =
+            let (persona_slug, model_name, kind, flow_id, instance_id) =
                 if let Ok(content) = std::fs::read_to_string(&info_path) {
                     let info: serde_json::Value =
                         serde_json::from_str(&content).unwrap_or_default();
+                    let field = |k: &str| {
+                        info.get(k).and_then(|v| v.as_str()).map(String::from)
+                    };
                     (
-                        info.get("persona_slug").and_then(|v| v.as_str()).map(String::from),
-                        info.get("model_name").and_then(|v| v.as_str()).map(String::from),
-                        info.get("kind").and_then(|v| v.as_str()).map(String::from),
-                        info.get("flow_id").and_then(|v| v.as_str()).map(String::from),
+                        field("persona_slug"),
+                        field("model_name"),
+                        field("kind"),
+                        field("flow_id"),
+                        field("instance_id"),
                     )
                 } else {
-                    (None, None, None, None)
+                    (None, None, None, None, None)
                 };
 
             let turn_count = std::fs::read_dir(&path)
@@ -96,6 +108,7 @@ pub fn list_diagnostics_sessions() -> Vec<DiagnosticsSessionSummary> {
                 model_name,
                 kind,
                 flow_id,
+                instance_id,
                 turn_count,
             })
         })
