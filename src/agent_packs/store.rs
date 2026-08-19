@@ -70,7 +70,13 @@ pub fn write_refs(agent_pack_id: &str, refs: &PackRefs) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(refs)
         .map_err(|e| format!("serializing pack refs: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("writing {}: {e}", path.display()))
+    // tmp + rename, like every other durable write here. A torn refs file reads back
+    // as *no* refs (`read_refs` swallows parse errors), which would make this pack's
+    // vendored integration packs vanish from its resolution *and* make them look
+    // like garbage to the next `gc` — a truncated write would delete real content.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("finalizing {}: {e}", path.display()))
 }
 
 pub fn read_refs(agent_pack_id: &str) -> PackRefs {
@@ -101,6 +107,17 @@ pub fn resolve(pack_id: &str) -> Option<PathBuf> {
             continue;
         }
         let dir = entry_dir(&sha);
+        // A ref can outlive its entry — a crashed install, a manual cleanup, an
+        // interrupted gc. Returning the path anyway made the failure surface far
+        // away: `export` reported a raw "No such file or directory", and tool
+        // resolution silently walked a directory that wasn't there, so the agent's
+        // tools vanished with no diagnostic at all.
+        if !dir.join("pack.json").is_file() {
+            log::warn!(
+                "agent packs: '{pack_id}' references store entry {sha}, which is missing"
+            );
+            continue;
+        }
         let version = std::fs::read_to_string(dir.join("pack.json"))
             .ok()
             .and_then(|s| serde_json::from_str::<metalcraft_packs::PackManifest>(&s).ok())

@@ -161,14 +161,89 @@ pub fn list() -> Vec<AgentInstance> {
     out
 }
 
-/// Delete an instance record. Conversations are *not* touched — a caller that wants
-/// them gone deletes them explicitly, so a mistaken delete never destroys transcripts.
+/// Delete an instance record, and everything only it owned.
+///
+/// Conversations are *not* touched — a caller that wants them gone deletes them
+/// explicitly, so a mistaken delete never destroys transcripts. Its **memory** is,
+/// because that is the thing an agent is: leaving it behind means a later instance
+/// that happened to reuse the id would inherit a stranger's recollections, and until
+/// then it is unreachable bytes.
+///
+/// Evicting from the resident set is not optional. Without it the deleted agent stays
+/// in RAM answering recalls, holds a memory base alive, and occupies one of the eight
+/// LRU slots for the life of the process.
 pub fn delete(id: &str) -> Result<(), String> {
     let dir = instance_dir(id);
     if !dir.is_dir() {
         return Err(format!("agent instance '{id}' not found"));
     }
+    crate::memory::instance::evict(id);
+    let mem = paths::memory_instance_dir(id);
+    if mem.is_dir()
+        && let Err(e) = std::fs::remove_dir_all(&mem)
+    {
+        // The record is what makes the agent exist; orphaned memory is waste, not a
+        // failure. Warn rather than refuse a delete the user asked for.
+        log::warn!("agent instance '{id}': could not remove {}: {e}", mem.display());
+    }
     std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to delete {}: {e}", dir.display()))
+}
+
+/// How long an unnamed agent survives with nothing happening in it.
+///
+/// Every chat mints an instance, so without a bound the directory grows by one entry
+/// per conversation ever started — and [`list`] parses all of them on every inbound
+/// gateway message, so the cost lands on the latency of answering a text.
+///
+/// Seven days is chosen to be longer than "I'll come back to this tomorrow" and
+/// shorter than "this is clearly abandoned". Naming an agent makes it persistent and
+/// exempt; that is the whole promotion story.
+pub const EPHEMERAL_TTL_DAYS: i64 = 7;
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ReapReport {
+    pub reaped: Vec<String>,
+    /// Ids that could not be removed, with why. Reported rather than fatal — one
+    /// stuck directory must not stop the sweep.
+    pub failed: Vec<(String, String)>,
+}
+
+/// Remove unnamed agents that have been idle past the TTL.
+///
+/// Only `persistent == false` instances are eligible, and only those with no
+/// conversations left pointing at them — a transcript someone can still open is a
+/// reason to keep the agent that produced it, since deleting it would strand the
+/// memory that explains the conversation.
+pub fn reap_ephemeral(live_instance_ids: &[String]) -> ReapReport {
+    let mut report = ReapReport::default();
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(EPHEMERAL_TTL_DAYS);
+
+    for inst in list() {
+        if inst.persistent || live_instance_ids.contains(&inst.id) {
+            continue;
+        }
+        // An agent a schedule fires into is doing work on a timer, whether or not
+        // anyone named it — `flow_bindings::arm` can bind an *existing* instance, and
+        // that branch does not mark it persistent. Reaping it would delete the memory
+        // the recurring run exists to accumulate and leave the schedule firing into a
+        // dead id.
+        if !crate::flow_bindings::flows_for_instance(&inst.id).is_empty() {
+            continue;
+        }
+        // An unparseable timestamp is treated as recent: refusing to guess is better
+        // than deleting an agent because its clock field was odd.
+        let idle_since = chrono::DateTime::parse_from_rfc3339(&inst.last_active_at)
+            .map(|t| t.with_timezone(&chrono::Utc));
+        let Ok(last) = idle_since else { continue };
+        if last >= cutoff {
+            continue;
+        }
+        match delete(&inst.id) {
+            Ok(()) => report.reaped.push(inst.id),
+            Err(e) => report.failed.push((inst.id, e)),
+        }
+    }
+    report
 }
 
 /// Find an existing instance for a gateway channel, or mint one.
@@ -180,6 +255,18 @@ pub fn for_channel(channel: &str, preset_slug: &str) -> Result<AgentInstance, St
         .into_iter()
         .find(|i| i.origin == InstanceOrigin::Gateway { channel: channel.to_string() })
     {
+        // The existing agent wins even if the channel has since been pointed at a
+        // different preset — its memories are the continuity the channel exists to
+        // have, and silently swapping them out is not a re-point, it is amnesia. Say
+        // so rather than ignoring the argument, which is what this used to do.
+        if found.agent_preset != preset_slug {
+            log::warn!(
+                "channel '{channel}' is configured for agent '{preset_slug}' but already has \
+                 an agent of '{}' ({}). Keeping it — delete that agent to start fresh.",
+                found.agent_preset,
+                found.id
+            );
+        }
         return Ok(found);
     }
     let preset =

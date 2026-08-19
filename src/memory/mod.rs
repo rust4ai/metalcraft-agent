@@ -675,9 +675,22 @@ pub async fn compact() -> Result<u64, String> {
 ///
 /// Returns `None` when the instance has no preset version or its pack shipped no
 /// memories — both ordinary, and both mean "this agent only knows what it learns".
+/// Which shipped knowledge base this agent reads from.
+///
+/// **The installed version wins, not the one the agent was born against.** Personas
+/// and skills already follow the installed pack — they resolve straight off its
+/// directory — so pinning memory to the birth version made an agent that upgraded
+/// half-follow: it used the new prompts and the old facts. An author correcting a
+/// seed memory in v1.5.0 would never reach an agent created on v1.4.0, which is the
+/// whole reason to ship a correction.
+///
+/// `created_from_version` stays as the diagnostic it is documented to be, and is the
+/// fallback when the preset no longer resolves — an agent whose pack was uninstalled
+/// keeps whatever base it still has rather than losing it twice over.
 fn base_for_instance(instance_id: &str) -> Option<(String, String)> {
     let inst = crate::agent_instance::load(instance_id).ok()?;
-    let version = inst.created_from_version.clone()?;
+    let version = crate::memory::instance::current_base_version(&inst.agent_preset)
+        .or_else(|| inst.created_from_version.clone())?;
     Some((inst.agent_preset, version))
 }
 

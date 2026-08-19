@@ -80,6 +80,9 @@ pub fn migrate_instance_to_channel() {
     let _ = crate::channels::set_link(
         crate::channels::DEFAULT_SLUG,
         crate::channels::Link {
+            // A gateway connect does not choose the agent; the channel keeps whichever
+            // it already had.
+            agent_preset: None,
             integration_id: get("integration_id"),
             persona: get("persona"),
             model: get("model"),
@@ -237,6 +240,9 @@ pub async fn connect(
     if let Err(e) = crate::channels::set_link(
         crate::channels::DEFAULT_SLUG,
         crate::channels::Link {
+            // A gateway connect does not choose the agent; the channel keeps whichever
+            // it already had.
+            agent_preset: None,
             integration_id: Some(cfg.integration_id.clone()),
             persona: existing.as_ref().and_then(|c| c.persona.clone()),
             model: existing.as_ref().and_then(|c| c.model.clone()),
@@ -569,6 +575,7 @@ pub async fn resync() -> Result<(), String> {
             crate::channels::set_link(
                 crate::channels::DEFAULT_SLUG,
                 crate::channels::Link {
+                    agent_preset: None,
                     integration_id: Some(iid),
                     persona: cur.as_ref().and_then(|c| c.persona.clone()),
                     model: cur.as_ref().and_then(|c| c.model.clone()),

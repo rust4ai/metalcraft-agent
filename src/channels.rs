@@ -51,7 +51,16 @@ pub struct Channel {
     /// carrying this `source_id` route here; also the send-time sender selector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_id: Option<String>,
-    /// Persona that answers inbound on this channel (default: orchestrator).
+    /// The agent that answers inbound on this channel. Its instance — and everything
+    /// that instance remembers — is what gives the channel continuity across idle
+    /// resets. Absent means the pod default.
+    ///
+    /// Without this a channel could only ever be the default agent: installing an
+    /// agent pack and pointing an SMS number at it was not expressible, and the
+    /// channel's memory base was one that had never been built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_preset: Option<String>,
+    /// Persona that answers inbound on this channel (default: the agent's own).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
     /// Model override for inbound runs on this channel.
@@ -80,6 +89,8 @@ struct StoredChannel {
     enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     integration_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     persona: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +141,7 @@ fn metalcraft_channel() -> Channel {
         enabled: true,
         managed: true,
         integration_id: None,
+        agent_preset: None,
         persona: None,
         model: None,
         active_number: None,
@@ -187,6 +199,7 @@ pub fn list_channels() -> Vec<Channel> {
         enabled: s.enabled,
         managed: false,
         integration_id: s.integration_id,
+        agent_preset: s.agent_preset,
         persona: s.persona,
         model: s.model,
         active_number: s.active_number,
@@ -223,6 +236,7 @@ pub fn set_webhook_secret(slug: &str, secret: &str) -> Result<(), String> {
 #[derive(Debug, Clone, Default)]
 pub struct Link {
     pub integration_id: Option<String>,
+    pub agent_preset: Option<String>,
     pub persona: Option<String>,
     pub model: Option<String>,
     pub active_number: Option<String>,
@@ -236,6 +250,11 @@ pub fn set_link(slug: &str, link: Link) -> Result<(), String> {
     match stored.iter_mut().find(|s| s.slug == slug) {
         Some(s) => {
             s.integration_id = link.integration_id;
+            // Only overwrite when the connect actually specified one: a reconnect
+            // must not silently move the channel back to the default agent.
+            if link.agent_preset.is_some() {
+                s.agent_preset = link.agent_preset;
+            }
             s.persona = link.persona;
             s.model = link.model;
             s.active_number = link.active_number;
@@ -245,6 +264,7 @@ pub fn set_link(slug: &str, link: Link) -> Result<(), String> {
             slug: slug.to_string(),
             enabled: true,
             integration_id: link.integration_id,
+            agent_preset: link.agent_preset,
             persona: link.persona,
             model: link.model,
             active_number: link.active_number,
@@ -377,6 +397,7 @@ pub fn create_channel(
         enabled: true,
         managed: false,
         integration_id: None,
+        agent_preset: None,
         persona: None,
         model: None,
         active_number: None,
@@ -424,6 +445,7 @@ pub fn update_channel(
         enabled,
         managed: false,
         integration_id: updated.integration_id,
+        agent_preset: updated.agent_preset,
         persona: updated.persona,
         model: updated.model,
         active_number: updated.active_number,

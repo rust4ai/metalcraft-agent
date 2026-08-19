@@ -471,6 +471,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
             // `crate::scheduled_tasks`). Runs in the same tick as flow polling.
             run_due_scheduled_tasks(&context, &cwd, &persona_slug, &model_name, &approval_mode)
                 .await;
+
+            reap_idle_agents();
         };
 
         tokio::select! {
@@ -495,6 +497,48 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     }
 
     Ok(())
+}
+
+/// Remove unnamed agents nobody has touched in a week.
+///
+/// Every chat mints an instance, so without this the directory grows by one entry per
+/// conversation ever started — and `agent_instance::list()` parses all of them on
+/// every inbound gateway message, which puts the cost on the latency of answering a
+/// text. Named agents are exempt; naming one is the act that says "keep this".
+///
+/// Hourly rather than every tick: the poll runs every 30s and this walks the whole
+/// instance directory, which is exactly the work being economised.
+fn reap_idle_agents() {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    const EVERY: Duration = Duration::from_secs(3600);
+
+    {
+        let mut last = match LAST.lock() {
+            Ok(l) => l,
+            Err(e) => e.into_inner(),
+        };
+        match *last {
+            Some(t) if t.elapsed() < EVERY => return,
+            _ => *last = Some(Instant::now()),
+        }
+    }
+
+    // An agent a conversation still points at is kept whatever its age: deleting it
+    // would strand the transcript, which survives on purpose.
+    let live = crate::workshop_api::instance_ids_with_conversations();
+    let report = crate::agent_instance::reap_ephemeral(&live);
+    if !report.reaped.is_empty() {
+        log::info!(
+            "reaped {} idle unnamed agent(s) after {} days",
+            report.reaped.len(),
+            crate::agent_instance::EPHEMERAL_TTL_DAYS
+        );
+    }
+    for (id, e) in &report.failed {
+        log::warn!("could not reap agent '{id}': {e}");
+    }
 }
 
 /// Run every scheduled follow-up that is now due: claim it (so a later tick

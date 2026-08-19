@@ -56,12 +56,25 @@ impl Bundle {
             if !is_safe_path(&raw) {
                 return Err(format!("unsafe path in archive: {}", entry.name()));
             }
-            total = total.saturating_add(entry.size());
-            if total > MAX_BUNDLE_BYTES {
+            // `entry.size()` is the size the *archive declares*, which whoever built
+            // it controls independently of the actual stream — the decompressor is
+            // bounded by `compressed_size`, not by this. So the budget is spent
+            // against bytes actually read, and the declared size only avoids a
+            // pointless reallocation. Trusting the declaration let a small archive
+            // inflate without limit: `?path=` and `?url=` both reach here having
+            // bypassed any HTTP body cap.
+            let remaining = MAX_BUNDLE_BYTES.saturating_sub(total);
+            let mut buf =
+                Vec::with_capacity(entry.size().min(remaining).min(1 << 20) as usize);
+            // One byte past the budget, so an over-long entry is detected rather than
+            // silently truncated into something that then fails its hash check.
+            std::io::Read::take(&mut entry, remaining + 1)
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("reading {raw}: {e}"))?;
+            if buf.len() as u64 > remaining {
                 return Err("archive exceeds the maximum allowed size".to_string());
             }
-            let mut buf = Vec::with_capacity(entry.size().min(MAX_BUNDLE_BYTES) as usize);
-            entry.read_to_end(&mut buf).map_err(|e| format!("reading {raw}: {e}"))?;
+            total = total.saturating_add(buf.len() as u64);
             if raw == "agent_pack.json" {
                 manifest_bytes = Some(buf);
             } else {

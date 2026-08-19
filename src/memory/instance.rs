@@ -89,6 +89,17 @@ impl InstanceMemory {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
         }
+        // Union with what is already on disk rather than replacing it. Two handles for
+        // the same agent can exist at once — eviction drops the registry entry while a
+        // caller still holds its clone — and each would otherwise serialise only the
+        // set *it* loaded, un-forgetting whatever the other had forgotten.
+        let mut ids: HashSet<String> = ids.into_iter().collect();
+        ids.extend(Self::load_tombstones(&self.instance_id));
+        let ids: Vec<String> = {
+            let mut v: Vec<String> = ids.into_iter().collect();
+            v.sort();
+            v
+        };
         let json = serde_json::to_string_pretty(&Tombstones { ids })
             .map_err(|e| format!("failed to serialize tombstones: {e}"))?;
         // tmp + rename: a torn write must not lose the whole set.
@@ -105,6 +116,26 @@ impl InstanceMemory {
             let mut delta = self.delta.write().await;
             if delta.get(id).is_some() {
                 delta.purge(id);
+                // Record it. The purge used to be RAM-only, so the next time this
+                // agent's log was replayed the memory came straight back — a forget
+                // that survived only until the instance left the resident set.
+                delta.seq += 1;
+                let event = crate::memory::types::Event::Purge {
+                    seq: delta.seq,
+                    at: chrono::Utc::now(),
+                    id: id.to_string(),
+                };
+                if let Err(e) = crate::memory::wal::append(
+                    &crate::paths::memory_instance_dir(&self.instance_id).join("wal.jsonl"),
+                    &event,
+                ) {
+                    // The memory is already gone from RAM; failing the call would be
+                    // a lie in the other direction. Warn and move on.
+                    log::warn!(
+                        "memory: instance '{}': could not record a purge: {e}",
+                        self.instance_id
+                    );
+                }
                 return Ok(Forgotten::Purged);
             }
         }
@@ -232,6 +263,46 @@ pub fn parse_seed_file(contents: &str) -> (Vec<Memory>, usize) {
     (out, skipped)
 }
 
+/// The version a preset's shipped memories are currently stored under.
+///
+/// **The agent pack's manifest version, not the preset document's.** `build_base` is
+/// called at install with `manifest.version`, so that is the key on disk — and the
+/// two fields are independent, unvalidated strings. Reading the preset's own
+/// `version` meant an export defaulting to `0.1.0` while the preset document still
+/// said `1.4.0` built `amy@0.1.0` and then looked up `amy@1.4.0`: every agent of that
+/// preset silently lost one hundred percent of its shipped memories, reported as
+/// `shipped: 0` with only a debug-level warning.
+///
+/// `None` for a preset no installed pack provides — a seeded or hand-authored one,
+/// which has no shipped base at all.
+pub fn current_base_version(preset: &str) -> Option<String> {
+    crate::agent_packs::list()
+        .into_iter()
+        .find(|p| p.manifest.presets.iter().any(|s| s == preset))
+        .map(|p| p.manifest.version)
+}
+
+/// The id a shipped memory has, for a given preset.
+///
+/// Content-derived and **deliberately not version-scoped**. A tombstone names an id;
+/// if the id moved when the pack was upgraded, every memory the user had told the
+/// agent to forget would come back, because the same unchanged seed line would hash
+/// differently. Scoping by preset keeps the same sentence shipped in two different
+/// agents distinct.
+fn deterministic_base_id(preset: &str, content: &str, occurrence: usize) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(preset.as_bytes());
+    h.update([0]);
+    h.update(content.as_bytes());
+    let base = format!("seed_{}", &hex::encode(h.finalize())[..32]);
+    // Two seed lines may share `content` and differ in kind, entity or importance —
+    // they are distinct memories, and hashing content alone collapsed them into one,
+    // silently dropping the first. The occurrence index disambiguates, and only the
+    // duplicate carries a suffix so the common case stays stable if a file is edited.
+    if occurrence == 0 { base } else { format!("{base}_{occurrence}") }
+}
+
 /// Build a preset's base index from a `memories.jsonl` and persist it as a snapshot.
 ///
 /// Runs **once per `preset@version`** at pack install — not per instance — so twenty
@@ -240,12 +311,23 @@ pub fn build_base(preset: &str, version: &str, seed_file: &Path) -> Result<usize
     let contents = std::fs::read_to_string(seed_file)
         .map_err(|e| format!("failed to read {}: {e}", seed_file.display()))?;
     let (memories, skipped) = parse_seed_file(&contents);
-    let count = memories.len();
 
     let mut idx = MemoryIndex::new();
-    for m in memories {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for mut m in memories {
+        // A deterministic id. `Memory::new` mints a v4 uuid, so rebuilding the same
+        // file — which reinstalling or upgrading does — produced an entirely new set
+        // of ids, and every tombstone an agent had written pointed at nothing.
+        // Memories the user had told the agent to forget silently came back.
+        let occurrence = seen.entry(m.content.clone()).or_insert(0);
+        m.id = deterministic_base_id(preset, &m.content, *occurrence);
+        *occurrence += 1;
         idx.insert_memory(m);
     }
+    // `count` is what the install report shows. Reporting the parsed line count while
+    // the index holds fewer would hide exactly the collision the occurrence index
+    // exists to prevent.
+    let count = idx.len();
 
     let dir = crate::paths::memory_preset_dir(preset, version);
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
@@ -326,10 +408,20 @@ pub fn handle_for(
 ) -> Result<InstanceMemory, String> {
     let mut reg = registry().lock().map_err(|_| "memory registry poisoned".to_string())?;
 
+    let wanted_key = base.map(|(p, v)| base_key(p, v));
     if let Some(existing) = reg.resident.get(instance_id).cloned() {
+        // …but only if it is still reading the right base. After a pack upgrade the
+        // resident copy holds an `Arc` to the *old* index, which nothing else can
+        // reach, so it kept serving the superseded memories until it happened to fall
+        // out of the LRU. Two agents of the same preset then disagreed about what
+        // the pack had shipped.
+        if existing.base_key == wanted_key {
+            reg.order.retain(|k| k != instance_id);
+            reg.order.push(instance_id.to_string());
+            return Ok(existing);
+        }
+        reg.resident.remove(instance_id);
         reg.order.retain(|k| k != instance_id);
-        reg.order.push(instance_id.to_string());
-        return Ok(existing);
     }
 
     let (base_idx, key) = match base {
@@ -348,7 +440,7 @@ pub fn handle_for(
         instance_id: instance_id.to_string(),
         base: base_idx,
         base_key: key,
-        delta: Arc::new(RwLock::new(MemoryIndex::new())),
+        delta: Arc::new(RwLock::new(load_delta(instance_id))),
         tombstones: Arc::new(RwLock::new(InstanceMemory::load_tombstones(instance_id))),
     };
 
@@ -365,12 +457,116 @@ pub fn handle_for(
     Ok(mem)
 }
 
+/// How many replayed events justify writing a snapshot.
+///
+/// Low enough that a busy agent never replays a long log on the interactive path,
+/// high enough that an agent written to once in a while never pays for a snapshot.
+const COMPACT_AFTER_EVENTS: usize = 200;
+
+/// Rebuild an agent's own memories from its log.
+///
+/// **Without this, every learned memory was write-only.** `remember_into_instance`
+/// fsyncs an `Upsert` to `memory/instances/<id>/wal.jsonl`, but the delta was
+/// constructed empty every time an instance became resident — so a restart, or
+/// simply eight other chats pushing this one out of the LRU, made everything the
+/// agent had been told unreachable. It stayed on disk, correct and unread.
+///
+/// Same shape as the pod-global load in [`crate::memory::handle`]: snapshot if there
+/// is one, then replay the log over it. Events already folded into the snapshot
+/// replay harmlessly — every variant is idempotent except `Touch`, which may
+/// over-count an access.
+fn load_delta(instance_id: &str) -> MemoryIndex {
+    let dir = crate::paths::memory_instance_dir(instance_id);
+    let wal_path = dir.join("wal.jsonl");
+    let snapshot_path = dir.join("snapshot.json");
+    let mut idx = match crate::memory::wal::read_snapshot(&snapshot_path) {
+        Some(s) => MemoryIndex::from_snapshot(s),
+        None => MemoryIndex::new(),
+    };
+    let (events, skipped) = crate::memory::wal::replay(&wal_path);
+    let replayed = events.len();
+    for e in events {
+        idx.apply(e);
+    }
+
+    // Fold the log into a snapshot once it is long enough to be worth it.
+    //
+    // The resident set holds eight agents, so a pod with more than that replays on
+    // every miss — and this is the interactive path, at the front of a turn. Without
+    // compaction the log only grows, so an agent with ten thousand lifetime writes
+    // pays for all ten thousand every time it is recalled into memory.
+    //
+    // Snapshot first, then truncate: a crash between the two replays a few
+    // already-folded events, which is harmless because every variant is idempotent.
+    // The reverse order would lose them.
+    if replayed >= COMPACT_AFTER_EVENTS {
+        let snapshot = idx.snapshot(None, None);
+        match crate::memory::wal::write_snapshot(&snapshot_path, &snapshot) {
+            Ok(()) => {
+                if let Err(e) = crate::memory::wal::truncate(&wal_path) {
+                    log::warn!("memory: instance '{instance_id}': could not truncate log: {e}");
+                } else {
+                    log::debug!(
+                        "memory: instance '{instance_id}': folded {replayed} event(s) into a snapshot"
+                    );
+                }
+            }
+            // Compaction is an optimisation; failing it must never fail a turn.
+            Err(e) => log::warn!("memory: instance '{instance_id}': snapshot failed: {e}"),
+        }
+    }
+    if replayed > 0 || skipped > 0 {
+        log::debug!(
+            "memory: instance '{instance_id}': replayed {replayed} event(s), skipped {skipped}"
+        );
+    }
+    if skipped > 0 {
+        log::warn!(
+            "memory: {skipped} unreadable line(s) in {} — likely a torn write from an \
+             unclean shutdown",
+            dir.join("wal.jsonl").display()
+        );
+    }
+    idx
+}
+
 /// Instances currently resident, least recently used first.
 pub fn resident_instances() -> Vec<String> {
     registry().lock().map(|r| r.order.clone()).unwrap_or_default()
 }
 
 /// Drop an instance from the resident set (used on delete).
+/// Drop a preset's shipped memories from the process cache, and from disk.
+///
+/// Called on uninstall. Without it the base stays in a process-static map that
+/// nothing else can reach, so an agent still resident keeps recalling memories from a
+/// pack that was removed — and the built snapshot stays on disk, loadable again by
+/// any orphaned instance.
+pub fn release_base(preset: &str, version: &str) {
+    // Two installed packs can provide the same preset slug — the installer reports
+    // that as a collision rather than refusing it — and they would share this
+    // directory. Deleting it on one uninstall would take the other's shipped
+    // memories with it.
+    if crate::agent_packs::list()
+        .iter()
+        .any(|p| p.manifest.presets.iter().any(|s| s == preset))
+    {
+        log::debug!("memory: base {preset}@{version} is still provided by an installed pack");
+        return;
+    }
+    let key = base_key(preset, version);
+    if let Ok(mut b) = bases().write() {
+        b.remove(&key);
+    }
+    let dir = crate::paths::memory_preset_dir(preset, version);
+    if dir.is_dir()
+        && let Err(e) = std::fs::remove_dir_all(&dir)
+    {
+        // Wasted space, not a failed uninstall.
+        log::warn!("memory: could not remove base {key} at {}: {e}", dir.display());
+    }
+}
+
 pub fn evict(instance_id: &str) {
     if let Ok(mut reg) = registry().lock() {
         reg.resident.remove(instance_id);

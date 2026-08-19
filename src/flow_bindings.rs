@@ -172,7 +172,18 @@ pub fn arm(
 
     // Explicit target, then another armed schedule of this flow, then a new agent.
     let resolved = match instance {
-        Some(id) => crate::agent_instance::load(id)?,
+        Some(id) => {
+            // Arming makes an agent do work on a timer, which is the same commitment
+            // as naming it. Without this, attaching a schedule to an existing chat's
+            // agent left it ephemeral and eligible for reaping — deleting the memory
+            // the recurring run was accumulating.
+            let mut existing = crate::agent_instance::load(id)?;
+            if !existing.persistent {
+                existing.persistent = true;
+                existing.save()?;
+            }
+            existing
+        }
         None => match binding.instances.values().next().and_then(|id| crate::agent_instance::load(id).ok()) {
             Some(existing) => existing,
             None => {

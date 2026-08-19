@@ -136,12 +136,59 @@ pub struct InstallReport {
     pub consent: ConsentSummary,
 }
 
+/// Whether every installed agent pack's manifest and refs parse.
+///
+/// `gc` deletes store entries no installed pack references, and both `list()` and
+/// `read_refs` degrade a parse failure to *nothing* rather than an error. A pack with
+/// a truncated `agent_pack.json` therefore contributes zero refs, and collecting
+/// would delete the integration packs it actually depends on. Skipping is the safe
+/// direction: the cost is disk, and the alternative is silent data loss.
+fn manifests_all_readable() -> bool {
+    let Ok(entries) = std::fs::read_dir(paths::agent_packs_dir()) else {
+        return true; // nothing installed
+    };
+    for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+        let manifest = e.path().join("agent_pack.json");
+        if !manifest.is_file() {
+            return false;
+        }
+        let ok = std::fs::read_to_string(&manifest)
+            .ok()
+            .and_then(|s| serde_json::from_str::<AgentPackManifest>(&s).ok())
+            .is_some();
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// Serialises install and uninstall against each other.
+///
+/// Both mutate the shared content store, and `gc` defines garbage as "not referenced
+/// by any installed pack" — a question with a wrong answer for the window between an
+/// install writing store entries and recording its refs. A concurrent uninstall's gc
+/// landing there deletes content the install is about to depend on, and the install
+/// still reports success.
+///
+/// The API handlers are concurrent (axum) and the agent's own tools call the same
+/// functions, so this window is reachable, not theoretical. A separate CLI process
+/// sharing the data dir is *not* covered — that needs a file lock, and is a real but
+/// much narrower exposure since the two are rarely run together.
+fn pack_mutex() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Install an agent pack from `.agentpack` bytes.
 ///
 /// Nothing is written until the archive verifies and validates, so a tampered or
 /// incoherent pack leaves the data dir untouched.
 pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
+    // Verify before taking the lock: reading the archive is the expensive part and it
+    // touches nothing shared.
     let bundle = Bundle::read(bytes)?;
+    let _guard = pack_mutex().lock().unwrap_or_else(|e| e.into_inner());
     let id = bundle.manifest.id.clone();
 
     // Never downgrade silently.
@@ -195,6 +242,19 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
 
     // 2. the pack's own files
     let root = pack_dir(&id);
+    // What the previous version left here, so files the new one dropped can be
+    // removed afterwards. Anything the new version no longer ships used to stay
+    // behind — personas and presets resolve straight off this directory, so a persona
+    // the author withdrew in v2 was still installable after upgrading, and a preset
+    // they removed could collide with another pack's and make both unloadable.
+    //
+    // Written first, deleted after, rather than clearing the directory up front: a
+    // reader is not synchronised with the installer, and emptying the root would make
+    // an in-flight turn lose its agent's personas, presets and tools mid-turn. This
+    // way every path that existed before still resolves throughout, and only the
+    // genuinely withdrawn ones stop.
+    let previous: std::collections::HashSet<String> =
+        read_tree(&root).unwrap_or_default().into_iter().map(|(rel, _)| rel).collect();
     for (rel, bytes) in &bundle.files {
         if rel.starts_with("integration_packs/") {
             continue; // lives in the store, not here
@@ -218,6 +278,46 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
     std::fs::write(root.join("agent_pack.json"), manifest_json)
         .map_err(|e| format!("writing agent_pack.json: {e}"))?;
     store::write_refs(&id, &refs)?;
+
+    // Now retire what this version no longer ships. Everything the new version
+    // provides is already in place, so nothing is ever missing in between.
+    let shipped: std::collections::HashSet<&str> = bundle
+        .files
+        .keys()
+        .map(String::as_str)
+        .filter(|r| !r.starts_with("integration_packs/"))
+        .collect();
+    for rel in &previous {
+        if rel == "agent_pack.json" || shipped.contains(rel.as_str()) {
+            continue;
+        }
+        let stale = root.join(rel);
+        if let Err(e) = std::fs::remove_file(&stale) {
+            // Leftovers are a correctness problem, not a reason to fail an install
+            // that has otherwise landed. Say so loudly enough to notice.
+            log::warn!("agent pack '{id}': could not remove withdrawn {rel}: {e}");
+        }
+    }
+
+    // Collect anything the previous version referenced and this one does not. `gc`
+    // used to run only on uninstall, so every upgrade left a full copy of each
+    // superseded integration pack on disk forever.
+    //
+    // Runs *after* the refs are recorded, never before: garbage is defined as "not
+    // referenced by any installed pack", and this pack's new refs have to be visible
+    // before that question has the right answer.
+    // Only collect when every installed pack could actually be read. `gc` derives
+    // liveness from each pack's manifest and refs file, and both fall back to "no
+    // refs" on a parse failure — so one corrupt pack would make installing an
+    // *unrelated* one delete the corrupt pack's vendored content for good.
+    if manifests_all_readable() {
+        let freed = store::gc();
+        if freed > 0 {
+            log::info!("agent pack '{id}': released {freed} superseded store entr(ies)");
+        }
+    } else {
+        log::warn!("agent packs: skipping store cleanup — some installed pack is unreadable");
+    }
 
     // 3. preset memory bases — built once per (preset, version), not per instance
     for slug in &bundle.manifest.presets {
@@ -267,11 +367,23 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
 /// hold memories and conversations, and orphaning them silently is worse than a
 /// failed command. `force` orphans them deliberately.
 pub fn uninstall(id: &str, force: bool) -> Result<UninstallReport, String> {
+    let _guard = pack_mutex().lock().unwrap_or_else(|e| e.into_inner());
     let pack = find(id).ok_or_else(|| format!("agent pack '{id}' is not installed"))?;
 
-    let dependents: Vec<String> = crate::agent_instance::list()
+    // Every agent made from one of this pack's presets, named or not.
+    //
+    // The check used to consider only `persistent` ones, which meant an ordinary
+    // in-progress chat — unnamed by default — had its preset deleted underneath it
+    // with no warning, and its next turn failed to load. Unnamed agents still don't
+    // *block* the uninstall (nobody chose to keep them), but they are evicted so a
+    // live one stops answering from a preset that no longer exists.
+    let all: Vec<crate::agent_instance::AgentInstance> = crate::agent_instance::list()
         .into_iter()
-        .filter(|i| i.persistent && pack.manifest.presets.contains(&i.agent_preset))
+        .filter(|i| pack.manifest.presets.contains(&i.agent_preset))
+        .collect();
+    let dependents: Vec<String> = all
+        .iter()
+        .filter(|i| i.persistent)
         .map(|i| format!("{} ({})", i.name, i.id))
         .collect();
     if !dependents.is_empty() && !force {
@@ -291,8 +403,23 @@ pub fn uninstall(id: &str, force: bool) -> Result<UninstallReport, String> {
     save_state(&state)?;
     let _ = crate::lockfile::remove_agent_pack(id);
 
-    // Only now, once the refs are gone, can the store tell what is unreferenced.
-    let freed = store::gc();
+    // Drop every affected agent from the resident set, and release the memory bases
+    // this pack shipped.
+    //
+    // Without this the removal simply does not take effect for anything already in
+    // RAM: a resident instance keeps recalling the uninstalled pack's memories, from
+    // an `Arc` nothing else can reach, until the process restarts.
+    for inst in &all {
+        crate::memory::instance::evict(&inst.id);
+    }
+    for slug in &pack.manifest.presets {
+        crate::memory::instance::release_base(slug, &pack.manifest.version);
+    }
+
+    // Only now, once the refs are gone, can the store tell what is unreferenced —
+    // and only if every remaining pack is readable, or its content would look like
+    // garbage. See `manifests_all_readable`.
+    let freed = if manifests_all_readable() { store::gc() } else { 0 };
 
     Ok(UninstallReport { id: id.to_string(), orphaned_agents: dependents, packs_freed: freed })
 }

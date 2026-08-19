@@ -3137,6 +3137,20 @@ async fn list_chats(State(_state): State<Arc<ApiState>>) -> Response {
 /// Read and parse every `<data>/chats/*.json` into [`PersistedChat`]s.
 /// Malformed files are logged and skipped. Shared by the list endpoint and
 /// startup load.
+/// Every agent instance some conversation still belongs to.
+///
+/// The daemon's reaper consults this so a transcript someone can still open keeps the
+/// agent that produced it — the memory is what explains the conversation.
+pub fn instance_ids_with_conversations() -> Vec<String> {
+    let mut out: Vec<String> = read_persisted_chats()
+        .into_iter()
+        .filter_map(|c| c.instance_id)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn read_persisted_chats() -> Vec<PersistedChat> {
     let dir = paths::chats_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -5167,10 +5181,14 @@ async fn get_or_create_gateway_session(
     // Bind this channel to a persistent agent first, so the diagnostics session can
     // record which agent it belongs to. The idle TTL ends a *conversation*; the
     // instance — and everything it remembers — carries across them.
-    let instance_id = match crate::agent_instance::for_channel(
-        &n.channel_slug,
-        crate::agent_preset::DEFAULT_PRESET,
-    ) {
+    // The channel's own agent, not whatever the pod defaults to. Hard-wiring
+    // `DEFAULT_PRESET` here meant installing an agent pack and pointing a number at
+    // it was not expressible: the channel answered as the default agent, and read
+    // from a memory base that had never been built for it.
+    let channel_preset = crate::channels::get_channel(&n.channel_slug)
+        .and_then(|c| c.agent_preset)
+        .unwrap_or_else(|| crate::agent_preset::DEFAULT_PRESET.to_string());
+    let instance_id = match crate::agent_instance::for_channel(&n.channel_slug, &channel_preset) {
         Ok(i) => Some(i.id),
         Err(e) => {
             log::warn!("gateway channel '{}': could not bind an agent instance: {e}", n.channel_slug);
