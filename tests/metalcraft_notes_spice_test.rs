@@ -20,6 +20,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "mnote_whoami",
     "mnote_list_notes",
     "mnote_get_note",
+    "mnote_links",
     "mnote_create_note",
     "mnote_update_note",
     "mnote_delete_note",
@@ -27,8 +28,15 @@ const EXPECTED_TOOLS: &[&str] = &[
     "mnote_create_category",
 ];
 
-const READ_TOOLS: &[&str] =
-    &["mnote_whoami", "mnote_list_notes", "mnote_get_note", "mnote_list_categories"];
+const READ_TOOLS: &[&str] = &[
+    "mnote_whoami",
+    "mnote_list_notes",
+    "mnote_get_note",
+    "mnote_list_categories",
+    // Reads, but the name matches neither `_list` nor `_get` — the approval rule has to
+    // name it explicitly, so assert it rather than trusting the pattern.
+    "mnote_links",
+];
 
 const WRITE_TOOLS: &[&str] =
     &["mnote_create_note", "mnote_update_note", "mnote_delete_note", "mnote_create_category"];
@@ -84,7 +92,7 @@ fn metalcraft_notes_pack_wires_up() {
     }
 
     // Per-note tools address the note by {slug}.
-    for tool in ["mnote_get_note", "mnote_update_note", "mnote_delete_note"] {
+    for tool in ["mnote_get_note", "mnote_update_note", "mnote_delete_note", "mnote_links"] {
         let (p, _) =
             integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("resolves");
@@ -100,6 +108,88 @@ fn metalcraft_notes_pack_wires_up() {
     let readme = pack.readme().expect("README");
     assert!(readme.contains("METALCRAFT_TOKEN") && readme.contains("notes.metalcraftai.com"));
     assert_eq!(pack.item_slugs("api_tools", "json").len(), EXPECTED_TOOLS.len());
+
+    // ── The pack must TEACH wikilinks, not merely expose the endpoint ──────────────
+    //
+    // The `[[slug]]` machinery in metalcraft-notes is worthless if the agent — the app's
+    // primary author — is never told the syntax exists. A model that hasn't been told
+    // writes "see the Q3 plan note" and creates zero edges. That failure is silent: every
+    // call succeeds, the notes look fine, and the graph just stays empty. These assertions
+    // are the tripwire, so a future prompt tidy-up can't quietly undo it.
+    let tool_json = |tool: &str| -> String {
+        let (p, _) =
+            integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
+                .expect("resolves");
+        std::fs::read_to_string(&p).unwrap()
+    };
+
+    for tool in ["mnote_create_note", "mnote_update_note"] {
+        let cfg: serde_json::Value = serde_json::from_str(&tool_json(tool)).unwrap();
+        let desc = cfg["description"].as_str().unwrap();
+        assert!(desc.contains("[[slug]]"), "`{tool}` must teach the [[slug]] link syntax");
+        assert!(
+            desc.contains('|') && desc.to_lowercase().contains("break"),
+            "`{tool}` must warn that a pipe in the display text voids the link"
+        );
+    }
+
+    // create_note must expose an explicit slug, or "create the note this broken link
+    // points at" is impossible from the agent side.
+    let create: serde_json::Value = serde_json::from_str(&tool_json("mnote_create_note")).unwrap();
+    assert!(
+        create["parameters"]["properties"]["slug"].is_object(),
+        "mnote_create_note must accept an explicit `slug`"
+    );
+
+    let skill_src = pack
+        .item_slugs("skills", "md")
+        .iter()
+        .find(|s| *s == "metalcraft-notes")
+        .map(|_| {
+            let (p, _) = integration_packs::resolve_file(
+                &paths::skills_dir(),
+                "skills",
+                "metalcraft-notes.md",
+            )
+            .expect("skill resolves");
+            std::fs::read_to_string(p).unwrap()
+        })
+        .expect("skill ships with the pack");
+    // Assert the load-bearing FACTS, not just that the string "[[slug]]" appears somewhere
+    // — an earlier version of this check passed even with the whole linking section
+    // deleted, because the syntax was incidentally mentioned in a workflow bullet.
+    for needle in [
+        "[[slug]]",              // the syntax
+        "[[slug|Display Text]]", // the alias form
+        "mnote_links",           // how to traverse
+        "broken",                // forward links / creating the note a link points at
+        "silently",              // the pipe/bracket warning
+    ] {
+        assert!(
+            skill_src.contains(needle),
+            "the skill must document {needle:?} — the linking section looks gutted"
+        );
+    }
+
+    let persona_src = {
+        let (p, _) = integration_packs::resolve_file(
+            &paths::personas_dir(),
+            "personas",
+            "metalcraft-notes-agent.json",
+        )
+        .expect("persona resolves");
+        std::fs::read_to_string(p).unwrap()
+    };
+    // Check the SYSTEM PROMPT specifically. Reading the whole file would pass on the
+    // `description` field alone, which the model never sees.
+    let persona_json: serde_json::Value = serde_json::from_str(&persona_src).unwrap();
+    let system_prompt = persona_json["system_prompt"].as_str().unwrap();
+    for needle in ["[[slug]]", "mnote_links"] {
+        assert!(
+            system_prompt.contains(needle),
+            "the persona SYSTEM PROMPT must teach {needle:?} — this is what the model reads"
+        );
+    }
 
     let recommended = integration_packs::recommended_env();
     assert!(

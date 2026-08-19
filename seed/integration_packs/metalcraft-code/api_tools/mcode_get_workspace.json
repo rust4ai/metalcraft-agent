@@ -1,0 +1,23 @@
+{
+  "name": "mcode_get_workspace",
+  "description": "Get one workspace by id: status, sprite_name, url, repo_full_name, branch, logs, error, last_active_at. Poll this after create until status is `ready`.",
+  "method": "GET",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      }
+    },
+    "required": [
+      "id"
+    ]
+  },
+  "body_mapping": "none"
+}

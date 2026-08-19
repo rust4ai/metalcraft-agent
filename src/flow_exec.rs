@@ -120,6 +120,26 @@ pub struct FlowExecutor<'a> {
     /// from the agent's current state when the executor is built. Carried into the
     /// run summary + record so flow-debug UIs can show them.
     warnings: Vec<String>,
+    /// The agent instance this run belongs to, when a schedule armed one
+    /// ([`crate::flow_bindings::arm`]). Every prompt/branch turn recalls from and
+    /// writes to that agent's memory, so a recurring flow accumulates history
+    /// across firings instead of waking up amnesiac each time.
+    instance_id: Option<String>,
+    /// The roster of the preset this flow is bound to, so a `sub_agent` call from
+    /// inside the flow obeys the same containment as a chat. `None` for unbound
+    /// flows, which behave as they always did.
+    preset_personas: Option<Vec<String>>,
+}
+
+/// The roster of the preset a flow is bound to, if it is bound and the preset
+/// still resolves. A missing preset is deliberately not fatal — a flow whose pack
+/// was uninstalled should still run, just without containment, rather than fail at
+/// 3am with a config error.
+fn roster_for(flow_id: &str) -> Option<Vec<String>> {
+    let slug = crate::flow_bindings::get(flow_id).preset?;
+    crate::agent_preset::AgentPreset::load(&slug, &crate::paths::agent_presets_dir())
+        .ok()
+        .map(|p| p.callable_personas())
 }
 
 impl<'a> FlowExecutor<'a> {
@@ -157,6 +177,7 @@ impl<'a> FlowExecutor<'a> {
 
         let step_budget = step_budget_for(&flow);
         let warnings = crate::flow_install::runtime_warnings(&flow);
+        let flow_id = flow.id.clone();
         Ok(Self {
             context,
             flow,
@@ -171,7 +192,16 @@ impl<'a> FlowExecutor<'a> {
             run_id: uuid::Uuid::new_v4().to_string(),
             created_at: None,
             warnings,
+            instance_id: None,
+            preset_personas: roster_for(&flow_id),
         })
+    }
+
+    /// Run as a specific agent instance, so this run's turns recall from (and
+    /// write to) that agent's memory. Set by the scheduler for armed schedules.
+    pub fn with_instance(mut self, instance_id: Option<String>) -> Self {
+        self.instance_id = instance_id;
+        self
     }
 
     /// Rebuild an executor from a persisted, paused [`FlowRun`] so it can resume.
@@ -183,6 +213,7 @@ impl<'a> FlowExecutor<'a> {
     ) -> Self {
         let step_budget = step_budget_for(&flow);
         let warnings = crate::flow_install::runtime_warnings(&flow);
+        let flow_id = flow.id.clone();
         Self {
             context,
             flow,
@@ -197,6 +228,8 @@ impl<'a> FlowExecutor<'a> {
             run_id: run.id.clone(),
             created_at: Some(run.created_at.clone()),
             warnings,
+            instance_id: run.instance_id.clone(),
+            preset_personas: roster_for(&flow_id),
         }
     }
 
@@ -352,6 +385,7 @@ impl<'a> FlowExecutor<'a> {
             steps: self.steps.clone(),
             flow: Some(self.flow.clone()),
             warnings: self.warnings.clone(),
+            instance_id: self.instance_id.clone(),
             created_at,
             updated_at: now,
         };
@@ -529,6 +563,8 @@ impl<'a> FlowExecutor<'a> {
                 task: &prompt,
                 approval_mode: ApprovalMode::AutoApprove,
                 diagnostics: self.logger.clone(),
+                instance_id: self.instance_id.clone(),
+                preset_personas: self.preset_personas.clone(),
             },
         )
         .await;
@@ -729,6 +765,8 @@ impl<'a> FlowExecutor<'a> {
 
         // Registry = persona tools + injected extras + one HandleTool per output.
         let tool_config = crate::tools::ToolConfig {
+            preset_personas: self.preset_personas.clone(),
+            instance_id: self.instance_id.clone(),
             api_key: self.context.api_key.clone(),
             model_name: model_name.clone(),
             system_prompt: system_prompt.clone(),
@@ -981,12 +1019,43 @@ pub async fn run_flow_v2(
     model_name: &str,
     args: &Value,
 ) -> Result<FlowRunSummary, String> {
+    run_flow_v2_as(context, flow, cwd, persona_override, model_name, args, None).await
+}
+
+/// [`run_flow_v2`], run as a given agent instance.
+///
+/// The scheduler passes the instance a schedule was armed with, so every firing is
+/// a conversation inside one long-lived agent — the whole point of binding a flow
+/// to a preset. Ad-hoc runs pass `None` and behave exactly as before.
+pub async fn run_flow_v2_as(
+    context: &AgentRuntimeContext,
+    flow: SavedFlow,
+    cwd: &str,
+    persona_override: Option<&str>,
+    model_name: &str,
+    args: &Value,
+    instance_id: Option<String>,
+) -> Result<FlowRunSummary, String> {
     let errors = metalcraft_flows::validate(&flow);
     if !errors.is_empty() {
         return Err(format!(
             "invalid flow: {}",
             errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
         ));
+    }
+
+    // Containment, for a flow that has been deliberately bound to an agent. It was
+    // checked at bind time, but the preset can be edited afterwards — a persona
+    // dropped from the roster must not keep running just because a binding predates
+    // the edit. Unbound flows skip this entirely: they are pre-preset flows and
+    // there is no roster to contain them to.
+    if let Some(slug) = crate::flow_bindings::get(&flow.id).preset
+        && let Ok(preset) = crate::agent_preset::AgentPreset::load(
+            &slug,
+            &crate::paths::agent_presets_dir(),
+        )
+    {
+        crate::flow_bindings::check_personas(&flow, &preset)?;
     }
 
     // A v2 flow owns its persona: the entry node's `data.persona` IS the flow's
@@ -1028,7 +1097,8 @@ pub async fn run_flow_v2(
         }
     };
 
-    let exec = FlowExecutor::new(context, flow, cwd, &effective_persona, model_name, args, logger)?;
+    let exec = FlowExecutor::new(context, flow, cwd, &effective_persona, model_name, args, logger)?
+        .with_instance(instance_id);
     exec.run().await
 }
 

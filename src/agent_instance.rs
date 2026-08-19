@@ -1,0 +1,326 @@
+//! Agent instances — a live agent, created from an [`AgentPreset`], holding its own
+//! identity and **many conversations**.
+//!
+//! The distinction that earns its keep is instance ≠ conversation. A gateway session
+//! resets its whole state on idle (`workshop_api.rs`, `DEFAULT_GATEWAY_SESSION_TTL_SECS`);
+//! if an instance were a single conversation, an agent would forget you between text
+//! messages. Instead the idle reset ends a *conversation* and the instance carries on —
+//! which is what makes per-instance memory (see `docs/AGENT_PRESETS_PLAN.md` §3) worth
+//! having at all.
+//!
+//! **Conversations are still stored as chats.** A conversation's messages live where
+//! they always have, in `<data>/chats/<id>.json`; the chat record simply gained an
+//! `instance_id`. That keeps the whole turn path untouched — this module adds grouping
+//! and identity, not a second copy of the transcript.
+//!
+//! Note the name collision: `workshop_api::SessionPreset` is the session's *I/O type*
+//! (workshop chat vs gateway) and has nothing to do with an agent preset.
+//!
+//! [`AgentPreset`]: crate::agent_preset::AgentPreset
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::paths;
+
+/// Where an instance came from. Drives the default lifetime: a workshop chat is
+/// disposable, a channel-bound agent is not.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InstanceOrigin {
+    Workshop,
+    Cli,
+    Gateway { channel: String },
+    Flow { flow_id: String },
+}
+
+impl Default for InstanceOrigin {
+    fn default() -> Self {
+        Self::Workshop
+    }
+}
+
+impl InstanceOrigin {
+    /// Whether an instance from this origin should survive reaping by default.
+    /// Channel- and flow-bound agents are long-lived by construction; a chat is not
+    /// until someone names it.
+    pub fn defaults_persistent(&self) -> bool {
+        matches!(self, Self::Gateway { .. } | Self::Flow { .. })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AgentInstance {
+    pub id: String,
+    /// The agent preset this instance was created from. **Immutable for its life** —
+    /// its memory is seeded from that preset, so swapping it mid-life is incoherent.
+    /// Switching agents means starting a new instance.
+    pub agent_preset: String,
+    /// The agent pack that provided the preset, when it came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_pack: Option<String>,
+    /// Diagnostics only. Personas and skills **follow** the installed pack version
+    /// (see the plan's §5.4); this records what it was born against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_from_version: Option<String>,
+    pub name: String,
+    /// The instance's current persona — starts at the preset's default and moves
+    /// within its roster.
+    pub persona: String,
+    #[serde(default)]
+    pub origin: InstanceOrigin,
+    /// Ephemeral instances recall against the preset but never accrue a durable
+    /// memory, and are reaped after a TTL. Naming one makes it persistent.
+    #[serde(default)]
+    pub persistent: bool,
+    pub created_at: String,
+    #[serde(default)]
+    pub last_active_at: String,
+}
+
+impl AgentInstance {
+    /// Mint an instance of `preset`. The persona is the preset's default; the name is
+    /// the preset's display name until someone renames it.
+    pub fn new(preset: &crate::agent_preset::AgentPreset, origin: InstanceOrigin) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            id: format!("inst_{}", uuid::Uuid::new_v4().simple()),
+            agent_preset: preset.slug.clone(),
+            agent_pack: None,
+            created_from_version: preset.version.clone(),
+            name: preset.name.clone(),
+            persona: preset.default_persona.clone(),
+            persistent: origin.defaults_persistent(),
+            origin,
+            created_at: now.clone(),
+            last_active_at: now,
+        }
+    }
+
+    pub fn dir(&self) -> PathBuf {
+        instance_dir(&self.id)
+    }
+
+    pub fn save(&self) -> Result<(), String> {
+        let dir = self.dir();
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+        let path = dir.join("instance.json");
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("failed to serialize instance: {e}"))?;
+        // tmp + rename, the atomic-write idiom used by key_store and scheduled_tasks:
+        // an interrupted write must never truncate a good file.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json).map_err(|e| format!("failed to write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| format!("failed to finalize {}: {e}", path.display()))
+    }
+
+    pub fn touch(&mut self) {
+        self.last_active_at = chrono::Utc::now().to_rfc3339();
+    }
+}
+
+pub fn instances_root() -> PathBuf {
+    paths::agent_instances_dir()
+}
+
+pub fn instance_dir(id: &str) -> PathBuf {
+    instances_root().join(id)
+}
+
+pub fn load(id: &str) -> Result<AgentInstance, String> {
+    let path = instance_dir(id).join("instance.json");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| format!("agent instance '{id}' not found"))?;
+    serde_json::from_str(&content).map_err(|e| format!("failed to parse {}: {e}", path.display()))
+}
+
+/// Every instance on the pod, newest activity first. A malformed record is skipped
+/// with a warning rather than failing the listing — one bad file must not hide the rest.
+pub fn list() -> Vec<AgentInstance> {
+    let root = instances_root();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<AgentInstance> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let id = e.file_name().to_str()?.to_string();
+            match load(&id) {
+                Ok(i) => Some(i),
+                Err(err) => {
+                    log::warn!("skipping agent instance '{id}': {err}");
+                    None
+                }
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
+    out
+}
+
+/// Delete an instance record. Conversations are *not* touched — a caller that wants
+/// them gone deletes them explicitly, so a mistaken delete never destroys transcripts.
+pub fn delete(id: &str) -> Result<(), String> {
+    let dir = instance_dir(id);
+    if !dir.is_dir() {
+        return Err(format!("agent instance '{id}' not found"));
+    }
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to delete {}: {e}", dir.display()))
+}
+
+/// Find an existing instance for a gateway channel, or mint one.
+///
+/// This is what gives a channel continuity across idle resets: the conversation ends,
+/// the agent does not.
+pub fn for_channel(channel: &str, preset_slug: &str) -> Result<AgentInstance, String> {
+    if let Some(found) = list()
+        .into_iter()
+        .find(|i| i.origin == InstanceOrigin::Gateway { channel: channel.to_string() })
+    {
+        return Ok(found);
+    }
+    let preset =
+        crate::agent_preset::AgentPreset::load(preset_slug, &paths::agent_presets_dir())?;
+    let mut instance =
+        AgentInstance::new(&preset, InstanceOrigin::Gateway { channel: channel.to_string() });
+    instance.name = format!("{} — {channel}", preset.name);
+    instance.save()?;
+    Ok(instance)
+}
+
+/// One-time backfill: give every legacy chat an instance so nothing on an upgraded pod
+/// is orphaned.
+///
+/// Chats predate presets, so they bind to whichever preset declares their persona, or
+/// to the default. They are marked persistent because they already exist and someone
+/// kept them — reaping a user's history would be the wrong default.
+pub fn backfill_from_chats(chats_dir: &Path) -> Result<BackfillReport, String> {
+    let mut report = BackfillReport::default();
+    let Ok(entries) = std::fs::read_dir(chats_dir) else {
+        return Ok(report);
+    };
+
+    let presets_dir = paths::agent_presets_dir();
+    let summaries = crate::agent_preset::AgentPreset::list_summaries(&presets_dir);
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&content) else {
+            report.skipped += 1;
+            continue;
+        };
+        if doc.get("instance_id").and_then(|v| v.as_str()).is_some() {
+            report.already_bound += 1;
+            continue;
+        }
+
+        let persona = doc.get("persona_slug").and_then(|v| v.as_str()).unwrap_or_default();
+        // Prefer a preset that actually declares this persona; fall back to the default.
+        let preset_slug = summaries
+            .iter()
+            .find(|s| s.default_persona == persona)
+            .map(|s| s.slug.clone())
+            .unwrap_or_else(|| crate::agent_preset::DEFAULT_PRESET.to_string());
+
+        let preset = match crate::agent_preset::AgentPreset::load(&preset_slug, &presets_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("backfill: {e}");
+                report.skipped += 1;
+                continue;
+            }
+        };
+
+        let mut instance = AgentInstance::new(&preset, InstanceOrigin::Workshop);
+        if !persona.is_empty() {
+            instance.persona = persona.to_string();
+        }
+        if let Some(created) = doc.get("created_at").and_then(|v| v.as_str()) {
+            instance.created_at = created.to_string();
+            instance.last_active_at = created.to_string();
+        }
+        // Existing history is not disposable.
+        instance.persistent = true;
+        instance.save()?;
+
+        doc["instance_id"] = serde_json::Value::String(instance.id.clone());
+        let json = serde_json::to_string_pretty(&doc)
+            .map_err(|e| format!("failed to serialize chat: {e}"))?;
+        std::fs::write(&path, json)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+        report.migrated += 1;
+    }
+    Ok(report)
+}
+
+#[derive(Debug, Default, Clone, Serialize, utoipa::ToSchema)]
+pub struct BackfillReport {
+    pub migrated: usize,
+    pub already_bound: usize,
+    pub skipped: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_preset::AgentPreset;
+
+    fn preset() -> AgentPreset {
+        serde_json::from_str(
+            r#"{"slug":"amy-kitchen","name":"Amy's Kitchen Agent","default_persona":"amy",
+                "version":"1.4.0",
+                "personas":[{"slug":"amy","role":"default"},{"slug":"amy-shopper"}]}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_new_instance_takes_the_presets_identity() {
+        let i = AgentInstance::new(&preset(), InstanceOrigin::Workshop);
+        assert_eq!(i.agent_preset, "amy-kitchen");
+        assert_eq!(i.persona, "amy", "starts as the preset's default persona");
+        assert_eq!(i.name, "Amy's Kitchen Agent");
+        assert_eq!(i.created_from_version.as_deref(), Some("1.4.0"));
+        assert!(i.id.starts_with("inst_"));
+    }
+
+    #[test]
+    fn chat_instances_are_disposable_but_channel_and_flow_instances_are_not() {
+        assert!(!AgentInstance::new(&preset(), InstanceOrigin::Workshop).persistent);
+        assert!(!AgentInstance::new(&preset(), InstanceOrigin::Cli).persistent);
+        assert!(
+            AgentInstance::new(&preset(), InstanceOrigin::Gateway { channel: "sms".into() })
+                .persistent,
+            "a channel-bound agent must survive reaping — it is the continuity"
+        );
+        assert!(
+            AgentInstance::new(&preset(), InstanceOrigin::Flow { flow_id: "brief".into() })
+                .persistent
+        );
+    }
+
+    #[test]
+    fn origin_round_trips_through_json() {
+        let o = InstanceOrigin::Gateway { channel: "sms-amy".into() };
+        let json = serde_json::to_string(&o).unwrap();
+        assert_eq!(serde_json::from_str::<InstanceOrigin>(&json).unwrap(), o);
+        // An old record with no origin still loads.
+        let legacy: InstanceOrigin =
+            serde_json::from_str(r#"{"kind":"workshop"}"#).unwrap();
+        assert_eq!(legacy, InstanceOrigin::Workshop);
+    }
+
+    #[test]
+    fn instances_are_distinct_per_mint() {
+        let a = AgentInstance::new(&preset(), InstanceOrigin::Workshop);
+        let b = AgentInstance::new(&preset(), InstanceOrigin::Workshop);
+        assert_ne!(a.id, b.id, "every chat gets its own agent");
+    }
+}

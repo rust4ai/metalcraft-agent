@@ -1,0 +1,28 @@
+{
+  "name": "mcode_expose",
+  "description": "Temporarily flip the workspace's sprite URL public so you can smoke-test an HTTP server running inside it, or revoke it. Set public=true to expose (returns the public url), false to revoke. Requires write scope. Revoke when done.",
+  "method": "PUT",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}/expose",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      },
+      "public": {
+        "type": "boolean",
+        "description": "true to expose the sprite URL, false to revoke (default true)."
+      }
+    },
+    "required": [
+      "id"
+    ]
+  },
+  "body_mapping": "params"
+}

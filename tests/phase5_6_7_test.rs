@@ -84,6 +84,8 @@ fn sub_agent_registered_with_config() {
         reply_sink: None,
         session_binding: None,
         reschedule_depth: 0,
+        preset_personas: None,
+        instance_id: None,
     };
 
     let tools: Vec<String> = vec!["read_file", "sub_agent"]

@@ -1,0 +1,33 @@
+{
+  "name": "mcode_create_workspace",
+  "description": "Provision a new workspace (an ephemeral sprites.dev sprite). Returns immediately with status `queued`; the worker turns it `ready` within ~1-2 min (poll mcode_get_workspace). Optionally set repo_full_name (owner/repo) + branch to remember what you'll clone, and installation_id to pin the GitHub App installation used for git auth. Cloning is a separate explicit step (mcode_clone). Requires the write scope.",
+  "method": "POST",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Optional friendly name (defaults to the repo name)."
+      },
+      "repo_full_name": {
+        "type": "string",
+        "description": "Optional owner/repo this workspace targets."
+      },
+      "branch": {
+        "type": "string",
+        "description": "Optional default branch."
+      },
+      "installation_id": {
+        "type": "integer",
+        "description": "Optional GitHub App installation id for git auth."
+      }
+    }
+  },
+  "body_mapping": "params"
+}

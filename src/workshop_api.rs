@@ -11,7 +11,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Response,
     },
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
     Json,
 };
 use futures_util::stream::Stream;
@@ -52,6 +52,17 @@ fn chat_store() -> ChatStore {
     static STORE: std::sync::OnceLock<ChatStore> = std::sync::OnceLock::new();
     STORE
         .get_or_init(|| {
+            // Give every pre-instance chat an agent before anything reads them, so
+            // nothing on an upgraded pod is orphaned. Idempotent and best-effort:
+            // a failure here must not stop the API from serving.
+            match crate::agent_instance::backfill_from_chats(&paths::chats_dir()) {
+                Ok(r) if r.migrated > 0 => log::info!(
+                    "Bound {} legacy chat(s) to new agent instances ({} already bound, {} skipped)",
+                    r.migrated, r.already_bound, r.skipped
+                ),
+                Ok(_) => {}
+                Err(e) => log::warn!("agent-instance backfill failed: {e}"),
+            }
             let persisted = load_persisted_chats();
             if !persisted.is_empty() {
                 log::info!("Loaded {} persisted chat(s) from disk", persisted.len());
@@ -85,6 +96,9 @@ async fn chat_event_sender(chat_id: &str) -> tokio::sync::broadcast::Sender<Chat
 
 struct ChatSession {
     id: String,
+    /// The agent instance this conversation belongs to. `None` only for records
+    /// written before instances existed (backfilled at startup).
+    instance_id: Option<String>,
     persona_slug: String,
     model_name: String,
     cwd: String,
@@ -149,6 +163,13 @@ struct ProjectSnapshot {
     sessions: Vec<DiagnosticsSessionSummary>,
     api_tools: Vec<ApiToolSummary>,
     keys: Vec<KeySummary>,
+    /// Agents this pod can be. Both Workshop clients paint their agent picker from
+    /// the snapshot, so leaving these out costs an extra round-trip on every load.
+    agent_presets: Vec<crate::agent_preset::PresetSummary>,
+    /// Agents that actually exist. Ephemeral ones are excluded — an unfiltered list
+    /// is one row per chat ever started, which is noise, not information.
+    agent_instances: Vec<crate::agent_instance::AgentInstance>,
+    default_agent_preset: String,
     layout: ProjectLayout,
 }
 
@@ -160,6 +181,8 @@ struct ProjectLayout {
     flows_dir: String,
     sessions_dir: String,
     api_tools_dir: String,
+    agent_presets_dir: String,
+    agent_instances_dir: String,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -272,10 +295,17 @@ async fn auth_middleware(
     ),
     paths(
         agent_info, get_snapshot,
+        list_agent_packs, get_agent_pack, post_install_agent_pack, delete_agent_pack,
+        post_export_agent_pack,
+        list_agent_presets, get_agent_preset, put_agent_preset, delete_agent_preset,
+        list_agent_instances, get_agent_instance, post_create_agent_instance,
+        patch_agent_instance, delete_agent_instance,
+        get_agent_instance_memory, post_instance_conversation,
         get_persona, put_persona, delete_persona,
         get_skill, put_skill, delete_skill,
         get_flow, put_flow, delete_flow, post_run_flow, post_install_flow,
         get_flow_schedules, put_flow_schedules, post_flow_schedule, delete_flow_schedule,
+        get_flow_binding, put_flow_binding, post_arm_schedule, delete_arm_schedule,
         get_flow_schedules_preview,
         post_install_flow_dependencies,
         list_flow_runs, get_flow_run, post_resume_flow_run,
@@ -307,6 +337,18 @@ async fn auth_middleware(
         MgRegisterRequest, MgConnectRequest,
         crate::channels::Channel, CreateChannelRequest, UpdateChannelRequest,
         crate::persona::Persona, crate::persona::PersonaSummary,
+        crate::agent_preset::AgentPreset, crate::agent_preset::PresetSummary,
+        crate::agent_preset::PresetPersona, crate::agent_preset::PersonaRole,
+        crate::agent_preset::ModelFloor, crate::agent_preset::MemoriesRef,
+        crate::agent_instance::AgentInstance, crate::agent_instance::InstanceOrigin,
+        crate::agent_packs::InstalledAgentPack, crate::agent_packs::InstallReport,
+        crate::agent_packs::UninstallReport, crate::agent_packs::AgentPackManifest,
+        crate::agent_packs::ConsentSummary, crate::agent_packs::manifest::Provides,
+        crate::agent_packs::manifest::PackRef, crate::agent_packs::manifest::Author,
+        crate::agent_packs::manifest::Parent, crate::agent_packs::manifest::EnvRequirement,
+        ExportAgentPackRequest,
+        crate::memory::InstanceMemoryView, crate::memory::MemorySample,
+        InstanceDetail, CreateInstanceRequest, PatchInstanceRequest, NewConversationRequest,
         crate::skill::Skill, crate::skill::SkillSummary,
         crate::gateway_activity::GatewayEvent,
         crate::metalcraft_gateway::GatewayStatus,
@@ -326,6 +368,9 @@ async fn auth_middleware(
         (name = "chats", description = "Interactive chat sessions"),
         (name = "scheduled-tasks", description = "Scheduled follow-ups"),
         (name = "integration-packs", description = "Installable integration packs"),
+        (name = "agent-packs", description = "Installable agent packs — an agent plus every persona, skill and integration pack it needs"),
+        (name = "agent-presets", description = "Agents this pod can be — a default persona, its callable roster, and the skills and packs they need"),
+        (name = "agent-instances", description = "Agents that exist — each with its own memory and conversations"),
         (name = "gateway", description = "Messaging gateway channels + Metalcraft connect"),
     ),
 )]
@@ -391,6 +436,25 @@ pub fn build_router(api_key: String) -> Router {
     Router::new()
         .route("/api/v1/info", get(agent_info))
         .route("/api/v1/snapshot", get(get_snapshot))
+        .route("/api/v1/agent-packs", get(list_agent_packs))
+        .route("/api/v1/agent-packs/install", post(post_install_agent_pack))
+        .route("/api/v1/agent-packs/export", post(post_export_agent_pack))
+        .route("/api/v1/agent-packs/{id}", get(get_agent_pack))
+        .route("/api/v1/agent-packs/{id}", delete(delete_agent_pack))
+        .route("/api/v1/agents/instances", get(list_agent_instances))
+        .route("/api/v1/agents/instances", post(post_create_agent_instance))
+        .route("/api/v1/agents/instances/{id}", get(get_agent_instance))
+        .route("/api/v1/agents/instances/{id}", patch(patch_agent_instance))
+        .route("/api/v1/agents/instances/{id}/memory", get(get_agent_instance_memory))
+        .route(
+            "/api/v1/agents/instances/{id}/conversations",
+            post(post_instance_conversation),
+        )
+        .route("/api/v1/agents/instances/{id}", delete(delete_agent_instance))
+        .route("/api/v1/agent-presets", get(list_agent_presets))
+        .route("/api/v1/agent-presets/{slug}", get(get_agent_preset))
+        .route("/api/v1/agent-presets/{slug}", put(put_agent_preset))
+        .route("/api/v1/agent-presets/{slug}", delete(delete_agent_preset))
         .route("/api/v1/personas/{slug}", get(get_persona))
         .route("/api/v1/personas/{slug}", put(put_persona))
         .route("/api/v1/personas/{slug}", delete(delete_persona))
@@ -411,6 +475,10 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/flows/{id}/schedules", post(post_flow_schedule))
         .route("/api/v1/flows/{id}/schedules/preview", get(get_flow_schedules_preview))
         .route("/api/v1/flows/{id}/schedules/{sid}", delete(delete_flow_schedule))
+        .route("/api/v1/flows/{id}/binding", get(get_flow_binding))
+        .route("/api/v1/flows/{id}/binding", put(put_flow_binding))
+        .route("/api/v1/flows/{id}/schedules/{sid}/arm", post(post_arm_schedule))
+        .route("/api/v1/flows/{id}/schedules/{sid}/arm", delete(delete_arm_schedule))
         .route("/api/v1/flows/{id}/install-dependencies", post(post_install_flow_dependencies))
         .route("/api/v1/flow-runs", get(list_flow_runs))
         .route("/api/v1/flow-runs/{run_id}", get(get_flow_run))
@@ -619,6 +687,10 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
     let sessions = list_diagnostics_sessions();
     let api_tools = list_api_tool_summaries();
     let keys = list_key_summaries();
+    let agent_presets =
+        crate::agent_preset::AgentPreset::list_summaries(&paths::agent_presets_dir());
+    let agent_instances: Vec<_> =
+        crate::agent_instance::list().into_iter().filter(|i| i.persistent).collect();
 
     Json(ProjectSnapshot {
         personas,
@@ -627,6 +699,9 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
         sessions,
         api_tools,
         keys,
+        agent_presets,
+        agent_instances,
+        default_agent_preset: crate::agent_preset::DEFAULT_PRESET.to_string(),
         layout: ProjectLayout {
             data_dir: paths::data_dir().display().to_string(),
             personas_dir: paths::personas_dir().display().to_string(),
@@ -634,6 +709,8 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
             flows_dir: paths::flows_dir().display().to_string(),
             sessions_dir: paths::sessions_dir().display().to_string(),
             api_tools_dir: paths::api_tools_dir().display().to_string(),
+            agent_presets_dir: paths::agent_presets_dir().display().to_string(),
+            agent_instances_dir: paths::agent_instances_dir().display().to_string(),
         },
     })
 }
@@ -668,6 +745,527 @@ fn list_persona_summaries() -> Vec<PersonaSummary> {
         });
     }
     out
+}
+
+// ── Agent packs ──────────────────────────────────────────────────────────────
+// The unit of installation. An agent pack provides one agent preset plus every
+// persona, skill and integration pack it needs.
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent-packs",
+    tag = "agent-packs",
+    responses((status = 200, description = "Installed agent packs")),
+)]
+async fn list_agent_packs() -> Response {
+    Json(serde_json::json!({ "agent_packs": crate::agent_packs::list() })).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent-packs/{id}",
+    tag = "agent-packs",
+    params(("id" = String, Path, description = "Agent pack id")),
+    responses((status = 200, description = "The pack's manifest"), (status = 404, description = "Not installed")),
+)]
+async fn get_agent_pack(Path(id): Path<String>) -> Response {
+    match crate::agent_packs::find(&id) {
+        Some(p) => Json(p).into_response(),
+        None => err_json(StatusCode::NOT_FOUND, format!("agent pack '{id}' is not installed")),
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct InstallAgentPackQuery {
+    /// Install from a `.agentpack` already on the pod's disk. Omit to upload the
+    /// archive as the request body instead.
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/agent-packs/install",
+    tag = "agent-packs",
+    params(("path" = Option<String>, Query, description = "Local .agentpack path; omit to upload the archive as the body")),
+    request_body(content = Vec<u8>, description = "The .agentpack archive", content_type = "application/octet-stream"),
+    responses((status = 200, description = "Install report"), (status = 400, description = "Rejected")),
+)]
+async fn post_install_agent_pack(
+    Query(q): Query<InstallAgentPackQuery>,
+    body: axum::body::Bytes,
+) -> Response {
+    let (bytes, source) = match &q.path {
+        Some(path) => match std::fs::read(path) {
+            Ok(b) => (b, path.clone()),
+            Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("reading {path}: {e}")),
+        },
+        None if !body.is_empty() => (body.to_vec(), "upload".to_string()),
+        None => {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                "provide ?path=<file> or upload the .agentpack as the request body".to_string(),
+            );
+        }
+    };
+    match crate::agent_packs::install(&bytes, &source) {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct UninstallQuery {
+    #[serde(default)]
+    force: Option<bool>,
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/agent-packs/{id}",
+    tag = "agent-packs",
+    params(("id" = String, Path, description = "Agent pack id"),
+           ("force" = Option<bool>, Query, description = "Orphan any saved agents that use it")),
+    responses((status = 200, description = "Uninstall report"), (status = 409, description = "In use")),
+)]
+async fn delete_agent_pack(Path(id): Path<String>, Query(q): Query<UninstallQuery>) -> Response {
+    match crate::agent_packs::uninstall(&id, q.force.unwrap_or(false)) {
+        Ok(report) => Json(report).into_response(),
+        // "In use" is a conflict, not a 404 — the caller can retry with force.
+        Err(e) if e.contains("in use by") => err_json(StatusCode::CONFLICT, e),
+        Err(e) => err_json(StatusCode::NOT_FOUND, e),
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct ExportAgentPackRequest {
+    preset: String,
+    #[serde(default)]
+    version: Option<String>,
+    /// Write the archive here. Omit to receive the bytes in the response.
+    #[serde(default)]
+    out: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/agent-packs/export",
+    tag = "agent-packs",
+    request_body = ExportAgentPackRequest,
+    responses((status = 200, description = "The .agentpack bytes, or a report if `out` was given")),
+)]
+async fn post_export_agent_pack(Json(req): Json<ExportAgentPackRequest>) -> Response {
+    let version = req.version.as_deref().unwrap_or("0.1.0");
+    let bytes = match crate::agent_packs::export(&req.preset, version) {
+        Ok(b) => b,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
+    };
+    match req.out {
+        Some(out) => match std::fs::write(&out, &bytes) {
+            Ok(()) => Json(serde_json::json!({ "path": out, "bytes": bytes.len() })).into_response(),
+            Err(e) => err_json(StatusCode::BAD_REQUEST, format!("writing {out}: {e}")),
+        },
+        None => (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"agent.agentpack\"",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+    }
+}
+
+// ── Agent instances ──────────────────────────────────────────────────────────
+// An instance is a live agent: a preset, a name, and (from AP4) its own memory.
+// Conversations are the chats that belong to it.
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct InstanceDetail {
+    #[serde(flatten)]
+    instance: crate::agent_instance::AgentInstance,
+    conversations: Vec<ChatSummary>,
+    /// What this agent is scheduled to do — the flow schedules armed to it. A pod
+    /// could not previously answer that question about a background agent.
+    scheduled: Vec<ScheduledFlowRef>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct ScheduledFlowRef {
+    flow_id: String,
+    /// Absent when the flow file is gone but the binding is not — worth surfacing
+    /// rather than hiding, since it means a stale binding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flow_name: Option<String>,
+    schedule_ids: Vec<String>,
+}
+
+fn scheduled_for(instance_id: &str) -> Vec<ScheduledFlowRef> {
+    crate::flow_bindings::flows_for_instance(instance_id)
+        .into_iter()
+        .map(|(flow_id, mut schedule_ids)| {
+            schedule_ids.sort();
+            ScheduledFlowRef {
+                flow_name: metalcraft_flows::load_flow(&paths::flows_dir(), &flow_id)
+                    .map(|f| f.name),
+                flow_id,
+                schedule_ids,
+            }
+        })
+        .collect()
+}
+
+fn conversations_of(instance_id: &str) -> Vec<ChatSummary> {
+    let mut out: Vec<ChatSummary> = read_persisted_chats()
+        .into_iter()
+        .filter(|c| c.instance_id.as_deref() == Some(instance_id))
+        .map(|c| ChatSummary {
+            id: c.id,
+            persona_slug: c.persona_slug,
+            model_name: c.model_name,
+            created_at: c.created_at,
+            turn_count: c.messages.len(),
+        })
+        .collect();
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    out
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agents/instances",
+    tag = "agent-instances",
+    responses((status = 200, description = "Live agents on this pod")),
+)]
+async fn list_agent_instances() -> Response {
+    let instances = crate::agent_instance::list();
+    let with_counts: Vec<serde_json::Value> = instances
+        .into_iter()
+        .map(|i| {
+            let count = conversations_of(&i.id).len();
+            let mut v = serde_json::to_value(&i).unwrap_or_default();
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("conversation_count".into(), serde_json::json!(count));
+            }
+            v
+        })
+        .collect();
+    Json(serde_json::json!({ "instances": with_counts })).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agents/instances/{id}",
+    tag = "agent-instances",
+    params(("id" = String, Path, description = "Instance id")),
+    responses((status = 200, body = InstanceDetail), (status = 404, description = "Not found")),
+)]
+async fn get_agent_instance(Path(id): Path<String>) -> Response {
+    match crate::agent_instance::load(&id) {
+        Ok(instance) => {
+            let conversations = conversations_of(&instance.id);
+            let scheduled = scheduled_for(&instance.id);
+            Json(InstanceDetail { instance, conversations, scheduled }).into_response()
+        }
+        Err(e) => err_json(StatusCode::NOT_FOUND, e),
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct CreateInstanceRequest {
+    #[serde(default)]
+    agent_preset: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/instances",
+    tag = "agent-instances",
+    request_body = CreateInstanceRequest,
+    responses((status = 200, description = "Created")),
+)]
+async fn post_create_agent_instance(Json(req): Json<CreateInstanceRequest>) -> Response {
+    use crate::agent_instance::{AgentInstance, InstanceOrigin};
+    let slug = req.agent_preset.as_deref().unwrap_or(crate::agent_preset::DEFAULT_PRESET);
+    let preset = match crate::agent_preset::AgentPreset::load(slug, &paths::agent_presets_dir()) {
+        Ok(p) => p,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
+    };
+    let mut instance = AgentInstance::new(&preset, InstanceOrigin::Workshop);
+    // Creating an agent explicitly (rather than incidentally, by starting a chat)
+    // means keeping it.
+    instance.persistent = true;
+    if let Some(name) = req.name {
+        instance.name = name;
+    }
+    match instance.save() {
+        Ok(()) => Json(instance).into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/agents/instances/{id}",
+    tag = "agent-instances",
+    params(("id" = String, Path, description = "Instance id")),
+    responses((status = 200, description = "Deleted"), (status = 404, description = "Not found")),
+)]
+async fn delete_agent_instance(Path(id): Path<String>) -> Response {
+    // Deleting an agent a cron still fires into would leave the schedule pointing at
+    // nothing — it would run, but memoryless, and nobody would be told why. Refuse
+    // and name the flows so the fix is obvious.
+    let scheduled = scheduled_for(&id);
+    if !scheduled.is_empty() {
+        let what: Vec<String> = scheduled
+            .iter()
+            .map(|f| format!("{} ({})", f.flow_name.as_deref().unwrap_or(&f.flow_id), f.schedule_ids.join(", ")))
+            .collect();
+        return err_json(
+            StatusCode::CONFLICT,
+            format!(
+                "agent '{id}' still runs scheduled flows: {}. Disarm those schedules first.",
+                what.join("; ")
+            ),
+        );
+    }
+    // Conversations survive deliberately: losing an agent should not lose transcripts.
+    let orphaned = conversations_of(&id).len();
+    match crate::agent_instance::delete(&id) {
+        Ok(()) => Json(serde_json::json!({ "deleted": id, "conversations_kept": orphaned }))
+            .into_response(),
+        Err(e) => err_json(StatusCode::NOT_FOUND, e),
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct PatchInstanceRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    persistent: Option<bool>,
+    /// Move within the preset's roster. Rejected if the persona isn't in it.
+    #[serde(default)]
+    persona: Option<String>,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/agents/instances/{id}",
+    tag = "agent-instances",
+    params(("id" = String, Path, description = "Instance id")),
+    request_body = PatchInstanceRequest,
+    responses((status = 200, description = "Updated"), (status = 404, description = "Not found")),
+)]
+async fn patch_agent_instance(
+    Path(id): Path<String>,
+    Json(req): Json<PatchInstanceRequest>,
+) -> Response {
+    let mut instance = match crate::agent_instance::load(&id) {
+        Ok(i) => i,
+        Err(e) => return err_json(StatusCode::NOT_FOUND, e),
+    };
+    if let Some(name) = req.name {
+        // Naming an agent is what keeps it — the promotion the UI needs one click for.
+        instance.name = name;
+        instance.persistent = true;
+    }
+    if let Some(p) = req.persistent {
+        instance.persistent = p;
+    }
+    if let Some(persona) = req.persona {
+        match crate::agent_preset::AgentPreset::load(
+            &instance.agent_preset,
+            &paths::agent_presets_dir(),
+        ) {
+            Ok(preset) if !preset.allows_persona(&persona) => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "persona '{persona}' is not in agent '{}' (roster: {})",
+                        preset.slug,
+                        preset.callable_personas().join(", ")
+                    ),
+                );
+            }
+            // A preset that no longer resolves must not lock an agent out of its own
+            // persona switch; the orphan case is reported elsewhere.
+            _ => {}
+        }
+        instance.persona = persona;
+    }
+    instance.touch();
+    match instance.save() {
+        Ok(()) => Json(instance).into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct MemoryViewQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agents/instances/{id}/memory",
+    tag = "agent-instances",
+    params(("id" = String, Path, description = "Instance id")),
+    responses((status = 200, description = "What this agent knows, shipped vs learned")),
+)]
+async fn get_agent_instance_memory(
+    Path(id): Path<String>,
+    Query(q): Query<MemoryViewQuery>,
+) -> Response {
+    if crate::agent_instance::load(&id).is_err() {
+        return err_json(StatusCode::NOT_FOUND, format!("agent instance '{id}' not found"));
+    }
+    let view = crate::memory::instance_view(&id, q.limit.unwrap_or(50).clamp(1, 500)).await;
+    Json(view).into_response()
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct NewConversationRequest {
+    #[serde(default)]
+    model_name: Option<String>,
+    /// Start this conversation as a specific persona from the agent's roster.
+    #[serde(default)]
+    persona_slug: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/instances/{id}/conversations",
+    tag = "agent-instances",
+    params(("id" = String, Path, description = "Instance id")),
+    request_body = NewConversationRequest,
+    responses((status = 200, body = ChatSummary)),
+)]
+async fn post_instance_conversation(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+    Json(req): Json<NewConversationRequest>,
+) -> Response {
+    // Continuing an existing agent is the same operation as starting a chat; this
+    // route just makes it discoverable from the instance you are looking at.
+    post_create_chat(
+        State(state),
+        Json(CreateChatRequest {
+            persona_slug: req.persona_slug,
+            model_name: req.model_name,
+            agent_preset: None,
+            instance_id: Some(id),
+            name: None,
+        }),
+    )
+    .await
+}
+
+// ── Agent presets ────────────────────────────────────────────────────────────
+// A preset is what a user picks when starting a chat; the persona underneath is an
+// implementation detail of it. Pack-provided presets are read-only, exactly like
+// pack-provided personas and skills.
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent-presets",
+    responses((status = 200, description = "Installed agent presets")),
+    tag = "agent-presets"
+)]
+async fn list_agent_presets() -> Response {
+    let summaries = crate::agent_preset::AgentPreset::list_summaries(&paths::agent_presets_dir());
+    Json(serde_json::json!({
+        "presets": summaries,
+        "default": crate::agent_preset::DEFAULT_PRESET,
+    }))
+    .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent-presets/{slug}",
+    params(("slug" = String, Path, description = "Preset slug")),
+    responses((status = 200, description = "The preset, with its roster resolved"),
+              (status = 404, description = "Not found")),
+    tag = "agent-presets"
+)]
+async fn get_agent_preset(Path(slug): Path<String>) -> Response {
+    let preset = match crate::agent_preset::AgentPreset::load(&slug, &paths::agent_presets_dir()) {
+        Ok(p) => p,
+        Err(e) => return err_json(StatusCode::NOT_FOUND, e),
+    };
+    // Resolve the roster so the caller can render it without N more round-trips,
+    // and so a preset naming a persona that isn't installed is visible as such.
+    let personas: Vec<serde_json::Value> = preset
+        .callable_personas()
+        .iter()
+        .map(|slug| match Persona::load(slug, &paths::personas_dir()) {
+            Ok(p) => serde_json::json!({
+                "slug": slug, "name": p.name, "description": p.description,
+                "tools": p.resolved_tool_names(), "skills": p.skills, "installed": true,
+            }),
+            Err(e) => serde_json::json!({ "slug": slug, "installed": false, "error": e }),
+        })
+        .collect();
+    Json(serde_json::json!({ "preset": preset, "personas": personas })).into_response()
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/agent-presets/{slug}",
+    params(("slug" = String, Path, description = "Preset slug")),
+    responses((status = 200, description = "Saved"), (status = 409, description = "Owned by a pack")),
+    tag = "agent-presets"
+)]
+async fn put_agent_preset(
+    Path(slug): Path<String>,
+    Json(mut preset): Json<crate::agent_preset::AgentPreset>,
+) -> Response {
+    let dir = paths::agent_presets_dir();
+    // A pack-owned slug is read-only here; pick a different one rather than
+    // shadowing a read-only entry through the API.
+    if !dir.join(format!("{slug}.json")).exists() {
+        if let Ok(existing) = crate::agent_preset::AgentPreset::load(&slug, &dir) {
+            let _ = existing;
+            if let Some(summary) = crate::agent_preset::AgentPreset::list_summaries(&dir)
+                .into_iter()
+                .find(|s| s.slug == slug)
+            {
+                if let Some(pack_id) = summary.pack_id {
+                    return err_json(
+                        StatusCode::CONFLICT,
+                        format!("agent preset '{slug}' is provided by the '{pack_id}' pack and is read-only. Choose a different slug."),
+                    );
+                }
+            }
+        }
+    }
+    preset.slug = slug.clone();
+    match preset.save(&dir) {
+        Ok(()) => Json(serde_json::json!({ "saved": slug })).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/agent-presets/{slug}",
+    params(("slug" = String, Path, description = "Preset slug")),
+    responses((status = 200, description = "Deleted"), (status = 404, description = "Not user-owned")),
+    tag = "agent-presets"
+)]
+async fn delete_agent_preset(Path(slug): Path<String>) -> Response {
+    match crate::agent_preset::AgentPreset::delete(&slug, &paths::agent_presets_dir()) {
+        Ok(()) => Json(serde_json::json!({ "deleted": slug })).into_response(),
+        Err(e) => err_json(StatusCode::NOT_FOUND, e),
+    }
 }
 
 #[utoipa::path(
@@ -861,6 +1459,13 @@ async fn get_flow(Path(id): Path<String>) -> Response {
 )]
 async fn put_flow(Path(id): Path<String>, Json(mut flow): Json<metalcraft_flows::SavedFlow>) -> Response {
     flow.id = id;
+    // The schedules endpoints validate cron expressions; this one did not, so a
+    // client saving a whole flow could store a schedule that parses as JSON, saves
+    // fine, and then never fires — the daemon just logs a warning nobody reads.
+    // Same check, same 400.
+    if let Err(e) = crate::flows::parse_schedules(&flow) {
+        return err_json(StatusCode::BAD_REQUEST, e);
+    }
     match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
         Ok(()) => Json(flow).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e.to_string()),
@@ -877,6 +1482,9 @@ async fn put_flow(Path(id): Path<String>, Json(mut flow): Json<metalcraft_flows:
 async fn delete_flow(Path(id): Path<String>) -> Response {
     if metalcraft_flows::delete_flow(&paths::flows_dir(), &id) {
         let _ = crate::lockfile::remove_flow(&id);
+        // The binding outlives the flow file otherwise, and a later flow reusing the
+        // id would silently inherit somebody else's agent.
+        let _ = crate::flow_bindings::forget(&id);
         StatusCode::NO_CONTENT.into_response()
     } else {
         err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"))
@@ -919,7 +1527,20 @@ fn save_flow_schedules(
         return err_json(StatusCode::BAD_REQUEST, e);
     }
     match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
-        Ok(()) => Json(flow.schedules).into_response(),
+        Ok(()) => {
+            // Any schedule that just disappeared can no longer be armed. Reconciling
+            // here rather than in each caller covers every edit shape — single
+            // delete, bulk replace, add — with one rule: an armed binding outlives
+            // its schedule only if the schedule is still there. The agent itself is
+            // kept; see `flow_bindings::disarm`.
+            let live: Vec<&str> = flow.schedules.iter().map(|s| s.id.as_str()).collect();
+            for sid in crate::flow_bindings::get(id).instances.keys() {
+                if !live.contains(&sid.as_str()) {
+                    let _ = crate::flow_bindings::disarm(id, sid);
+                }
+            }
+            Json(flow.schedules).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
@@ -1024,7 +1645,175 @@ async fn delete_flow_schedule(Path((id, sid)): Path<(String, String)>) -> Respon
     if schedules.len() == before {
         return err_json(StatusCode::NOT_FOUND, format!("schedule '{sid}' not found"));
     }
+    // `save_flow_schedules` disarms whatever no longer exists, once the save lands.
     save_flow_schedules(&id, schedules)
+}
+
+// ---- Flow ↔ agent binding -------------------------------------------------
+//
+// Which agent a flow runs as, and which agent instance each schedule fires into.
+// See `docs/FLOWS_AND_AGENT_PRESETS_PLAN.md`.
+
+/// The binding for one flow, resolved for display.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct FlowBindingView {
+    flow_id: String,
+    /// The preset the flow runs as. Always populated — an unbound flow resolves to
+    /// the default agent, which is what it effectively already was.
+    preset: String,
+    /// True when the preset was chosen deliberately rather than defaulted.
+    bound: bool,
+    /// Personas the flow names, and whether the preset can reach each one.
+    personas: Vec<FlowPersonaCheck>,
+    /// `schedule id -> agent instance`, for schedules that have been armed.
+    armed: Vec<ArmedSchedule>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct FlowPersonaCheck {
+    slug: String,
+    allowed: bool,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct ArmedSchedule {
+    schedule_id: String,
+    instance_id: String,
+    /// Absent if the instance was deleted out from under the binding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instance_name: Option<String>,
+}
+
+fn binding_view(flow: &metalcraft_flows::SavedFlow) -> FlowBindingView {
+    let raw = crate::flow_bindings::get(&flow.id);
+    let preset_slug = crate::flow_bindings::preset_for(&flow.id);
+    let preset =
+        crate::agent_preset::AgentPreset::load(&preset_slug, &paths::agent_presets_dir()).ok();
+    FlowBindingView {
+        flow_id: flow.id.clone(),
+        preset: preset_slug,
+        bound: raw.preset.is_some(),
+        personas: crate::flow_bindings::personas_named(flow)
+            .into_iter()
+            .map(|slug| FlowPersonaCheck {
+                allowed: preset.as_ref().is_none_or(|p| p.allows_persona(&slug)),
+                slug,
+            })
+            .collect(),
+        armed: {
+            let mut v: Vec<ArmedSchedule> = raw
+                .instances
+                .into_iter()
+                .map(|(schedule_id, instance_id)| ArmedSchedule {
+                    instance_name: crate::agent_instance::load(&instance_id).ok().map(|i| i.name),
+                    schedule_id,
+                    instance_id,
+                })
+                .collect();
+            v.sort_by(|a, b| a.schedule_id.cmp(&b.schedule_id));
+            v
+        },
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/flows/{id}/binding",
+    tag = "flows",
+    params(("id" = String, Path, description = "Flow id")),
+    responses((status = 200, body = FlowBindingView), (status = 404, body = ErrorResponse)),
+)]
+async fn get_flow_binding(Path(id): Path<String>) -> Response {
+    match metalcraft_flows::load_flow(&paths::flows_dir(), &id) {
+        Some(flow) => Json(binding_view(&flow)).into_response(),
+        None => err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found")),
+    }
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct BindFlowRequest {
+    /// The preset slug. `null` clears the binding back to the default agent.
+    #[serde(default)]
+    preset: Option<String>,
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/flows/{id}/binding",
+    tag = "flows",
+    params(("id" = String, Path, description = "Flow id")),
+    request_body = BindFlowRequest,
+    responses(
+        (status = 200, body = FlowBindingView),
+        (status = 400, description = "Flow names personas outside the roster", body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+    ),
+)]
+async fn put_flow_binding(Path(id): Path<String>, Json(req): Json<BindFlowRequest>) -> Response {
+    let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
+    };
+    let result = match req.preset.as_deref() {
+        Some(slug) => crate::flow_bindings::bind_preset(&flow, slug),
+        None => crate::flow_bindings::unbind(&id),
+    };
+    match result {
+        Ok(()) => Json(binding_view(&flow)).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct ArmScheduleRequest {
+    /// Attach to an existing agent instead of minting one — e.g. run the briefer as
+    /// the same agent you chat with.
+    #[serde(default)]
+    instance_id: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/flows/{id}/schedules/{sid}/arm",
+    tag = "flows",
+    params(
+        ("id" = String, Path, description = "Flow id"),
+        ("sid" = String, Path, description = "Schedule id"),
+    ),
+    request_body = ArmScheduleRequest,
+    responses(
+        (status = 200, description = "The agent this schedule now runs as", body = crate::agent_instance::AgentInstance),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+    ),
+)]
+async fn post_arm_schedule(
+    Path((id, sid)): Path<(String, String)>,
+    Json(req): Json<ArmScheduleRequest>,
+) -> Response {
+    let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
+    };
+    match crate::flow_bindings::arm(&flow, &sid, req.instance_id.as_deref()) {
+        Ok(instance) => Json(instance).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/flows/{id}/schedules/{sid}/arm",
+    tag = "flows",
+    params(
+        ("id" = String, Path, description = "Flow id"),
+        ("sid" = String, Path, description = "Schedule id"),
+    ),
+    responses((status = 204, description = "Disarmed; the agent and its memory are kept")),
+)]
+async fn delete_arm_schedule(Path((id, sid)): Path<(String, String)>) -> Response {
+    match crate::flow_bindings::disarm(&id, &sid) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
 }
 
 #[utoipa::path(
@@ -1927,6 +2716,9 @@ impl From<ChatMessageWire> for AgentMessage {
 #[derive(Serialize, Deserialize)]
 struct PersistedChat {
     id: String,
+    /// Set from v0.30. Absent on legacy chats until `backfill_from_chats` runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
     persona_slug: String,
     model_name: String,
     cwd: String,
@@ -1950,6 +2742,7 @@ async fn persist_chat(session: &Arc<Mutex<ChatSession>>) {
         let s = session.lock().await;
         PersistedChat {
             id: s.id.clone(),
+            instance_id: s.instance_id.clone(),
             persona_slug: s.persona_slug.clone(),
             model_name: s.model_name.clone(),
             cwd: s.cwd.clone(),
@@ -2046,6 +2839,7 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
         };
         let session = ChatSession {
             id: pc.id.clone(),
+            instance_id: pc.instance_id.clone(),
             persona_slug: pc.persona_slug,
             model_name: pc.model_name,
             cwd: pc.cwd,
@@ -2065,9 +2859,22 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
 
 #[derive(Deserialize, utoipa::ToSchema)]
 struct CreateChatRequest {
-    persona_slug: String,
+    /// Optional now: with an `agent_preset`, the persona comes from the preset's
+    /// default. Kept for callers that still pick a persona directly.
+    #[serde(default)]
+    persona_slug: Option<String>,
     #[serde(default)]
     model_name: Option<String>,
+    /// The agent to start this conversation with. Defaults to `general-agent`.
+    #[serde(default)]
+    agent_preset: Option<String>,
+    /// Continue an existing agent instead of minting a new one — how a named agent
+    /// accumulates conversations.
+    #[serde(default)]
+    instance_id: Option<String>,
+    /// Name the agent, which also makes it persistent.
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[utoipa::path(
@@ -2134,14 +2941,65 @@ async fn post_create_chat(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<CreateChatRequest>,
 ) -> Response {
+    use crate::agent_instance::{AgentInstance, InstanceOrigin};
+    use crate::agent_preset::{AgentPreset, DEFAULT_PRESET};
+
+    // Resolve the agent first: either continue an existing instance, or mint one from
+    // a preset. The persona follows from that unless the caller named one explicitly.
+    let mut instance = match &req.instance_id {
+        Some(existing) => match crate::agent_instance::load(existing) {
+            Ok(i) => i,
+            Err(e) => return err_json(StatusCode::NOT_FOUND, e),
+        },
+        None => {
+            let slug = req.agent_preset.as_deref().unwrap_or(DEFAULT_PRESET);
+            match AgentPreset::load(slug, &paths::agent_presets_dir()) {
+                Ok(preset) => AgentInstance::new(&preset, InstanceOrigin::Workshop),
+                Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
+            }
+        }
+    };
+
+    // An explicit persona wins, but must be one this agent can actually be — the same
+    // containment `sub_agent` enforces, applied at the front door.
+    let persona_slug = match &req.persona_slug {
+        Some(p) => {
+            if let Ok(preset) =
+                AgentPreset::load(&instance.agent_preset, &paths::agent_presets_dir())
+            {
+                if !preset.allows_persona(p) {
+                    return err_json(
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "persona '{p}' is not in agent '{}' (roster: {})",
+                            preset.slug,
+                            preset.callable_personas().join(", ")
+                        ),
+                    );
+                }
+            }
+            p.clone()
+        }
+        None => instance.persona.clone(),
+    };
+
     // Validate persona exists before creating a chat — fail fast instead of
     // surfacing the error mid-stream.
-    if Persona::load(&req.persona_slug, &paths::personas_dir()).is_err() {
-        return err_json(
-            StatusCode::BAD_REQUEST,
-            format!("persona '{}' not found", req.persona_slug),
-        );
+    if Persona::load(&persona_slug, &paths::personas_dir()).is_err() {
+        return err_json(StatusCode::BAD_REQUEST, format!("persona '{persona_slug}' not found"));
     }
+
+    // Naming an agent is what keeps it: an unnamed chat instance is disposable.
+    if let Some(name) = &req.name {
+        instance.name = name.clone();
+        instance.persistent = true;
+    }
+    instance.persona = persona_slug.clone();
+    instance.touch();
+    if let Err(e) = instance.save() {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+
     let id = uuid::Uuid::new_v4().to_string();
     let model_name = req.model_name.unwrap_or_else(crate::runtime::configured_default_model);
     let diagnostics = DiagnosticsLogger::new().ok().map(Arc::new);
@@ -2150,7 +3008,8 @@ async fn post_create_chat(
     let trace = trace_for(diagnostics.as_deref(), &model_name);
     let session = ChatSession {
         id: id.clone(),
-        persona_slug: req.persona_slug,
+        instance_id: Some(instance.id.clone()),
+        persona_slug,
         model_name: model_name.clone(),
         cwd: state.cwd.clone(),
         preset: SessionPreset::Workshop,
@@ -2235,6 +3094,7 @@ async fn delete_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>)
     if chats.remove(&id).is_some() {
         drop(chats);
         remove_chat_file(&id);
+        crate::memory::capture::record_session_end(&id);
         StatusCode::NO_CONTENT.into_response()
     } else {
         err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"))
@@ -2640,6 +3500,7 @@ async fn post_chat_turn(
             &persona_slug,
             &cwd,
             &model_name,
+            Some(&id),
             agent_state,
             step_guard,
             Some(llm_call_hook),
@@ -2654,6 +3515,9 @@ async fn post_chat_turn(
                     chat_id: id.clone(),
                 }),
                 reschedule_depth: 0,
+                prompt_extras: crate::persona::PromptExtras::load().await,
+                preset_personas: None,
+                instance_id: None,
             },
         )
         .await;
@@ -2902,6 +3766,7 @@ pub async fn deliver_followup_to_chat(
         &persona_slug,
         &cwd,
         &model_name,
+        Some(chat_id),
         agent_state,
         step_guard,
         llm_call_hook,
@@ -2915,6 +3780,9 @@ pub async fn deliver_followup_to_chat(
             }),
             // A follow-up may schedule one more; the tool caps the chain depth.
             reschedule_depth: 0,
+            prompt_extras: crate::persona::PromptExtras::load().await,
+            preset_personas: None,
+            instance_id: None,
         },
     )
     .await;
@@ -2939,11 +3807,15 @@ pub async fn deliver_followup_to_chat(
     FollowupDelivery::Delivered
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_chat_turn(
     context: &AgentRuntimeContext,
     persona_slug: &str,
     cwd: &str,
     model_name: &str,
+    // Which conversation this turn belongs to, so captured material can be
+    // grouped into an episode later. `None` for turns with no chat.
+    chat_id: Option<&str>,
     initial_state: AgentState,
     step_guard: StepGuard<AgentState>,
     llm_call_hook: Option<metalcraft::LlmCallHook>,
@@ -2952,6 +3824,23 @@ async fn run_chat_turn(
 ) -> Result<RunOutcome<AgentState>, Box<dyn std::error::Error + Send + Sync>> {
     use crate::runtime::build_agent_runtime;
     use rig::client::CompletionClient;
+
+    // Which agent is this? Resolved from the conversation rather than plumbed
+    // through every caller — the chat record already names its instance, and every
+    // turn path funnels through here.
+    let instance_id = match (&options.instance_id, chat_id) {
+        (Some(id), _) => Some(id.clone()),
+        (None, Some(cid)) => {
+            let store = chat_store();
+            let session = { store.lock().await.get(cid).cloned() };
+            match session {
+                Some(s) => s.lock().await.instance_id.clone(),
+                None => None,
+            }
+        }
+        _ => None,
+    };
+
     let persona = Persona::load(persona_slug, &context.personas_dir)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
     let runtime = build_agent_runtime(
@@ -2976,6 +3865,8 @@ async fn run_chat_turn(
     // funnel through here; the CLI and one-shot paths share the same primitive.
     // The daemon ignores the "did it compact" flag and relies on the log line.
     let (_compacted, outcome) = crate::runtime::TurnRunner::new(runtime)
+        .with_capture_context(chat_id.map(str::to_string), Some(persona_slug.to_string()))
+        .with_instance(instance_id)
         .run(initial_state, step_guard)
         .await;
     // Box the real error rather than stringifying it, so its `source()` chain
@@ -3192,27 +4083,41 @@ fn pack_dependents(id: &str) -> UninstallPackResult {
     UninstallPackResult { dependent_flows, dependent_personas }
 }
 
+/// Kept only so the retired endpoint below still documents the body clients used
+/// to send; the value is ignored.
 #[derive(Deserialize, utoipa::ToSchema)]
 struct SetEnabledRequest {
+    #[allow(dead_code)]
     enabled: bool,
 }
 
+/// Retired. An integration pack is no longer independently enabled or disabled —
+/// an agent pack is the install unit, and the packs it vendors are simply present
+/// (see `docs/AGENT_PACKS_PLAN.md`).
+///
+/// This answers 410 rather than quietly succeeding: a toggle that returns 204 and
+/// changes nothing is worse than one that says it is gone, because the UI would go
+/// on showing a state the runtime does not honour.
 #[utoipa::path(
     put,
     path = "/api/v1/integration-packs/{id}/enabled",
     tag = "integration-packs",
     params(("id" = String, Path, description = "Pack id")),
     request_body = SetEnabledRequest,
-    responses((status = 200, description = "Updated")),
+    responses((status = 410, description = "Retired — uninstall the agent pack instead", body = ErrorResponse)),
 )]
 async fn put_pack_enabled(
     Path(id): Path<String>,
-    Json(req): Json<SetEnabledRequest>,
+    Json(_req): Json<SetEnabledRequest>,
 ) -> Response {
-    match crate::integration_packs::set_enabled(&id, req.enabled) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
-    }
+    err_json(
+        StatusCode::GONE,
+        format!(
+            "integration packs are no longer enabled or disabled individually; '{id}' \
+             is available because an installed agent pack provides it. Uninstall \
+             that agent pack to remove it."
+        ),
+    )
 }
 
 /// Build the same summary the list endpoint returns, for a single installed pack.
@@ -4045,8 +4950,21 @@ async fn get_or_create_gateway_session(
             );
         }
     }
+    // Bind this channel to a persistent agent. The idle TTL ends a *conversation*;
+    // the instance — and everything it remembers — carries across them.
+    let instance_id = match crate::agent_instance::for_channel(
+        &n.channel_slug,
+        crate::agent_preset::DEFAULT_PRESET,
+    ) {
+        Ok(i) => Some(i.id),
+        Err(e) => {
+            log::warn!("gateway channel '{}': could not bind an agent instance: {e}", n.channel_slug);
+            None
+        }
+    };
     let session = ChatSession {
         id: chat_id.to_string(),
+        instance_id,
         persona_slug: n.persona_slug.clone(),
         model_name: n.model_name.clone(),
         cwd: state.cwd.clone(),
@@ -4085,7 +5003,7 @@ async fn run_one_gateway_turn(
     sink: crate::tools::ReplySink,
     body: String,
 ) {
-    let (persona_slug, model_name, cwd, agent_state, diagnostics) = {
+    let (chat_id, persona_slug, model_name, cwd, agent_state, diagnostics) = {
         let mut s = session.lock().await;
         let next_state = match s.state.take() {
             Some(prev) => prev.continue_with(body.clone()),
@@ -4113,6 +5031,7 @@ async fn run_one_gateway_turn(
             }
         }
         (
+            s.id.clone(),
             s.persona_slug.clone(),
             s.model_name.clone(),
             s.cwd.clone(),
@@ -4137,6 +5056,7 @@ async fn run_one_gateway_turn(
         &persona_slug,
         &cwd,
         &model_name,
+        Some(&chat_id),
         agent_state,
         step_guard,
         llm_call_hook,
@@ -4150,6 +5070,9 @@ async fn run_one_gateway_turn(
             // now a follow-up armed in a gateway turn is unbound (logged).
             session_binding: None,
             reschedule_depth: 0,
+            prompt_extras: crate::persona::PromptExtras::load().await,
+            preset_personas: None,
+            instance_id: None,
         },
     )
     .await;
@@ -4254,6 +5177,10 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
                 log::info!(
                     "Gateway chat {chat_id}: idle > {ttl_secs}s — starting a fresh session"
                 );
+                // This is the one place the system says "that conversation is
+                // over", so it is the right place to tell memory the episode can
+                // be distilled without waiting for a gap to prove it.
+                crate::memory::capture::record_session_end(&chat_id);
             }
         }
         s.busy = true;

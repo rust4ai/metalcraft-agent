@@ -1,0 +1,23 @@
+{
+  "name": "mcode_list_runs",
+  "description": "List recent runs (exec/clone/build/test/git/actions) for a workspace \u2014 the audit/log trail. Returns rows with id, kind, cmd, status, exit_code, output, timestamps. Use to review what was done or fetch build/test output.",
+  "method": "GET",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}/runs",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      }
+    },
+    "required": [
+      "id"
+    ]
+  },
+  "body_mapping": "none"
+}

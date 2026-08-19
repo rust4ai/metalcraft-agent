@@ -64,6 +64,11 @@ pub struct FlowRun {
     /// fully work says why. Empty (and omitted) when the flow has everything it needs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// The agent instance this run belongs to, when a schedule armed one. Pod-local
+    /// and never published — see [`crate::flow_bindings`]. Absent on ad-hoc runs and
+    /// on records written before agent instances existed, which resume as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
     /// RFC-3339 creation timestamp.
     pub created_at: String,
     /// RFC-3339 last-update timestamp.
@@ -129,6 +134,7 @@ mod tests {
             steps: vec![],
             flow: None,
             warnings: vec![],
+            instance_id: None,
             created_at: "2026-07-27T00:00:00Z".into(),
             updated_at: "2026-07-27T00:00:00Z".into(),
         }

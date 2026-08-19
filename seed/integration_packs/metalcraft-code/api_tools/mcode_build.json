@@ -1,0 +1,29 @@
+{
+  "name": "mcode_build",
+  "description": "Run a long build command in the background inside the sprite (rebuild/compile), polling until it finishes (up to 10 min). Returns a run { id, status, exit_code, output }. Use for e.g. 'cargo build', 'npm run build'. Requires write scope.",
+  "method": "POST",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}/build",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      },
+      "cmd": {
+        "type": "string",
+        "description": "Build command, e.g. 'cargo build' or 'npm run build'."
+      }
+    },
+    "required": [
+      "id",
+      "cmd"
+    ]
+  },
+  "body_mapping": "params"
+}

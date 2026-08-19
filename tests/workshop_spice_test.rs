@@ -245,6 +245,8 @@ impl AgentUnderTest for MetalcraftPersonaAgent {
             task: user_message,
             approval_mode: ApprovalMode::AutoApprove,
             diagnostics: None,
+            instance_id: None,
+            preset_personas: None,
         };
 
         let outcome = run_one_shot_task(&self.context, request)

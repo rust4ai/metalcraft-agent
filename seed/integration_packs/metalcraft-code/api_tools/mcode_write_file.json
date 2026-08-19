@@ -1,0 +1,34 @@
+{
+  "name": "mcode_write_file",
+  "description": "Create or overwrite a file in the workspace. path is relative to the repo root; content is the full new text (max 1 MiB). Parent directories are created. Requires write scope + a ready workspace. Follow with mcode_test / mcode_git as needed.",
+  "method": "PUT",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}/files",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      },
+      "path": {
+        "type": "string",
+        "description": "Path relative to the repo root."
+      },
+      "content": {
+        "type": "string",
+        "description": "Full new file contents."
+      }
+    },
+    "required": [
+      "id",
+      "path",
+      "content"
+    ]
+  },
+  "body_mapping": "params"
+}

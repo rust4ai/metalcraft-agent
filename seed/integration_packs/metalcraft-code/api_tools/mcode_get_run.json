@@ -1,0 +1,28 @@
+{
+  "name": "mcode_get_run",
+  "description": "Get one run by id (full output). Find run ids via mcode_list_runs or the return of mcode_build / mcode_test.",
+  "method": "GET",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}/runs/{run_id}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      },
+      "run_id": {
+        "type": "string",
+        "description": "Run id (UUID)."
+      }
+    },
+    "required": [
+      "id",
+      "run_id"
+    ]
+  },
+  "body_mapping": "none"
+}

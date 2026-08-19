@@ -1,0 +1,27 @@
+{
+  "name": "mcode_read_file",
+  "description": "Read a file OR list a directory in the workspace. Pass path relative to the repo root (/workspace/app); omit for the root. For a file returns { kind:'file', content, size, binary, truncated } (binary files are base64, files capped at 1 MiB). For a directory returns { kind:'dir', entries:[{name,is_dir}] }. Use this to explore code before editing.",
+  "method": "GET",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}/files",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      },
+      "path": {
+        "type": "string",
+        "description": "Path relative to the repo root; omit for the root."
+      }
+    },
+    "required": [
+      "id"
+    ]
+  },
+  "body_mapping": "none"
+}

@@ -39,6 +39,10 @@ pub struct Lock {
     pub packs: Vec<LockEntry>,
     #[serde(default)]
     pub flows: Vec<LockEntry>,
+    /// Agent packs — the unit of installation. Self-contained, so restoring these
+    /// needs no dependency ordering: each carries its own integration packs.
+    #[serde(default)]
+    pub agent_packs: Vec<LockEntry>,
 }
 
 fn one() -> u32 {
@@ -47,7 +51,7 @@ fn one() -> u32 {
 
 impl Default for Lock {
     fn default() -> Self {
-        Lock { version: 1, packs: Vec::new(), flows: Vec::new() }
+        Lock { version: 1, packs: Vec::new(), flows: Vec::new(), agent_packs: Vec::new() }
     }
 }
 
@@ -129,6 +133,21 @@ pub fn record_pack(name: &str, version: &str, content_sha256: &str, source: &str
 }
 
 /// Record (or update) a pinned flow in the lockfile.
+pub fn record_agent_pack(name: &str, version: &str, content_sha256: &str, source: &str) -> Result<(), String> {
+    mutate(|doc| {
+        upsert(
+            &mut doc.agent_packs,
+            LockEntry {
+                name: name.to_string(),
+                version: version.to_string(),
+                content_sha256: content_sha256.to_string(),
+                source: source.to_string(),
+            },
+        )
+    })
+}
+
+/// Record (or update) a pinned flow in the lockfile.
 pub fn record_flow(name: &str, version: &str, content_sha256: &str, source: &str) -> Result<(), String> {
     mutate(|doc| {
         upsert(
@@ -145,6 +164,10 @@ pub fn record_flow(name: &str, version: &str, content_sha256: &str, source: &str
 
 pub fn remove_pack(name: &str) -> Result<(), String> {
     mutate(|doc| doc.packs.retain(|e| e.name != name))
+}
+
+pub fn remove_agent_pack(name: &str) -> Result<(), String> {
+    mutate(|doc| doc.agent_packs.retain(|e| e.name != name))
 }
 
 pub fn remove_flow(name: &str) -> Result<(), String> {

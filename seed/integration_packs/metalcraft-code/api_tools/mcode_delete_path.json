@@ -1,0 +1,28 @@
+{
+  "name": "mcode_delete_path",
+  "description": "Delete a file or directory (recursive) in the workspace. path is relative to the repo root. Requires write scope.",
+  "method": "DELETE",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}/files",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      },
+      "path": {
+        "type": "string",
+        "description": "Path relative to the repo root."
+      }
+    },
+    "required": [
+      "id",
+      "path"
+    ]
+  },
+  "body_mapping": "none"
+}

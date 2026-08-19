@@ -58,6 +58,8 @@ fn as_refs(v: &[(String, String)]) -> Vec<(&str, &str)> {
 pub fn ensure_defaults() {
     let dirs = [
         paths::personas_dir(),
+        paths::agent_presets_dir(),
+        paths::agent_instances_dir(),
         paths::skills_dir(),
         paths::flows_dir(),
         paths::sessions_dir(),
@@ -78,6 +80,12 @@ pub fn ensure_defaults() {
     // existing installs); everything else is write-if-missing.
     let personas = embedded_flat("personas");
     write_versioned_seeds(&paths::personas_dir(), &as_refs(&personas));
+
+    // Agent presets follow the persona rule rather than the write-if-missing rule:
+    // adding a persona to the built-in roster is exactly the kind of change that has
+    // to reach installs that already have the file.
+    let presets = embedded_flat("agent_presets");
+    write_versioned_seeds(&paths::agent_presets_dir(), &as_refs(&presets));
 
     for (subdir, target) in [
         ("skills", paths::skills_dir()),

@@ -1,0 +1,15 @@
+{
+  "name": "mcode_list_installations",
+  "description": "List the GitHub App installations the user has connected to Metalcraft Code. Returns rows with installation_id, account_login, account_type, repo_selection. If empty, the user must connect GitHub first at https://code.metalcraftai.com (Connect GitHub). No parameters.",
+  "method": "GET",
+  "url": "https://code.metalcraftai.com/api/v1/github/installations",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "none"
+}

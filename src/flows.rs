@@ -293,6 +293,9 @@ pub async fn run_flow(
                 task: &fp.prompt,
                 approval_mode: ApprovalMode::AutoApprove,
                 diagnostics: logger.clone(),
+                // v1 flows predate presets and are never bound to an agent.
+                instance_id: None,
+                preset_personas: None,
             },
         )
         .await;

@@ -1,0 +1,32 @@
+{
+  "name": "mcode_clone",
+  "description": "Clone a git repo into the workspace at /workspace/app using the connected GitHub App (a short-lived token is minted per call \u2014 never stored). Pass repo_full_name (owner/repo) and optional branch, or omit to use the workspace's recorded repo/branch. Replaces whatever is in /workspace/app. Returns { output, exit_code, ok }. Requires write scope + a ready workspace.",
+  "method": "POST",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}/clone",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      },
+      "repo_full_name": {
+        "type": "string",
+        "description": "owner/repo to clone; omit to use the workspace's repo."
+      },
+      "branch": {
+        "type": "string",
+        "description": "Branch to check out; omit for the repo default."
+      }
+    },
+    "required": [
+      "id"
+    ]
+  },
+  "body_mapping": "params"
+}

@@ -1,6 +1,6 @@
 {
   "name": "mnote_get_note",
-  "description": "Get one note by `slug`. Returns the full note including its markdown `body` (the source of truth), title, is_favorite, version, timestamps, and `categories` (its tags). Fetch the current note with this before a partial edit, since mnote_update_note replaces the fields you send. Note: opening a note updates its last_accessed_at.",
+  "description": "Get one note by `slug`. Returns the full note including its markdown `body` (the source of truth), title, is_favorite, version, timestamps, and `categories` (its tags). Fetch the current note with this before a partial edit, since mnote_update_note replaces the fields you send. Any `[[slug]]` in the body is a link to another note. To see what links to THIS note (backlinks) or which of its targets don't exist yet, call mnote_links. Note: opening a note updates its last_accessed_at.",
   "method": "GET",
   "url": "https://notes.metalcraftai.com/api/v1/notes/{slug}",
   "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Accept": "application/json" },

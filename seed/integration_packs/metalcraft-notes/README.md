@@ -27,6 +27,7 @@ and categories with `mnote_list_categories`.
 | `mnote_whoami` | GET | `/api/v1/whoami` | read |
 | `mnote_list_notes` | GET | `/api/v1/notes` | read |
 | `mnote_get_note` | GET | `/api/v1/notes/{slug}` | read |
+| `mnote_links` | GET | `/api/v1/notes/{slug}/links` | read |
 | `mnote_create_note` | POST | `/api/v1/notes` | **write** |
 | `mnote_update_note` | PATCH | `/api/v1/notes/{slug}` | **write** |
 | `mnote_delete_note` | DELETE | `/api/v1/notes/{slug}` | **write** |
@@ -37,7 +38,22 @@ Reads auto-approve; create/update/delete require approval. Writes need a token w
 `write` scope (403 otherwise). Note bodies are plain markdown; categories are addressed by
 `id` (from `mnote_list_categories`). *(Search + share tools live in the web app.)*
 
+## Linking
+Notes reference each other with **`[[slug]]`** (or `[[slug|Display Text]]`) written inline
+in the markdown body — Obsidian's syntax, so it survives export. Nothing special is sent
+over the wire: links are just characters in `body`, and the server derives the link graph
+from them.
+
+`mnote_links` reports a note's outgoing links, its **backlinks** (what points at it —
+something `mnote_list_notes` can't tell you), and its `broken` targets. Passing a broken
+target as `slug` to `mnote_create_note` creates the note those links were waiting for, and
+they all resolve at once.
+
+One sharp edge worth knowing: a `|` or `]` inside the display text makes the link parse to
+**nothing at all** — no link, no error. The skill and tool descriptions say so; the web
+editor sanitizes it automatically, but an agent writing raw markdown has to avoid it.
+
 ## Ships
 - `personas/metalcraft-notes-agent.json` — a notes assistant scoped to this pack.
 - `skills/metalcraft-notes.md` — the whoami → list_notes / list_categories →
-  create/update workflow, scope + markdown conventions.
+  create/update workflow, scope + markdown conventions, and the `[[slug]]` linking rules.

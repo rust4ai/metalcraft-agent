@@ -4,6 +4,7 @@ use metalcraft_agent::cli;
 use metalcraft_agent::context;
 use metalcraft_agent::diagnostics::DiagnosticsLogger;
 use metalcraft_agent::guard;
+use metalcraft_agent::agent_preset::{AgentPreset, DEFAULT_PRESET};
 use metalcraft_agent::persona::Persona;
 use metalcraft_agent::runtime::{self, AgentRuntimeContext, AVAILABLE_MODELS, DEFAULT_MODEL};
 use metalcraft_agent::ui;
@@ -62,12 +63,15 @@ fn build_prompt_str(persona_slug: &str, cwd: &str) -> String {
 }
 
 fn print_usage(personas_dir: &std::path::Path) {
-    eprintln!("{} {}", ui::error("Usage:"), ui::command("metalcraft-agent [--auto-approve] [--persona <slug>] [task]"));
+    eprintln!("{} {}", ui::error("Usage:"), ui::command("metalcraft-agent [--auto-approve] [--preset <slug>] [--persona <slug>] [task]"));
     eprintln!();
     eprintln!("  If [task] is given, run once and exit.");
     eprintln!("  If [task] is omitted, enter interactive mode.");
-    eprintln!("  --persona <slug>  Persona to use (default: orchestrator-agent; also METALCRAFT_PERSONA).");
+    eprintln!("  --preset <slug>   Agent preset to run as (default: general-agent; also METALCRAFT_PRESET).");
+    eprintln!("  --persona <slug>  Persona to use; overrides the preset's default (also METALCRAFT_PERSONA).");
     eprintln!("  --auto-approve    Skip approval prompts for all tools.");
+    eprintln!("  --migrate-agent-packs [--dry-run]");
+    eprintln!("                    Wrap legacy integration packs into agent packs, then exit.");
     eprintln!();
     let available = Persona::list_available(personas_dir);
     if available.is_empty() {
@@ -169,15 +173,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Migration is explicit and terminal: run it, print the report, exit. It must
+    // never happen on boot — an upgraded pod restructures its data dir when the
+    // operator says so, not because it restarted.
+    if invocation.migrate_agent_packs {
+        let report = metalcraft_agent::agent_packs::migrate::run(invocation.dry_run);
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => println!("{json}"),
+            Err(e) => eprintln!("{} {e}", ui::error("could not render the report:")),
+        }
+        let failed = report.failed.len();
+        if failed > 0 {
+            eprintln!(
+                "\n{} {failed} integration pack(s) could not be wrapped; they are unchanged.",
+                ui::warning("Warning:")
+            );
+        }
+        std::process::exit(if failed > 0 { 1 } else { 0 });
+    }
+
     let auto_approve = invocation.auto_approve;
 
-    // Persona resolution: explicit `--persona/-p`, else METALCRAFT_PERSONA, else
-    // the Orchestrator — the default agent, which delegates the actual work via
-    // sub_agent rather than requiring the caller to pick a specialist up front.
+    // Agent preset resolution: explicit `--preset`, else METALCRAFT_PRESET, else the
+    // built-in `general-agent`. The preset is what a user picks; the persona is an
+    // implementation detail of it.
+    let preset_slug_owned = invocation
+        .preset
+        .clone()
+        .or_else(|| std::env::var("METALCRAFT_PRESET").ok());
+    let presets_dir = metalcraft_agent::paths::agent_presets_dir();
+    let active_preset =
+        AgentPreset::load(preset_slug_owned.as_deref().unwrap_or(DEFAULT_PRESET), &presets_dir).ok();
+
+    // Persona resolution: explicit `--persona/-p` wins, then METALCRAFT_PERSONA, then
+    // the active preset's default persona, then the Orchestrator — the agent that
+    // delegates the actual work via sub_agent rather than requiring the caller to pick
+    // a specialist up front.
     let persona_slug_owned = invocation
         .persona
         .clone()
         .or_else(|| std::env::var("METALCRAFT_PERSONA").ok())
+        .or_else(|| active_preset.as_ref().map(|p| p.default_persona.clone()))
         .unwrap_or_else(|| "orchestrator-agent".to_string());
     let persona_slug = persona_slug_owned.as_str();
     let one_shot_task = invocation.task.clone();
@@ -249,7 +285,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         approval_mode.clone(),
         Some(llm_call_hook.clone()),
         None, // CLI runs don't emit OTLP traces
-        runtime::RuntimeOptions::default(),
+        runtime::RuntimeOptions {
+            prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
+            // sub_agent may only delegate inside the active preset's roster.
+            preset_personas: active_preset.as_ref().map(|p| p.callable_personas()),
+            instance_id: None,
+            ..Default::default()
+        },
         |client, model_name| client.completion_model(model_name),
     )?);
     // One session-long step guard (loop/error-spiral tracker), reused across
@@ -269,6 +311,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 task: &task,
                 approval_mode: approval_mode.clone(),
                 diagnostics: Some(diagnostics.clone()),
+                // The CLI runs against the pod-global memory, not an agent instance;
+                // sub_agent still obeys the active preset's roster.
+                instance_id: None,
+                preset_personas: active_preset.as_ref().map(|p| p.callable_personas()),
             },
         )
         .await?
@@ -357,7 +403,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         approval_mode.clone(),
                         Some(llm_call_hook.clone()),
                         None, // CLI runs don't emit OTLP traces
-                        runtime::RuntimeOptions::default(),
+                        runtime::RuntimeOptions {
+                            prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
+                            preset_personas: active_preset.as_ref().map(|p| p.callable_personas()),
+                            instance_id: None,
+                            ..Default::default()
+                        },
                         |client, model_name| client.completion_model(model_name),
                     ) {
                         Ok(built) => {
@@ -376,6 +427,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             continue;
         }
+        if input == "/preset" || input == "/preset list" {
+            match &active_preset {
+                Some(p) => {
+                    println!("{} {}", ui::label("Current agent:"), ui::accent(&p.slug));
+                    println!("  {}\n", p.name);
+                    println!("{}", ui::heading("Personas it can call:"));
+                    for slug in p.callable_personas() {
+                        let marker = if slug == p.default_persona { " (default)" } else { "" };
+                        println!("  {}{}", ui::accent(&slug), marker);
+                    }
+                }
+                None => println!("{}", ui::warning("No agent preset active.")),
+            }
+            println!();
+            println!("{}", ui::heading("Available agents:"));
+            for summary in AgentPreset::list_summaries(&presets_dir) {
+                println!("  {:<20} {}", ui::accent(&summary.slug), summary.description);
+            }
+            println!();
+            println!("{}", ui::label("Switching agents starts a fresh session — restart with --preset <slug>."));
+            println!();
+            continue;
+        }
+
         if input == "/persona" || input == "/persona list" {
             println!("{} {}\n", ui::label("Current persona:"), ui::accent(&current_persona_slug));
             println!("{}", ui::heading("Available personas:"));
@@ -404,7 +479,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         approval_mode.clone(),
                         Some(llm_call_hook.clone()),
                         None, // CLI runs don't emit OTLP traces
-                        runtime::RuntimeOptions::default(),
+                        runtime::RuntimeOptions {
+                            prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
+                            preset_personas: active_preset.as_ref().map(|p| p.callable_personas()),
+                            instance_id: None,
+                            ..Default::default()
+                        },
                         |client, model_name| client.completion_model(model_name),
                     ) {
                         Ok(built) => {
@@ -458,7 +538,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 approval_mode.clone(),
                 Some(llm_call_hook.clone()),
                 None, // CLI runs don't emit OTLP traces
-                runtime::RuntimeOptions::default(),
+                runtime::RuntimeOptions {
+                    prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
+                    preset_personas: active_preset.as_ref().map(|p| p.callable_personas()),
+                    instance_id: None,
+                    ..Default::default()
+                },
                 |client, model_name| client.completion_model(model_name),
             ) {
                 Ok(built) => {

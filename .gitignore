@@ -7,3 +7,6 @@
 # data dir resolves to the repo root. Canonical copies live in seed/.
 /personas
 /skills
+
+# Scratch: files staged for manual deletion (agent sessions cannot rm on this host).
+/_to_delete

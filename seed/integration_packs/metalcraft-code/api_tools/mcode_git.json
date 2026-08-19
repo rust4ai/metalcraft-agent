@@ -1,0 +1,37 @@
+{
+  "name": "mcode_git",
+  "description": "Run a git operation in the workspace. op \u2208 status | diff | commit | push | pull. `commit` needs a message (stages all changes, then commits with the account's identity). `push`/`pull` authenticate via a freshly-minted GitHub App token and use `branch` (defaults to the workspace branch). status/diff are read-only; commit/push/pull need the write scope. Returns { op, output, exit_code, ok }.",
+  "method": "POST",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}/git",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      },
+      "op": {
+        "type": "string",
+        "description": "status | diff | commit | push | pull."
+      },
+      "message": {
+        "type": "string",
+        "description": "Commit message (required for op=commit)."
+      },
+      "branch": {
+        "type": "string",
+        "description": "Branch for push/pull; defaults to the workspace branch."
+      }
+    },
+    "required": [
+      "id",
+      "op"
+    ]
+  },
+  "body_mapping": "params"
+}

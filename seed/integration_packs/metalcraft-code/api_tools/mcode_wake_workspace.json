@@ -1,0 +1,24 @@
+{
+  "name": "mcode_wake_workspace",
+  "description": "Wake a `hibernated` workspace back to `ready` so it accepts file/exec/git ops again. Requires the write scope.",
+  "method": "POST",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}/wake",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      }
+    },
+    "required": [
+      "id"
+    ]
+  },
+  "body_mapping": "none"
+}

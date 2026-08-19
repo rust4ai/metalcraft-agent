@@ -39,6 +39,26 @@ pub struct PersonaSummary {
     pub read_only: bool,
 }
 
+/// Live values spliced into a persona's system prompt that are not part of the
+/// persona definition.
+///
+/// A struct rather than more positional parameters so adding the next dynamic
+/// block (per ADR-0001, which requires new dynamic lists to become placeholders
+/// rather than hardcoded text) does not churn every call site again.
+#[derive(Debug, Clone, Default)]
+pub struct PromptExtras {
+    /// Rendered memory profile, or empty when memory is off or has nothing
+    /// durable to say yet.
+    pub memory_profile: String,
+}
+
+impl PromptExtras {
+    /// Build the extras for a real turn, reading the live memory profile.
+    pub async fn load() -> Self {
+        Self { memory_profile: crate::memory::profile_block().await }
+    }
+}
+
 impl Persona {
     /// Load a persona by slug, resolving the user-local `personas/` dir first
     /// and falling back to any enabled integration pack. Pack personas (e.g.
@@ -147,13 +167,27 @@ impl Persona {
         names
     }
 
+    /// Build the system prompt with no dynamic extras. Equivalent to
+    /// [`Self::build_system_prompt_with`] with [`PromptExtras::default`], and the
+    /// right call for diagnostics or anywhere the live memory profile is not
+    /// wanted.
+    pub fn build_system_prompt(&self, skills_dir: &Path, cwd: &str) -> String {
+        self.build_system_prompt_with(skills_dir, cwd, &PromptExtras::default())
+    }
+
     /// Build the system prompt. The persona's `system_prompt` is treated as a
     /// template: `{{cwd}}`, `{{available_skills}}`, `{{available_personas}}`,
-    /// `{{installed_packs}}`, and `{{now_utc}}` are substituted with live values
+    /// `{{installed_packs}}`, `{{now_utc}}`, and `{{memory_profile}}` are
+    /// substituted with live values
     /// so an author can place each exactly where they want it. Any of those the
     /// template does NOT reference is appended afterward with a default heading,
     /// preserving the behavior of personas written before templating.
-    pub fn build_system_prompt(&self, skills_dir: &Path, cwd: &str) -> String {
+    pub fn build_system_prompt_with(
+        &self,
+        skills_dir: &Path,
+        cwd: &str,
+        extras: &PromptExtras,
+    ) -> String {
         let skills_block = self.skills_block(skills_dir);
         let personas_block = self.personas_block();
         let packs_block = installed_packs_block();
@@ -171,6 +205,7 @@ impl Persona {
             ("available_personas", personas_block.clone()),
             ("installed_packs", packs_block),
             ("now_utc", now_utc.clone()),
+            ("memory_profile", extras.memory_profile.clone()),
         ];
 
         let mut prompt = render_template(&self.system_prompt, &vars);
@@ -185,6 +220,17 @@ impl Persona {
         // placed {{now_utc}} themselves.
         if !template_uses(&self.system_prompt, "now_utc") {
             prompt.push_str(&format!("\n\nCurrent time: {} (UTC).", now_utc));
+        }
+
+        // The operator profile: stable, slow-moving memory (pinned facts,
+        // preferences, working methods). Deliberately NOT the per-turn recall —
+        // that goes in the message tail, because changing the system prompt every
+        // turn would defeat the provider's prompt cache.
+        if !extras.memory_profile.is_empty()
+            && !template_uses(&self.system_prompt, "memory_profile")
+        {
+            prompt.push_str("\n\n# What You Remember About This User\n");
+            prompt.push_str(&extras.memory_profile);
         }
 
         if !skills_block.is_empty() && !template_uses(&self.system_prompt, "available_skills") {

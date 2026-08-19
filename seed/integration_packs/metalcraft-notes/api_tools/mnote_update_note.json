@@ -1,6 +1,6 @@
 {
   "name": "mnote_update_note",
-  "description": "Update a note by `slug`. Only the fields you send change: `title`, `body` (markdown — REPLACES the whole body, so fetch with mnote_get_note and resend the full new markdown to append/edit), and `categories` (an array of category ids that REPLACES the note's whole tag set — send all ids it should have). Requires the write scope (403 otherwise). Returns the updated note.",
+  "description": "Update a note by `slug`. Only the fields you send change: `title`, `body` (markdown — REPLACES the whole body, so fetch with mnote_get_note and resend the full new markdown to append/edit), and `categories` (an array of category ids that REPLACES the note's whole tag set — send all ids it should have). Notes LINK to each other with `[[slug]]`, or `[[slug|Display Text]]` to choose the wording — written inline in the markdown body, Obsidian-style. Prefer a link over restating another note's content. Get slugs from mnote_list_notes. Linking to a slug that doesn't exist yet is allowed and shows as a to-be-created link. Never put `|` or `]` inside the display text — it silently breaks the link. Preserve existing `[[links]]` when you resend a body. Requires the write scope (403 otherwise). Returns the updated note.",
   "method": "PATCH",
   "url": "https://notes.metalcraftai.com/api/v1/notes/{slug}",
   "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Content-Type": "application/json", "Accept": "application/json" },

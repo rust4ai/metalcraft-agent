@@ -33,6 +33,13 @@ pub enum OperationKind {
     DiscordAction, // discord_send_message, discord_edit_message, discord_add_reaction
     MetaRead,      // read-only meta tools (list/read/validate over the project's own files)
     MetaWrite,     // mutating meta tools (write/delete personas, skills, flows)
+    /// Installing, uninstalling or publishing an **agent pack**.
+    ///
+    /// Its own kind rather than `MetaWrite` because the consequence is different in
+    /// character: an install adds personas whose system prompts the model then
+    /// follows, and vendors tools that run with the operator's credentials. It is
+    /// arguably the highest-consequence non-`bash` operation the agent has.
+    AgentPackWrite,
 }
 
 impl OperationKind {
@@ -58,6 +65,11 @@ impl OperationKind {
             "web_fetch" => Self::NetworkFetch,
             "sub_agent" => Self::SubAgent,
             "load_skill" => Self::LoadSkill,
+            // Long-term memory: reads auto-approve. Writes (mem_remember,
+            // mem_forget) fall through to the default Execute arm and require
+            // approval — harmless in practice, because automatic capture does not
+            // go through a tool.
+            "mem_search" | "mem_get" | "mem_stats" => Self::ReadFile,
             "discord_send_message" | "discord_edit_message" | "discord_add_reaction" => Self::DiscordAction,
             "discord_get_messages" | "discord_get_channel_info" => Self::ReadFile,
             // Discord admin pack (bot-token REST tools). The chat tools above are
@@ -86,6 +98,7 @@ impl OperationKind {
                 && (n.contains("_list")
                     || n.contains("_get")
                     || n == "mcal_whoami"
+                    || n == "mcal_now"
                     || n == "mcal_sync") =>
             {
                 Self::ReadFile
@@ -94,7 +107,10 @@ impl OperationKind {
             // update/delete change the user's notes, so they fall through to the
             // default Execute arm and require approval.
             n if n.starts_with("mnote_")
-                && (n.contains("_list") || n.contains("_get") || n == "mnote_whoami") =>
+                && (n.contains("_list")
+                    || n.contains("_get")
+                    || n == "mnote_whoami"
+                    || n == "mnote_links") =>
             {
                 Self::ReadFile
             }
@@ -107,14 +123,52 @@ impl OperationKind {
             {
                 Self::ReadFile
             }
+            // Metalcraft Code pack (`mcode_` tools): inspecting a workspace — who am
+            // I, what repos/workspaces/runs exist, read a file, list a directory —
+            // auto-approves. Everything else (`exec`, `git`, `build`, `write_file`,
+            // `delete_path`, workspace lifecycle) runs or changes code on a real
+            // machine and falls through to the default Execute arm.
+            n if n.starts_with("mcode_")
+                && (n.contains("_list")
+                    || n.contains("_get")
+                    || n == "mcode_whoami"
+                    || n == "mcode_read_file") =>
+            {
+                Self::ReadFile
+            }
+            // Metalcraft Contacts pack (`mcon_` tools): lookups auto-approve;
+            // create/update/delete/set_photo change the user's address book and fall
+            // through to the default Execute arm.
+            n if n.starts_with("mcon_")
+                && (n.contains("_list")
+                    || n.contains("_get")
+                    || n == "mcon_search"
+                    || n == "mcon_whoami"
+                    || n == "mcon_upcoming_birthdays") =>
+            {
+                Self::ReadFile
+            }
+            // Metalcraft Email pack (`memail_` tools) is read-only — it lists,
+            // searches and reads mail but never sends or mutates it, so the whole
+            // prefix auto-approves. A future sending tool must be excluded here
+            // explicitly rather than inheriting this.
+            n if n.starts_with("memail_") && n != "memail_send" => Self::ReadFile,
+            // Pack registry browsing (`mpack_` tools) is read-only: searching and
+            // reading published packs changes nothing locally. Installing one is a
+            // separate tool (`agentpack_install`) with its own gate.
+            n if n.starts_with("mpack_") => Self::ReadFile,
             // Meta tools — managing the project's own personas/skills/flows.
             // Read-only ones auto-approve; mutating ones require approval.
             "persona_list" | "persona_read" | "skill_list" | "skill_read" | "flow_list"
             | "flow_read" | "flow_validate" | "flow_templates_list" | "flow_template_read"
             | "diagnostics_list" | "diagnostics_read" | "pack_list" | "pack_read" => Self::MetaRead,
             "persona_write" | "persona_delete" | "skill_write" | "skill_delete" | "flow_write"
-            | "flow_set_schedules" | "flow_install" | "flow_install_dependencies" | "flow_delete"
-            | "pack_enable" => Self::MetaWrite,
+            | "flow_set_schedules" | "flow_install" | "flow_install_dependencies"
+            | "flow_delete" => Self::MetaWrite,
+            "agentpack_install" | "agentpack_uninstall" | "agentpack_export" => {
+                Self::AgentPackWrite
+            }
+            "agentpack_list" | "agentpack_read" => Self::MetaRead,
             // flow_run spawns agent runs that may use any tool — treat it like
             // a sub-agent (requires approval).
             "flow_run" => Self::SubAgent,
@@ -129,6 +183,7 @@ impl OperationKind {
             Self::ReadFile | Self::ListFiles | Self::Search | Self::LoadSkill => PermissionLevel::AutoApprove,
             Self::MetaRead => PermissionLevel::AutoApprove,
             Self::MetaWrite => PermissionLevel::RequiresApproval,
+            Self::AgentPackWrite => PermissionLevel::RequiresApproval,
             Self::WriteNewFile => PermissionLevel::AutoApprove,
             Self::OverwriteFile => PermissionLevel::RequiresApproval,
             Self::EditFile => PermissionLevel::RequiresApproval,
@@ -155,6 +210,7 @@ impl OperationKind {
             Self::DiscordAction => "DiscordAction",
             Self::MetaRead => "MetaRead",
             Self::MetaWrite => "MetaWrite",
+            Self::AgentPackWrite => "AgentPackWrite",
         }
     }
 }

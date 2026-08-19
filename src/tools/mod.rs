@@ -54,6 +54,12 @@ pub struct ToolConfig {
     /// here is armed at `reschedule_depth + 1` so self-rearming chains are
     /// bounded. 0 for a normal user-initiated turn.
     pub reschedule_depth: u32,
+    /// Personas `sub_agent` may delegate to, from the active agent preset's
+    /// roster. `None` ⇒ unscoped.
+    pub preset_personas: Option<Vec<String>>,
+    /// The agent instance this turn runs as. Scopes the `mem_*` tools to that
+    /// agent's own memory. `None` ⇒ the pod-global store.
+    pub instance_id: Option<String>,
 }
 
 /// Register only the tools listed by name.
@@ -88,6 +94,34 @@ pub fn create_registry_for_with_config(
                 }
             }
             "web_fetch" => registry.register(web_fetch::WebFetchTool),
+            // Long-term memory. These operate on the process-global store via
+            // `crate::memory`, so like the meta tools they need no ToolConfig.
+            "agentpack_list" => registry.register(crate::agent_packs::tools::AgentPackListTool),
+            "agentpack_read" => registry.register(crate::agent_packs::tools::AgentPackReadTool),
+            "agentpack_install" => {
+                registry.register(crate::agent_packs::tools::AgentPackInstallTool)
+            }
+            "agentpack_uninstall" => {
+                registry.register(crate::agent_packs::tools::AgentPackUninstallTool)
+            }
+            "agentpack_export" => {
+                registry.register(crate::agent_packs::tools::AgentPackExportTool)
+            }
+            "mem_remember" => registry.register(crate::memory::tools::MemRememberTool::new(
+                config.and_then(|c| c.instance_id.clone()),
+            )),
+            "mem_search" => registry.register(crate::memory::tools::MemSearchTool::new(
+                config.and_then(|c| c.instance_id.clone()),
+            )),
+            "mem_get" => registry.register(crate::memory::tools::MemGetTool::new(
+                config.and_then(|c| c.instance_id.clone()),
+            )),
+            "mem_forget" => registry.register(crate::memory::tools::MemForgetTool::new(
+                config.and_then(|c| c.instance_id.clone()),
+            )),
+            "mem_stats" => registry.register(crate::memory::tools::MemStatsTool::new(
+                config.and_then(|c| c.instance_id.clone()),
+            )),
             // Meta tools: author/manage the metalcraft project itself (the
             // workshop's CRUD surface, by prompt). They operate on the global
             // `paths::*` dirs, so they need no ToolConfig.
@@ -119,7 +153,6 @@ pub fn create_registry_for_with_config(
             // agent itself, and inspect what's available + which keys they need.
             "pack_list" => registry.register(meta_integration::PackListTool),
             "pack_read" => registry.register(meta_integration::PackReadTool),
-            "pack_enable" => registry.register(meta_integration::PackEnableTool),
             // API key / secret store: the secrets HTTP-API tools reference via
             // `$NAME`. Setting a key here is what lets an enabled pack authenticate.
             "key_list" => registry.register(meta_keys::KeyListTool),
@@ -165,11 +198,15 @@ pub fn create_registry_for_with_config(
             }
             "sub_agent" => {
                 if let Some(cfg) = config {
-                    registry.register(sub_agent::SubAgentTool::new(
-                        cfg.api_key.clone(),
-                        cfg.model_name.clone(),
-                        cfg.system_prompt.clone(),
-                    ))
+                    registry.register(
+                        sub_agent::SubAgentTool::new(
+                            cfg.api_key.clone(),
+                            cfg.model_name.clone(),
+                            cfg.system_prompt.clone(),
+                        )
+                        .with_preset_personas(cfg.preset_personas.clone())
+                        .with_instance(cfg.instance_id.clone()),
+                    )
                 } else {
                     log::warn!("sub_agent tool requires ToolConfig, skipping");
                     registry

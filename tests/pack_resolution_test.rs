@@ -1,8 +1,14 @@
 //! Regression test for the bug where flow runs failed with
 //! "Persona '<slug>' not found" because the persona lived in an integration
 //! pack rather than the local `personas/` dir. Runtime persona loading must
-//! resolve enabled packs as a fallback, and report an actionable error when
-//! the providing pack is installed but disabled.
+//! resolve packs as a fallback.
+//!
+//! The enable/disable half of this test is gone on purpose. Availability is no
+//! longer a mutable flag: a tool resolves when an installed pack provides it, the
+//! persona references it, and the preset declares it. An installed pack is
+//! available, full stop — so there is no "installed but disabled" state left to
+//! report, and this now checks that an *installed* pack resolves and a missing one
+//! reports a plain not-found.
 //!
 //! Everything runs inside ONE `#[test]` so the process-global
 //! `METALCRAFT_DATA_DIR` env var isn't raced by parallel tests.
@@ -26,7 +32,7 @@ const PACK_PERSONA: &str = r#"{
 }"#;
 
 #[test]
-fn persona_resolves_from_pack_only_when_enabled() {
+fn persona_resolves_from_an_installed_pack() {
     // Isolated data dir for this process.
     let data_dir = std::env::temp_dir().join(format!("mc-pack-test-{}", std::process::id()));
     let _ = fs::remove_dir_all(&data_dir);
@@ -45,20 +51,16 @@ fn persona_resolves_from_pack_only_when_enabled() {
     );
     write(&pack_root.join("personas").join("pack-persona.json"), PACK_PERSONA);
 
-    let state_file = data_dir.join("integration_packs.json");
-
-    // 1. Pack disabled (default): resolution fails with an actionable message
-    //    naming the pack — not a bare "not found at <path>".
-    let err = Persona::load("pack-persona", &local_personas).unwrap_err();
-    assert!(
-        err.contains("testpack") && err.to_lowercase().contains("disabled"),
-        "disabled-pack error should name the pack and say it's disabled, got: {err}"
-    );
-
-    // 2. Enable the pack — the persona now resolves from the pack dir.
-    write(&state_file, r#"{"testpack":{"enabled":true}}"#);
+    // 1. The pack is installed, so its persona resolves — no flag to flip first.
     let persona = Persona::load("pack-persona", &local_personas)
-        .expect("persona should resolve from an enabled pack");
+        .expect("a persona in an installed pack must resolve");
+    assert_eq!(persona.name, "Pack Persona");
+
+    // 2. A stale `enabled: false` from before the flag was retired must not hide it.
+    //    Upgraded pods carry these, and honouring them would resurrect the bug.
+    write(&data_dir.join("integration_packs.json"), r#"{"testpack":{"enabled":false}}"#);
+    let persona = Persona::load("pack-persona", &local_personas)
+        .expect("a stale disabled flag must not affect resolution");
     assert_eq!(persona.name, "Pack Persona");
 
     // 3. A genuinely missing persona reports the plain not-found message.

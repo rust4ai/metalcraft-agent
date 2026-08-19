@@ -10,19 +10,24 @@
 //!      packs+personas into an isolated data dir and asserts the `config-agent`
 //!      persona resolves and exposes the pack/key/persona meta tools.
 //!
-//!   2. `installing_a_pack_via_meta_tools_works` — always runs, no network and
+//!   2. `configuring_a_pack_via_meta_tools_works` — always runs, no network and
 //!      NO LLM. Calls the meta tools directly (exactly what the agent would do
-//!      for "install X using key Y") against the `email` pack and proves the
-//!      side effects actually land: the pack flips to enabled and the key is
-//!      stored and reported configured. This is the deterministic proof that
-//!      the meta tools *do the thing*.
+//!      for "set up X with key Y") against the `email` pack and proves the side
+//!      effects actually land: the key is stored, reported configured, and never
+//!      echoed back. This is the deterministic proof that the meta tools *do the
+//!      thing*.
+//!
+//!      There used to be an enable step here. Packs are no longer enabled or
+//!      disabled — an agent pack is the install unit, and an integration pack it
+//!      vendors is present or absent (see `docs/AGENT_PACKS_PLAN.md`). What is
+//!      left to configure is the key.
 //!
 //!   3. `live_config_agent_installs_metalcraft_drive` — a real, gated [Spice]
 //!      suite that drives an actual agentic loop (OpenAI LLM -> meta tools)
 //!      through the `config-agent` persona with the prompt "install the
 //!      metalcraft-drive integration using this Metalcraft token …". Asserts
-//!      the model calls `pack_enable` and `key_set`, then verifies the
-//!      `metalcraft-drive` pack is enabled and the key landed in the store.
+//!      the model calls `key_set` and verifies the key landed in the store —
+//!      the pack itself is already installed.
 //!      Skipped unless `OPENAI_API_KEY` is present (drop it in a crate-root
 //!      `.env`); needs NO real token — it's a throwaway we only check
 //!      round-trips into the store. Run:
@@ -56,7 +61,8 @@ const ORCHESTRATOR_SLUG: &str = "orchestrator-agent";
 /// lockstep with `seed/personas/config-agent.json`.
 const EXPECTED_TOOLS: &[&str] = &[
     "pack_list",
-    "pack_enable",
+    "agentpack_list",
+    "agentpack_install",
     "key_list",
     "key_set",
     "key_delete",
@@ -86,22 +92,20 @@ fn init() {
     });
 }
 
-/// Serialize tests that touch global pack/key state. All tiers share one data
-/// dir per process, and `set_enabled` / `key_set` are read-modify-write against
-/// `integration_packs.json` / `keys.json`, so parallel `cargo test` threads
-/// would otherwise race (clobbering each other's writes, or reading a pack as
-/// enabled mid-install). Held for the whole test body; poison is recovered so
-/// one failing tier doesn't cascade.
+/// Serialize tests that touch global key state. All tiers share one data dir per
+/// process, and `key_set` is read-modify-write against `keys.json`, so parallel
+/// `cargo test` threads would otherwise race, clobbering each other's writes.
+/// Held for the whole test body; poison is recovered so one failing tier doesn't
+/// cascade.
 static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn lock_state() -> std::sync::MutexGuard<'static, ()> {
     STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Reset a pack+key to the "not installed" baseline so a mutating tier doesn't
-/// depend on another tier's cleanup having run first.
-fn reset_pack_key(pack: &str, key: &str) {
-    let _ = integration_packs::set_enabled(pack, false);
+/// Clear a pack's key so a mutating tier doesn't depend on another tier's cleanup
+/// having run first. (The pack itself has no state to reset — it is installed.)
+fn reset_pack_key(_pack: &str, key: &str) {
     let mut store = KeyStore::load(&paths::keys_file());
     if store.delete(key) {
         let _ = store.save(&paths::keys_file());
@@ -202,6 +206,8 @@ impl AgentUnderTest for MetalcraftPersonaAgent {
             // classify as `Execute` (would otherwise block).
             approval_mode: ApprovalMode::AutoApprove,
             diagnostics: None,
+            instance_id: None,
+            preset_personas: None,
         };
 
         let outcome = run_one_shot_task(&self.context, request)
@@ -280,22 +286,25 @@ fn config_agent_wires_up() {
             "config-agent is missing expected meta tool `{tool}`"
         );
     }
+    // Regression guard: `pack_enable` is retired. A persona still listing it would
+    // resolve to nothing and the agent would keep reaching for a tool that no longer
+    // exists — silently, since unknown names are dropped from the registry.
+    assert!(
+        !resolved.iter().any(|t| t == "pack_enable" || t == "pack_disable"),
+        "config-agent still lists a retired enable/disable tool: {resolved:?}"
+    );
+
     assert!(
         persona.skills.iter().any(|s| s == "managing-integrations"),
         "config-agent should reference the managing-integrations skill"
     );
 
-    // The metalcraft-drive pack ships installed but DISABLED — the thing the
-    // agent is expected to turn on.
+    // A seeded integration pack is simply present — there is no off state to turn on.
     assert!(
         integration_packs::list_installed()
             .iter()
             .any(|p| p.manifest.id == "metalcraft-drive"),
         "metalcraft-drive pack should be installed (seeded)"
-    );
-    assert!(
-        !integration_packs::is_enabled("metalcraft-drive"),
-        "metalcraft-drive pack should start disabled"
     );
 }
 
@@ -304,7 +313,7 @@ fn config_agent_wires_up() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn installing_a_pack_via_meta_tools_works() {
+async fn configuring_a_pack_via_meta_tools_works() {
     init();
     let _guard = lock_state();
 
@@ -315,24 +324,15 @@ async fn installing_a_pack_via_meta_tools_works() {
     const VALUE: &str = "imap_config_spice_test_password_value";
 
     reset_pack_key(PACK, KEY);
-    assert!(
-        !integration_packs::is_enabled(PACK),
-        "email pack should start disabled"
-    );
 
-    // Step 1: enable (install) the pack — exactly what the agent's pack_enable
-    // call does.
-    let enable = meta_integration::PackEnableTool
+    // Step 1: read the pack — what the agent does to learn what it still needs.
+    // The pack is already there; what's missing is the key.
+    let read = meta_integration::PackReadTool
         .call(serde_json::json!({ "id": PACK }))
         .await
-        .expect("pack_enable should not error");
-    assert_eq!(enable["enabled"], true);
-    assert!(
-        integration_packs::is_enabled(PACK),
-        "pack_enable should have flipped email to enabled"
-    );
+        .expect("pack_read should not error");
     // The result surfaces the still-missing required key so the agent knows to set it.
-    let requires = enable["pack"]["requires_env"]
+    let requires = read["requires_env"]
         .as_array()
         .expect("requires_env should be an array");
     assert!(
@@ -386,7 +386,6 @@ async fn installing_a_pack_via_meta_tools_works() {
     let _ = meta_keys::KeyDeleteTool
         .call(serde_json::json!({ "name": KEY }))
         .await;
-    let _ = integration_packs::set_enabled(PACK, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -410,13 +409,9 @@ async fn live_config_agent_installs_metalcraft_drive() {
     // the store. Use a recognizable sentinel so the post-run assertion is precise.
     const TEST_KEY_VALUE: &str = "mck_configspice_TESTKEY_do_not_use";
 
-    // Preconditions: metalcraft-drive must start disabled and unkeyed so the
-    // agent has to do both steps itself.
+    // Precondition: metalcraft-drive must start unkeyed, so the agent has to store
+    // the token itself rather than find one already there.
     reset_pack_key("metalcraft-drive", "METALCRAFT_TOKEN");
-    assert!(
-        !integration_packs::is_enabled("metalcraft-drive"),
-        "metalcraft-drive should start disabled for the live install test"
-    );
 
     let agent =
         MetalcraftPersonaAgent::for_persona(PERSONA_SLUG).expect("build config-agent under test");
@@ -428,8 +423,8 @@ async fn live_config_agent_installs_metalcraft_drive() {
                 "Install the metalcraft-drive integration for me. Use this Metalcraft token: {TEST_KEY_VALUE}"
             ),
         )
-        .name("Enables the metalcraft-drive pack and stores METALCRAFT_TOKEN")
-        .expect_tools(&["pack_enable", "key_set"])
+        .name("Stores METALCRAFT_TOKEN for the metalcraft-drive pack")
+        .expect_tools(&["key_set"])
         .expect_tools_within_allowlist()
         .expect_no_error()
         .build(),
@@ -457,19 +452,14 @@ async fn live_config_agent_installs_metalcraft_drive() {
         report.failed, report.total
     );
 
-    // The proof it actually worked: the side effects landed in real state.
-    assert!(
-        integration_packs::is_enabled("metalcraft-drive"),
-        "after the install prompt, the metalcraft-drive pack should be enabled"
-    );
+    // The proof it actually worked: the side effect landed in real state.
     assert_eq!(
         key_store::lookup("METALCRAFT_TOKEN").as_deref(),
         Some(TEST_KEY_VALUE),
-        "after the install prompt, METALCRAFT_TOKEN should be stored verbatim"
+        "after the setup prompt, METALCRAFT_TOKEN should be stored verbatim"
     );
 
     // Leave no state behind.
-    let _ = integration_packs::set_enabled("metalcraft-drive", false);
     let mut store = KeyStore::load(&paths::keys_file());
     if store.delete("METALCRAFT_TOKEN") {
         let _ = store.save(&paths::keys_file());
@@ -482,8 +472,8 @@ async fn live_config_agent_installs_metalcraft_drive() {
 // configuration request" hole: it proves (a) the orchestrator is told to
 // delegate such tasks to `config-agent`, (b) it delegates rather than holding
 // the meta tools itself, and (c) a sub-agent built AS `config-agent` — exactly
-// how `sub_agent` assembles a persona delegation — actually registers
-// pack_enable / key_set. No network, no spend.
+// how `sub_agent` assembles a persona delegation — actually registers the
+// config meta tools. No network, no spend.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -520,7 +510,7 @@ fn orchestrator_can_delegate_config() {
     );
     // It must NOT carry the config meta tools itself — those belong to the
     // delegated persona, not the router.
-    for tool in ["pack_enable", "key_set", "pack_list", "key_list"] {
+    for tool in ["agentpack_install", "key_set", "pack_list", "key_list"] {
         assert!(
             !orchestrator.tools.iter().any(|t| t == tool),
             "orchestrator should NOT declare `{tool}` directly — it delegates to config-agent"
@@ -564,10 +554,6 @@ async fn live_orchestrator_delegates_install_to_config() {
     const TEST_KEY_VALUE: &str = "mck_orchspice_TESTKEY_do_not_use";
 
     reset_pack_key("metalcraft-drive", "METALCRAFT_TOKEN");
-    assert!(
-        !integration_packs::is_enabled("metalcraft-drive"),
-        "metalcraft-drive should start disabled for the orchestrator install test"
-    );
 
     let agent = MetalcraftPersonaAgent::for_persona(ORCHESTRATOR_SLUG)
         .expect("build orchestrator under test");
@@ -593,13 +579,11 @@ async fn live_orchestrator_delegates_install_to_config() {
             }
             // ... and that sub-agent actually ran the config tools.
             let used = delegated_tools_used(out);
-            let enabled = used.iter().any(|t| t == "pack_enable");
-            let keyed = used.iter().any(|t| t == "key_set");
-            if enabled && keyed {
+            if used.iter().any(|t| t == "key_set") {
                 Ok(())
             } else {
                 Err(format!(
-                    "delegated config-agent did not call both pack_enable and key_set (tools_used: {used:?})"
+                    "delegated config-agent did not call key_set (tools_used: {used:?})"
                 ))
             }
         })
@@ -629,11 +613,7 @@ async fn live_orchestrator_delegates_install_to_config() {
         report.failed, report.total
     );
 
-    // The proof the delegated install actually landed in real state.
-    assert!(
-        integration_packs::is_enabled("metalcraft-drive"),
-        "after delegating the install, the metalcraft-drive pack should be enabled"
-    );
+    // The proof the delegated setup actually landed in real state.
     assert_eq!(
         key_store::lookup("METALCRAFT_TOKEN").as_deref(),
         Some(TEST_KEY_VALUE),

@@ -28,13 +28,38 @@ user to mint a token with `write` at id.metalcraftai.com → Account → Tokens.
    `updated` (last edited) or `accessed` (last opened), or filter by a `category` id.
 3. **`mnote_list_categories`** — resolve category names to ids for tagging/filtering.
 4. **Read:** `mnote_get_note(slug)` → the note incl. its markdown `body`.
-5. **Write (needs `write`):** `mnote_create_note(title, body, categories?)`,
+   `mnote_links(slug)` → what it links to, what links back, and which `[[targets]]` are
+   still missing.
+5. **Write (needs `write`):** `mnote_create_note(title, body, categories?, slug?)`,
    `mnote_update_note(slug, …)`, `mnote_delete_note(slug)`,
    `mnote_create_category(name)` (auto-assigns a color; 409 at the 12-category cap).
+
+## Linking notes together
+Notes reference each other with **`[[slug]]`** — or **`[[slug|Display Text]]`** to control
+the wording — written inline in the markdown body (Obsidian's syntax; it survives export).
+This is the main way a vault becomes more than a pile of files, and you are usually the one
+writing it.
+
+- **Link instead of restating.** If a note touches a topic another note already covers, link
+  to it rather than summarizing it again.
+- **Get the slug first.** `mnote_list_notes` is the lookup table — call it before writing a
+  note that should reference existing ones. Never guess at a slug's spelling.
+- **Forward links are fine.** `[[a-note-that-doesnt-exist-yet]]` is legal; it shows as a
+  to-be-created link and resolves the moment that note exists. Use it when you know the
+  note *should* exist.
+- **Creating a linked-to note:** `mnote_links(slug)` lists a note's `broken` targets. Pass
+  that exact target as `slug` to `mnote_create_note` so every existing link to it resolves.
+- **Never put `|` or `]` inside the display text.** `[[plan|Q3|Q4]]` silently parses to
+  nothing at all — no link, no error. Rewrite the wording instead.
+- **Traverse with `mnote_links`.** Backlinks answer "what already refers to this?", which
+  `mnote_list_notes` cannot. Following links and reading neighbours is usually a better way
+  to assemble context than re-listing everything.
 
 ## Writing good notes
 - Author clean markdown: a clear `# title`-less body (the `title` is a separate field),
   headings, bullet/number lists, ` ``` ` code fences, tables, and `- [ ]` task lists.
+- **Link deliberately:** weave `[[slug]]` references into the prose where they belong (see
+  above) instead of appending a bare "Related" list.
 - **Tag deliberately:** pass `categories` (an array of category ids) so notes land under
   the right tags. `mnote_update_note`'s `categories` REPLACES the whole tag set — send the
   full list the note should have.

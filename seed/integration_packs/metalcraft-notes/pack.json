@@ -1,8 +1,8 @@
 {
   "id": "metalcraft-notes",
   "name": "Metalcraft Notes",
-  "description": "Persona, skill, and HTTP API tools to save and manage markdown notes in Metalcraft Notes (notes.metalcraftai.com). Agent-first: the agent writes notes as plain markdown. Notes are FLAT (no folders) — one account owns many notes, each addressed by slug, and organized by color-coded categories (tags, at most 12). List notes, get a note (markdown), create/update/delete notes, and list/create categories (needs the write scope). Authenticated by a single Metalcraft account token — METALCRAFT_TOKEN, sent as Authorization: Bearer — the same token that works across every Metalcraft ecosystem app. The API base is fixed to https://notes.metalcraftai.com.",
-  "version": "2.0.0",
+  "description": "Persona, skill, and HTTP API tools to save and manage markdown notes in Metalcraft Notes (notes.metalcraftai.com). Agent-first: the agent writes notes as plain markdown. Notes are FLAT (no folders) — one account owns many notes, each addressed by slug, and organized by color-coded categories (tags, at most 12). Notes cross-link with Obsidian-style [[slug]] wikilinks written straight into the markdown. List notes, get a note (markdown), see a note's links and backlinks, create/update/delete notes, and list/create categories (needs the write scope). Authenticated by a single Metalcraft account token — METALCRAFT_TOKEN, sent as Authorization: Bearer — the same token that works across every Metalcraft ecosystem app. The API base is fixed to https://notes.metalcraftai.com.",
+  "version": "2.1.0",
   "requires_env": [
     "METALCRAFT_TOKEN"
   ],

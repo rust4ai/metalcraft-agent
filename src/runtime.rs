@@ -1,6 +1,6 @@
 use metalcraft::{
-    create_react_agent_with_options, AgentOptions, AgentState, Executor, GraphError, LlmCallHook,
-    LlmResponseHook, RunOutcome, StepGuard, ToolChoice,
+    create_react_agent_with_options, AgentMessage, AgentOptions, AgentState, Executor, GraphError,
+    LlmCallHook, LlmResponseHook, RunOutcome, StepGuard, ToolChoice,
 };
 
 use crate::context::{self, CompactionConfig};
@@ -114,6 +114,17 @@ pub struct TurnRunner<M: CompletionModel + 'static> {
     compaction_model: M,
     compaction_config: CompactionConfig,
     max_steps: usize,
+    /// Whether to splice recalled memories into the turn. Read from config at
+    /// construction so a long-lived CLI runner does not re-check the environment
+    /// on every turn.
+    recall: bool,
+    /// Which conversation this runner's turns belong to, for tagging captures.
+    /// Empty for one-shot and flow runs, which is fine — they are still captured,
+    /// just without conversation grouping.
+    capture_ctx: crate::memory::capture::CaptureContext,
+    /// The agent instance whose memory this runner recalls from. `None` uses the
+    /// pod-global store — the CLI and any pre-instance caller.
+    instance_id: Option<String>,
 }
 
 impl<M: CompletionModel + 'static> TurnRunner<M> {
@@ -125,7 +136,41 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
             compaction_model: runtime.compaction_model,
             compaction_config: CompactionConfig::default(),
             max_steps: MAX_TURN_STEPS,
+            recall: crate::memory::recall_enabled(),
+            capture_ctx: crate::memory::capture::CaptureContext::default(),
+            instance_id: None,
         }
+    }
+
+    /// Bind this runner to an agent instance, so recall reads that agent's own
+    /// memory rather than the pod-global store.
+    pub fn with_instance(mut self, instance_id: Option<String>) -> Self {
+        // Keep the capture context in step regardless of call order — a capture
+        // that doesn't name its agent is material nobody can route later.
+        self.capture_ctx.instance_id = instance_id.clone();
+        self.instance_id = instance_id;
+        self
+    }
+
+    /// Tag this runner's captures with the conversation they belong to.
+    pub fn with_capture_context(
+        mut self,
+        chat_id: Option<String>,
+        persona: Option<String>,
+    ) -> Self {
+        self.capture_ctx = crate::memory::capture::CaptureContext {
+            chat_id,
+            persona,
+            instance_id: self.instance_id.clone(),
+        };
+        self
+    }
+
+    /// Force per-turn recall on or off, overriding the configured default.
+    /// Mainly for tests and for callers that deliberately want a memoryless run.
+    pub fn with_recall(mut self, recall: bool) -> Self {
+        self.recall = recall;
+        self
     }
 
     /// Compact `state` if it exceeds the window, then run one turn to completion
@@ -147,19 +192,42 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
         )
         .await
         {
-            Ok(true) => {
+            Ok(Some(summary)) => {
                 log::info!(
                     "Context compacted before turn -> ~{} tokens, {} messages",
                     context::estimate_tokens(&state),
                     state.messages.len()
                 );
+                // The summary is about to be buried in a single `Assistant`
+                // message and forgotten. It is the most concentrated account of
+                // this conversation that will ever exist, and the LLM call for it
+                // is already paid — so hand it to memory on the way past.
+                crate::memory::capture::record_compaction(&self.capture_ctx, &summary);
                 true
             }
-            Ok(false) => false,
+            Ok(None) => false,
             Err(e) => {
                 log::warn!("Context compaction failed, proceeding uncompacted: {e}");
                 false
             }
+        };
+
+        // Where this turn's messages begin, so capture can tell what was said now
+        // from what was already history. Taken before injection so the synthetic
+        // block does not shift the boundary.
+        let turn_start = state.messages.len().saturating_sub(1);
+
+        // Recall is spliced in AFTER compaction, so the summarizer never sees
+        // (and never bakes in) a block that is about to be removed again.
+        let injected = if self.recall {
+            let opts = crate::memory::recall::RecallOptions {
+                token_budget: Some(crate::memory::recall_token_budget()),
+                instance_id: self.instance_id.clone(),
+                ..Default::default()
+            };
+            crate::memory::inject::inject(&mut state, opts).await
+        } else {
+            false
         };
 
         let outcome = Executor::new_from_arc(self.graph.clone())
@@ -168,7 +236,174 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
             .run(state, "agent")
             .await;
 
+        // Ephemeral: the block never reaches the persisted transcript, the token
+        // estimate that drives compaction, or the next turn's recall query.
+        let outcome = if injected {
+            outcome.map(crate::memory::inject::strip)
+        } else {
+            outcome
+        };
+
+        // Capture AFTER stripping, so an injected block is never mistaken for
+        // something the user said and fed back into tomorrow's memories.
+        if let Ok(o) = &outcome {
+            capture_turn(&self.capture_ctx, turn_start, o);
+        }
+
         (compacted, outcome)
+    }
+}
+
+/// Extract this turn's exchange from the finished state and queue it for the
+/// dream.
+///
+/// Fire-and-forget by construction: everything here is in-memory string work
+/// plus one appended line, and [`crate::memory::capture`] swallows its own IO
+/// errors, so a capture problem can never surface as a turn failure.
+fn capture_turn(
+    ctx: &crate::memory::capture::CaptureContext,
+    turn_start: usize,
+    outcome: &RunOutcome<AgentState>,
+) {
+    let state = match outcome {
+        RunOutcome::Completed(s) => s,
+        RunOutcome::Interrupted { state, .. } => state,
+        // A failed turn still taught us what was asked and what broke, which is
+        // exactly the kind of thing worth remembering.
+        RunOutcome::Failed { state, .. } => state,
+    };
+
+    let recent = state.messages.get(turn_start..).unwrap_or(&[]);
+    let mut user_text = String::new();
+    let mut agent_text = String::new();
+    let mut tools: Vec<String> = Vec::new();
+    for m in recent {
+        match m {
+            AgentMessage::User(t) => {
+                if !user_text.is_empty() {
+                    user_text.push('\n');
+                }
+                user_text.push_str(t);
+            }
+            AgentMessage::Assistant(t) => {
+                if !agent_text.is_empty() {
+                    agent_text.push('\n');
+                }
+                agent_text.push_str(t);
+            }
+            AgentMessage::ToolCall { name, .. } if !tools.iter().any(|t| t == name) => {
+                tools.push(name.clone());
+            }
+            _ => {}
+        }
+    }
+
+    crate::memory::capture::record_turn(ctx, &user_text, &agent_text, tools);
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use crate::memory::capture::CaptureContext;
+
+    /// Rebuild what `capture_turn` would extract, without touching the global
+    /// store — the extraction logic is the part worth pinning.
+    fn extract(messages: Vec<AgentMessage>, turn_start: usize) -> (String, String, Vec<String>) {
+        let mut state = AgentState::new("seed");
+        state.messages = messages;
+        let outcome = RunOutcome::Completed(state);
+        let state = match &outcome {
+            RunOutcome::Completed(s) => s,
+            _ => unreachable!(),
+        };
+        let recent = state.messages.get(turn_start..).unwrap_or(&[]);
+        let mut user_text = String::new();
+        let mut agent_text = String::new();
+        let mut tools: Vec<String> = Vec::new();
+        for m in recent {
+            match m {
+                AgentMessage::User(t) => {
+                    if !user_text.is_empty() {
+                        user_text.push('\n');
+                    }
+                    user_text.push_str(t);
+                }
+                AgentMessage::Assistant(t) => {
+                    if !agent_text.is_empty() {
+                        agent_text.push('\n');
+                    }
+                    agent_text.push_str(t);
+                }
+                AgentMessage::ToolCall { name, .. } => {
+                    if !tools.iter().any(|t| t == name) {
+                        tools.push(name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        (user_text, agent_text, tools)
+    }
+
+    fn tool_call(name: &str) -> AgentMessage {
+        AgentMessage::ToolCall {
+            id: format!("call-{name}"),
+            call_id: None,
+            name: name.to_string(),
+            args: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn extraction_takes_only_this_turn_not_the_whole_history() {
+        let messages = vec![
+            AgentMessage::User("old question".into()),
+            AgentMessage::Assistant("old answer".into()),
+            AgentMessage::User("new question".into()),
+            AgentMessage::Assistant("new answer".into()),
+        ];
+        let (user, agent, _) = extract(messages, 2);
+        assert_eq!(user, "new question");
+        assert_eq!(agent, "new answer");
+    }
+
+    #[test]
+    fn tool_names_are_collected_in_order_and_deduplicated() {
+        let messages = vec![
+            AgentMessage::User("q".into()),
+            tool_call("read_file"),
+            tool_call("bash"),
+            tool_call("read_file"),
+            AgentMessage::Assistant("a".into()),
+        ];
+        let (_, _, tools) = extract(messages, 0);
+        assert_eq!(tools, vec!["read_file", "bash"], "order preserved, no duplicates");
+    }
+
+    #[test]
+    fn multiple_assistant_messages_in_one_turn_are_joined() {
+        let messages = vec![
+            AgentMessage::User("q".into()),
+            AgentMessage::Assistant("part one".into()),
+            tool_call("grep"),
+            AgentMessage::Assistant("part two".into()),
+        ];
+        let (_, agent, tools) = extract(messages, 0);
+        assert_eq!(agent, "part one\npart two");
+        assert_eq!(tools, vec!["grep"]);
+    }
+
+    #[test]
+    fn an_out_of_range_boundary_yields_nothing_rather_than_panicking() {
+        let (user, agent, tools) = extract(vec![AgentMessage::User("q".into())], 99);
+        assert!(user.is_empty() && agent.is_empty() && tools.is_empty());
+    }
+
+    #[test]
+    fn a_default_capture_context_is_untagged() {
+        let ctx = CaptureContext::default();
+        assert!(ctx.chat_id.is_none());
+        assert!(ctx.persona.is_none());
     }
 }
 
@@ -224,6 +459,30 @@ pub struct RunOneShotRequest<'a> {
     pub task: &'a str,
     pub approval_mode: ApprovalMode,
     pub diagnostics: Option<Arc<DiagnosticsLogger>>,
+    /// The agent instance this run belongs to. Scheduled flow runs set it (see
+    /// [`crate::flow_bindings`]) so a recurring job recalls what it did last time
+    /// instead of starting cold every firing. `None` keeps the historical
+    /// pod-global behaviour.
+    pub instance_id: Option<String>,
+    /// The roster a `sub_agent` call may reach, when this run is bound to a
+    /// preset. `None` means unrestricted, as before presets existed.
+    pub preset_personas: Option<Vec<String>>,
+}
+
+impl<'a> RunOneShotRequest<'a> {
+    /// The common case: an unbound one-shot run.
+    pub fn new(persona_slug: &'a str, cwd: &'a str, model_name: &'a str, task: &'a str) -> Self {
+        Self {
+            persona_slug,
+            cwd,
+            model_name,
+            task,
+            approval_mode: ApprovalMode::AutoApprove,
+            diagnostics: None,
+            instance_id: None,
+            preset_personas: None,
+        }
+    }
 }
 
 /// Per-run I/O wiring that varies by session preset. `default()` reproduces the
@@ -246,6 +505,19 @@ pub struct RuntimeOptions {
     pub session_binding: Option<crate::scheduled_tasks::IoBinding>,
     /// Reschedule depth this session already carries (see [`crate::tools::ToolConfig`]).
     pub reschedule_depth: u32,
+    /// Live values spliced into the system prompt — currently the memory
+    /// profile. Default is empty, which is right for diagnostics and for any
+    /// caller that should not carry the operator's remembered context.
+    pub prompt_extras: crate::persona::PromptExtras,
+    /// The agent instance this turn runs as. When set, recall and capture use that
+    /// agent's own two-layer memory instead of the pod-global store.
+    pub instance_id: Option<String>,
+    /// The active agent preset's callable roster. When set, `sub_agent` may only
+    /// delegate to these personas — containment, so an installed agent cannot
+    /// reach a persona its preset never declared. `None` ⇒ unscoped (any persona
+    /// on the pod), which is the pre-preset behaviour and stays the default for
+    /// callers that have no preset in hand.
+    pub preset_personas: Option<Vec<String>>,
 }
 
 pub fn build_agent_runtime<M>(
@@ -262,8 +534,11 @@ pub fn build_agent_runtime<M>(
 where
     M: CompletionModel + 'static,
 {
-    let system_prompt = persona.build_system_prompt(&context.skills_dir, cwd);
+    let system_prompt =
+        persona.build_system_prompt_with(&context.skills_dir, cwd, &options.prompt_extras);
     let tool_config = crate::tools::ToolConfig {
+        preset_personas: options.preset_personas.clone(),
+        instance_id: options.instance_id.clone(),
         api_key: context.api_key.clone(),
         model_name: model_name.to_string(),
         system_prompt: system_prompt.clone(),
@@ -338,7 +613,13 @@ pub async fn run_one_shot_task(
         request.approval_mode.clone(),
         llm_call_hook,
         None, // one-shot runs don't emit OTLP traces
-        RuntimeOptions::default(), // free-text agent; no session reply sink
+        RuntimeOptions {
+            // free-text agent; no session reply sink
+            prompt_extras: crate::persona::PromptExtras::load().await,
+            instance_id: request.instance_id.clone(),
+            preset_personas: request.preset_personas.clone(),
+            ..Default::default()
+        },
         |client, model_name| client.completion_model(model_name),
     )?;
     // Let the guard know which of this persona's tools are status polls, so
@@ -354,6 +635,8 @@ pub async fn run_one_shot_task(
     // one turn path with no compaction). The compaction flag is irrelevant for a
     // single-shot task, so it's discarded.
     let (_compacted, outcome) = TurnRunner::new(runtime)
+        .with_instance(request.instance_id.clone())
+        .with_capture_context(None, Some(request.persona_slug.to_string()))
         .run(AgentState::new(request.task), step_guard)
         .await;
     outcome.map_err(|e| -> Box<dyn std::error::Error> {

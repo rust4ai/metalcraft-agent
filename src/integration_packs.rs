@@ -215,19 +215,32 @@ fn mutate_state<T>(f: impl FnOnce(&mut HashMap<String, PackState>) -> T) -> Resu
     result.map(|()| out)
 }
 
+/// Whether a pack's tools are available.
+///
+/// **An installed pack is always available.** Enable/disable is retired: scoping is
+/// structural now — a tool resolves only if some installed agent pack provides it,
+/// the persona references it via `Persona.packs`, *and* the active preset declares
+/// it. Three declarations, checked where they matter. A fourth, mutable, global flag
+/// had nothing left to decide and could only disagree with them.
+///
+/// Kept as a function (rather than deleted) so the ~20 call sites and the workshop's
+/// `enabled` field keep working while the UIs catch up.
 pub fn is_enabled(id: &str) -> bool {
-    load_state()
-        .get(id)
-        .map(|s| s.enabled)
-        .unwrap_or(false)
+    list_installed().iter().any(|p| p.manifest.id == id)
 }
 
+/// **Deprecated.** Enabling now only ensures the pack's files exist; disabling is a
+/// no-op, because availability is decided by declaration (see [`is_enabled`]).
+///
+/// Materializing the files is still worth doing — that part was never the flag, it
+/// was the fix for a flag with nothing behind it.
 pub fn set_enabled(id: &str, enabled: bool) -> Result<(), String> {
-    // Enabling always installs first: materialize the pack's files from the
-    // embedded seed so an enabled pack is *guaranteed* to have its personas,
-    // skills, and api_tools on disk. A flag with nothing behind it — which made
-    // the persona/tools silently unresolvable — was the core bug. Install is
-    // idempotent (only writes missing files).
+    if !enabled {
+        log::debug!(
+            "pack '{id}': disable is a no-op — a pack's tools are scoped by the persona \
+             and preset that declare them, not by a global flag"
+        );
+    }
     if enabled {
         crate::seed::install_pack(id);
     }
@@ -453,12 +466,9 @@ pub fn uninstall(id: &str) -> Result<bool, String> {
 
 /// Iterate enabled packs in deterministic (sorted-id) order. Used by the
 /// resolvers below to walk packs when a user-local item isn't found.
+/// Every installed pack. See [`is_enabled`] — installed *is* available now.
 pub fn enabled_packs() -> Vec<Pack> {
-    let state = load_state();
     list_installed()
-        .into_iter()
-        .filter(|p| state.get(&p.manifest.id).map(|s| s.enabled).unwrap_or(false))
-        .collect()
 }
 
 /// Env keys recommended by the currently-enabled packs, each mapped to the
@@ -509,6 +519,32 @@ impl PackOrigin {
 /// Resolve a file by extension under a user-local dir, falling back to the
 /// same subdir within each enabled pack. The first hit wins (user-local
 /// always shadows pack content).
+/// The directories an **installed agent pack** contributes for `pack_subdir`.
+///
+/// Agent packs are the install unit now, so their personas, skills and presets have
+/// to resolve through the same layered lookup that integration packs always did —
+/// otherwise everything an agent pack installs is written to disk and then invisible.
+///
+/// `api_tools` are special: a vendored integration pack lives in the content store
+/// under its hash, not inside the agent pack, so those layers point at the store.
+pub fn agent_pack_layers(pack_subdir: &str) -> Vec<(PathBuf, PackOrigin)> {
+    let mut out = Vec::new();
+    for p in crate::agent_packs::list() {
+        let origin = PackOrigin::Pack { id: p.id.clone() };
+        if pack_subdir == "api_tools" {
+            for (_, sha) in crate::agent_packs::store::read_refs(&p.id) {
+                out.push((
+                    crate::agent_packs::store::entry_dir(&sha).join("api_tools"),
+                    origin.clone(),
+                ));
+            }
+        } else {
+            out.push((PathBuf::from(&p.root).join(pack_subdir), origin.clone()));
+        }
+    }
+    out
+}
+
 pub fn resolve_file(
     local_dir: &Path,
     pack_subdir: &str,
@@ -517,6 +553,14 @@ pub fn resolve_file(
     let local = local_dir.join(filename);
     if local.exists() {
         return Some((local, PackOrigin::Local));
+    }
+    // Agent packs first: they are the current install unit. Legacy integration
+    // packs still resolve behind them until they are migrated away.
+    for (dir, origin) in agent_pack_layers(pack_subdir) {
+        let candidate = dir.join(filename);
+        if candidate.exists() {
+            return Some((candidate, origin));
+        }
     }
     for pack in enabled_packs() {
         let candidate = pack.root.join(pack_subdir).join(filename);
@@ -530,19 +574,11 @@ pub fn resolve_file(
 /// Diagnostic for a resolution miss: is `filename` provided by an installed
 /// pack that is currently *disabled*? Returns that pack's id so callers can
 /// tell the user to enable it instead of reporting a bare "not found".
-pub fn disabled_provider(pack_subdir: &str, filename: &str) -> Option<String> {
-    let state = load_state();
-    list_installed().into_iter().find_map(|pack| {
-        let enabled = state.get(&pack.manifest.id).map(|s| s.enabled).unwrap_or(false);
-        if enabled {
-            return None; // an enabled provider would already have resolved
-        }
-        pack.root
-            .join(pack_subdir)
-            .join(filename)
-            .exists()
-            .then_some(pack.manifest.id)
-    })
+pub fn disabled_provider(_pack_subdir: &str, _filename: &str) -> Option<String> {
+    // Nothing is disabled any more, so a resolution miss is a genuine miss. Kept so
+    // `resolve_or_explain`'s shape is unchanged; it now always reports "not found"
+    // rather than sending the user to a switch that no longer exists.
+    None
 }
 
 /// Resolve a file like [`resolve_file`], but on a miss return an actionable
@@ -600,6 +636,17 @@ pub fn list_files_layered(
             let path = entry.path();
             if path.extension().and_then(|x| x.to_str()) == Some(extension) {
                 push(path, PackOrigin::Local);
+            }
+        }
+    }
+    // Then each installed agent pack.
+    for (dir, origin) in agent_pack_layers(pack_subdir) {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.extension().and_then(|x| x.to_str()) == Some(extension) {
+                    push(path, origin.clone());
+                }
             }
         }
     }

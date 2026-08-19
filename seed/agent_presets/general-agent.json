@@ -1,0 +1,40 @@
+{
+  "manifest_version": 1,
+  "slug": "general-agent",
+  "name": "General Agent",
+  "tagline": "The default. Orchestrates, delegates, and knows its way around a codebase.",
+  "description": "The out-of-the-box agent: an orchestrator that breaks work into sub-tasks and hands each to the specialist persona built for it.",
+  "default_persona": "orchestrator-agent",
+  "personas": [
+    {
+      "slug": "orchestrator-agent",
+      "role": "default"
+    },
+    {
+      "slug": "coding-agent",
+      "role": "subagent",
+      "description": "Reads, writes and edits code"
+    },
+    {
+      "slug": "research-agent",
+      "role": "subagent",
+      "description": "Read-only investigation"
+    },
+    {
+      "slug": "devops-agent",
+      "role": "subagent",
+      "description": "Deploys and infrastructure"
+    },
+    {
+      "slug": "config-agent",
+      "role": "subagent",
+      "description": "Agent configuration and keys"
+    },
+    {
+      "slug": "workshop-agent",
+      "role": "subagent",
+      "description": "Authors personas, skills and flows"
+    }
+  ],
+  "version": "1.1.0"
+}

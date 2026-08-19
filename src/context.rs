@@ -115,20 +115,25 @@ pub fn compact(state: &mut AgentState, summary: String, keep_recent: usize) {
 
 /// Check if compaction is needed and perform it using the given model.
 ///
-/// Returns `true` if compaction was performed.
+/// Returns the summary that was produced, or `None` if no compaction was needed.
+///
+/// The summary is returned rather than only applied because it is the most
+/// concentrated description of the conversation that exists — an LLM call has
+/// already been paid for it — and the memory system captures it on the way past
+/// instead of letting it vanish into a single `Assistant` message.
 pub async fn compact_if_needed<M: CompletionModel + 'static>(
     state: &mut AgentState,
     model: &M,
     config: &CompactionConfig,
-) -> Result<bool, String> {
+) -> Result<Option<String>, String> {
     let tokens = estimate_tokens(state);
     if tokens < config.threshold_tokens() {
-        return Ok(false);
+        return Ok(None);
     }
 
     let split = safe_split(&state.messages, config.keep_recent_messages);
     if split == 0 {
-        return Ok(false);
+        return Ok(None);
     }
     let old_messages = &state.messages[..split];
 
@@ -141,8 +146,8 @@ pub async fn compact_if_needed<M: CompletionModel + 'static>(
         config.keep_recent_messages
     );
 
-    compact(state, summary, config.keep_recent_messages);
-    Ok(true)
+    compact(state, summary.clone(), config.keep_recent_messages);
+    Ok(Some(summary))
 }
 
 async fn summarize_messages<M: CompletionModel + 'static>(

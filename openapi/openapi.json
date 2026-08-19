@@ -1,0 +1,5561 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Metalcraft Agent API",
+    "description": "The pod's workshop admin API. Manages personas, skills, flows, keys, chats, diagnostics sessions, integration packs, and gateway channels. Authenticate with a Bearer token: the static WORKSHOP_API_KEY or a Metalcraft ID token (mck_…) scoped to this pod.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "0.29.0"
+  },
+  "paths": {
+    "/api/v1/agent-packs": {
+      "get": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "list_agent_packs",
+        "responses": {
+          "200": {
+            "description": "Installed agent packs"
+          }
+        }
+      }
+    },
+    "/api/v1/agent-packs/export": {
+      "post": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "post_export_agent_pack",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportAgentPackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The .agentpack bytes, or a report if `out` was given"
+          }
+        }
+      }
+    },
+    "/api/v1/agent-packs/install": {
+      "post": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "post_install_agent_pack",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "description": "Local .agentpack path; omit to upload the archive as the body",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The .agentpack archive",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Install report"
+          },
+          "400": {
+            "description": "Rejected"
+          }
+        }
+      }
+    },
+    "/api/v1/agent-packs/{id}": {
+      "get": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "get_agent_pack",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent pack id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pack's manifest"
+          },
+          "404": {
+            "description": "Not installed"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "delete_agent_pack",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent pack id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "description": "Orphan any saved agents that use it",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Uninstall report"
+          },
+          "409": {
+            "description": "In use"
+          }
+        }
+      }
+    },
+    "/api/v1/agent-presets": {
+      "get": {
+        "tags": [
+          "agent-presets"
+        ],
+        "operationId": "list_agent_presets",
+        "responses": {
+          "200": {
+            "description": "Installed agent presets"
+          }
+        }
+      }
+    },
+    "/api/v1/agent-presets/{slug}": {
+      "get": {
+        "tags": [
+          "agent-presets"
+        ],
+        "operationId": "get_agent_preset",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Preset slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The preset, with its roster resolved"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agent-presets"
+        ],
+        "operationId": "put_agent_preset",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Preset slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentPreset"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved"
+          },
+          "409": {
+            "description": "Owned by a pack"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agent-presets"
+        ],
+        "operationId": "delete_agent_preset",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Preset slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Not user-owned"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/instances": {
+      "get": {
+        "tags": [
+          "agent-instances"
+        ],
+        "operationId": "list_agent_instances",
+        "responses": {
+          "200": {
+            "description": "Live agents on this pod"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agent-instances"
+        ],
+        "operationId": "post_create_agent_instance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInstanceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Created"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/instances/{id}": {
+      "get": {
+        "tags": [
+          "agent-instances"
+        ],
+        "operationId": "get_agent_instance",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agent-instances"
+        ],
+        "operationId": "delete_agent_instance",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "agent-instances"
+        ],
+        "operationId": "patch_agent_instance",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchInstanceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/v1/agents/instances/{id}/conversations": {
+      "post": {
+        "tags": [
+          "agent-instances"
+        ],
+        "operationId": "post_instance_conversation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewConversationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatSummary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/instances/{id}/memory": {
+      "get": {
+        "tags": [
+          "agent-instances"
+        ],
+        "operationId": "get_agent_instance_memory",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What this agent knows, shipped vs learned"
+          }
+        }
+      }
+    },
+    "/api/v1/api-tools": {
+      "get": {
+        "tags": [
+          "api-tools"
+        ],
+        "operationId": "list_api_tools",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiToolSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/api-tools/{name}": {
+      "get": {
+        "tags": [
+          "api-tools"
+        ],
+        "operationId": "get_api_tool",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Tool name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpApiToolConfig"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "api-tools"
+        ],
+        "operationId": "put_api_tool",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Tool name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HttpApiToolConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "api-tools"
+        ],
+        "operationId": "delete_api_tool",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Tool name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/api/v1/channels": {
+      "get": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "List all channels — the built-in `metalcraft` default first, then custom\nchannels. Secrets are never included.",
+        "operationId": "list_channels",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Channel"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Add a custom channel (its own gateway url + secret). The `metalcraft` slug is\nreserved for the built-in channel.",
+        "operationId": "create_channel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChannelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Channel"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/channels/{slug}": {
+      "put": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Update a custom channel. The built-in `metalcraft` channel can't be edited.",
+        "operationId": "update_channel",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Channel slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateChannelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Channel"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Delete a custom channel and its secret. The built-in `metalcraft` channel\ncan't be deleted.",
+        "operationId": "delete_channel",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Channel slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/channels/{slug}/events": {
+      "get": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Recent activity for a single channel (by slug), newest first.",
+        "operationId": "list_channel_events",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Channel slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GatewayEvent"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/chats": {
+      "get": {
+        "tags": [
+          "chats"
+        ],
+        "operationId": "list_chats",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ChatSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "chats"
+        ],
+        "operationId": "post_create_chat",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatSummary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/chats/{id}": {
+      "get": {
+        "tags": [
+          "chats"
+        ],
+        "operationId": "get_chat",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "chats"
+        ],
+        "operationId": "delete_chat",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/api/v1/chats/{id}/events": {
+      "get": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "Live subscription to a chat's *agent-initiated* turns (scheduled follow-ups).\nThe workshop opens this when a chat is on screen so a follow-up that fires\nwhile the user is idle streams in without a page refresh. Normal\nuser-initiated turns still come back on their own `POST .../turn` response.",
+        "operationId": "get_chat_events",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of agent-initiated ChatEvent frames",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatEvent"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/chats/{id}/turn": {
+      "post": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "Run one turn against the chat session. Streams new messages as Server-Sent\nEvents as the agent steps; closes the connection when the executor returns.",
+        "operationId": "post_chat_turn",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatTurnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream (text/event-stream) of ChatEvent frames",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatEvent"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/diagnostics": {
+      "get": {
+        "tags": [
+          "diagnostics"
+        ],
+        "operationId": "list_diagnostics",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DiagnosticsSessionSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/diagnostics/{id}": {
+      "get": {
+        "tags": [
+          "diagnostics"
+        ],
+        "operationId": "get_diagnostics_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticsSession"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/flow-runs": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "List persisted flow runs, optionally filtered by `?flow_id=`.",
+        "operationId": "list_flow_runs",
+        "responses": {
+          "200": {
+            "description": "Flow run summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FlowRun"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/flow-runs/{run_id}": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Get one flow run by id.",
+        "operationId": "get_flow_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Flow run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Flow run detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowRun"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/flow-runs/{run_id}/resume": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Resume a paused flow run.",
+        "operationId": "post_resume_flow_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Flow run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResumeFlowRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Resumed run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowRunSummary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/flow-templates": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "list_flow_templates",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FlowTemplateSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/flow-templates/{slug}": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "get_flow_template",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Template slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowTemplate"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/flows/install": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Install a registry flow onto this agent: download its `SavedFlow` JSON from\nflows.metalcraftai.com, validate it, and save it into the flows dir (installed\ndisabled). Returns `{ flow, dependencies }` — the dependency report lists any\npacks/personas the flow needs that aren't installed yet.",
+        "operationId": "post_install_flow",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallFlowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Installed flow + dependency report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/flows/{id}": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "get_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The saved flow (metalcraft-flows SavedFlow)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "put_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "delete_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/api/v1/flows/{id}/install-dependencies": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Install the integration packs an already-installed flow declares in its\n`requires` block: for each, resolve its semver range against the registry,\ndownload that exact version, verify the content hash, install, and enable it.\nReturns one outcome per pack. Idempotent — packs already satisfied are left\nuntouched.",
+        "operationId": "post_install_flow_dependencies",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-pack install outcomes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallDependenciesResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/flows/{id}/run": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "post_run_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunFlowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "v2 flows return a FlowRunSummary; v1 flows return a RunFlowResponse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunFlowOutput"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/flows/{id}/schedules": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "get_flow_schedules",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Effective schedules (array of FlowScheduleSpec)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "put_flow_schedules",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved schedules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "post_flow_schedule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Schedule added; returns the full list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A schedule with that id already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/flows/{id}/schedules/preview": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "get_flow_schedules_preview",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Upcoming fire times per schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SchedulePreview"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/flows/{id}/schedules/{sid}": {
+      "delete": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "delete_flow_schedule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "description": "Schedule id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed; returns the remaining list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/gateway/activity": {
+      "get": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Recent gateway activity across all channels, including inbound messages that\nmatched no channel (the global Network view). Newest first.",
+        "operationId": "list_gateway_activity",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GatewayEvent"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/gateway/metalcraft/connect": {
+      "post": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Connect: fetch config + wire the webhook + enable the channel. 409 until verified.",
+        "operationId": "gateway_metalcraft_connect",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MgConnectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Connected"
+          }
+        }
+      }
+    },
+    "/api/v1/gateway/metalcraft/disconnect": {
+      "post": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Disconnect: disable the metalcraft-gateway channel + drop its secrets. Idempotent.",
+        "operationId": "gateway_metalcraft_disconnect",
+        "responses": {
+          "200": {
+            "description": "Disconnected"
+          }
+        }
+      }
+    },
+    "/api/v1/gateway/metalcraft/register": {
+      "post": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Inline register: proxy to the gateway with the pod's token; returns `verify_code`.",
+        "operationId": "gateway_metalcraft_register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MgRegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Registered"
+          }
+        }
+      }
+    },
+    "/api/v1/gateway/metalcraft/status": {
+      "get": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Registration/verification/connection state for the workshop's Connect panel.",
+        "operationId": "gateway_metalcraft_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/info": {
+      "get": {
+        "tags": [
+          "agent"
+        ],
+        "summary": "Agent identity/version + config the Workshop reads. `version` drives the\nSettings tab's \"which build is live\" check; `default_persona` is the persona\nthe Workshop's New Chat modal defaults to (set `METALCRAFT_DEFAULT_PERSONA`\nto override; falls back to the orchestrator, which delegates to specialists).",
+        "operationId": "agent_info",
+        "responses": {
+          "200": {
+            "description": "Agent name, version, and default persona"
+          }
+        }
+      }
+    },
+    "/api/v1/integration-packs": {
+      "get": {
+        "tags": [
+          "integration-packs"
+        ],
+        "operationId": "list_integration_packs",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/IntegrationPackSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/integration-packs/install": {
+      "post": {
+        "tags": [
+          "integration-packs"
+        ],
+        "summary": "Install a registry pack onto this agent: download its ZIP from\npacks.metalcraftai.com, extract it into the data dir, and enable it. Returns\nthe new pack's summary (same shape as the list endpoint).",
+        "operationId": "post_install_pack",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallPackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationPackSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/integration-packs/{id}": {
+      "get": {
+        "tags": [
+          "integration-packs"
+        ],
+        "operationId": "get_integration_pack",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Pack id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationPackDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "integration-packs"
+        ],
+        "operationId": "delete_integration_pack",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Pack id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Uninstalled; body lists anything that still depends on the pack",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UninstallPackResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/integration-packs/{id}/enabled": {
+      "put": {
+        "tags": [
+          "integration-packs"
+        ],
+        "operationId": "put_pack_enabled",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Pack id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetEnabledRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated"
+          }
+        }
+      }
+    },
+    "/api/v1/keys": {
+      "get": {
+        "tags": [
+          "keys"
+        ],
+        "operationId": "list_keys",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KeyEntry"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/keys/recommended": {
+      "get": {
+        "tags": [
+          "keys"
+        ],
+        "summary": "Keys recommended by enabled packs, each flagged configured/missing. Lets the\nkey store UI surface \"these enabled packs need these keys\" without the user\nhaving to read each pack's manifest.",
+        "operationId": "list_recommended_keys",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RecommendedKey"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/keys/{name}": {
+      "put": {
+        "tags": [
+          "keys"
+        ],
+        "summary": "Upsert a key. The name comes from the path; the raw value (and an optional\ntarget `channel_id`) from the body. Managed keys — a platform-injected global\n(env-authoritative) or a provisioner-backed channel's secrets — are read-only\nand rejected here.",
+        "operationId": "put_key",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Key name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KeyValueBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "keys"
+        ],
+        "summary": "Delete a key. An optional `?channel_id=` targets a channel's secret scope;\nomitted means the global scope. Managed keys are read-only and rejected.",
+        "operationId": "delete_key",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Key name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel_id",
+            "in": "query",
+            "description": "Channel scope for a channel secret",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/api/v1/keys/{name}/reveal": {
+      "get": {
+        "tags": [
+          "keys"
+        ],
+        "summary": "Reveal a stored key's **raw** value. An optional `?channel_id=` targets a\nchannel's secret scope; omitted means global. This is the one endpoint that\nreturns an unmasked value — an explicit, user-initiated action in the Keys UI.\nOnly returns values physically present in the store (a derived/env-only value\nlike a provisioner's `API_KEY` is not stored, so there's nothing to reveal).",
+        "operationId": "reveal_key",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Key name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel_id",
+            "in": "query",
+            "description": "Channel scope for a channel secret",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyRevealResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lockfile": {
+      "get": {
+        "tags": [
+          "lockfile"
+        ],
+        "summary": "The pod's `metalcraft.lock` — every registry pack/flow pinned to an exact\nversion + content hash. Export it to clone a pod's toolset, or feed it to\n`/lockfile/restore` on a rebuilt pod.",
+        "operationId": "get_lockfile",
+        "responses": {
+          "200": {
+            "description": "The install lockfile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Lock"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/lockfile/restore": {
+      "post": {
+        "tags": [
+          "lockfile"
+        ],
+        "summary": "Reinstall everything in the lockfile at its pinned version, verifying each against\nits locked content hash — the reproducible-rebuild path for a fresh or cloned pod.\nReturns one outcome per entry; a failure on one entry doesn't stop the rest.",
+        "operationId": "post_lockfile_restore",
+        "responses": {
+          "200": {
+            "description": "Per-entry restore outcomes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/personas/{slug}": {
+      "get": {
+        "tags": [
+          "personas"
+        ],
+        "operationId": "get_persona",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Persona slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Persona"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "personas"
+        ],
+        "operationId": "put_persona",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Persona slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Persona"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "personas"
+        ],
+        "operationId": "delete_persona",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Persona slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/api/v1/scheduled-tasks": {
+      "get": {
+        "tags": [
+          "scheduled-tasks"
+        ],
+        "summary": "List scheduled follow-ups (pending + recently completed), newest first.",
+        "operationId": "list_scheduled_tasks",
+        "responses": {
+          "200": {
+            "description": "Scheduled follow-ups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/scheduled-tasks/{id}": {
+      "delete": {
+        "tags": [
+          "scheduled-tasks"
+        ],
+        "summary": "Cancel a pending scheduled follow-up.",
+        "operationId": "delete_scheduled_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/api/v1/skills/{slug}": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "operationId": "get_skill",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Skill slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Skill"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "skills"
+        ],
+        "operationId": "put_skill",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Skill slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Skill"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "skills"
+        ],
+        "operationId": "delete_skill",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Skill slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/api/v1/snapshot": {
+      "get": {
+        "tags": [
+          "agent"
+        ],
+        "operationId": "get_snapshot",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectSnapshot"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentInstance": {
+        "type": "object",
+        "required": [
+          "id",
+          "agent_preset",
+          "name",
+          "persona",
+          "created_at"
+        ],
+        "properties": {
+          "agent_pack": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent pack that provided the preset, when it came from one."
+          },
+          "agent_preset": {
+            "type": "string",
+            "description": "The agent preset this instance was created from. **Immutable for its life** —\nits memory is seeded from that preset, so swapping it mid-life is incoherent.\nSwitching agents means starting a new instance."
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "created_from_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Diagnostics only. Personas and skills **follow** the installed pack version\n(see the plan's §5.4); this records what it was born against."
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_active_at": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/InstanceOrigin"
+          },
+          "persistent": {
+            "type": "boolean",
+            "description": "Ephemeral instances recall against the preset but never accrue a durable\nmemory, and are reaped after a TTL. Naming one makes it persistent."
+          },
+          "persona": {
+            "type": "string",
+            "description": "The instance's current persona — starts at the preset's default and moves\nwithin its roster."
+          }
+        }
+      },
+      "AgentPackManifest": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "version"
+        ],
+        "properties": {
+          "author": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Author"
+              }
+            ]
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hash of every file in the archive **except `agent_pack.json`**, so the\nmanifest can carry the hash of what it describes without hashing itself."
+          },
+          "description": {
+            "type": "string"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "handle": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The registry handle this pack is published under (`amy_kitchen`)."
+          },
+          "id": {
+            "type": "string"
+          },
+          "license": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "manifest_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "parent": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Parent",
+                "description": "Fork lineage."
+              }
+            ]
+          },
+          "presets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The agent presets this pack provides. Exactly one today — the registry\nenforces it — but an array so multi-preset \"crews\" stay additive later."
+          },
+          "provides": {
+            "$ref": "#/components/schemas/Provides"
+          },
+          "requires_env": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnvRequirement"
+            },
+            "description": "Derived at build time and **re-derived at install**; a manifest that\ndisagrees with its own contents is rejected rather than trusted."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "AgentPreset": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name",
+          "default_persona"
+        ],
+        "properties": {
+          "avatar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_persona": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "integration_packs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "manifest_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "memories": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MemoriesRef"
+              }
+            ]
+          },
+          "model": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModelFloor"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "personas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PresetPersona"
+            }
+          },
+          "requires_env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "slug": {
+            "type": "string"
+          },
+          "tagline": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ApiToolSummary": {
+        "type": "object",
+        "required": [
+          "name",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pack_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "read_only": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Author": {
+        "type": "object",
+        "required": [
+          "handle"
+        ],
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "handle": {
+            "type": "string"
+          },
+          "sub": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The author's Metalcraft ID subject, when the registry recorded one."
+          }
+        }
+      },
+      "Channel": {
+        "type": "object",
+        "description": "A channel as surfaced to callers/UI: a named connection. `managed` marks the\nbuilt-in `metalcraft` channel (secret is the pod token; not user-editable).\nThe secret value itself is never included here.",
+        "required": [
+          "slug",
+          "name",
+          "url"
+        ],
+        "properties": {
+          "active_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The gateway number bound to this channel, if any."
+          },
+          "connected": {
+            "type": "boolean",
+            "description": "Whether the channel has completed a gateway connect (link fields present)."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "integration_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The gateway integration UUID this channel is bound to. Inbound messages\ncarrying this `source_id` route here; also the send-time sender selector."
+          },
+          "managed": {
+            "type": "boolean",
+            "description": "True only for the built-in `metalcraft` channel."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model override for inbound runs on this channel."
+          },
+          "name": {
+            "type": "string"
+          },
+          "persona": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Persona that answers inbound on this channel (default: orchestrator)."
+          },
+          "slug": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "ChatDetail": {
+        "type": "object",
+        "required": [
+          "id",
+          "persona_slug",
+          "model_name",
+          "created_at",
+          "messages"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatMessageWire"
+            }
+          },
+          "model_name": {
+            "type": "string"
+          },
+          "persona_slug": {
+            "type": "string"
+          }
+        }
+      },
+      "ChatEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Marks the start of a turn — emitted once at the top of `post_chat_turn`\nso the workshop can open a new group in the transcript.",
+            "required": [
+              "turn_index",
+              "user_message",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "turn_started"
+                ]
+              },
+              "session_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Diagnostics session directory name for this chat, so the workshop can\ndeep-link a turn (or a turn error) to its session logs. `None` for a\nchat with no active logger — e.g. one reloaded after an agent restart."
+              },
+              "turn_index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "user_message": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "LLM call has started. Paired with a later `LlmCompleted`.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "llm_started"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "LLM call finished. `messages` is any new assistant message(s); tool\ncalls produced by this LLM step are emitted as separate `ToolStarted`\nevents immediately after.",
+            "required": [
+              "messages",
+              "duration_ms",
+              "kind"
+            ],
+            "properties": {
+              "duration_ms": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "llm_completed"
+                ]
+              },
+              "messages": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ChatMessageWire"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tool the LLM requested is about to run.",
+            "required": [
+              "tool_call_id",
+              "name",
+              "args",
+              "kind"
+            ],
+            "properties": {
+              "args": {},
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tool_started"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "tool_call_id": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The tool finished. `result` is the `ToolResult` message that was\nappended to state.",
+            "required": [
+              "tool_call_id",
+              "name",
+              "duration_ms",
+              "result",
+              "kind"
+            ],
+            "properties": {
+              "duration_ms": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tool_completed"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "result": {
+                "$ref": "#/components/schemas/ChatMessageWire"
+              },
+              "tool_call_id": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The agent's user-facing reply, produced by a `say_to_user` tool call.\nIn tool-only mode this — not free-text `LlmCompleted` content — is the\nassistant's message; the workshop renders it as the reply bubble. The\nunderlying `say_to_user` tool start/finish events are suppressed so the\nreply isn't also shown as a raw tool card.",
+            "required": [
+              "content",
+              "kind"
+            ],
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "reply"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Terminal event. `status` is \"completed\" | \"interrupted\" | \"failed\".",
+            "required": [
+              "status",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "done"
+                ]
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A classified turn failure, safe to show the user. Emitted instead of a\nbare `Done{status:\"failed\"}` so frontends can render a friendly message\n(and branch on `code`) rather than the raw provider-error chain. `code`\nis the machine-readable identifier (see `runtime::ErrorCode`); `message`\nis the user-facing text; `retryable` hints whether \"try again\" is useful.\nA `done` still follows so lifecycle handling is unchanged for old clients.",
+            "required": [
+              "code",
+              "message",
+              "retryable",
+              "kind"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            }
+          }
+        ],
+        "description": "SSE event wire format. One JSON object per event. The `kind` field\ndiscriminates; payloads vary by kind. Events form a lifecycle:\n  `turn_started` → (`llm_started` → `llm_completed`\n                  → `tool_started`* → `tool_completed`*)+\n                  → `done`\n(`tool_started` and `tool_completed` can repeat per LLM step.)"
+      },
+      "ChatMessageWire": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "content",
+              "role"
+            ],
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "user"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "content",
+              "role"
+            ],
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "assistant"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A reasoning item preserved so it can be replayed with its tool call on a\nlater turn (Responses API requirement for reasoning models). Persisted so\nthe pairing survives a reload — dropping it would re-trigger the \"function\ncall without required reasoning item\" 400 on resume.",
+            "required": [
+              "id",
+              "encrypted",
+              "role"
+            ],
+            "properties": {
+              "encrypted": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "reasoning"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "args",
+              "role"
+            ],
+            "properties": {
+              "args": {},
+              "call_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "tool_call"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "result",
+              "role"
+            ],
+            "properties": {
+              "call_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "result": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "tool_result"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire form for `metalcraft::AgentMessage` — the in-memory enum isn't\n`Serialize`, so we convert before responding. Also used as the on-disk\nformat for persisted chats, so it derives `Deserialize` too."
+      },
+      "ChatSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "persona_slug",
+          "model_name",
+          "created_at",
+          "turn_count"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "model_name": {
+            "type": "string"
+          },
+          "persona_slug": {
+            "type": "string"
+          },
+          "turn_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ChatTurnRequest": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ConsentSummary": {
+        "type": "object",
+        "description": "What a human is shown before approving an install.",
+        "required": [
+          "domains",
+          "requires_env",
+          "tools",
+          "mutating_tools"
+        ],
+        "properties": {
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every origin this agent's tools can reach."
+          },
+          "mutating_tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tools classified as mutating. A read-only agent is a materially smaller\ncommitment than one that can write, and the dialog should say which it is."
+          },
+          "requires_env": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnvRequirement"
+            },
+            "description": "Every credential it wants, and what wants it."
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tool names it gains, so \"what can this thing actually do\" is answerable."
+          }
+        }
+      },
+      "CreateChannelRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "url",
+          "secret"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string"
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateChatRequest": {
+        "type": "object",
+        "properties": {
+          "agent_preset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent to start this conversation with. Defaults to `general-agent`."
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue an existing agent instead of minting a new one — how a named agent\naccumulates conversations."
+          },
+          "model_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name the agent, which also makes it persistent."
+          },
+          "persona_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional now: with an `agent_preset`, the persona comes from the preset's\ndefault. Kept for callers that still pick a persona directly."
+          }
+        }
+      },
+      "CreateInstanceRequest": {
+        "type": "object",
+        "properties": {
+          "agent_preset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "DependencyReport": {
+        "type": "object",
+        "description": "What a flow needs beyond itself, checked against this agent's current state.",
+        "required": [
+          "required_packs",
+          "missing_packs",
+          "version_conflicts",
+          "required_tools",
+          "required_personas",
+          "missing_personas",
+          "required_env"
+        ],
+        "properties": {
+          "missing_packs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Of `required_packs`, those not installed *and enabled* on this agent."
+          },
+          "missing_personas": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Of `required_personas`, those not available on this agent."
+          },
+          "required_env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Secret keys the required (installed) packs declare in their `requires_env`."
+          },
+          "required_packs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Integration packs the flow requires — the union of what the graph\nreferences (`sub_agent.pack` + custom vendor nodes) and what the flow's\n`requires` block declares."
+          },
+          "required_personas": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Personas the flow's nodes run as (`data.persona`)."
+          },
+          "required_tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tool names the flow's `tool` nodes invoke (the real API surface)."
+          },
+          "version_conflicts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Version/hash conflicts: a required pack is installed & enabled but its\nversion is outside the declared range, or its content hash doesn't match a\npin. Human-readable, one per conflict (advisory — install never hard-fails)."
+          }
+        }
+      },
+      "DiagnosticsSession": {
+        "type": "object",
+        "description": "A fully reconstructed session: its `session_info.json` plus an ordered\ntimeline of every other JSON event file in the directory.",
+        "required": [
+          "id",
+          "timeline"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "session_info": {},
+          "timeline": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineEvent"
+            }
+          }
+        }
+      },
+      "DiagnosticsSessionSummary": {
+        "type": "object",
+        "description": "One session in the listing (metadata + turn count, no per-turn payloads).",
+        "required": [
+          "id",
+          "timestamp",
+          "turn_count"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present (and `kind == \"flow\"`) when produced by a flow run."
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "\"session\" for a normal run, \"flow\" for a flow run."
+          },
+          "model_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persona_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "turn_count": {
+            "type": "integer",
+            "description": "Count of `turn_NNN.json` files — how far the run actually got.",
+            "minimum": 0
+          }
+        }
+      },
+      "EnvRequirement": {
+        "type": "object",
+        "description": "One credential, attributed to what needs it — because the question a human is\nanswering at install time is \"which secrets do I have to paste in\", not \"which\npack wants what\".",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "needed_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "required": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "ExportAgentPackRequest": {
+        "type": "object",
+        "required": [
+          "preset"
+        ],
+        "properties": {
+          "out": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Write the archive here. Omit to receive the bytes in the response."
+          },
+          "preset": {
+            "type": "string"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "FlowPromptResult": {
+        "type": "object",
+        "description": "Result of running one prompt node of a flow.",
+        "required": [
+          "prompt_index",
+          "status"
+        ],
+        "properties": {
+          "answer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prompt_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "description": "\"completed\" | \"interrupted\" | \"failed\"."
+          }
+        }
+      },
+      "FlowRun": {
+        "type": "object",
+        "description": "A persisted flow run.",
+        "required": [
+          "id",
+          "flow_id",
+          "status",
+          "current_node_id",
+          "variables",
+          "persona",
+          "model",
+          "cwd",
+          "steps",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "RFC-3339 creation timestamp."
+          },
+          "current_node_id": {
+            "type": "string",
+            "description": "The node the run is paused at (for `paused`) or last ran."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Working directory to resume in."
+          },
+          "flow": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Snapshot of the flow definition at pause time, so resume routes against\nthe graph the run actually paused in — not a since-edited on-disk flow.\nAbsent (`None`) on legacy records; resume then falls back to loading the\ncurrent flow."
+          },
+          "flow_id": {
+            "type": "string",
+            "description": "The flow this run belongs to."
+          },
+          "id": {
+            "type": "string",
+            "description": "Unique run id (the `runs/{id}.json` filename)."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model name to resume with."
+          },
+          "pause": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PauseInfo",
+                "description": "Pause details when `status == \"paused\"`."
+              }
+            ]
+          },
+          "persona": {
+            "type": "string",
+            "description": "Persona/model/cwd needed to resume the run."
+          },
+          "status": {
+            "type": "string",
+            "description": "`running` | `paused` | `completed` | `failed`."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowStep"
+            },
+            "description": "The trace accumulated so far."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "RFC-3339 last-update timestamp."
+          },
+          "variables": {
+            "type": "object",
+            "description": "The run's state (`variables`) at the checkpoint."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Non-fatal warnings computed when the run started — e.g. required packs/personas\nthat aren't installed or enabled. Surfaced in flow-debug UIs so a run that can't\nfully work says why. Empty (and omitted) when the flow has everything it needs."
+          }
+        }
+      },
+      "FlowRunSummary": {
+        "type": "object",
+        "description": "The result of running (or pausing) a flow.",
+        "required": [
+          "run_id",
+          "flow_id",
+          "status",
+          "steps",
+          "variables"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "description": "The flow that ran."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "The run id (matches the `runs/{id}.json` record when the run paused)."
+          },
+          "status": {
+            "type": "string",
+            "description": "`completed` | `failed` | `paused`."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowStep"
+            },
+            "description": "Per-node trace, in execution order."
+          },
+          "variables": {
+            "type": "object",
+            "description": "Final (or checkpointed) state — the `variables` object."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Missing-dependency warnings for this run (empty when the flow has everything\nit needs). Shown in flow-debug UIs."
+          }
+        }
+      },
+      "FlowStep": {
+        "type": "object",
+        "description": "One node's contribution to the run trace.",
+        "required": [
+          "node_id",
+          "node_type",
+          "outcome"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable detail (answer snippet, error, chosen handle)."
+          },
+          "node_id": {
+            "type": "string",
+            "description": "The node that ran."
+          },
+          "node_type": {
+            "type": "string",
+            "description": "Its wire-format type."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`advanced` | `routed:<handle>` | `completed` | `failed`."
+          }
+        }
+      },
+      "FlowTemplate": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name",
+          "flow"
+        ],
+        "properties": {
+          "flow": {
+            "description": "The raw template flow JSON, ready to be cloned and edited as a new flow."
+          },
+          "name": {
+            "type": "string"
+          },
+          "pack_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "FlowTemplateSummary": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "pack_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "GatewayEvent": {
+        "type": "object",
+        "description": "One inbound or outbound gateway event.\n\n`channel_id` is `None` when an inbound message matched no enabled channel —\nthese \"unrouted\" records are what make the global Network view useful for\ndiagnosing misconfiguration (e.g. a wrong `integration_id`).",
+        "required": [
+          "ts",
+          "direction",
+          "platform",
+          "outcome"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Message body (truncated to [`MAX_BODY_CHARS`])."
+          },
+          "channel_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The matched gateway channel's id, or `None` if unrouted."
+          },
+          "channel_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The matched gateway channel's name, for display."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Extra context — persona used, error message, etc."
+          },
+          "direction": {
+            "type": "string",
+            "description": "`\"inbound\"` or `\"outbound\"`."
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sender identifier (phone number for WhatsApp)."
+          },
+          "from_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable sender name, when known."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "Outcome: `routed`, `no_matching_channel`, `signature_rejected`,\n`sent`, `send_failed`."
+          },
+          "platform": {
+            "type": "string",
+            "description": "Delivery kind, e.g. `\"apns\"`, `\"whatsapp\"`, or `\"text\"`."
+          },
+          "source_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Upstream gateway integration UUID (`source_id`), when known."
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Recipient identifier."
+          },
+          "ts": {
+            "type": "string",
+            "description": "RFC3339 timestamp; filled in by [`record`] if left empty."
+          }
+        }
+      },
+      "GatewayStatus": {
+        "type": "object",
+        "description": "What the workshop Connect panel renders from.",
+        "required": [
+          "configured",
+          "registered",
+          "verified",
+          "connected",
+          "streaming",
+          "has_public_url",
+          "webhook_stale"
+        ],
+        "properties": {
+          "active_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "configured": {
+            "type": "boolean",
+            "description": "The pod has a token (is linked to a Metalcraft ID account)."
+          },
+          "connected": {
+            "type": "boolean",
+            "description": "A local `metalcraft-gateway` channel is enabled and the webhook secret is set."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_public_url": {
+            "type": "boolean",
+            "description": "Whether the pod knows its own public URL (POD_PUBLIC_URL) for the webhook."
+          },
+          "registered": {
+            "type": "boolean",
+            "description": "The user has registered a personal number on the gateway."
+          },
+          "streaming": {
+            "type": "boolean",
+            "description": "The Inbound Pull long-poll is currently connected and draining. Unlike `connected`\n(config present on disk), this is *intrinsic* liveness — it cannot be true while\ninbound delivery is actually dead. `false` in push mode (no long-poll runs)."
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "That number is verified — required before connecting."
+          },
+          "webhook_stale": {
+            "type": "boolean",
+            "description": "The gateway's registered inbound webhook (`consumer_webhook_url`) no longer\npoints at this pod's current URL, so inbound messages are being delivered into\nthe void. `connected` can be true while this is true — the \"green light, dead\npipe\" state. Detecting it kicks off a reactive re-register (see `status`)."
+          }
+        }
+      },
+      "HttpApiToolConfig": {
+        "type": "object",
+        "description": "JSON config schema for a user-defined HTTP API tool.",
+        "required": [
+          "name",
+          "description",
+          "method",
+          "url",
+          "parameters"
+        ],
+        "properties": {
+          "body_defaults": {
+            "type": "object",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "body_mapping": {
+            "type": "string"
+          },
+          "body_template": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "method": {
+            "type": "string"
+          },
+          "multipart": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MultipartConfig",
+                "description": "Present only when `body_mapping == \"multipart\"`: describes which argument\ncarries the local file path and what form-field name to send it under."
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "param_paths": {
+            "type": "object",
+            "description": "Present only when `body_mapping == \"params_nested\"`: maps each flat\nargument name to a dotted JSON path in the request body (e.g.\n`\"prompt\": \"payload.structured_data.params.prompt\"`). Lets a tool expose\nsimple scalar parameters (which OpenAI's function-schema validation\naccepts) while still producing a deeply nested JSON body — without the\nstring-substitution hazards of `body_mapping == \"template\"`. Arguments\nwith no entry here are inserted at the top level under their own name.\nAbsent (optional) arguments are simply skipped, and `body_defaults`\nprovides the nested base the paths are written onto.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "parameters": {},
+          "poll": {
+            "type": "boolean",
+            "description": "Marks this tool as a status **poll** (e.g. checking an async job until it\nfinishes). Polling means calling the same tool with the same arguments\nrepeatedly on purpose, which would otherwise look like a runaway loop, so\nthe step guard exempts poll tools from tight loop detection. See\n[`crate::guard`]."
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "InstallDependenciesResponse": {
+        "type": "object",
+        "description": "Response for `POST /flows/{id}/install-dependencies`.",
+        "required": [
+          "flow",
+          "packs"
+        ],
+        "properties": {
+          "flow": {
+            "type": "string",
+            "description": "The flow whose dependencies were installed."
+          },
+          "packs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackInstallOutcome"
+            },
+            "description": "One outcome per required pack."
+          }
+        }
+      },
+      "InstallFlowRequest": {
+        "type": "object",
+        "required": [
+          "slug"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "Registry slug of the flow to install (equals the flow id)."
+          }
+        }
+      },
+      "InstallPackRequest": {
+        "type": "object",
+        "required": [
+          "slug"
+        ],
+        "properties": {
+          "content_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional integrity pin: if set, the downloaded pack's canonical content\nhash must match this or the install is refused."
+          },
+          "slug": {
+            "type": "string",
+            "description": "Registry slug of the pack to install (equals the pack id)."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional specific version to install (defaults to the registry's latest)."
+          }
+        }
+      },
+      "InstallReport": {
+        "type": "object",
+        "description": "What an install actually did. Every field here is something a human or a UI has\na reason to see — silence about a skipped dependency is how you get an agent that\nhalf works.",
+        "required": [
+          "id",
+          "version",
+          "presets",
+          "personas",
+          "skills",
+          "packs_stored",
+          "packs_deduplicated",
+          "missing_env",
+          "preset_collisions",
+          "memories_indexed",
+          "consent"
+        ],
+        "properties": {
+          "consent": {
+            "$ref": "#/components/schemas/ConsentSummary"
+          },
+          "id": {
+            "type": "string"
+          },
+          "memories_indexed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "missing_env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Credentials the pod does not have yet. A **warning**, never a failure: the\npack installs, its tools error clearly at call time, and `key_set` fixes it."
+          },
+          "packs_deduplicated": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Packs already present under the same hash — free, because content-addressed."
+          },
+          "packs_stored": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Packs newly written to the content store."
+          },
+          "personas": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "preset_collisions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Preset slugs already provided by another installed pack."
+          },
+          "presets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "InstallResult": {
+        "type": "object",
+        "description": "The result of a successful install: what landed + what it still needs.",
+        "required": [
+          "flow",
+          "dependencies"
+        ],
+        "properties": {
+          "dependencies": {
+            "$ref": "#/components/schemas/DependencyReport"
+          },
+          "flow": {
+            "$ref": "#/components/schemas/InstalledFlow"
+          }
+        }
+      },
+      "InstalledAgentPack": {
+        "type": "object",
+        "description": "An installed agent pack.",
+        "required": [
+          "id",
+          "manifest",
+          "root"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/AgentPackManifest"
+          },
+          "root": {
+            "type": "string"
+          }
+        }
+      },
+      "InstalledFlow": {
+        "type": "object",
+        "description": "Summary of the flow that was written.",
+        "required": [
+          "id",
+          "name",
+          "node_count",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the flow is enabled for scheduling. Registry flows install disabled."
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "node_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "InstanceDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AgentInstance"
+          },
+          {
+            "type": "object",
+            "required": [
+              "conversations"
+            ],
+            "properties": {
+              "conversations": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ChatSummary"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "InstanceMemoryView": {
+        "type": "object",
+        "description": "What one agent knows, split by where it came from.",
+        "required": [
+          "instance_id",
+          "shipped",
+          "learned",
+          "forgotten",
+          "sample"
+        ],
+        "properties": {
+          "base": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`<preset>@<version>` when this agent was shipped a knowledge base."
+          },
+          "forgotten": {
+            "type": "integer",
+            "description": "Shipped memories this agent has been told to forget.",
+            "minimum": 0
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "learned": {
+            "type": "integer",
+            "description": "Memories this agent formed itself.",
+            "minimum": 0
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemorySample"
+            }
+          },
+          "shipped": {
+            "type": "integer",
+            "description": "Memories the pack gave it, still visible (tombstones excluded).",
+            "minimum": 0
+          }
+        }
+      },
+      "InstanceOrigin": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "workshop"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "cli"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "channel",
+              "kind"
+            ],
+            "properties": {
+              "channel": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "gateway"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "flow_id",
+              "kind"
+            ],
+            "properties": {
+              "flow_id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "flow"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Where an instance came from. Drives the default lifetime: a workshop chat is\ndisposable, a channel-bound agent is not."
+      },
+      "IntegrationPackDetail": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "version",
+          "enabled",
+          "personas",
+          "skills",
+          "api_tools",
+          "flow_templates"
+        ],
+        "properties": {
+          "api_tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "flow_templates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "personas": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requires_env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "IntegrationPackSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "version",
+          "enabled",
+          "personas",
+          "skills",
+          "api_tools",
+          "flow_templates"
+        ],
+        "properties": {
+          "api_tools": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "flow_templates": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "personas": {
+            "type": "integer",
+            "description": "Number of personas/skills/api_tools/flow_templates the pack provides.",
+            "minimum": 0
+          },
+          "requires_env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skills": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "KeyEntry": {
+        "type": "object",
+        "description": "A stored key with its **scope** and whether it is managed (platform- or\nconnection-owned → read-only in the UI). Returned by `GET /api/v1/keys` so\nthe Keys page can group global keys and per-channel secrets, and lock the\nmanaged ones. `channel_id`/`channel_name` are present only for channel scope.",
+        "required": [
+          "name",
+          "masked",
+          "scope",
+          "managed"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "channel_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "managed": {
+            "type": "boolean"
+          },
+          "masked": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "description": "`\"global\"` or `\"channel\"`."
+          }
+        }
+      },
+      "KeyRevealResponse": {
+        "type": "object",
+        "description": "The raw value of a key, returned only by the explicit reveal endpoint.",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "KeyScopeQuery": {
+        "type": "object",
+        "properties": {
+          "channel_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When set, target this channel's secret scope instead of global."
+          }
+        }
+      },
+      "KeySummary": {
+        "type": "object",
+        "description": "A stored API key, exposed to the workshop with its value masked — the\nraw secret is never sent over the wire. Used by the load-time snapshot and\nthe sidebar (global scope only).",
+        "required": [
+          "name",
+          "masked"
+        ],
+        "properties": {
+          "masked": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "KeyValueBody": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When set, the key is written to this channel's secret scope instead of\nthe global namespace."
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "Lock": {
+        "type": "object",
+        "description": "The lockfile document.",
+        "properties": {
+          "agent_packs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LockEntry"
+            },
+            "description": "Agent packs — the unit of installation. Self-contained, so restoring these\nneeds no dependency ordering: each carries its own integration packs."
+          },
+          "flows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LockEntry"
+            }
+          },
+          "packs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LockEntry"
+            }
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Lockfile format version (not the artifacts' versions).",
+            "minimum": 0
+          }
+        }
+      },
+      "LockEntry": {
+        "type": "object",
+        "description": "One pinned artifact in the lockfile.",
+        "required": [
+          "name",
+          "version",
+          "content_sha256",
+          "source"
+        ],
+        "properties": {
+          "content_sha256": {
+            "type": "string",
+            "description": "Integrity hash of the installed content (verified on restore)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Registry slug (== pack id / flow id)."
+          },
+          "source": {
+            "type": "string",
+            "description": "Registry origin the artifact came from (e.g. `https://packs.metalcraftai.com`)."
+          },
+          "version": {
+            "type": "string",
+            "description": "The concrete version installed."
+          }
+        }
+      },
+      "MemoriesRef": {
+        "type": "object",
+        "description": "Reference to the seed memories an agent pack ships with a preset.",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "dims": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "embed_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file": {
+            "type": "string"
+          }
+        }
+      },
+      "MemorySample": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "text",
+          "importance",
+          "origin",
+          "tags"
+        ],
+        "properties": {
+          "entity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "importance": {
+            "type": "number",
+            "format": "float"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "description": "`\"shipped\"` or `\"learned\"` — the distinction the UI actually needs."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "MgConnectRequest": {
+        "type": "object",
+        "properties": {
+          "connection_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Audience-scoped connection token from the k3 broker, adopted as the\nchannel's outbound API key. Omitted on the Workshop path."
+          },
+          "webhook_base": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Override for the pod's public URL when `POD_PUBLIC_URL` isn't injected."
+          }
+        }
+      },
+      "MgRegisterRequest": {
+        "type": "object",
+        "required": [
+          "phone_number"
+        ],
+        "properties": {
+          "phone_number": {
+            "type": "string"
+          }
+        }
+      },
+      "ModelFloor": {
+        "type": "object",
+        "description": "A **capability floor**, not a model name.\n\nA hard `\"gpt-5.4\"` breaks on a pod that doesn't have it. Declare what the agent\nneeds and let the pod map that onto what it has; `prefer` is a hint, never a\nrequirement.",
+        "properties": {
+          "min_context": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "needs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "prefer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "MultipartConfig": {
+        "type": "object",
+        "description": "Config for a `multipart/form-data` upload tool. The argument named by\n`file_param` is treated as a local file path (constrained to the upload\nroot) and sent as the file part `file_field`; all other arguments become\ntext fields.",
+        "required": [
+          "file_param",
+          "file_field"
+        ],
+        "properties": {
+          "file_field": {
+            "type": "string",
+            "description": "Multipart field name the server expects the file under (e.g. `\"file\"`)."
+          },
+          "file_param": {
+            "type": "string",
+            "description": "Incoming argument that holds the local file path to upload."
+          }
+        }
+      },
+      "NewConversationRequest": {
+        "type": "object",
+        "properties": {
+          "model_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persona_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Start this conversation as a specific persona from the agent's roster."
+          }
+        }
+      },
+      "PackInstallOutcome": {
+        "type": "object",
+        "description": "Outcome of trying to satisfy one pack requirement of a flow.",
+        "required": [
+          "pack",
+          "status"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable detail (why it was skipped/failed, or the resolved version)."
+          },
+          "pack": {
+            "type": "string",
+            "description": "The pack id."
+          },
+          "status": {
+            "type": "string",
+            "description": "`\"installed\" | \"already-satisfied\" | \"skipped\" | \"failed\"`."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The version installed (or already present), when known."
+          }
+        }
+      },
+      "PackRef": {
+        "type": "object",
+        "description": "A vendored integration pack, pinned by content.",
+        "required": [
+          "id",
+          "version"
+        ],
+        "properties": {
+          "content_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Integrity pin for the vendored copy. Verified at install."
+          },
+          "id": {
+            "type": "string"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the author obtained it, for provenance display. Never fetched from."
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "Parent": {
+        "type": "object",
+        "required": [
+          "id",
+          "version"
+        ],
+        "properties": {
+          "content_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "PatchInstanceRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persistent": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "persona": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Move within the preset's roster. Rejected if the persona isn't in it."
+          }
+        }
+      },
+      "PauseInfo": {
+        "type": "object",
+        "description": "Why a run is paused and what will resume it.",
+        "required": [
+          "reason",
+          "resume_handles"
+        ],
+        "properties": {
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `approval`: the (interpolated) prompt shown to the human."
+          },
+          "reason": {
+            "type": "string",
+            "description": "`\"approval\"` or `\"wait\"`."
+          },
+          "resume_handles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For `approval`: the decision handles a human may choose. For `wait`:\ntypically `[\"after\"]`."
+          },
+          "wake_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `wait`: RFC-3339 timestamp at/after which the run may resume."
+          }
+        }
+      },
+      "Persona": {
+        "type": "object",
+        "required": [
+          "name",
+          "description",
+          "tools",
+          "system_prompt"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "packs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Integration packs this persona is scoped to (by pack id, e.g. \"linear\").\nEvery HTTP-API tool provided by an enabled pack listed here is added to\nthe persona's tool set, so a persona can adopt a whole integration\nwithout enumerating each `<pack>_*` tool by name. Combine with `tools`\nfor native tools like `load_skill`. See [`Persona::resolved_tool_names`]."
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "system_prompt": {
+            "type": "string"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional semantic version (e.g. \"1.1.0\") for built-in/seed personas.\nDrives force-upgrade on startup: when a bundled seed persona's version\nis higher than the installed copy's (a missing version counts as 0),\nthe installed file is overwritten. User-created personas omit this and\nare never force-upgraded. See `seed::write_versioned_seeds`."
+          }
+        }
+      },
+      "PersonaRole": {
+        "type": "string",
+        "description": "What a persona is allowed to do inside a preset.",
+        "enum": [
+          "default",
+          "subagent",
+          "internal"
+        ]
+      },
+      "PersonaSummary": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pack_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when this persona is provided by an enabled integration pack.\nLocal (user-owned) personas omit this."
+          },
+          "read_only": {
+            "type": "boolean",
+            "description": "True for pack-provided personas — the workshop disables Save/Delete."
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "PresetPersona": {
+        "type": "object",
+        "required": [
+          "slug"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "$ref": "#/components/schemas/PersonaRole"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "PresetSummary": {
+        "type": "object",
+        "required": [
+          "slug",
+          "name",
+          "description",
+          "default_persona",
+          "persona_count"
+        ],
+        "properties": {
+          "default_persona": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pack_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persona_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "read_only": {
+            "type": "boolean"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "tagline": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ProjectLayout": {
+        "type": "object",
+        "required": [
+          "data_dir",
+          "personas_dir",
+          "skills_dir",
+          "flows_dir",
+          "sessions_dir",
+          "api_tools_dir",
+          "agent_presets_dir",
+          "agent_instances_dir"
+        ],
+        "properties": {
+          "agent_instances_dir": {
+            "type": "string"
+          },
+          "agent_presets_dir": {
+            "type": "string"
+          },
+          "api_tools_dir": {
+            "type": "string"
+          },
+          "data_dir": {
+            "type": "string"
+          },
+          "flows_dir": {
+            "type": "string"
+          },
+          "personas_dir": {
+            "type": "string"
+          },
+          "sessions_dir": {
+            "type": "string"
+          },
+          "skills_dir": {
+            "type": "string"
+          }
+        }
+      },
+      "ProjectSnapshot": {
+        "type": "object",
+        "required": [
+          "personas",
+          "skills",
+          "flows",
+          "sessions",
+          "api_tools",
+          "keys",
+          "agent_presets",
+          "agent_instances",
+          "default_agent_preset",
+          "layout"
+        ],
+        "properties": {
+          "agent_instances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentInstance"
+            },
+            "description": "Agents that actually exist. Ephemeral ones are excluded — an unfiltered list\nis one row per chat ever started, which is noise, not information."
+          },
+          "agent_presets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PresetSummary"
+            },
+            "description": "Agents this pod can be. Both Workshop clients paint their agent picker from\nthe snapshot, so leaving these out costs an extra round-trip on every load."
+          },
+          "api_tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiToolSummary"
+            }
+          },
+          "default_agent_preset": {
+            "type": "string"
+          },
+          "flows": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "From the external `metalcraft-flows` crate, which has no `ToSchema`; the\nweb app doesn't consume this field, so expose it as an opaque object array."
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KeySummary"
+            }
+          },
+          "layout": {
+            "$ref": "#/components/schemas/ProjectLayout"
+          },
+          "personas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonaSummary"
+            }
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticsSessionSummary"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkillSummary"
+            }
+          }
+        }
+      },
+      "Provides": {
+        "type": "object",
+        "properties": {
+          "integration_packs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackRef"
+            }
+          },
+          "personas": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "RecommendedKey": {
+        "type": "object",
+        "description": "A key recommended by one or more *enabled* integration packs (from their\n`requires_env`), with whether it currently resolves (key store or env) and\nwhich packs declare it. Drives the \"keys these packs still need\" list in\nthe key store UI — `configured: false` is the hint to add it.",
+        "required": [
+          "name",
+          "configured",
+          "packs",
+          "managed"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "managed": {
+            "type": "boolean",
+            "description": "Platform-managed (env-authoritative, e.g. `METALCRAFT_TOKEN` injected into a\nprovisioned pod). The UI should show it as provided/read-only rather than\nprompting the user to paste a value."
+          },
+          "name": {
+            "type": "string"
+          },
+          "packs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "RestoreOutcome": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "version",
+          "status"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`installed` | `failed`."
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "RestoreResult": {
+        "type": "object",
+        "description": "Wrapper for the lockfile-restore response (`{ outcomes: [...] }`).",
+        "required": [
+          "outcomes"
+        ],
+        "properties": {
+          "outcomes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RestoreOutcome"
+            }
+          }
+        }
+      },
+      "ResumeFlowRunRequest": {
+        "type": "object",
+        "required": [
+          "handle"
+        ],
+        "properties": {
+          "data": {
+            "description": "Optional value to set as the resumed node's `_last` input."
+          },
+          "handle": {
+            "type": "string",
+            "description": "Handle to take (an approval decision, or `\"after\"` for a wait)."
+          }
+        }
+      },
+      "RunFlowOutput": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/FlowRunSummary"
+          },
+          {
+            "$ref": "#/components/schemas/RunFlowResponse"
+          }
+        ],
+        "description": "The run endpoint returns one of two shapes depending on the flow's spec\nversion: v2 (state-machine) flows return a [`FlowRunSummary`]; v1 (linear)\nflows return a [`RunFlowResponse`]. Documented as a `oneOf` so generated\nclients see a proper union rather than an opaque object. Never constructed —\nit exists only to describe the response schema."
+      },
+      "RunFlowRequest": {
+        "type": "object",
+        "properties": {
+          "inputs": {
+            "description": "Values for the flow's declared entry `inputs`. Object of `{ name: value }`;\nmissing inputs fall back to their declared defaults. Ignored by v1 flows."
+          },
+          "model_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "persona_slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional persona override. A v2 flow owns its persona via the entry node,\nso this is normally omitted and left to the flow. It is only a fallback for\na flow that declares none (and for legacy v1 flows). Prompt nodes that\ndeclare their own persona override it regardless."
+          }
+        }
+      },
+      "RunFlowResponse": {
+        "type": "object",
+        "required": [
+          "flow_id",
+          "prompts"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string"
+          },
+          "prompts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowPromptResult"
+            }
+          }
+        }
+      },
+      "SchedulePreview": {
+        "type": "object",
+        "description": "One upcoming-fire preview for a schedule.",
+        "required": [
+          "schedule_id",
+          "description",
+          "next_runs"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Human-readable description of the cadence."
+          },
+          "next_runs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Up to a few upcoming fire times, RFC-3339. Empty for `manual`."
+          },
+          "schedule_id": {
+            "type": "string",
+            "description": "The schedule's id."
+          }
+        }
+      },
+      "SetEnabledRequest": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Skill": {
+        "type": "object",
+        "description": "A full skill (frontmatter description + body).",
+        "required": [
+          "slug",
+          "description",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "pack_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "read_only": {
+            "type": "boolean"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "SkillSummary": {
+        "type": "object",
+        "description": "Summary of a skill for listings (no body).",
+        "required": [
+          "slug",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "pack_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when this skill is provided by an enabled integration pack."
+          },
+          "read_only": {
+            "type": "boolean",
+            "description": "True for pack-provided skills — the workshop disables Save/Delete."
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "TimelineEvent": {
+        "type": "object",
+        "required": [
+          "kind",
+          "file",
+          "data"
+        ],
+        "properties": {
+          "data": {},
+          "file": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          }
+        }
+      },
+      "UninstallPackResult": {
+        "type": "object",
+        "required": [
+          "dependent_flows",
+          "dependent_personas"
+        ],
+        "properties": {
+          "dependent_flows": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Installed flows that still reference the removed pack — they'll fail to resolve\nit until the pack is reinstalled or the flow is edited."
+          },
+          "dependent_personas": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Surviving personas that still declare the removed pack in their `packs` list."
+          }
+        }
+      },
+      "UninstallReport": {
+        "type": "object",
+        "required": [
+          "id",
+          "orphaned_agents",
+          "packs_freed"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "orphaned_agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Agents left pointing at a preset that no longer exists. Never silently\ndeleted — someone's memories are in there."
+          },
+          "packs_freed": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "UpdateChannelRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "url"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New secret; omit or leave empty to keep the existing one."
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "token"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "agent",
+      "description": "Agent identity + project snapshot"
+    },
+    {
+      "name": "personas",
+      "description": "Persona definitions"
+    },
+    {
+      "name": "skills",
+      "description": "Skill definitions"
+    },
+    {
+      "name": "flows",
+      "description": "Flows, flow runs, and flow templates"
+    },
+    {
+      "name": "diagnostics",
+      "description": "Diagnostics session browsing"
+    },
+    {
+      "name": "api-tools",
+      "description": "HTTP-API tool configs"
+    },
+    {
+      "name": "keys",
+      "description": "The agent key/secret store"
+    },
+    {
+      "name": "chats",
+      "description": "Interactive chat sessions"
+    },
+    {
+      "name": "scheduled-tasks",
+      "description": "Scheduled follow-ups"
+    },
+    {
+      "name": "integration-packs",
+      "description": "Installable integration packs"
+    },
+    {
+      "name": "agent-packs",
+      "description": "Installable agent packs — an agent plus every persona, skill and integration pack it needs"
+    },
+    {
+      "name": "agent-presets",
+      "description": "Agents this pod can be — a default persona, its callable roster, and the skills and packs they need"
+    },
+    {
+      "name": "agent-instances",
+      "description": "Agents that exist — each with its own memory and conversations"
+    },
+    {
+      "name": "gateway",
+      "description": "Messaging gateway channels + Metalcraft connect"
+    }
+  ]
+}

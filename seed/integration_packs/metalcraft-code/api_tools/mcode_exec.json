@@ -1,0 +1,29 @@
+{
+  "name": "mcode_exec",
+  "description": "Run an arbitrary bash command in the workspace from the repo root \u2014 the primitive that makes the remote code feel local. Returns { output, exit_code }. Bounded to 120s; for long builds/tests use mcode_build / mcode_test. Requires write scope + a ready workspace.",
+  "method": "POST",
+  "url": "https://code.metalcraftai.com/api/v1/workspaces/{id}/exec",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Workspace id (UUID)."
+      },
+      "cmd": {
+        "type": "string",
+        "description": "Bash command to run, e.g. 'ls -la' or 'grep -rn TODO src'."
+      }
+    },
+    "required": [
+      "id",
+      "cmd"
+    ]
+  },
+  "body_mapping": "params"
+}

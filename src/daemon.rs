@@ -294,13 +294,18 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                 if crate::flow_exec::is_v2_flow(&flow.saved) {
                     // v2 flows run on the stateful state-machine executor.
                     let inputs = trigger.inputs.clone().unwrap_or_else(|| serde_json::json!({}));
-                    match crate::flow_exec::run_flow_v2(
+                    let instance_id = crate::flow_bindings::instance_for(
+                        &flow.saved.id,
+                        &trigger.schedule_id,
+                    );
+                    match crate::flow_exec::run_flow_v2_as(
                         &context,
                         flow.saved.clone(),
                         &cwd,
                         Some(default_persona),
                         &model_name,
                         &inputs,
+                        instance_id,
                     )
                     .await
                     {
@@ -366,6 +371,14 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                                     task: &prompt.prompt,
                                     approval_mode: approval_mode.clone(),
                                     diagnostics: logger,
+                                    // A v1 flow's schedule can still be armed; if it
+                                    // is, its prompts run as that agent and remember
+                                    // across firings like a v2 flow's do.
+                                    instance_id: crate::flow_bindings::instance_for(
+                                        &flow.saved.id,
+                                        &trigger.schedule_id,
+                                    ),
+                                    preset_personas: None,
                                 },
                             )
                             .await;
@@ -534,6 +547,9 @@ async fn run_due_scheduled_tasks(
                         task: &task.task,
                         approval_mode: approval_mode.clone(),
                         diagnostics: logger,
+                        // A follow-up is not a flow run; it has no armed agent.
+                        instance_id: None,
+                        preset_personas: None,
                     },
                 )
                 .await;

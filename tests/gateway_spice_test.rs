@@ -167,6 +167,9 @@ impl AgentUnderTest for GatewayPersonaAgent {
             terminal_tools: vec!["say_to_user".to_string()],
             session_binding: None,
             reschedule_depth: 0,
+            prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
+            preset_personas: None,
+            instance_id: None,
         };
 
         let persona = Persona::load(&self.persona_slug, &self.context.personas_dir)

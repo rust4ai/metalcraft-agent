@@ -6,14 +6,34 @@ pub struct SubAgentTool {
     api_key: String,
     model_name: String,
     system_prompt: String,
+    /// Personas this sub-agent may run as, from the active agent preset's roster.
+    /// `None` ⇒ unscoped (any persona on the pod) — the pre-preset behaviour.
+    preset_personas: Option<Vec<String>>,
+    /// The agent instance the parent turn runs as. A delegated subtask remembers
+    /// into the same place, rather than opening a second store nobody reads.
+    instance_id: Option<String>,
 }
 
 impl SubAgentTool {
+    /// Restrict delegation to an agent preset's callable roster.
+    pub fn with_preset_personas(mut self, personas: Option<Vec<String>>) -> Self {
+        self.preset_personas = personas;
+        self
+    }
+
+    /// Inherit the parent turn's agent identity.
+    pub fn with_instance(mut self, instance_id: Option<String>) -> Self {
+        self.instance_id = instance_id;
+        self
+    }
+
     pub fn new(api_key: String, model_name: String, system_prompt: String) -> Self {
         Self {
             api_key,
             model_name,
             system_prompt,
+            preset_personas: None,
+            instance_id: None,
         }
     }
 }
@@ -29,6 +49,20 @@ impl metalcraft::Tool for SubAgentTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
+        // With a preset roster in hand, restrict `persona` to an enum so the model
+        // cannot even propose a persona the preset never declared — the same trick
+        // `load_skill` uses for its skill list.
+        let persona_schema = match &self.preset_personas {
+            Some(roster) if !roster.is_empty() => serde_json::json!({
+                "type": "string",
+                "enum": roster,
+                "description": "Run the sub-agent AS one of this agent's personas. It inherits that persona's tools (including integration tools it is scoped to via its packs), system prompt and skills. When set, `tool_set`/`pack` are ignored."
+            }),
+            _ => serde_json::json!({
+                "type": "string",
+                "description": "Run the sub-agent AS a named persona (e.g. 'linear-agent', 'github-agent'). The sub-agent inherits that persona's tools — including any integration tools the persona is scoped to via its packs — plus its system prompt and skills. This is the preferred way to delegate an integration task: pick the persona built for that service rather than assembling raw tools. When set, `tool_set`/`pack` are ignored."
+            }),
+        };
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -36,10 +70,7 @@ impl metalcraft::Tool for SubAgentTool {
                     "type": "string",
                     "description": "The task for the sub-agent to perform"
                 },
-                "persona": {
-                    "type": "string",
-                    "description": "Run the sub-agent AS a named persona (e.g. 'linear-agent', 'github-agent', 'media-studio-agent'). The sub-agent inherits that persona's tools — including any integration tools the persona is scoped to via its packs — plus its system prompt and skills. This is the preferred way to delegate an integration task: pick the persona built for that service rather than assembling raw tools. When set, `tool_set`/`pack` are ignored."
-                },
+                "persona": persona_schema,
                 "tool_set": {
                     "type": "string",
                     "enum": ["read_only", "full", "all"],
@@ -68,6 +99,20 @@ impl metalcraft::Tool for SubAgentTool {
         //      parent's system prompt.
         let persona_slug = args["persona"].as_str().filter(|s| !s.is_empty());
 
+        // Containment. The schema enum guides the model; this is the rule. An agent
+        // must not be able to reach a persona its preset never declared.
+        if let (Some(slug), Some(roster)) = (persona_slug, self.preset_personas.as_ref()) {
+            if !roster.iter().any(|p| p == slug) {
+                return Err(metalcraft::GraphError::ToolCallFailed {
+                    tool: "sub_agent".into(),
+                    message: format!(
+                        "persona '{slug}' is not in this agent's roster ({}). Delegate to one of those, or handle the task directly.",
+                        roster.join(", ")
+                    ),
+                });
+            }
+        }
+
         let (registry, sub_prompt) = if let Some(slug) = persona_slug {
             let persona = crate::persona::Persona::load(slug, &crate::paths::personas_dir())
                 .map_err(|e| metalcraft::GraphError::ToolCallFailed {
@@ -91,14 +136,17 @@ impl metalcraft::Tool for SubAgentTool {
                     "error": true,
                     "result": format!(
                         "Persona '{slug}' requires integration pack(s) {missing:?} that are not \
-                         enabled, so its tools are unavailable. Enable them first (pack_enable), \
-                         which also installs their resources, then retry."
+                         installed, so its tools are unavailable. Install the agent pack that \
+                         provides them (agentpack_install), then retry."
                     ),
                 }));
             }
 
             let base_prompt = persona.build_system_prompt(&crate::paths::skills_dir(), ".");
             let config = crate::tools::ToolConfig {
+                // A nested sub-agent must not widen its own reach.
+                preset_personas: None,
+                instance_id: self.instance_id.clone(),
                 api_key: self.api_key.clone(),
                 model_name: self.model_name.clone(),
                 system_prompt: base_prompt.clone(),
