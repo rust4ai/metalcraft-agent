@@ -53,6 +53,12 @@ pub struct InstalledFlow {
 pub struct InstallResult {
     pub flow: InstalledFlow,
     pub dependencies: DependencyReport,
+    /// The agent preset this flow was bound to, chosen because its roster covers
+    /// every persona the flow names. `None` means no installed preset can reach them
+    /// all — the flow is saved and runnable by hand, but cannot be armed until one
+    /// can, which is worth saying at install rather than discovering later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_preset: Option<String>,
 }
 
 /// The integration-pack ids a flow requires — the union of what the graph
@@ -397,6 +403,15 @@ pub async fn install_flow_from_registry(slug: &str) -> Result<InstallResult, Str
 
     metalcraft_flows::save_flow(&paths::flows_dir(), &flow).map_err(|e| e.to_string())?;
 
+    // Bind it to an agent that can actually run it.
+    //
+    // A flow may only name personas from its preset's roster, and the default agent
+    // is deliberately small — so a flow calling a specialist (`morning-briefer`,
+    // say) is unarmable until someone works out which preset covers it. Choosing
+    // here turns that from a puzzle the user hits at arm time into a line in the
+    // install report.
+    let bound_preset = crate::flow_bindings::bind_to_a_capable_preset(&flow);
+
     Ok(InstallResult {
         flow: InstalledFlow {
             id: flow.id.clone(),
@@ -405,6 +420,7 @@ pub async fn install_flow_from_registry(slug: &str) -> Result<InstallResult, Str
             enabled: flow.enabled,
         },
         dependencies,
+        agent_preset: bound_preset,
     })
 }
 

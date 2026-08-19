@@ -34,6 +34,20 @@ pub struct MigrationReport {
     /// `(integration pack id, why)`. Reported rather than fatal — one unwrappable
     /// pack must not block the rest.
     pub failed: Vec<(String, String)>,
+    /// Agents minted for flows that were already running on a schedule.
+    ///
+    /// Reported loudly on purpose: a user who had six cron flows suddenly has six
+    /// agents in their list, and should be told why rather than discovering it.
+    #[serde(default)]
+    pub flow_agents: Vec<FlowAgent>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct FlowAgent {
+    pub flow_id: String,
+    pub schedule_id: String,
+    pub instance: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -49,11 +63,17 @@ pub struct MigratedPack {
 
 /// Wrap every legacy integration pack into an agent pack.
 pub fn run(dry_run: bool) -> MigrationReport {
-    let mut report =
-        MigrationReport { dry_run, migrated: Vec::new(), already_migrated: Vec::new(), failed: Vec::new() };
+    let mut report = MigrationReport {
+        dry_run,
+        migrated: Vec::new(),
+        already_migrated: Vec::new(),
+        failed: Vec::new(),
+        flow_agents: Vec::new(),
+    };
 
     let root = paths::integration_packs_dir();
     let Ok(entries) = std::fs::read_dir(&root) else {
+        report.flow_agents = adopt_running_flows(dry_run, &mut report.failed);
         return report;
     };
 
@@ -75,7 +95,64 @@ pub fn run(dry_run: bool) -> MigrationReport {
             Err(e) => report.failed.push((id, e)),
         }
     }
+
+    report.flow_agents = adopt_running_flows(dry_run, &mut report.failed);
     report
+}
+
+/// Give every flow that was **already running on a schedule** the agent it now needs.
+///
+/// Before presets, a scheduled flow ran as a one-shot against the pod-global memory:
+/// it worked, but it could not remember anything between firings. Arming is normally
+/// what mints the agent, and these schedules were armed before that concept existed —
+/// so migration has to do it, or the flows keep running with no memory and the
+/// arm/disarm surface has nothing to show for them.
+///
+/// Only flows the operator had actually enabled. A disabled flow stays unbound: it is
+/// not running, so there is nothing to preserve and no reason to put an agent in
+/// somebody's list for work that is not happening.
+fn adopt_running_flows(dry_run: bool, failed: &mut Vec<(String, String)>) -> Vec<FlowAgent> {
+    let mut out = Vec::new();
+
+    for summary in metalcraft_flows::list_flows(&paths::flows_dir()) {
+        // The summary carries no schedules, and `arm` needs the whole document to
+        // check its persona references — so load it.
+        let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &summary.id) else {
+            continue;
+        };
+        if !flow.enabled {
+            continue;
+        }
+        for schedule in flow.schedules.iter().filter(|s| s.enabled) {
+            if crate::flow_bindings::instance_for(&flow.id, &schedule.id).is_some() {
+                continue; // already armed, nothing to adopt
+            }
+            if dry_run {
+                out.push(FlowAgent {
+                    flow_id: flow.id.clone(),
+                    schedule_id: schedule.id.clone(),
+                    instance: String::new(),
+                    name: format!("(would mint an agent for {})", flow.name),
+                });
+                continue;
+            }
+            match crate::flow_bindings::arm(&flow, &schedule.id, None) {
+                Ok(inst) => out.push(FlowAgent {
+                    flow_id: flow.id.clone(),
+                    schedule_id: schedule.id.clone(),
+                    instance: inst.id,
+                    name: inst.name,
+                }),
+                // A flow naming a persona outside its preset's roster cannot be armed.
+                // Report it and move on: the flow keeps running exactly as it did, it
+                // just does not gain a memory until someone binds it to an agent that
+                // can reach its personas.
+                Err(e) => failed.push((format!("flow:{}#{}", flow.id, schedule.id), e)),
+            }
+        }
+    }
+
+    out
 }
 
 /// Build (and unless `dry_run`, install) one legacy agent pack.

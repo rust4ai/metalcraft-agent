@@ -86,6 +86,54 @@ pub fn bind_preset(flow: &metalcraft_flows::SavedFlow, preset_slug: &str) -> Res
     save(&b)
 }
 
+/// Bind a flow to an installed preset whose roster covers every persona it names.
+///
+/// The default agent is deliberately small, and the containment rule means a flow it
+/// cannot reach is a flow nobody can arm. Rather than leaving that to be discovered
+/// at arm time — as a message about a persona the user never chose — pick a preset
+/// that works, at install, and say which.
+///
+/// The default wins when it fits, because an unremarkable flow should belong to the
+/// unremarkable agent. Otherwise the first preset that can reach everything, by slug
+/// order so the choice is stable across runs rather than depending on directory
+/// iteration. `None` means nothing installed can run it.
+pub fn bind_to_a_capable_preset(flow: &metalcraft_flows::SavedFlow) -> Option<String> {
+    let dir = paths::agent_presets_dir();
+    let named = personas_named(flow);
+
+    let fits = |slug: &str| {
+        AgentPreset::load(slug, &dir)
+            .ok()
+            .is_some_and(|p| named.iter().all(|n| p.allows_persona(n)))
+    };
+
+    let chosen = if fits(DEFAULT_PRESET) {
+        Some(DEFAULT_PRESET.to_string())
+    } else {
+        let mut slugs: Vec<String> = AgentPreset::list_summaries(&dir)
+            .into_iter()
+            .map(|s| s.slug)
+            .filter(|s| s != DEFAULT_PRESET)
+            .collect();
+        slugs.sort();
+        slugs.into_iter().find(|s| fits(s))
+    }?;
+
+    // Don't move a flow the operator has already placed. Re-installing a flow they
+    // deliberately bound elsewhere must not quietly hand it back to the default.
+    if get(&flow.id).preset.is_some() {
+        return get(&flow.id).preset;
+    }
+
+    match bind_preset(flow, &chosen) {
+        Ok(()) => Some(chosen),
+        Err(e) => {
+            log::warn!("flow '{}': could not bind to '{chosen}': {e}", flow.id);
+            None
+        }
+    }
+}
+
 /// Clear a flow's preset, returning it to the default agent. Armed schedules are
 /// left alone: the agents already running this flow keep running it, and their
 /// memory is not something a rebind should quietly discard.
