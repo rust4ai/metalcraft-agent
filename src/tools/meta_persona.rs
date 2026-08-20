@@ -24,7 +24,7 @@ fn pack_owner_blocking_write(slug: &str) -> Option<String> {
     if paths::personas_dir().join(&filename).exists() {
         return None;
     }
-    crate::integration_packs::resolve_file(&paths::personas_dir(), "personas", &filename)
+    crate::integrations::resolve_file(&paths::personas_dir(), "personas", &filename)
         .and_then(|(_, origin)| origin.pack_id().map(String::from))
 }
 
@@ -36,7 +36,7 @@ impl metalcraft::Tool for PersonaListTool {
         "persona_list"
     }
     fn description(&self) -> &str {
-        "List all personas (local + enabled integration packs) with slug, name, description, and whether each is pack-provided (read-only)."
+        "List all personas (local + enabled integrations) with slug, name, description, and whether each is pack-provided (read-only)."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({ "type": "object", "properties": {}, "required": [] })
@@ -81,7 +81,7 @@ impl metalcraft::Tool for PersonaWriteTool {
         "persona_write"
     }
     fn description(&self) -> &str {
-        "Create or overwrite a persona. Provide `slug` and `persona`: a JSON string for an object with fields name, description, tools (array), optional packs (array), optional skills (array), and system_prompt. Refuses slugs owned by an integration pack."
+        "Create or overwrite a persona. Provide `slug` and `persona`: a JSON string for an object with fields name, description, tools (array), optional packs (array), optional skills (array), and system_prompt. Refuses slugs owned by an integration."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -115,7 +115,7 @@ impl metalcraft::Tool for PersonaWriteTool {
 
         if let Some(pack_id) = pack_owner_blocking_write(&slug) {
             return Ok(serde_json::json!({
-                "error": format!("persona '{slug}' is provided by the '{pack_id}' integration pack and is read-only. Choose a different slug.")
+                "error": format!("persona '{slug}' is provided by the '{pack_id}' integration and is read-only. Choose a different slug.")
             }));
         }
 

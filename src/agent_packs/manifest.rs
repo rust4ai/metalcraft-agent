@@ -3,14 +3,22 @@
 //!
 //! The summary is **derived, never author-supplied**. An author writes what their
 //! agent *is*; the domains it can reach and the credentials it needs are computed
-//! from the integration packs actually inside the archive. Anything a human is asked
+//! from the integrations actually inside the archive. Anything a human is asked
 //! to approve has to come from the bytes, not from a description of them.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 /// Format version of `agent_pack.json` itself (not the pack's own version).
-pub const MANIFEST_VERSION: u32 = 1;
+///
+/// **2** since 0.30: vendored dependencies moved from `integration_packs/<id>/pack.json`
+/// to `integrations/<id>/integration.json`, and `provides.integration_packs` became
+/// `provides.integrations`. Because the archive path is part of what
+/// `content_sha256` covers, that is a genuine format break rather than a rename —
+/// a v1 archive's hash cannot be reproduced under v2 layout. Nothing was published
+/// under v1, so there is no dual-read path to maintain; a v1 archive is refused
+/// with the version in the message.
+pub const MANIFEST_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Author {
@@ -22,9 +30,9 @@ pub struct Author {
     pub sub: Option<String>,
 }
 
-/// A vendored integration pack, pinned by content.
+/// A vendored integration, pinned by content.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct PackRef {
+pub struct IntegrationRef {
     pub id: String,
     pub version: String,
     /// Integrity pin for the vendored copy. Verified at install.
@@ -57,8 +65,9 @@ pub struct Provides {
     pub personas: Vec<String>,
     #[serde(default)]
     pub skills: Vec<String>,
-    #[serde(default)]
-    pub integration_packs: Vec<PackRef>,
+    /// Reads `integration_packs` too — the pre-0.30 name.
+    #[serde(default, alias = "integration_packs")]
+    pub integrations: Vec<IntegrationRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -154,9 +163,9 @@ pub struct ConsentSummary {
     pub mutating_tools: Vec<String>,
 }
 
-/// Derive the consent summary from the vendored integration packs.
+/// Derive the consent summary from the vendored integrations.
 ///
-/// `packs` maps `<pack id> -> (pack.json bytes, [(api_tool file name, bytes)])`.
+/// `packs` maps `<pack id> -> (integration.json bytes, [(api_tool file name, bytes)])`.
 pub fn derive_consent(
     packs: &BTreeMap<String, (Vec<u8>, Vec<(String, Vec<u8>)>)>,
 ) -> ConsentSummary {
@@ -168,7 +177,7 @@ pub fn derive_consent(
 
     for (pack_id, (manifest_bytes, api_tools)) in packs {
         if let Ok(manifest) =
-            serde_json::from_slice::<metalcraft_packs::PackManifest>(manifest_bytes)
+            serde_json::from_slice::<metalcraft_packs::IntegrationManifest>(manifest_bytes)
         {
             for key in &manifest.requires_env {
                 let e = env.entry(key.clone()).or_insert_with(|| (BTreeSet::new(), true));

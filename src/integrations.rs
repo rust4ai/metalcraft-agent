@@ -1,20 +1,20 @@
-//! Integration packs — bundles of personas, skills, HTTP-API tools, and
+//! Integrations — bundles of personas, skills, HTTP-API tools, and
 //! flow templates that can be enabled/disabled as a unit.
 //!
 //! A pack is a directory laid out exactly like a project:
 //! ```text
 //! <pack>/
-//!   pack.json
+//!   integration.json
 //!   personas/<slug>.json
 //!   skills/<slug>.md
 //!   api_tools/<name>.json
 //!   flow_templates/<slug>.json
 //! ```
-//! Packs live in `<data>/integration_packs/<id>/`. The built-in `discord`
+//! Packs live in `<data>/integrations/<id>/`. The built-in `discord`
 //! pack is shipped with the binary as a seed and copied into that directory
 //! on first run (see [`crate::seed`]).
 //!
-//! Enable state is persisted in `<data>/integration_packs.json`:
+//! Enable state is persisted in `<data>/integrations.json`:
 //! ```json
 //! { "discord": { "enabled": true, "enabled_at": "2026-05-29T..." } }
 //! ```
@@ -36,9 +36,9 @@ const MAX_PACK_BYTES: u64 = 16 * 1024 * 1024;
 // The pack manifest, the ecosystem tag, and the ecosystem check live in the
 // shared `metalcraft-packs` spec crate so the agent and the registry parse and
 // classify packs identically. Re-exported here so existing
-// `crate::integration_packs::{PackManifest, ECOSYSTEM_TAG, is_ecosystem}` paths
+// `crate::integrations::{IntegrationManifest, ECOSYSTEM_TAG, is_ecosystem}` paths
 // keep working unchanged.
-pub use metalcraft_packs::{is_ecosystem, PackManifest, ECOSYSTEM_TAG};
+pub use metalcraft_packs::{is_ecosystem, IntegrationManifest, ECOSYSTEM_TAG};
 
 /// Ids of installed packs tagged [`ECOSYSTEM_TAG`], in sorted-id order. This is
 /// the exact set the daemon auto-enables on a managed pod's first boot.
@@ -52,14 +52,14 @@ pub fn ecosystem_pack_ids() -> Vec<String> {
 
 /// A loaded pack — manifest plus the path to its directory.
 #[derive(Debug, Clone)]
-pub struct Pack {
-    pub manifest: PackManifest,
-    /// Directory containing the pack files (`pack.json`, `personas/`, etc.).
+pub struct Integration {
+    pub manifest: IntegrationManifest,
+    /// Directory containing the pack files (`integration.json`, `personas/`, etc.).
     pub root: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PackState {
+pub struct IntegrationState {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled_at: Option<String>,
@@ -74,7 +74,7 @@ pub struct PackState {
 /// Lazily-resolved pack content — we keep [`Pack`] cheap and pull files
 /// off disk on demand. Disk I/O happens inside the workshop API handlers
 /// which are already on a tokio runtime.
-impl Pack {
+impl Integration {
     pub fn personas_dir(&self) -> PathBuf { self.root.join("personas") }
     pub fn skills_dir(&self) -> PathBuf { self.root.join("skills") }
     pub fn api_tools_dir(&self) -> PathBuf { self.root.join("api_tools") }
@@ -109,14 +109,14 @@ impl Pack {
 }
 
 /// The installed pack with this id, if any.
-pub fn find_installed(id: &str) -> Option<Pack> {
+pub fn find_installed(id: &str) -> Option<Integration> {
     list_installed().into_iter().find(|p| p.manifest.id == id)
 }
 
-/// Read every `pack.json` under `<data>/integration_packs/*/pack.json` into
+/// Read every `integration.json` under `<data>/integrations/*/integration.json` into
 /// memory. Malformed packs are logged and skipped.
-pub fn list_installed() -> Vec<Pack> {
-    let root = paths::integration_packs_dir();
+pub fn list_installed() -> Vec<Integration> {
+    let root = paths::integrations_dir();
     let entries = match std::fs::read_dir(&root) {
         Ok(rd) => rd,
         Err(_) => return Vec::new(),
@@ -127,7 +127,7 @@ pub fn list_installed() -> Vec<Pack> {
         if !path.is_dir() {
             continue;
         }
-        let manifest_path = path.join("pack.json");
+        let manifest_path = path.join("integration.json");
         let content = match std::fs::read_to_string(&manifest_path) {
             Ok(c) => c,
             Err(e) => {
@@ -135,14 +135,14 @@ pub fn list_installed() -> Vec<Pack> {
                 continue;
             }
         };
-        let manifest: PackManifest = match serde_json::from_str(&content) {
+        let manifest: IntegrationManifest = match serde_json::from_str(&content) {
             Ok(m) => m,
             Err(e) => {
-                log::warn!("invalid pack.json in {}: {e}", path.display());
+                log::warn!("invalid integration.json in {}: {e}", path.display());
                 continue;
             }
         };
-        out.push(Pack {
+        out.push(Integration {
             manifest,
             root: path,
         });
@@ -152,20 +152,20 @@ pub fn list_installed() -> Vec<Pack> {
 }
 
 /// Read the on-disk state map, defaulting to empty (all packs disabled).
-pub fn load_state() -> HashMap<String, PackState> {
-    let path = paths::integration_packs_state_file();
+pub fn load_state() -> HashMap<String, IntegrationState> {
+    let path = paths::integrations_state_file();
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return HashMap::new(),
     };
     serde_json::from_str(&content).unwrap_or_else(|e| {
-        log::warn!("integration_packs.json is malformed, ignoring: {e}");
+        log::warn!("integrations.json is malformed, ignoring: {e}");
         HashMap::new()
     })
 }
 
-fn save_state(state: &HashMap<String, PackState>) -> std::io::Result<()> {
-    let path = paths::integration_packs_state_file();
+fn save_state(state: &HashMap<String, IntegrationState>) -> std::io::Result<()> {
+    let path = paths::integrations_state_file();
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
@@ -192,8 +192,8 @@ fn save_state(state: &HashMap<String, PackState>) -> std::io::Result<()> {
 /// an agent-side `pack_enable` and a workshop toggle would stomp one another),
 /// then persists atomically via [`save_state`]. Readers stay lock-free: the
 /// atomic rename means they always see a complete old-or-new file.
-fn mutate_state<T>(f: impl FnOnce(&mut HashMap<String, PackState>) -> T) -> Result<T, String> {
-    let lock_path = paths::data_dir().join("integration_packs.lock");
+fn mutate_state<T>(f: impl FnOnce(&mut HashMap<String, IntegrationState>) -> T) -> Result<T, String> {
+    let lock_path = paths::data_dir().join("integrations.lock");
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create state dir: {e}"))?;
@@ -261,7 +261,7 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<(), String> {
                 s.enabled = enabled;
                 s.enabled_at = enabled_at.clone();
             })
-            .or_insert(PackState { enabled, enabled_at, source: None });
+            .or_insert(IntegrationState { enabled, enabled_at, source: None });
     })
 }
 
@@ -273,17 +273,17 @@ pub fn set_source(id: &str, source: &str) -> Result<(), String> {
         state
             .entry(id.to_string())
             .and_modify(|s| s.source = Some(src.clone()))
-            .or_insert(PackState { enabled: false, enabled_at: None, source: Some(src) });
+            .or_insert(IntegrationState { enabled: false, enabled_at: None, source: Some(src) });
     })
 }
 
 // Pack id/slug validation and semver compare live in the shared spec crate so
 // the agent and the registry agree. `valid_pack_id` keeps its local name via the
 // alias; the id rule is `^[a-z0-9][a-z0-9_-]{0,63}$`.
-use metalcraft_packs::{is_valid_pack_id as valid_pack_id, version_ge};
+use metalcraft_packs::{is_valid_integration_id as valid_pack_id, version_ge};
 
 /// Canonical content hash of an already-installed pack, computed over the files
-/// on disk under `<data>/integration_packs/<id>/`. Matches the registry's
+/// on disk under `<data>/integrations/<id>/`. Matches the registry's
 /// published `content_sha256`, so a flow's hash pin can be verified against what
 /// is actually installed. Returns `None` if the pack isn't installed.
 pub fn installed_content_sha256(id: &str) -> Option<String> {
@@ -322,9 +322,9 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Install a pack from a registry ZIP into `<data>/integration_packs/<id>/`.
+/// Install a pack from a registry ZIP into `<data>/integrations/<id>/`.
 ///
-/// Validates the archive (top-level `pack.json`, safe id, no path traversal,
+/// Validates the archive (top-level `integration.json`, safe id, no path traversal,
 /// size cap), refuses to shadow a built-in pack of the same id, and won't
 /// downgrade an existing install. When `expected_sha256` is `Some`, the extracted
 /// file-map's canonical hash must match it or the install is refused (integrity
@@ -337,14 +337,14 @@ pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<S
     // Learn the pack id from the (required, top-level) manifest.
     let manifest_json = {
         let mut f = zip
-            .by_name("pack.json")
-            .map_err(|_| "archive has no top-level pack.json".to_string())?;
+            .by_name("integration.json")
+            .map_err(|_| "archive has no top-level integration.json".to_string())?;
         let mut s = String::new();
-        f.read_to_string(&mut s).map_err(|e| format!("reading pack.json: {e}"))?;
+        f.read_to_string(&mut s).map_err(|e| format!("reading integration.json: {e}"))?;
         s
     };
-    let manifest: PackManifest =
-        serde_json::from_str(&manifest_json).map_err(|e| format!("invalid pack.json: {e}"))?;
+    let manifest: IntegrationManifest =
+        serde_json::from_str(&manifest_json).map_err(|e| format!("invalid integration.json: {e}"))?;
     let id = manifest.id.clone();
     if !valid_pack_id(&id) {
         return Err(format!("invalid pack id '{id}'"));
@@ -352,7 +352,7 @@ pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<S
     // Never let a registry pack fight or shadow a bundled first-party pack: the
     // boot seeder version-gates embedded ids, so a same-id registry copy could be
     // clobbered on the next boot (or shadow the bundled one). Refuse up front.
-    if crate::seed::is_embedded_pack(&id) {
+    if crate::seed::is_embedded_integration(&id) {
         return Err(format!(
             "'{id}' is a built-in pack — it's managed by the app, not installable from the registry"
         ));
@@ -406,7 +406,7 @@ pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<S
         }
     }
 
-    let dest_root = paths::integration_packs_dir().join(&id);
+    let dest_root = paths::integrations_dir().join(&id);
     for (raw, buf) in &files {
         let target = dest_root.join(raw);
         if let Some(parent) = target.parent() {
@@ -421,7 +421,7 @@ pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<S
 }
 
 /// Uninstall a registry pack: delete its files from
-/// `<data>/integration_packs/<id>/` and drop its enable-state entry. Refuses
+/// `<data>/integrations/<id>/` and drop its enable-state entry. Refuses
 /// built-in (embedded) packs — those are app-managed and would just be re-seeded
 /// on the next boot. Returns `Ok(false)` when no such pack is installed (so the
 /// caller can answer 404), `Ok(true)` on a successful removal.
@@ -429,7 +429,7 @@ pub fn uninstall(id: &str) -> Result<bool, String> {
     if !valid_pack_id(id) {
         return Err(format!("invalid pack id '{id}'"));
     }
-    if crate::seed::is_embedded_pack(id) {
+    if crate::seed::is_embedded_integration(id) {
         return Err(format!(
             "'{id}' is a built-in pack — it's managed by the app and can't be uninstalled"
         ));
@@ -438,7 +438,7 @@ pub fn uninstall(id: &str) -> Result<bool, String> {
     // can't be fully removed: deleting the files would strip the pack's persona/docs
     // while the tools remain live in the binary, leaving a half-uninstalled pack.
     // Refuse and let the user disable it instead.
-    if !crate::tools::native_pack_tool_names(id).is_empty() {
+    if !crate::tools::native_integration_tool_names(id).is_empty() {
         return Err(format!(
             "'{id}' ships built-in tools compiled into the app and can't be fully uninstalled — disable it instead"
         ));
@@ -455,7 +455,7 @@ pub fn uninstall(id: &str) -> Result<bool, String> {
     })?;
     // `id` is validated to a single safe path segment above, so this stays inside
     // the packs dir.
-    let dir = paths::integration_packs_dir().join(id);
+    let dir = paths::integrations_dir().join(id);
     if let Err(e) = std::fs::remove_dir_all(&dir) {
         if e.kind() != std::io::ErrorKind::NotFound {
             return Err(format!("failed to remove pack files: {e}"));
@@ -467,7 +467,7 @@ pub fn uninstall(id: &str) -> Result<bool, String> {
 /// Iterate enabled packs in deterministic (sorted-id) order. Used by the
 /// resolvers below to walk packs when a user-local item isn't found.
 /// Every installed pack. See [`is_enabled`] — installed *is* available now.
-pub fn enabled_packs() -> Vec<Pack> {
+pub fn installed_integrations() -> Vec<Integration> {
     list_installed()
 }
 
@@ -481,7 +481,7 @@ pub fn enabled_packs() -> Vec<Pack> {
 /// [`crate::key_store::lookup`]. Returned in sorted key order.
 pub fn recommended_env() -> Vec<(String, Vec<String>)> {
     let mut map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
-    for pack in enabled_packs() {
+    for pack in installed_integrations() {
         for key in &pack.manifest.requires_env {
             map.entry(key.clone()).or_default().push(pack.manifest.id.clone());
         }
@@ -492,27 +492,27 @@ pub fn recommended_env() -> Vec<(String, Vec<String>)> {
 // ── Resolvers ───────────────────────────────────────────────────────────
 //
 // Each accepts a user-local path and walks enabled packs as fallback. The
-// returned `PackOrigin` lets the caller tag the wire response with
+// returned `IntegrationOrigin` lets the caller tag the wire response with
 // `pack_id` + `read_only` so the workshop UI can render it correctly.
 
 /// Where a resolved item came from.
 #[derive(Debug, Clone)]
-pub enum PackOrigin {
+pub enum IntegrationOrigin {
     /// Lives under `<data>/personas/` (or skills/, etc.) — user-owned and editable.
     Local,
     /// Lives under an enabled pack's directory — read-only.
     Pack { id: String },
 }
 
-impl PackOrigin {
+impl IntegrationOrigin {
     pub fn pack_id(&self) -> Option<&str> {
         match self {
-            PackOrigin::Local => None,
-            PackOrigin::Pack { id } => Some(id),
+            IntegrationOrigin::Local => None,
+            IntegrationOrigin::Pack { id } => Some(id),
         }
     }
     pub fn is_read_only(&self) -> bool {
-        matches!(self, PackOrigin::Pack { .. })
+        matches!(self, IntegrationOrigin::Pack { .. })
     }
 }
 
@@ -522,15 +522,15 @@ impl PackOrigin {
 /// The directories an **installed agent pack** contributes for `pack_subdir`.
 ///
 /// Agent packs are the install unit now, so their personas, skills and presets have
-/// to resolve through the same layered lookup that integration packs always did —
+/// to resolve through the same layered lookup that integrations always did —
 /// otherwise everything an agent pack installs is written to disk and then invisible.
 ///
-/// `api_tools` are special: a vendored integration pack lives in the content store
+/// `api_tools` are special: a vendored integration lives in the content store
 /// under its hash, not inside the agent pack, so those layers point at the store.
-pub fn agent_pack_layers(pack_subdir: &str) -> Vec<(PathBuf, PackOrigin)> {
+pub fn agent_pack_layers(pack_subdir: &str) -> Vec<(PathBuf, IntegrationOrigin)> {
     let mut out = Vec::new();
     for p in crate::agent_packs::list() {
-        let origin = PackOrigin::Pack { id: p.id.clone() };
+        let origin = IntegrationOrigin::Pack { id: p.id.clone() };
         if pack_subdir == "api_tools" {
             for (_, sha) in crate::agent_packs::store::read_refs(&p.id) {
                 out.push((
@@ -549,10 +549,10 @@ pub fn resolve_file(
     local_dir: &Path,
     pack_subdir: &str,
     filename: &str,
-) -> Option<(PathBuf, PackOrigin)> {
+) -> Option<(PathBuf, IntegrationOrigin)> {
     let local = local_dir.join(filename);
     if local.exists() {
-        return Some((local, PackOrigin::Local));
+        return Some((local, IntegrationOrigin::Local));
     }
     // Agent packs first: they are the current install unit. Legacy integration
     // packs still resolve behind them until they are migrated away.
@@ -562,10 +562,10 @@ pub fn resolve_file(
             return Some((candidate, origin));
         }
     }
-    for pack in enabled_packs() {
+    for pack in installed_integrations() {
         let candidate = pack.root.join(pack_subdir).join(filename);
         if candidate.exists() {
-            return Some((candidate, PackOrigin::Pack { id: pack.manifest.id }));
+            return Some((candidate, IntegrationOrigin::Pack { id: pack.manifest.id }));
         }
     }
     None
@@ -594,18 +594,18 @@ pub fn resolve_or_explain(
     filename: &str,
     kind: &str,
     slug: &str,
-) -> Result<(PathBuf, PackOrigin), String> {
+) -> Result<(PathBuf, IntegrationOrigin), String> {
     if let Some(hit) = resolve_file(local_dir, pack_subdir, filename) {
         return Ok(hit);
     }
     if let Some(pack_id) = disabled_provider(pack_subdir, filename) {
         return Err(format!(
-            "{kind} '{slug}' is provided by integration pack '{pack_id}', which is disabled. \
+            "{kind} '{slug}' is provided by integration '{pack_id}', which is disabled. \
              Enable it in the workshop (Integration Packs) to use it."
         ));
     }
     Err(format!(
-        "{kind} '{slug}' not found in {} or any enabled integration pack",
+        "{kind} '{slug}' not found in {} or any enabled integration",
         local_dir.display()
     ))
 }
@@ -618,11 +618,11 @@ pub fn list_files_layered(
     local_dir: &Path,
     pack_subdir: &str,
     extension: &str,
-) -> Vec<(PathBuf, PackOrigin)> {
+) -> Vec<(PathBuf, IntegrationOrigin)> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out: Vec<(PathBuf, PackOrigin)> = Vec::new();
+    let mut out: Vec<(PathBuf, IntegrationOrigin)> = Vec::new();
 
-    let mut push = |path: PathBuf, origin: PackOrigin| {
+    let mut push = |path: PathBuf, origin: IntegrationOrigin| {
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
             if seen.insert(stem.to_string()) {
                 out.push((path, origin));
@@ -635,7 +635,7 @@ pub fn list_files_layered(
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().and_then(|x| x.to_str()) == Some(extension) {
-                push(path, PackOrigin::Local);
+                push(path, IntegrationOrigin::Local);
             }
         }
     }
@@ -651,14 +651,14 @@ pub fn list_files_layered(
         }
     }
     // Then each enabled pack.
-    for pack in enabled_packs() {
+    for pack in installed_integrations() {
         let pack_dir = pack.root.join(pack_subdir);
         if let Ok(entries) = std::fs::read_dir(&pack_dir) {
             let id = pack.manifest.id.clone();
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.extension().and_then(|x| x.to_str()) == Some(extension) {
-                    push(path, PackOrigin::Pack { id: id.clone() });
+                    push(path, IntegrationOrigin::Pack { id: id.clone() });
                 }
             }
         }
@@ -670,8 +670,8 @@ pub fn list_files_layered(
 mod tests {
     use super::*;
 
-    fn manifest(id: &str, tags: &[&str]) -> PackManifest {
-        PackManifest {
+    fn manifest(id: &str, tags: &[&str]) -> IntegrationManifest {
+        IntegrationManifest {
             id: id.to_string(),
             name: id.to_string(),
             description: String::new(),
@@ -733,14 +733,14 @@ mod tests {
     fn install_from_zip_requires_pack_json() {
         let z = zip_of(&[("personas/x.json", "{}")]);
         let err = install_from_zip(&z, None).unwrap_err();
-        assert!(err.contains("pack.json"), "got: {err}");
+        assert!(err.contains("integration.json"), "got: {err}");
     }
 
     #[test]
     fn install_from_zip_refuses_embedded_id() {
         // `email` ships embedded, so a registry pack claiming that id is refused
         // before anything is written to disk.
-        let z = zip_of(&[("pack.json", r#"{"id":"email","name":"x","description":"","version":"9.9.9"}"#)]);
+        let z = zip_of(&[("integration.json", r#"{"id":"email","name":"x","description":"","version":"9.9.9"}"#)]);
         let err = install_from_zip(&z, None).unwrap_err();
         assert!(err.contains("built-in"), "got: {err}");
     }
@@ -758,7 +758,7 @@ mod tests {
 
     #[test]
     fn install_from_zip_rejects_invalid_id() {
-        let z = zip_of(&[("pack.json", r#"{"id":"Bad Id","name":"x","description":"","version":"1.0.0"}"#)]);
+        let z = zip_of(&[("integration.json", r#"{"id":"Bad Id","name":"x","description":"","version":"1.0.0"}"#)]);
         let err = install_from_zip(&z, None).unwrap_err();
         assert!(err.contains("invalid pack id"), "got: {err}");
     }
@@ -768,7 +768,7 @@ mod tests {
         // A non-embedded, valid id so we reach the integrity check, with a wrong
         // expected hash. It must fail before any file is written.
         let z = zip_of(&[(
-            "pack.json",
+            "integration.json",
             r#"{"id":"some-third-party-pack","name":"x","description":"","version":"1.0.0"}"#,
         )]);
         let err = install_from_zip(&z, Some(&"0".repeat(64))).unwrap_err();
@@ -777,9 +777,9 @@ mod tests {
 
     #[test]
     fn manifest_defaults_tags_to_empty_when_absent() {
-        // Older/foreign pack.json with no `tags` key must deserialize (not error)
+        // Older/foreign integration.json with no `tags` key must deserialize (not error)
         // and read as "not an ecosystem pack".
-        let m: PackManifest = serde_json::from_str(
+        let m: IntegrationManifest = serde_json::from_str(
             r#"{"id":"github","name":"GitHub","description":"","version":"1.0.0"}"#,
         )
         .expect("manifest without tags should parse");

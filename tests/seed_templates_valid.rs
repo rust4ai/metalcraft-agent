@@ -1,4 +1,4 @@
-//! Every bundled flow template (base + integration packs) must parse and pass
+//! Every bundled flow template (base + integrations) must parse and pass
 //! `metalcraft_flows::validate` — so shipped templates are never broken and stay
 //! v2-conformant.
 
@@ -60,7 +60,7 @@ fn all_seed_flow_templates_parse_and_validate() {
 /// a message about a persona the user never chose.
 ///
 /// The fix is *not* to widen the default roster: `morning-briefer` reaches
-/// `metalcraft-calendar`, and a persona may only use integration packs its preset
+/// `metalcraft-calendar`, and a persona may only use integrations its preset
 /// declares, so putting it in `general-agent` would drag the whole calendar
 /// integration into the minimal default agent. Instead the installer binds a flow to
 /// a preset that can actually run it (`flow_bindings::bind_to_a_capable_preset`), and
@@ -94,7 +94,7 @@ fn every_seed_template_has_a_preset_that_can_arm_it() {
         assert!(
             capable.is_some(),
             "{} names {named:?}, and no seeded preset can reach all of them. \
-             Either add the persona to a preset that declares the integration packs it \
+             Either add the persona to a preset that declares the integrations it \
              uses, or the template ships unarmable.",
             f.display(),
         );
@@ -115,10 +115,10 @@ fn every_persona_a_seeded_preset_lists_is_shipped() {
         let preset: AgentPreset =
             serde_json::from_str(&std::fs::read_to_string(e.path()).unwrap()).unwrap();
         for p in preset.callable_personas() {
-            // Personas ship either standalone or inside the integration pack whose
+            // Personas ship either standalone or inside the integration whose
             // tools they are built around, and a preset may name either.
             let standalone = seed.join("personas").join(format!("{p}.json"));
-            let in_a_pack = std::fs::read_dir(seed.join("integration_packs"))
+            let in_a_pack = std::fs::read_dir(seed.join("integrations"))
                 .into_iter()
                 .flatten()
                 .flatten()

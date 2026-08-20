@@ -50,7 +50,7 @@ pub fn agent_instances_dir() -> PathBuf {
 
 /// Installed agent packs — the unit of installation. Each holds its manifest, the
 /// presets/personas/skills it provides, and a map into the content-addressed
-/// `pack_store` for its vendored integration packs.
+/// `integration_store` for its vendored integrations.
 pub fn agent_packs_dir() -> PathBuf {
     data_dir().join("agent_packs")
 }
@@ -93,12 +93,12 @@ pub fn chats_dir() -> PathBuf {
     data_dir().join("chats")
 }
 
-pub fn integration_packs_dir() -> PathBuf {
-    data_dir().join("integration_packs")
+pub fn integrations_dir() -> PathBuf {
+    data_dir().join("integrations")
 }
 
-pub fn integration_packs_state_file() -> PathBuf {
-    data_dir().join("integration_packs.json")
+pub fn integrations_state_file() -> PathBuf {
+    data_dir().join("integrations.json")
 }
 
 /// One-shot marker written after the daemon auto-enables the Metalcraft
@@ -113,7 +113,7 @@ pub fn ecosystem_packs_seeded_marker() -> PathBuf {
 
 /// Directory of installed gateway *channel types* — declarative JSON manifests
 /// (one `<id>/channel_type.json` per type), seeded from the binary like
-/// integration packs. See [`crate::gateway_channels`].
+/// integrations. See [`crate::gateway_channels`].
 pub fn gateway_channels_dir() -> PathBuf {
     data_dir().join("gateway_channels")
 }

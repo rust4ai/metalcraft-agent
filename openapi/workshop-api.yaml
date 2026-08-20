@@ -1069,7 +1069,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
-  /api/v1/integration-packs:
+  /api/v1/integrations:
     get:
       summary: List installed integration packs
       operationId: listIntegrationPacks
@@ -1083,7 +1083,7 @@ paths:
                 items:
                   $ref: '#/components/schemas/IntegrationPackSummary'
 
-  /api/v1/integration-packs/{id}:
+  /api/v1/integrations/{id}:
     get:
       summary: Load one integration pack
       operationId: getIntegrationPack
@@ -1107,7 +1107,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
-  /api/v1/integration-packs/{id}/enabled:
+  /api/v1/integrations/{id}/enabled:
     put:
       summary: Enable or disable an integration pack
       description: >-

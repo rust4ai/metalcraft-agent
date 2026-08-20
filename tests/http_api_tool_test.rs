@@ -12,9 +12,9 @@
 use metalcraft_agent::tools::http_api::HttpApiToolConfig;
 use std::path::{Path, PathBuf};
 
-/// Every `seed/integration_packs/*/api_tools/*.json`, as `(path, config)`.
+/// Every `seed/integrations/*/api_tools/*.json`, as `(path, config)`.
 fn seeded_api_tools() -> Vec<(PathBuf, HttpApiToolConfig)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/integration_packs");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/integrations");
     let mut out = Vec::new();
     let packs = std::fs::read_dir(&root)
         .unwrap_or_else(|e| panic!("reading {}: {e}", root.display()));
@@ -139,10 +139,10 @@ fn seeded_api_tools_reference_only_declared_env_keys() {
     // A `$NAME` in a header that the pack does not list in `requires_env` will never
     // be surfaced to the user by `key_list`, so the tool fails at call time with a
     // literal `$NAME` in the Authorization header and no hint about what to set.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/integration_packs");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/integrations");
     let mut problems = Vec::new();
     for pack in std::fs::read_dir(&root).unwrap().filter_map(|e| e.ok()) {
-        let manifest_path = pack.path().join("pack.json");
+        let manifest_path = pack.path().join("integration.json");
         if !manifest_path.is_file() {
             continue;
         }

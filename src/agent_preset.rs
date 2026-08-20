@@ -8,7 +8,7 @@
 //! personas are in play.
 //!
 //! Presets resolve in layers exactly like personas and skills
-//! ([`crate::integration_packs::list_files_layered`]) — user-local first, then every
+//! ([`crate::integrations::list_files_layered`]) — user-local first, then every
 //! enabled pack — with one deliberate difference: **a slug provided by two packs is an
 //! error, never a silent shadow**. See [`AgentPreset::load`].
 //!
@@ -87,8 +87,10 @@ pub struct AgentPreset {
 
     #[serde(default)]
     pub skills: Vec<String>,
-    #[serde(default)]
-    pub integration_packs: Vec<String>,
+    /// Reads `integration_packs` too — the pre-0.30 name, still present in every
+    /// preset authored before the rename.
+    #[serde(default, alias = "integration_packs")]
+    pub integrations: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memories: Option<MemoriesRef>,
@@ -133,7 +135,7 @@ impl AgentPreset {
         let providers = Self::providers(presets_dir, &filename);
 
         match providers.len() {
-            0 => Err(crate::integration_packs::resolve_or_explain(
+            0 => Err(crate::integrations::resolve_or_explain(
                 presets_dir,
                 "agent_presets",
                 &filename,
@@ -171,23 +173,23 @@ impl AgentPreset {
     fn providers(
         presets_dir: &Path,
         filename: &str,
-    ) -> Vec<(std::path::PathBuf, crate::integration_packs::PackOrigin)> {
-        use crate::integration_packs::PackOrigin;
+    ) -> Vec<(std::path::PathBuf, crate::integrations::IntegrationOrigin)> {
+        use crate::integrations::IntegrationOrigin;
         let mut out = Vec::new();
         let local = presets_dir.join(filename);
         if local.is_file() {
-            out.push((local, PackOrigin::Local));
+            out.push((local, IntegrationOrigin::Local));
         }
-        for (dir, origin) in crate::integration_packs::agent_pack_layers("agent_presets") {
+        for (dir, origin) in crate::integrations::agent_pack_layers("agent_presets") {
             let candidate = dir.join(filename);
             if candidate.is_file() {
                 out.push((candidate, origin));
             }
         }
-        for pack in crate::integration_packs::enabled_packs() {
+        for pack in crate::integrations::installed_integrations() {
             let candidate = pack.root.join("agent_presets").join(filename);
             if candidate.is_file() {
-                out.push((candidate, PackOrigin::Pack { id: pack.manifest.id.clone() }));
+                out.push((candidate, IntegrationOrigin::Pack { id: pack.manifest.id.clone() }));
             }
         }
         out
@@ -252,7 +254,7 @@ impl AgentPreset {
 
     pub fn list_available(presets_dir: &Path) -> Vec<String> {
         let mut slugs: Vec<String> =
-            crate::integration_packs::list_files_layered(presets_dir, "agent_presets", "json")
+            crate::integrations::list_files_layered(presets_dir, "agent_presets", "json")
                 .into_iter()
                 .filter_map(|(path, _)| {
                     path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
@@ -264,7 +266,7 @@ impl AgentPreset {
     }
 
     pub fn list_summaries(presets_dir: &Path) -> Vec<PresetSummary> {
-        crate::integration_packs::list_files_layered(presets_dir, "agent_presets", "json")
+        crate::integrations::list_files_layered(presets_dir, "agent_presets", "json")
             .into_iter()
             .filter_map(|(path, origin)| {
                 let slug = path.file_stem().and_then(|s| s.to_str())?.to_string();

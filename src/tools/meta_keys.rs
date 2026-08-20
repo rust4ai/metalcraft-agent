@@ -1,12 +1,12 @@
 //! Meta tools for managing the **API key / secret store** by prompt — the
 //! workshop GUI's key-store surface, driven by tool calls. HTTP-API tools
 //! reference these secrets via `$NAME` placeholders, so setting a key here is
-//! what lets an enabled integration pack actually authenticate.
+//! what lets an enabled integration actually authenticate.
 //!
 //! Values only ever flow *inward*: `key_set` takes a raw value, but `key_list`
 //! returns only [`crate::key_store::mask`]ed previews — never the raw secret —
 //! mirroring the HTTP API. These delegate to [`crate::key_store`] and
-//! [`crate::integration_packs::recommended_env`].
+//! [`crate::integrations::recommended_env`].
 
 use async_trait::async_trait;
 
@@ -29,7 +29,7 @@ impl metalcraft::Tool for KeyListTool {
         "key_list"
     }
     fn description(&self) -> &str {
-        "List API keys / secrets in the key store. Returns `configured` keys (name + masked preview only — never the raw value) and `recommended` keys that enabled integration packs need, each flagged configured/missing so you know what still has to be set with key_set."
+        "List API keys / secrets in the key store. Returns `configured` keys (name + masked preview only — never the raw value) and `recommended` keys that enabled integrations need, each flagged configured/missing so you know what still has to be set with key_set."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({ "type": "object", "properties": {}, "required": [] })
@@ -40,7 +40,7 @@ impl metalcraft::Tool for KeyListTool {
             .into_iter()
             .map(|(name, masked)| serde_json::json!({ "name": name, "masked": masked }))
             .collect();
-        let recommended: Vec<serde_json::Value> = crate::integration_packs::recommended_env()
+        let recommended: Vec<serde_json::Value> = crate::integrations::recommended_env()
             .into_iter()
             .map(|(name, packs)| {
                 serde_json::json!({

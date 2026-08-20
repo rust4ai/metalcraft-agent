@@ -1,11 +1,11 @@
 # Metalcraft Packs skill
 
-Discover integration packs in the **Metalcraft Packs** registry
+Discover integrations in the **Metalcraft Packs** registry
 (`https://packs.metalcraftai.com/api/v1`). These tools are **read-only** and hit
 the registry's **public** API — no key or `METALCRAFT_TOKEN` is required.
 
 ## What a pack is
-An integration pack bundles personas, skills, HTTP-API tools, and flow templates
+An integration bundles personas, skills, HTTP-API tools, and flow templates
 that extend an agent as a unit (e.g. `github`, `linear`, `metalcraft-notes`). Each
 pack has a **slug** (its id), a **version**, and a **requires_env** list of the keys
 it needs to actually work once installed.

@@ -1,9 +1,9 @@
 //! Migrating a pre-agent-pack pod.
 //!
-//! Before agent packs, an integration pack was the install unit and could carry
+//! Before agent packs, an integration was the install unit and could carry
 //! `personas/` and `skills/` of its own. Both of those now belong to an agent pack,
-//! and an integration pack is a vendored dependency. This wraps each installed
-//! integration pack into a **legacy agent pack** so an upgraded pod keeps everything
+//! and an integration is a vendored dependency. This wraps each installed
+//! integration into a **legacy agent pack** so an upgraded pod keeps everything
 //! it had.
 //!
 //! **It goes through the installer.** Rather than writing files into place, it builds
@@ -31,7 +31,7 @@ pub struct MigrationReport {
     pub migrated: Vec<MigratedPack>,
     /// Already wrapped by an earlier run.
     pub already_migrated: Vec<String>,
-    /// `(integration pack id, why)`. Reported rather than fatal — one unwrappable
+    /// `(integration id, why)`. Reported rather than fatal — one unwrappable
     /// pack must not block the rest.
     pub failed: Vec<(String, String)>,
     /// Agents minted for flows that were already running on a schedule.
@@ -71,7 +71,7 @@ pub fn run(dry_run: bool) -> MigrationReport {
         flow_agents: Vec::new(),
     };
 
-    let root = paths::integration_packs_dir();
+    let root = paths::integrations_dir();
     let Ok(entries) = std::fs::read_dir(&root) else {
         report.flow_agents = adopt_running_flows(dry_run, &mut report.failed);
         return report;
@@ -79,7 +79,7 @@ pub fn run(dry_run: bool) -> MigrationReport {
 
     let mut ids: Vec<String> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().join("pack.json").is_file())
+        .filter(|e| e.path().join("integration.json").is_file())
         .filter_map(|e| e.file_name().to_str().map(String::from))
         .collect();
     ids.sort();
@@ -157,22 +157,22 @@ fn adopt_running_flows(dry_run: bool, failed: &mut Vec<(String, String)>) -> Vec
 
 /// Build (and unless `dry_run`, install) one legacy agent pack.
 fn wrap(id: &str, agent_pack_id: &str, dry_run: bool) -> Result<MigratedPack, String> {
-    let pack_root = paths::integration_packs_dir().join(id);
-    let manifest: metalcraft_packs::PackManifest =
-        serde_json::from_str(&std::fs::read_to_string(pack_root.join("pack.json")).map_err(
-            |e| format!("reading pack.json: {e}"),
+    let pack_root = paths::integrations_dir().join(id);
+    let manifest: metalcraft_packs::IntegrationManifest =
+        serde_json::from_str(&std::fs::read_to_string(pack_root.join("integration.json")).map_err(
+            |e| format!("reading integration.json: {e}"),
         )?)
-        .map_err(|e| format!("parsing pack.json: {e}"))?;
+        .map_err(|e| format!("parsing integration.json: {e}"))?;
 
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
-    // 1. The integration pack itself, minus the personas and skills it is no longer
+    // 1. The integration itself, minus the personas and skills it is no longer
     //    allowed to carry — those move up to the agent pack.
     for (rel, bytes) in read_tree(&pack_root)? {
         if rel.starts_with("personas/") || rel.starts_with("skills/") {
             continue;
         }
-        files.insert(format!("integration_packs/{id}/{rel}"), bytes);
+        files.insert(format!("integrations/{id}/{rel}"), bytes);
     }
 
     // 2. Its personas, promoted.
@@ -206,7 +206,7 @@ fn wrap(id: &str, agent_pack_id: &str, dry_run: bool) -> Result<MigratedPack, St
             name: manifest.name.clone(),
             description: format!("Uses the {} integration.", manifest.name),
             tools: vec!["load_skill".to_string()],
-            packs: vec![id.to_string()],
+            integrations: vec![id.to_string()],
             skills: Vec::new(),
             version: None,
             system_prompt: format!(
@@ -242,7 +242,7 @@ fn wrap(id: &str, agent_pack_id: &str, dry_run: bool) -> Result<MigratedPack, St
             if skills.contains(s) {
                 continue;
             }
-            match crate::integration_packs::resolve_file(
+            match crate::integrations::resolve_file(
                 &paths::skills_dir(),
                 "skills",
                 &format!("{s}.md"),
@@ -259,25 +259,25 @@ fn wrap(id: &str, agent_pack_id: &str, dry_run: bool) -> Result<MigratedPack, St
     }
     skills.sort();
 
-    // 4. Every *other* integration pack a promoted persona reaches for must be
+    // 4. Every *other* integration a promoted persona reaches for must be
     //    vendored too, or the containment rule rejects the result.
     let mut required: Vec<String> = vec![id.to_string()];
     for (slug, persona) in &personas {
-        for p in &persona.packs {
+        for p in &persona.integrations {
             if required.contains(p) {
                 continue;
             }
-            let dir = paths::integration_packs_dir().join(p);
-            if !dir.join("pack.json").is_file() {
+            let dir = paths::integrations_dir().join(p);
+            if !dir.join("integration.json").is_file() {
                 return Err(format!(
-                    "persona '{slug}' uses integration pack '{p}', which is not installed"
+                    "persona '{slug}' uses integration '{p}', which is not installed"
                 ));
             }
             for (rel, bytes) in read_tree(&dir)? {
                 if rel.starts_with("personas/") || rel.starts_with("skills/") {
                     continue;
                 }
-                files.insert(format!("integration_packs/{p}/{rel}"), bytes);
+                files.insert(format!("integrations/{p}/{rel}"), bytes);
             }
             required.push(p.clone());
         }
@@ -292,7 +292,7 @@ fn wrap(id: &str, agent_pack_id: &str, dry_run: bool) -> Result<MigratedPack, St
         name: manifest.name.clone(),
         tagline: None,
         description: format!(
-            "Migrated from the '{id}' integration pack, which used to be installed on its own."
+            "Migrated from the '{id}' integration, which used to be installed on its own."
         ),
         avatar: None,
         default_persona: default_persona.clone(),
@@ -310,7 +310,7 @@ fn wrap(id: &str, agent_pack_id: &str, dry_run: bool) -> Result<MigratedPack, St
             })
             .collect(),
         skills: skills.clone(),
-        integration_packs: required.clone(),
+        integrations: required.clone(),
         memories: None,
         model: None,
         requires_env: manifest.requires_env.clone(),
@@ -334,9 +334,9 @@ fn wrap(id: &str, agent_pack_id: &str, dry_run: bool) -> Result<MigratedPack, St
     m.provides = super::manifest::Provides {
         personas: personas.iter().map(|(s, _)| s.clone()).collect(),
         skills: skills.clone(),
-        integration_packs: required
+        integrations: required
             .iter()
-            .map(|p| super::manifest::PackRef {
+            .map(|p| super::manifest::IntegrationRef {
                 id: p.clone(),
                 version: manifest.version.clone(),
                 content_sha256: None,

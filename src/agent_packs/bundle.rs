@@ -7,11 +7,11 @@
 //!   agent_presets/<slug>/memories.jsonl
 //!   personas/<slug>.json
 //!   skills/<slug>.md
-//!   integration_packs/<id>/{pack.json, api_tools/*.json, README.md}
+//!   integrations/<id>/{integration.json, api_tools/*.json, README.md}
 //! ```
 //!
 //! **Self-contained by construction.** Every persona a preset names, every skill
-//! those personas load, and every integration pack they call is in the archive — so
+//! those personas load, and every integration they call is in the archive — so
 //! installing needs no network at all, and there is no thin/fat variant to reason
 //! about. A pack that does not carry its dependencies is not valid, and §`validate`
 //! is where that stops being a promise.
@@ -168,10 +168,10 @@ impl Bundle {
                 if let Ok(persona) =
                     serde_json::from_slice::<crate::persona::Persona>(&self.files[&key])
                 {
-                    for pack in &persona.packs {
-                        if !preset.integration_packs.contains(pack) {
+                    for pack in &persona.integrations {
+                        if !preset.integrations.contains(pack) {
                             problems.push(format!(
-                                "persona '{p}' uses integration pack '{pack}', which preset '{slug}' does not declare"
+                                "persona '{p}' uses integration '{pack}', which preset '{slug}' does not declare"
                             ));
                         }
                     }
@@ -200,10 +200,10 @@ impl Bundle {
                     ));
                 }
             }
-            for pack in &preset.integration_packs {
+            for pack in &preset.integrations {
                 if !pack_ids.contains(pack) {
                     problems.push(format!(
-                        "preset '{slug}' requires integration pack '{pack}', which the archive does not vendor"
+                        "preset '{slug}' requires integration '{pack}', which the archive does not vendor"
                     ));
                 }
             }
@@ -247,9 +247,9 @@ impl Bundle {
 
         // Vendored pack hashes are pins, not decoration.
         let packs = collect_pack_files(&self.files);
-        for r in &self.manifest.provides.integration_packs {
+        for r in &self.manifest.provides.integrations {
             let Some(files) = packs.get(&r.id) else {
-                problems.push(format!("manifest lists integration pack '{}', which is absent", r.id));
+                problems.push(format!("manifest lists integration '{}', which is absent", r.id));
                 continue;
             };
             if let Some(expected) = &r.content_sha256 {
@@ -318,16 +318,16 @@ pub fn content_hash(files: &BTreeMap<String, Vec<u8>>) -> String {
     metalcraft_packs::canonical_sha256(files.iter().map(|(p, c)| (p.as_str(), c.as_slice())))
 }
 
-/// `<pack id> -> (pack.json, [(api tool file, bytes)])`, for consent derivation.
+/// `<pack id> -> (integration.json, [(api tool file, bytes)])`, for consent derivation.
 fn collect_packs(
     files: &BTreeMap<String, Vec<u8>>,
 ) -> BTreeMap<String, (Vec<u8>, Vec<(String, Vec<u8>)>)> {
     let mut out: BTreeMap<String, (Vec<u8>, Vec<(String, Vec<u8>)>)> = BTreeMap::new();
     for (path, bytes) in files {
-        let Some(rest) = path.strip_prefix("integration_packs/") else { continue };
+        let Some(rest) = path.strip_prefix("integrations/") else { continue };
         let Some((id, tail)) = rest.split_once('/') else { continue };
         let entry = out.entry(id.to_string()).or_default();
-        if tail == "pack.json" {
+        if tail == "integration.json" {
             entry.0 = bytes.clone();
         } else if let Some(file) = tail.strip_prefix("api_tools/") {
             entry.1.push((file.to_string(), bytes.clone()));
@@ -342,7 +342,7 @@ pub fn collect_pack_files(
 ) -> BTreeMap<String, BTreeMap<String, Vec<u8>>> {
     let mut out: BTreeMap<String, BTreeMap<String, Vec<u8>>> = BTreeMap::new();
     for (path, bytes) in files {
-        let Some(rest) = path.strip_prefix("integration_packs/") else { continue };
+        let Some(rest) = path.strip_prefix("integrations/") else { continue };
         let Some((id, tail)) = rest.split_once('/') else { continue };
         out.entry(id.to_string()).or_default().insert(tail.to_string(), bytes.clone());
     }

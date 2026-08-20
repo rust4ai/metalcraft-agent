@@ -1,7 +1,7 @@
 //! Every preset this binary ships must be installable.
 //!
 //! This exists because it wasn't. The seeded `general-agent` listed `morning-briefer`
-//! in its roster while declaring no integration packs — but that persona declares
+//! in its roster while declaring no integrations — but that persona declares
 //! `packs: ["metalcraft-calendar"]`, so the default agent shipped with every pod
 //! violated the containment rule the installer enforces. Nothing caught it: the unit
 //! tests build their own fixtures, and the integration tests build archives by hand.
@@ -24,12 +24,12 @@ fn read_json(path: &Path) -> serde_json::Value {
 }
 
 /// `slug -> (packs it declares, skills it loads)` for every persona the binary ships —
-/// the top-level `seed/personas/` **and** those inside integration packs, because a
+/// the top-level `seed/personas/` **and** those inside integrations, because a
 /// preset resolves personas through the same layered lookup the runtime uses.
 fn seeded_personas() -> HashMap<String, (Vec<String>, Vec<String>)> {
     let mut out = HashMap::new();
     let mut dirs = vec![seed_dir().join("personas")];
-    if let Ok(packs) = std::fs::read_dir(seed_dir().join("integration_packs")) {
+    if let Ok(packs) = std::fs::read_dir(seed_dir().join("integrations")) {
         dirs.extend(packs.filter_map(|e| e.ok()).map(|e| e.path().join("personas")));
     }
     for dir in dirs {
@@ -54,12 +54,12 @@ fn seeded_personas() -> HashMap<String, (Vec<String>, Vec<String>)> {
 }
 
 /// Every skill the binary ships — the top-level `seed/skills/` **and** those inside
-/// integration packs, because a persona resolves skills through the same layered
+/// integrations, because a persona resolves skills through the same layered
 /// lookup the runtime uses.
 fn seeded_skills() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut dirs = vec![seed_dir().join("skills")];
-    if let Ok(packs) = std::fs::read_dir(seed_dir().join("integration_packs")) {
+    if let Ok(packs) = std::fs::read_dir(seed_dir().join("integrations")) {
         dirs.extend(packs.filter_map(|e| e.ok()).map(|e| e.path().join("skills")));
     }
     for dir in dirs {
@@ -76,11 +76,11 @@ fn seeded_skills() -> Vec<String> {
 }
 
 fn seeded_packs() -> Vec<String> {
-    let dir = seed_dir().join("integration_packs");
+    let dir = seed_dir().join("integrations");
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
     entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().join("pack.json").is_file())
+        .filter(|e| e.path().join("integration.json").is_file())
         .filter_map(|e| e.file_name().to_str().map(String::from))
         .collect()
 }
@@ -115,7 +115,7 @@ fn every_seeded_preset_is_installable() {
             problems.push(format!("{slug}: declares slug '{}'", preset.slug));
         }
 
-        let declared = &preset.integration_packs;
+        let declared = &preset.integrations;
 
         for p in preset.callable_personas() {
             let Some((persona_packs, persona_skills)) = personas.get(&p) else {
@@ -127,7 +127,7 @@ fn every_seeded_preset_is_installable() {
             for pack in persona_packs {
                 if !declared.contains(pack) {
                     problems.push(format!(
-                        "{slug}: persona '{p}' uses integration pack '{pack}', which the preset does not declare"
+                        "{slug}: persona '{p}' uses integration '{pack}', which the preset does not declare"
                     ));
                 }
             }
@@ -152,7 +152,7 @@ fn every_seeded_preset_is_installable() {
         for pack in declared {
             if !packs.contains(pack) {
                 problems.push(format!(
-                    "{slug}: declares integration pack '{pack}', which seed/integration_packs lacks"
+                    "{slug}: declares integration '{pack}', which seed/integrations lacks"
                 ));
             }
         }
@@ -183,12 +183,12 @@ fn seeded_personas_only_reference_skills_that_exist() {
 }
 
 #[test]
-fn seeded_integration_packs_have_valid_manifests() {
-    let dir = seed_dir().join("integration_packs");
+fn seeded_integrations_have_valid_manifests() {
+    let dir = seed_dir().join("integrations");
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
     let mut checked = 0;
     for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
-        let manifest = e.path().join("pack.json");
+        let manifest = e.path().join("integration.json");
         if !manifest.is_file() {
             continue;
         }
@@ -198,9 +198,9 @@ fn seeded_integration_packs_have_valid_manifests() {
         assert_eq!(
             id,
             e.file_name().to_str().unwrap(),
-            "pack.json id must match its directory name"
+            "integration.json id must match its directory name"
         );
         assert!(!v["version"].as_str().unwrap_or_default().is_empty(), "{id} has no version");
     }
-    assert!(checked > 0, "no seeded integration packs found");
+    assert!(checked > 0, "no seeded integrations found");
 }

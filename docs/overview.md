@@ -72,8 +72,8 @@ directory, resolved in this order:
 ├── flows/                    # *.json workflow graphs
 ├── flow_templates/           # *.json reusable flow templates
 ├── api_tools/                # *.json HTTP tool configs
-├── integration_packs/        # pack directories (read-only contents)
-├── integration_packs.json    # per-pack enabled/disabled state
+├── integrations/        # pack directories (read-only contents)
+├── integrations.json    # per-pack enabled/disabled state
 ├── keys.json                 # API key store (secret name -> value)
 ├── gateway_channels/         # gateway channel types + user channel instances
 ├── chats/                    # persisted Workshop chat sessions

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Metalcraft Agent API",
-    "description": "The pod's workshop admin API. Manages personas, skills, flows, keys, chats, diagnostics sessions, integration packs, and gateway channels. Authenticate with a Bearer token: the static WORKSHOP_API_KEY or a Metalcraft ID token (mck_…) scoped to this pod.",
+    "description": "The pod's workshop admin API. Manages personas, skills, flows, keys, chats, diagnostics sessions, integrations, and gateway channels. Authenticate with a Bearer token: the static WORKSHOP_API_KEY or a Metalcraft ID token (mck_…) scoped to this pod.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -1624,7 +1624,7 @@
         "tags": [
           "flows"
         ],
-        "summary": "Install the integration packs an already-installed flow declares in its\n`requires` block: for each, resolve its semver range against the registry,\ndownload that exact version, verify the content hash, install, and enable it.\nReturns one outcome per pack. Idempotent — packs already satisfied are left\nuntouched.",
+        "summary": "Install the integrations an already-installed flow declares in its\n`requires` block: for each, resolve its semver range against the registry,\ndownload that exact version, verify the content hash, install, and enable it.\nReturns one outcome per pack. Idempotent — packs already satisfied are left\nuntouched.",
         "operationId": "post_install_flow_dependencies",
         "parameters": [
           {
@@ -2187,12 +2187,12 @@
         }
       }
     },
-    "/api/v1/integration-packs": {
+    "/api/v1/integrations": {
       "get": {
         "tags": [
-          "integration-packs"
+          "integrations"
         ],
-        "operationId": "list_integration_packs",
+        "operationId": "list_integrations",
         "responses": {
           "200": {
             "description": "",
@@ -2201,7 +2201,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/IntegrationPackSummary"
+                    "$ref": "#/components/schemas/IntegrationSummary"
                   }
                 }
               }
@@ -2210,13 +2210,13 @@
         }
       }
     },
-    "/api/v1/integration-packs/install": {
+    "/api/v1/integrations/install": {
       "post": {
         "tags": [
-          "integration-packs"
+          "integrations"
         ],
         "summary": "Install a registry pack onto this agent: download its ZIP from\npacks.metalcraftai.com, extract it into the data dir, and enable it. Returns\nthe new pack's summary (same shape as the list endpoint).",
-        "operationId": "post_install_pack",
+        "operationId": "post_install_integration",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2233,7 +2233,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/IntegrationPackSummary"
+                  "$ref": "#/components/schemas/IntegrationSummary"
                 }
               }
             }
@@ -2261,12 +2261,12 @@
         }
       }
     },
-    "/api/v1/integration-packs/{id}": {
+    "/api/v1/integrations/{id}": {
       "get": {
         "tags": [
-          "integration-packs"
+          "integrations"
         ],
-        "operationId": "get_integration_pack",
+        "operationId": "get_integration",
         "parameters": [
           {
             "name": "id",
@@ -2284,7 +2284,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/IntegrationPackDetail"
+                  "$ref": "#/components/schemas/IntegrationDetail"
                 }
               }
             }
@@ -2303,9 +2303,9 @@
       },
       "delete": {
         "tags": [
-          "integration-packs"
+          "integrations"
         ],
-        "operationId": "delete_integration_pack",
+        "operationId": "delete_integration",
         "parameters": [
           {
             "name": "id",
@@ -2351,14 +2351,14 @@
         }
       }
     },
-    "/api/v1/integration-packs/{id}/enabled": {
+    "/api/v1/integrations/{id}/enabled": {
       "put": {
         "tags": [
-          "integration-packs"
+          "integrations"
         ],
-        "summary": "Retired. An integration pack is no longer independently enabled or disabled —\nan agent pack is the install unit, and the packs it vendors are simply present\n(see `docs/AGENT_PACKS_PLAN.md`).",
+        "summary": "Retired. An integration is no longer independently enabled or disabled —\nan agent pack is the install unit, and the packs it vendors are simply present\n(see `docs/AGENT_PACKS_PLAN.md`).",
         "description": "This answers 410 rather than quietly succeeding: a toggle that returns 204 and\nchanges nothing is worse than one that says it is gone, because the UI would go\non showing a state the runtime does not honour.",
-        "operationId": "put_pack_enabled",
+        "operationId": "put_integration_enabled",
         "parameters": [
           {
             "name": "id",
@@ -3106,11 +3106,12 @@
           "description": {
             "type": "string"
           },
-          "integration_packs": {
+          "integrations": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Reads `integration_packs` too — the pre-0.30 name, still present in every\npreset authored before the rename."
           },
           "manifest_version": {
             "type": "integer",
@@ -3967,7 +3968,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Integration packs the flow requires — the union of what the graph\nreferences (`sub_agent.pack` + custom vendor nodes) and what the flow's\n`requires` block declares."
+            "description": "Integrations the flow requires — the union of what the graph\nreferences (`sub_agent.pack` + custom vendor nodes) and what the flow's\n`requires` block declares."
           },
           "required_personas": {
             "type": "array",
@@ -5049,7 +5050,7 @@
         ],
         "description": "Where an instance came from. Drives the default lifetime: a workshop chat is\ndisposable, a channel-bound agent is not."
       },
-      "IntegrationPackDetail": {
+      "IntegrationDetail": {
         "type": "object",
         "required": [
           "id",
@@ -5110,7 +5111,37 @@
           }
         }
       },
-      "IntegrationPackSummary": {
+      "IntegrationRef": {
+        "type": "object",
+        "description": "A vendored integration, pinned by content.",
+        "required": [
+          "id",
+          "version"
+        ],
+        "properties": {
+          "content_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Integrity pin for the vendored copy. Verified at install."
+          },
+          "id": {
+            "type": "string"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the author obtained it, for provenance display. Never fetched from."
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "IntegrationSummary": {
         "type": "object",
         "required": [
           "id",
@@ -5268,7 +5299,7 @@
             "items": {
               "$ref": "#/components/schemas/LockEntry"
             },
-            "description": "Agent packs — the unit of installation. Self-contained, so restoring these\nneeds no dependency ordering: each carries its own integration packs."
+            "description": "Agent packs — the unit of installation. Self-contained, so restoring these\nneeds no dependency ordering: each carries its own integrations."
           },
           "flows": {
             "type": "array",
@@ -5549,36 +5580,6 @@
           }
         }
       },
-      "PackRef": {
-        "type": "object",
-        "description": "A vendored integration pack, pinned by content.",
-        "required": [
-          "id",
-          "version"
-        ],
-        "properties": {
-          "content_sha256": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Integrity pin for the vendored copy. Verified at install."
-          },
-          "id": {
-            "type": "string"
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Where the author obtained it, for provenance display. Never fetched from."
-          },
-          "version": {
-            "type": "string"
-          }
-        }
-      },
       "Parent": {
         "type": "object",
         "required": [
@@ -5671,15 +5672,15 @@
           "description": {
             "type": "string"
           },
-          "name": {
-            "type": "string"
-          },
-          "packs": {
+          "integrations": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Integration packs this persona is scoped to (by pack id, e.g. \"linear\").\nEvery HTTP-API tool provided by an enabled pack listed here is added to\nthe persona's tool set, so a persona can adopt a whole integration\nwithout enumerating each `<pack>_*` tool by name. Combine with `tools`\nfor native tools like `load_skill`. See [`Persona::resolved_tool_names`]."
+            "description": "Integrations this persona is scoped to, by id (e.g. `\"linear\"`). Every\nHTTP-API tool an installed integration listed here provides is added to\nthe persona's tool set, so a persona can adopt a whole integration without\nenumerating each `<id>_*` tool by name. Combine with `tools` for native\ntools like `load_skill`. See [`Persona::resolved_tool_names`].\n\nReads `packs` too: that was the field's name until integrations stopped\nbeing installable, and personas carrying it are already on people's pods."
+          },
+          "name": {
+            "type": "string"
           },
           "skills": {
             "type": "array",
@@ -5759,7 +5760,7 @@
               "string",
               "null"
             ],
-            "description": "Set when this persona is provided by an enabled integration pack.\nLocal (user-owned) personas omit this."
+            "description": "Set when this persona is provided by an enabled integration.\nLocal (user-owned) personas omit this."
           },
           "read_only": {
             "type": "boolean",
@@ -5968,11 +5969,12 @@
       "Provides": {
         "type": "object",
         "properties": {
-          "integration_packs": {
+          "integrations": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/PackRef"
-            }
+              "$ref": "#/components/schemas/IntegrationRef"
+            },
+            "description": "Reads `integration_packs` too — the pre-0.30 name."
           },
           "personas": {
             "type": "array",
@@ -5990,7 +5992,7 @@
       },
       "RecommendedKey": {
         "type": "object",
-        "description": "A key recommended by one or more *enabled* integration packs (from their\n`requires_env`), with whether it currently resolves (key store or env) and\nwhich packs declare it. Drives the \"keys these packs still need\" list in\nthe key store UI — `configured: false` is the hint to add it.",
+        "description": "A key recommended by one or more *enabled* integrations (from their\n`requires_env`), with whether it currently resolves (key store or env) and\nwhich packs declare it. Drives the \"keys these packs still need\" list in\nthe key store UI — `configured: false` is the hint to add it.",
         "required": [
           "name",
           "configured",
@@ -6325,7 +6327,7 @@
               "string",
               "null"
             ],
-            "description": "Set when this skill is provided by an enabled integration pack."
+            "description": "Set when this skill is provided by an enabled integration."
           },
           "read_only": {
             "type": "boolean",
@@ -6534,12 +6536,12 @@
       "description": "Scheduled follow-ups"
     },
     {
-      "name": "integration-packs",
-      "description": "Installable integration packs"
+      "name": "integrations",
+      "description": "Installable integrations"
     },
     {
       "name": "agent-packs",
-      "description": "Installable agent packs — an agent plus every persona, skill and integration pack it needs"
+      "description": "Installable agent packs — an agent plus every persona, skill and integration it needs"
     },
     {
       "name": "agent-presets",

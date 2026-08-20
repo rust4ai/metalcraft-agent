@@ -32,7 +32,7 @@ fn preset(slug: &str, personas: &[(&str, &str)], packs: &[&str]) -> Vec<u8> {
         "default_persona": personas[0].0,
         "personas": roster,
         "skills": ["knife-skills"],
-        "integration_packs": packs,
+        "integrations": packs,
         "version": "1.4.0",
     }))
     .unwrap()
@@ -72,7 +72,7 @@ fn a_locally_authored_agent_exports_and_reinstalls() {
     };
 
     // A pod with a hand-authored agent: a preset, two personas, a skill, and one
-    // integration pack in the legacy location.
+    // integration in the legacy location.
     write("agent_presets/amy-kitchen.json",
           &preset("amy-kitchen", &[("amy", "default"), ("amy-shopper", "subagent")], &["metalcraft-calendar"]));
     write("agent_presets/amy-kitchen/memories.jsonl",
@@ -80,11 +80,11 @@ fn a_locally_authored_agent_exports_and_reinstalls() {
     write("personas/amy.json", &persona("amy", &["metalcraft-calendar"]));
     write("personas/amy-shopper.json", &persona("amy-shopper", &["metalcraft-calendar"]));
     write("skills/knife-skills.md", b"# Knife skills\n");
-    write("integration_packs/metalcraft-calendar/pack.json", &pack_manifest("metalcraft-calendar"));
-    write("integration_packs/metalcraft-calendar/api_tools/mcal_list.json",
+    write("integrations/metalcraft-calendar/integration.json", &pack_manifest("metalcraft-calendar"));
+    write("integrations/metalcraft-calendar/api_tools/mcal_list.json",
           &api_tool("mcal_list", "GET", "https://calendar.metalcraftai.com/api/v1/calendars"));
     // An old pack that still carries a persona: the export must not smuggle it back in.
-    write("integration_packs/metalcraft-calendar/personas/legacy.json", &persona("legacy", &[]));
+    write("integrations/metalcraft-calendar/personas/legacy.json", &persona("legacy", &[]));
 
     let bytes = agent_packs::export("amy-kitchen", "2.0.0").expect("export");
 
@@ -96,11 +96,11 @@ fn a_locally_authored_agent_exports_and_reinstalls() {
     assert!(parsed.files.contains_key("skills/knife-skills.md"));
     assert!(parsed.files.contains_key("agent_presets/amy-kitchen/memories.jsonl"));
     assert!(
-        !parsed.files.keys().any(|k| k.contains("integration_packs/metalcraft-calendar/personas/")),
+        !parsed.files.keys().any(|k| k.contains("integrations/metalcraft-calendar/personas/")),
         "a legacy pack's personas must not ride along; presets curate personas now"
     );
     // Each vendored pack is pinned by content, so tampering is caught downstream.
-    assert!(parsed.manifest.provides.integration_packs[0].content_sha256.is_some());
+    assert!(parsed.manifest.provides.integrations[0].content_sha256.is_some());
     assert_eq!(parsed.consent.domains, vec!["calendar.metalcraftai.com"]);
 
     // Exporting something the pod can't satisfy fails loudly, here, rather than

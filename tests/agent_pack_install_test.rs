@@ -30,7 +30,7 @@ fn preset(slug: &str, personas: &[(&str, &str)], packs: &[&str]) -> Vec<u8> {
         "default_persona": personas[0].0,
         "personas": roster,
         "skills": ["knife-skills"],
-        "integration_packs": packs,
+        "integrations": packs,
         "version": "1.4.0",
     }))
     .unwrap()
@@ -68,15 +68,15 @@ fn good_files() -> BTreeMap<String, Vec<u8>> {
     f.insert("personas/amy-shopper.json".into(), persona("amy-shopper", &["metalcraft-calendar"]));
     f.insert("skills/knife-skills.md".into(), b"# Knife skills\nPinch the blade.\n".to_vec());
     f.insert(
-        "integration_packs/metalcraft-calendar/pack.json".into(),
+        "integrations/metalcraft-calendar/integration.json".into(),
         pack_manifest("metalcraft-calendar"),
     );
     f.insert(
-        "integration_packs/metalcraft-calendar/api_tools/mcal_list.json".into(),
+        "integrations/metalcraft-calendar/api_tools/mcal_list.json".into(),
         api_tool("mcal_list", "GET", "https://calendar.metalcraftai.com/api/v1/calendars"),
     );
     f.insert(
-        "integration_packs/metalcraft-calendar/api_tools/mcal_create.json".into(),
+        "integrations/metalcraft-calendar/api_tools/mcal_create.json".into(),
         api_tool("mcal_create", "POST", "https://calendar.metalcraftai.com/api/v1/events"),
     );
     f
@@ -89,7 +89,7 @@ fn good_manifest() -> AgentPackManifest {
     m.provides = Provides {
         personas: vec!["amy".into(), "amy-shopper".into()],
         skills: vec!["knife-skills".into()],
-        integration_packs: vec![PackRef {
+        integrations: vec![IntegrationRef {
             id: "metalcraft-calendar".into(),
             version: "1.7.1".into(),
             content_sha256: None,
@@ -156,9 +156,9 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     let err = build_and_read(good_manifest(), missing).expect_err("missing skill must fail");
     assert!(err.contains("knife-skills"), "{err}");
 
-    // An integration pack the archive doesn't vendor — the self-contained rule.
+    // An integration the archive doesn't vendor — the self-contained rule.
     let mut missing = good_files();
-    missing.retain(|k, _| !k.starts_with("integration_packs/"));
+    missing.retain(|k, _| !k.starts_with("integrations/"));
     let err = build_and_read(good_manifest(), missing).expect_err("missing pack must fail");
     assert!(err.contains("does not vendor"), "{err}");
 
@@ -177,7 +177,7 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     // Spec §10 V15 — a vendored pack that does not match its pin. The registry runs
     // the same check under the same test name; see specs/AGENT_PACK_FORMAT.md §10.1.
     let mut lying = good_manifest();
-    lying.provides.integration_packs[0].content_sha256 = Some("00".repeat(32));
+    lying.provides.integrations[0].content_sha256 = Some("00".repeat(32));
     let err = build_and_read(lying, good_files()).expect_err("a false pin must be refused");
     assert!(err.contains("hashes to"), "{err}");
 
@@ -207,7 +207,7 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     assert_eq!(installed.manifest.version, "1.4.0");
     assert!(agent_packs::pack_dir("amy-kitchen-agent").join("agent_presets/amy-kitchen.json").is_file());
     assert!(
-        !agent_packs::pack_dir("amy-kitchen-agent").join("integration_packs").exists(),
+        !agent_packs::pack_dir("amy-kitchen-agent").join("integrations").exists(),
         "vendored packs live in the content store, not inside the agent pack"
     );
 
@@ -254,7 +254,7 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
         //
         // This was the install above's other job: it is the first *in-place*
         // upgrade in this test, and it used to end with the agent holding no
-        // integration packs at all. `integration_packs.json` is written by the
+        // integrations at all. `integrations.json` is written by the
         // installer, so it is never in the incoming archive; the retire pass read
         // that as "withdrawn" and deleted it, and the store gc that follows then
         // saw a pack referencing nothing and collected everything it vendored.

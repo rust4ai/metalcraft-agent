@@ -120,22 +120,22 @@ impl metalcraft::Tool for SubAgentTool {
                     message: format!("Failed to load persona '{slug}': {e}"),
                 })?;
 
-            // Fail fast if the persona depends on integration packs that aren't
+            // Fail fast if the persona depends on integrations that aren't
             // enabled. Otherwise its pack-scoped tools resolve to nothing, the
             // model calls a tool that isn't registered, and the dropped call
             // leaves an orphaned assistant tool_call the OpenAI API rejects with
             // an opaque 400. A clear, actionable error here is far better.
             let missing: Vec<String> = persona
-                .packs
+                .integrations
                 .iter()
-                .filter(|p| !crate::integration_packs::is_enabled(p))
+                .filter(|p| !crate::integrations::is_enabled(p))
                 .cloned()
                 .collect();
             if !missing.is_empty() {
                 return Ok(serde_json::json!({
                     "error": true,
                     "result": format!(
-                        "Persona '{slug}' requires integration pack(s) {missing:?} that are not \
+                        "Persona '{slug}' requires integration(s) {missing:?} that are not \
                          installed, so its tools are unavailable. Install the agent pack that \
                          provides them (agentpack_install), then retry."
                     ),
@@ -192,15 +192,15 @@ impl metalcraft::Tool for SubAgentTool {
                 use crate::tools::http_api::HttpApiTool;
                 let integration_tools = match args["pack"].as_str() {
                     Some(pack) if !pack.is_empty() => {
-                        let mut t = HttpApiTool::installed_tool_names_for_pack(pack);
+                        let mut t = HttpApiTool::installed_tool_names_for_integration(pack);
                         // Native-tool packs (e.g. s3) ship no
                         // api_tools/ files, so add their tools from the registry.
-                        t.extend(crate::tools::native_pack_tool_names(pack));
+                        t.extend(crate::tools::native_integration_tool_names(pack));
                         t
                     }
                     _ => {
                         let mut t = HttpApiTool::installed_tool_names();
-                        t.extend(crate::tools::all_enabled_native_pack_tool_names());
+                        t.extend(crate::tools::all_enabled_native_integration_tool_names());
                         t
                     }
                 };

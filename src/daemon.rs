@@ -109,7 +109,7 @@ pub async fn run_daemon() -> Result<(), DynError> {
 }
 
 /// One-shot: on a managed pod that sets `ENABLE_METALCRAFT_PACKS`, enable every
-/// pack tagged [`crate::integration_packs::ECOSYSTEM_TAG`] the first time the
+/// pack tagged [`crate::integrations::ECOSYSTEM_TAG`] the first time the
 /// daemon boots, then drop a marker so it never runs again.
 ///
 /// This is deliberately *not* a reconciler. After the single seed the user owns
@@ -130,10 +130,10 @@ fn maybe_autoenable_ecosystem_packs() {
         return;
     }
 
-    let ids = crate::integration_packs::ecosystem_pack_ids();
+    let ids = crate::integrations::ecosystem_pack_ids();
     let mut enabled = Vec::new();
     for id in &ids {
-        match crate::integration_packs::set_enabled(id, true) {
+        match crate::integrations::set_enabled(id, true) {
             Ok(()) => enabled.push(id.clone()),
             Err(e) => log::warn!("auto-enable: could not enable ecosystem pack '{id}': {e}"),
         }

@@ -31,7 +31,7 @@ impl metalcraft::Tool for AgentPackListTool {
     }
     fn description(&self) -> &str {
         "List the agent packs installed on this pod. An agent pack provides an agent \
-         preset plus every persona, skill and integration pack it needs."
+         preset plus every persona, skill and integration it needs."
     }
     fn parameters_schema(&self) -> Value {
         json!({ "type": "object", "properties": {} })
@@ -47,7 +47,7 @@ impl metalcraft::Tool for AgentPackListTool {
                     "presets": p.manifest.presets,
                     "personas": p.manifest.provides.personas.len(),
                     "skills": p.manifest.provides.skills.len(),
-                    "integration_packs": p.manifest.provides.integration_packs.len(),
+                    "integrations": p.manifest.provides.integrations.len(),
                 })
             })
             .collect();
@@ -96,7 +96,7 @@ impl metalcraft::Tool for AgentPackInstallTool {
     fn description(&self) -> &str {
         "Install an agent pack from a local .agentpack file. The archive is verified \
          against its own content hash and validated before anything is written: every \
-         persona, skill and integration pack it names must be inside it. Returns what \
+         persona, skill and integration it names must be inside it. Returns what \
          was installed, which domains the agent can now reach, and any credentials the \
          pod is still missing."
     }
@@ -236,7 +236,7 @@ impl metalcraft::Tool for AgentPackExportTool {
     }
     fn description(&self) -> &str {
         "Package an agent preset that already exists on this pod into a self-contained \
-         .agentpack file — its personas, skills, seed memories and the integration packs \
+         .agentpack file — its personas, skills, seed memories and the integrations \
          it declares. This is how you author an agent locally and then install it \
          elsewhere or publish it. It does not include anything a running agent has learned."
     }
@@ -288,7 +288,7 @@ impl metalcraft::Tool for AgentPackExportTool {
             "presets": parsed.manifest.presets,
             "personas": parsed.manifest.provides.personas,
             "skills": parsed.manifest.provides.skills,
-            "integration_packs": parsed.manifest.provides.integration_packs
+            "integrations": parsed.manifest.provides.integrations
                 .iter().map(|p| json!({"id": p.id, "version": p.version})).collect::<Vec<_>>(),
             "domains": parsed.consent.domains,
             "requires_env": parsed.consent.requires_env.iter().map(|e| &e.name).collect::<Vec<_>>(),

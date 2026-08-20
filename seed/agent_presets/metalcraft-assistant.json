@@ -44,7 +44,7 @@
     {
       "slug": "metalcraft-packs-agent",
       "role": "subagent",
-      "description": "Helps a user discover integration packs in the Metalcraft Packs registry \u2014 searches and browses the catalog, explains what a pack does and which keys it needs, and points the user to install it on their agent."
+      "description": "Helps a user discover integrations in the Metalcraft Packs registry \u2014 searches and browses the catalog, explains what a pack does and which keys it needs, and points the user to install it on their agent."
     },
     {
       "slug": "morning-briefer",

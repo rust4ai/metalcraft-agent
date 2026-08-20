@@ -67,7 +67,7 @@ impl metalcraft::Tool for SkillWriteTool {
         "skill_write"
     }
     fn description(&self) -> &str {
-        "Create or overwrite a skill. Provide `slug`, a one-line `description` (becomes the YAML frontmatter), and the markdown `body`. Refuses slugs owned by an integration pack."
+        "Create or overwrite a skill. Provide `slug`, a one-line `description` (becomes the YAML frontmatter), and the markdown `body`. Refuses slugs owned by an integration."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -91,7 +91,7 @@ impl metalcraft::Tool for SkillWriteTool {
 
         if let Some(pack_id) = skill::pack_owner_blocking_write(&slug) {
             return Ok(serde_json::json!({
-                "error": format!("skill '{slug}' is provided by the '{pack_id}' integration pack and is read-only. Choose a different slug.")
+                "error": format!("skill '{slug}' is provided by the '{pack_id}' integration and is read-only. Choose a different slug.")
             }));
         }
 

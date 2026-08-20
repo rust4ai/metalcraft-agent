@@ -6,13 +6,16 @@ pub struct Persona {
     pub name: String,
     pub description: String,
     pub tools: Vec<String>,
-    /// Integration packs this persona is scoped to (by pack id, e.g. "linear").
-    /// Every HTTP-API tool provided by an enabled pack listed here is added to
-    /// the persona's tool set, so a persona can adopt a whole integration
-    /// without enumerating each `<pack>_*` tool by name. Combine with `tools`
-    /// for native tools like `load_skill`. See [`Persona::resolved_tool_names`].
-    #[serde(default)]
-    pub packs: Vec<String>,
+    /// Integrations this persona is scoped to, by id (e.g. `"linear"`). Every
+    /// HTTP-API tool an installed integration listed here provides is added to
+    /// the persona's tool set, so a persona can adopt a whole integration without
+    /// enumerating each `<id>_*` tool by name. Combine with `tools` for native
+    /// tools like `load_skill`. See [`Persona::resolved_tool_names`].
+    ///
+    /// Reads `packs` too: that was the field's name until integrations stopped
+    /// being installable, and personas carrying it are already on people's pods.
+    #[serde(default, alias = "packs")]
+    pub integrations: Vec<String>,
     #[serde(default)]
     pub skills: Vec<String>,
     /// Optional semantic version (e.g. "1.1.0") for built-in/seed personas.
@@ -30,7 +33,7 @@ pub struct PersonaSummary {
     pub slug: String,
     pub name: String,
     pub description: String,
-    /// Set when this persona is provided by an enabled integration pack.
+    /// Set when this persona is provided by an enabled integration.
     /// Local (user-owned) personas omit this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pack_id: Option<String>,
@@ -61,10 +64,10 @@ impl PromptExtras {
 
 impl Persona {
     /// Load a persona by slug, resolving the user-local `personas/` dir first
-    /// and falling back to any enabled integration pack. Pack personas (e.g.
+    /// and falling back to any enabled integration. Pack personas (e.g.
     /// the discord bundle) load here exactly like local ones.
     pub fn load(slug: &str, personas_dir: &Path) -> Result<Self, String> {
-        let (file, _origin) = crate::integration_packs::resolve_or_explain(
+        let (file, _origin) = crate::integrations::resolve_or_explain(
             personas_dir,
             "personas",
             &format!("{}.json", slug),
@@ -85,7 +88,7 @@ impl Persona {
     /// (user-local shadows pack on slug collision).
     pub fn list_available(personas_dir: &Path) -> Vec<String> {
         let mut slugs: Vec<String> =
-            crate::integration_packs::list_files_layered(personas_dir, "personas", "json")
+            crate::integrations::list_files_layered(personas_dir, "personas", "json")
                 .into_iter()
                 .filter_map(|(path, _origin)| {
                     path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
@@ -119,7 +122,7 @@ impl Persona {
     /// and every enabled pack, tagging each with its origin so the workshop can
     /// mark pack-provided personas read-only.
     pub fn list_summaries(personas_dir: &Path) -> Vec<PersonaSummary> {
-        crate::integration_packs::list_files_layered(personas_dir, "personas", "json")
+        crate::integrations::list_files_layered(personas_dir, "personas", "json")
             .into_iter()
             .filter_map(|(path, origin)| {
                 let slug = path.file_stem().and_then(|s| s.to_str())?.to_string();
@@ -140,24 +143,22 @@ impl Persona {
     /// HTTP-API tool provided by the enabled packs it declares in `packs`
     /// (deduplicated, explicit tools first). This is what the registry and the
     /// step guard should be built from — not the raw `tools` field. A persona
-    /// with no `packs` resolves to exactly its `tools`.
+    /// with no `integrations` resolves to exactly its `tools`.
     pub fn resolved_tool_names(&self) -> Vec<String> {
         let mut names = self.tools.clone();
-        for pack in &self.packs {
-            for tool in crate::tools::http_api::HttpApiTool::installed_tool_names_for_pack(pack) {
+        for id in &self.integrations {
+            for tool in crate::tools::http_api::HttpApiTool::installed_tool_names_for_integration(id) {
                 if !names.contains(&tool) {
                     names.push(tool);
                 }
             }
-            // Packs whose tools are native Rust (e.g. s3, which needs S3 SigV4
-            // signing) ship no api_tools/ files, so pull their tool names from the
-            // native-pack registry too — but only when the pack is enabled, matching
-            // the HTTP-API path above (which resolves through enabled packs only).
-            // Without this gate a disabled or uninstalled native-tool pack keeps
-            // leaking its tools into any persona that pins it, so "disable" wouldn't
-            // actually disable them.
-            if crate::integration_packs::is_enabled(pack) {
-                for tool in crate::tools::native_pack_tool_names(pack) {
+            // An integration whose tools are native Rust (e.g. s3, which needs SigV4
+            // signing) ships no `api_tools/` files, so pull its tool names from the
+            // native registry too — but only when it is actually installed, matching
+            // the HTTP-API path above. Without that gate an uninstalled native-tool
+            // integration keeps leaking its tools into any persona that pins it.
+            if crate::integrations::is_enabled(id) {
+                for tool in crate::tools::native_integration_tool_names(id) {
                     if !names.contains(&tool) {
                         names.push(tool);
                     }
@@ -289,11 +290,11 @@ impl Persona {
 
 }
 
-/// Bulleted list of enabled integration packs as `id (name): description`
+/// Bulleted list of enabled integrations as `id (name): description`
 /// (one per line, trailing newline). Empty when no packs are enabled.
 fn installed_packs_block() -> String {
     let mut out = String::new();
-    for pack in crate::integration_packs::enabled_packs() {
+    for pack in crate::integrations::installed_integrations() {
         let m = &pack.manifest;
         out.push_str(&format!("- **{}** ({}): {}\n", m.id, m.name, m.description));
     }
@@ -333,10 +334,10 @@ fn render_template(template: &str, vars: &[(&str, String)]) -> String {
 }
 
 /// Parse YAML frontmatter description from a skill file, resolving the local
-/// `skills/` dir first and falling back to any enabled integration pack.
+/// `skills/` dir first and falling back to any enabled integration.
 fn load_skill_description(name: &str, skills_dir: &Path) -> String {
     let Some((file, _origin)) =
-        crate::integration_packs::resolve_file(skills_dir, "skills", &format!("{}.md", name))
+        crate::integrations::resolve_file(skills_dir, "skills", &format!("{}.md", name))
     else {
         return "Specialized guidance".to_string();
     };

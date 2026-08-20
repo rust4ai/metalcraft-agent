@@ -24,11 +24,11 @@ Status: **design / options only.** Nothing built. Pick a direction first.
   Gap: **no PVC snapshot/backup/resize automation exists** — if `/data` becomes
   system-of-record, backup is net-new work.
 - **The agent is already DB-less.** All agent state is flat JSON under `/data`
-  (`keys.json`, `integration_packs.json`, `flows/`, `runs/`, `chats/`, …), using
+  (`keys.json`, `integrations.json`, `flows/`, `runs/`, `chats/`, …), using
   a consistent **advisory-lock + write-temp + fsync + atomic-rename** idiom
   (`src/paths.rs`, `src/integration_packs.rs:167-186`). No SQLite anywhere today.
 - **Packs are already the "installed app" runtime.** A pack is a directory
-  (`pack.json` manifest + `personas/` + `skills/` + declarative `api_tools/*.json`
+  (`integration.json` manifest + `personas/` + `skills/` + declarative `api_tools/*.json`
   + `flow_templates/`). Packs are embedded at compile time (`include_dir!`,
   `src/seed.rs:30`) **or** installed from a registry as ZIPs at runtime
   (`integration_packs.rs:321`). Most packs are pure JSON HTTP-tool specs; a few
@@ -93,7 +93,7 @@ set of "syscalls"/resources the agent-OS lends an installed app:
 | **Identity** | "The pod is the user." The app gets the owner identity for free; no per-request hub introspection. | pod token / `POD_PUBLIC_URL` |
 | **Scheduler** | Register timers / cron ticks (reminders, snapshots). | the daemon flow scheduler (`daemon.rs`) |
 | **Event bus** | Publish/subscribe app events (drives WebSocket push to the SPA). | today's in-process `broadcast` hub |
-| **Manifest** | `pack.json` gains an `app` block: declared storage kind, mounted routes, bundled SPA assets, native tools. | `PackManifest` (add fields) |
+| **Manifest** | `integration.json` gains an `app` block: declared storage kind, mounted routes, bundled SPA assets, native tools. | `IntegrationManifest` (add fields) |
 
 The manifest's `native_tools` field + the drift test are the seed of this: the
 OS already distinguishes "compiled-in capability" from "declarative data." An App
@@ -158,7 +158,7 @@ Promote notes and calendar to **native packs compiled into the agent binary**
 registers its `metalcraft::Tool`s (`mnote_*`, `mcal_*`) that read/write pod-local
 storage **directly** (no HTTP hop); mounts an `axum::Router` at `/apps/<id>/*` on
 the pod's Workshop server for REST + its embedded SPA (via `rust-embed`); and
-declares its needs in an `app` block in `pack.json`. One binary, one process, one
+declares its needs in an `app` block in `integration.json`. One binary, one process, one
 `/data` dir. The ~800-line CRUD core of each app is ported to native
 tools + mounted routes backed by pod-local SQLite (or JSON — see B-var).
 
@@ -254,7 +254,7 @@ not v1.
 ## 5. Migration & sequencing (applies to B; adaptable to A/D)
 
 1. **App SDK skeleton** — `App` trait + `AppContext` (storage handle, router
-   mount, tool register, scheduler, event bus); `pack.json` `app` block +
+   mount, tool register, scheduler, event bus); `integration.json` `app` block +
    drift test. No app logic yet.
 2. **Notes first** (lower risk, SQLite port exists). Port schema (r2's
    FTS5 schema), CRUD → native tools, mount REST+SPA at `/apps/notes/*`,

@@ -1,11 +1,11 @@
-//! Content-addressed storage for vendored integration packs.
+//! Content-addressed storage for vendored integrations.
 //!
 //! Ten agent packs that each vendor `metalcraft-calendar` should not mean ten copies
 //! on disk. Packs are stored under their content hash and referenced by it:
 //!
 //! ```text
-//! <data>/pack_store/<sha256>/{pack.json, api_tools/…, README.md}
-//! <data>/agent_packs/<id>/integration_packs.json  → { "metalcraft-calendar": "<sha256>" }
+//! <data>/integration_store/<sha256>/{integration.json, api_tools/…, README.md}
+//! <data>/agent_packs/<id>/integrations.json  → { "metalcraft-calendar": "<sha256>" }
 //! ```
 //!
 //! Two consequences beyond saving space, and the second is the one that matters:
@@ -23,10 +23,10 @@ use std::path::PathBuf;
 use crate::paths;
 
 /// `<pack id> -> <content sha256>` for one agent pack.
-pub type PackRefs = BTreeMap<String, String>;
+pub type IntegrationRefs = BTreeMap<String, String>;
 
 pub fn store_root() -> PathBuf {
-    paths::data_dir().join("pack_store")
+    paths::data_dir().join("integration_store")
 }
 
 pub fn entry_dir(sha: &str) -> PathBuf {
@@ -42,7 +42,7 @@ pub fn put(files: &BTreeMap<String, Vec<u8>>) -> Result<String, String> {
         files.iter().map(|(p, c)| (p.as_str(), c.as_slice())),
     );
     let dir = entry_dir(&sha);
-    if dir.join("pack.json").is_file() {
+    if dir.join("integration.json").is_file() {
         return Ok(sha);
     }
     for (rel, bytes) in files {
@@ -59,10 +59,10 @@ pub fn put(files: &BTreeMap<String, Vec<u8>>) -> Result<String, String> {
 
 /// Where an agent pack records which store entries it uses.
 fn refs_file(agent_pack_id: &str) -> PathBuf {
-    paths::agent_packs_dir().join(agent_pack_id).join("integration_packs.json")
+    paths::agent_packs_dir().join(agent_pack_id).join("integrations.json")
 }
 
-pub fn write_refs(agent_pack_id: &str, refs: &PackRefs) -> Result<(), String> {
+pub fn write_refs(agent_pack_id: &str, refs: &IntegrationRefs) -> Result<(), String> {
     let path = refs_file(agent_pack_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -72,14 +72,14 @@ pub fn write_refs(agent_pack_id: &str, refs: &PackRefs) -> Result<(), String> {
         .map_err(|e| format!("serializing pack refs: {e}"))?;
     // tmp + rename, like every other durable write here. A torn refs file reads back
     // as *no* refs (`read_refs` swallows parse errors), which would make this pack's
-    // vendored integration packs vanish from its resolution *and* make them look
+    // vendored integrations vanish from its resolution *and* make them look
     // like garbage to the next `gc` — a truncated write would delete real content.
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("finalizing {}: {e}", path.display()))
 }
 
-pub fn read_refs(agent_pack_id: &str) -> PackRefs {
+pub fn read_refs(agent_pack_id: &str) -> IntegrationRefs {
     std::fs::read_to_string(refs_file(agent_pack_id))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -112,15 +112,15 @@ pub fn resolve(pack_id: &str) -> Option<PathBuf> {
         // away: `export` reported a raw "No such file or directory", and tool
         // resolution silently walked a directory that wasn't there, so the agent's
         // tools vanished with no diagnostic at all.
-        if !dir.join("pack.json").is_file() {
+        if !dir.join("integration.json").is_file() {
             log::warn!(
                 "agent packs: '{pack_id}' references store entry {sha}, which is missing"
             );
             continue;
         }
-        let version = std::fs::read_to_string(dir.join("pack.json"))
+        let version = std::fs::read_to_string(dir.join("integration.json"))
             .ok()
-            .and_then(|s| serde_json::from_str::<metalcraft_packs::PackManifest>(&s).ok())
+            .and_then(|s| serde_json::from_str::<metalcraft_packs::IntegrationManifest>(&s).ok())
             .map(|m| m.version)
             .unwrap_or_else(|| "0.0.0".to_string());
         match &best {
@@ -192,9 +192,9 @@ mod tests {
     #[test]
     fn identical_content_hashes_identically() {
         let mut a = BTreeMap::new();
-        a.insert("pack.json".to_string(), b"{\"id\":\"x\"}".to_vec());
+        a.insert("integration.json".to_string(), b"{\"id\":\"x\"}".to_vec());
         let mut b = BTreeMap::new();
-        b.insert("pack.json".to_string(), b"{\"id\":\"x\"}".to_vec());
+        b.insert("integration.json".to_string(), b"{\"id\":\"x\"}".to_vec());
 
         let ha = metalcraft_packs::canonical_sha256(a.iter().map(|(p, c)| (p.as_str(), c.as_slice())));
         let hb = metalcraft_packs::canonical_sha256(b.iter().map(|(p, c)| (p.as_str(), c.as_slice())));

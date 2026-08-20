@@ -1,5 +1,5 @@
 //! Spice test harness for the **config-agent** persona — the agent that
-//! configures this agent itself (installs integration packs, manages the API
+//! configures this agent itself (installs integrations, manages the API
 //! key store, edits personas/skills).
 //!
 //! Three tiers, all from one test binary (one process) so the process-global
@@ -18,7 +18,7 @@
 //!      thing*.
 //!
 //!      There used to be an enable step here. Packs are no longer enabled or
-//!      disabled — an agent pack is the install unit, and an integration pack it
+//!      disabled — an agent pack is the install unit, and an integration it
 //!      vendors is present or absent (see `docs/AGENT_PACKS_PLAN.md`). What is
 //!      left to configure is the key.
 //!
@@ -52,7 +52,7 @@ use metalcraft_agent::key_store::KeyStore;
 use metalcraft_agent::persona::Persona;
 use metalcraft_agent::runtime::{run_one_shot_task, AgentRuntimeContext, RunOneShotRequest};
 use metalcraft_agent::tools::{self, meta_integration, meta_keys};
-use metalcraft_agent::{integration_packs, key_store, paths, seed};
+use metalcraft_agent::{integrations, key_store, paths, seed};
 
 const PERSONA_SLUG: &str = "config-agent";
 const ORCHESTRATOR_SLUG: &str = "orchestrator-agent";
@@ -60,7 +60,7 @@ const ORCHESTRATOR_SLUG: &str = "orchestrator-agent";
 /// Tools the config-agent must expose to configure the agent itself — kept in
 /// lockstep with `seed/personas/config-agent.json`.
 const EXPECTED_TOOLS: &[&str] = &[
-    "pack_list",
+    "integration_list",
     "agentpack_list",
     "agentpack_install",
     "key_list",
@@ -290,7 +290,7 @@ fn config_agent_wires_up() {
     // resolve to nothing and the agent would keep reaching for a tool that no longer
     // exists — silently, since unknown names are dropped from the registry.
     assert!(
-        !resolved.iter().any(|t| t == "pack_enable" || t == "pack_disable"),
+        !resolved.iter().any(|t| t == "integration_enable" || t == "integration_disable"),
         "config-agent still lists a retired enable/disable tool: {resolved:?}"
     );
 
@@ -299,9 +299,9 @@ fn config_agent_wires_up() {
         "config-agent should reference the managing-integrations skill"
     );
 
-    // A seeded integration pack is simply present — there is no off state to turn on.
+    // A seeded integration is simply present — there is no off state to turn on.
     assert!(
-        integration_packs::list_installed()
+        integrations::list_installed()
             .iter()
             .any(|p| p.manifest.id == "metalcraft-drive"),
         "metalcraft-drive pack should be installed (seeded)"
@@ -327,7 +327,7 @@ async fn configuring_a_pack_via_meta_tools_works() {
 
     // Step 1: read the pack — what the agent does to learn what it still needs.
     // The pack is already there; what's missing is the key.
-    let read = meta_integration::PackReadTool
+    let read = meta_integration::IntegrationReadTool
         .call(serde_json::json!({ "id": PACK }))
         .await
         .expect("pack_read should not error");
@@ -510,7 +510,7 @@ fn orchestrator_can_delegate_config() {
     );
     // It must NOT carry the config meta tools itself — those belong to the
     // delegated persona, not the router.
-    for tool in ["agentpack_install", "key_set", "pack_list", "key_list"] {
+    for tool in ["agentpack_install", "key_set", "integration_list", "key_list"] {
         assert!(
             !orchestrator.tools.iter().any(|t| t == tool),
             "orchestrator should NOT declare `{tool}` directly — it delegates to config-agent"

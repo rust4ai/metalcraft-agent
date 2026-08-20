@@ -262,7 +262,7 @@ async fn memory_store_round_trip() {
         name: "T".into(),
         description: "test".into(),
         tools: vec![],
-        packs: vec![],
+        integrations: vec![],
         skills: vec![],
         version: None,
         system_prompt: "You are a test persona.".into(),

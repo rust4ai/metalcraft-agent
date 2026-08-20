@@ -8,7 +8,7 @@
 //!
 //! It is written as a side effect of install/uninstall, so the file always reflects the
 //! current set. Reads are lock-free (atomic rename); writes serialize through an advisory
-//! file lock, mirroring [`crate::integration_packs`]'s state handling, because the daemon
+//! file lock, mirroring [`crate::integrations`]'s state handling, because the daemon
 //! and the workshop API can both mutate it.
 use std::path::PathBuf;
 
@@ -40,7 +40,7 @@ pub struct Lock {
     #[serde(default)]
     pub flows: Vec<LockEntry>,
     /// Agent packs — the unit of installation. Self-contained, so restoring these
-    /// needs no dependency ordering: each carries its own integration packs.
+    /// needs no dependency ordering: each carries its own integrations.
     #[serde(default)]
     pub agent_packs: Vec<LockEntry>,
 }
@@ -88,7 +88,7 @@ fn save(lock: &Lock) -> std::io::Result<()> {
 }
 
 /// Serialize a read-modify-write of the lockfile across threads and processes with an
-/// advisory lock on a sidecar file, mirroring `integration_packs::mutate_state`.
+/// advisory lock on a sidecar file, mirroring `integrations::mutate_state`.
 fn mutate(f: impl FnOnce(&mut Lock)) -> Result<(), String> {
     let lock_path = paths::data_dir().join("metalcraft.lock.guard");
     if let Some(parent) = lock_path.parent() {

@@ -123,9 +123,9 @@ Workshop API.
 
 Packs (`src/integration_packs.rs`) are the plugin mechanism:
 
-- A pack is a directory under `<data>/integration_packs/<id>/` with a manifest plus
+- A pack is a directory under `<data>/integrations/<id>/` with a manifest plus
   `personas/`, `skills/`, `api_tools/`, and `flow_templates/` subdirectories.
-- Enable/disable state is stored in `<data>/integration_packs.json`.
+- Enable/disable state is stored in `<data>/integrations.json`.
 - At resolution time, **user files shadow pack files** — a user persona named the same as a
   pack persona takes precedence.
 - Pack contents are **read-only**; the Workshop API rejects writes to pack-owned items.

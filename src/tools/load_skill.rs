@@ -46,7 +46,7 @@ impl metalcraft::Tool for LoadSkillTool {
 
         // Resolve the local skills dir first, then any enabled integration
         // pack (e.g. discord ships its own skills).
-        let (file, _origin) = crate::integration_packs::resolve_file(
+        let (file, _origin) = crate::integrations::resolve_file(
             &self.skills_dir,
             "skills",
             &format!("{}.md", skill_name),

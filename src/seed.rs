@@ -4,15 +4,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Every seed file — default personas, skills, flows, flow templates, and
-/// integration packs — embedded into the binary at compile time from the
+/// integrations — embedded into the binary at compile time from the
 /// `seed/` directory, then written to the app data dir on startup by
 /// [`ensure_defaults`]. The released binary is therefore self-contained: it
 /// carries its seeds and needs no `seed/` folder shipped alongside it.
 ///
-/// Adding a persona, skill, or whole integration pack is just dropping files
+/// Adding a persona, skill, or whole integration is just dropping files
 /// under `seed/` — no edit to this file is needed.
 ///
-/// Layout (top-level subdirs map to data dirs; `integration_packs/<id>/` is a
+/// Layout (top-level subdirs map to data dirs; `integrations/<id>/` is a
 /// pack tree):
 /// ```text
 /// seed/
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 ///   flows/*                  -> write-if-missing
 ///   api_tools/*              -> write-if-missing
 ///   flow_templates/*         -> write-if-missing
-///   integration_packs/<id>/  -> pack-version-gated (see write_integration_packs)
+///   integrations/<id>/  -> pack-version-gated (see write_integrations)
 /// ```
 ///
 /// Caveat: `include_dir` re-embeds when the *contents* of already-tracked files
@@ -51,10 +51,10 @@ fn as_refs(v: &[(String, String)]) -> Vec<(&str, &str)> {
     v.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect()
 }
 
-/// Ensure default personas, skills, and integration packs exist in the app data
+/// Ensure default personas, skills, and integrations exist in the app data
 /// directory. Creates the data dirs, then writes the embedded seed files
 /// (personas upgrade on version bump; everything else is written only when
-/// missing — packs gate on their own `pack.json` version).
+/// missing — packs gate on their own `integration.json` version).
 pub fn ensure_defaults() {
     let dirs = [
         paths::personas_dir(),
@@ -66,7 +66,7 @@ pub fn ensure_defaults() {
         paths::api_tools_dir(),
         paths::flow_templates_dir(),
         paths::chats_dir(),
-        paths::integration_packs_dir(),
+        paths::integrations_dir(),
         paths::upload_root(),
     ];
 
@@ -97,7 +97,7 @@ pub fn ensure_defaults() {
         write_seeds(&target, &as_refs(&seeds));
     }
 
-    write_integration_packs();
+    write_integrations();
 
     retire_obsolete_seeds();
 }
@@ -106,9 +106,9 @@ pub fn ensure_defaults() {
 /// replaced, so they don't linger as stale, enable-able items on upgraded
 /// installs.
 fn retire_obsolete_seeds() {
-    // The `whatsapp` integration pack became the native, generic
+    // The `whatsapp` integration became the native, generic
     // `gateway_send_message` tool.
-    retire_dir(paths::integration_packs_dir().join("whatsapp"), "'whatsapp' integration pack");
+    retire_dir(paths::integrations_dir().join("whatsapp"), "'whatsapp' integration");
     // The channel *type/instance* model was replaced by the simple channels
     // connection model (channels.json); drop the seeded manifest tree so old
     // channel types stop lingering on upgraded installs.
@@ -143,7 +143,7 @@ fn write_seeds(dir: &Path, seeds: &[(&str, &str)]) {
 ///
 /// This is how a prompt change to a built-in persona reaches existing data
 /// dirs — bump its `version` and it re-seeds on next start. The trade-off
-/// (shared with integration packs) is that this clobbers user edits to a
+/// (shared with integrations) is that this clobbers user edits to a
 /// built-in persona on a version bump; customizations should be saved under a
 /// new slug, which is not a seeded persona and so is never touched.
 fn write_versioned_seeds(dir: &Path, seeds: &[(&str, &str)]) {
@@ -180,37 +180,37 @@ fn json_version(doc: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-/// Write every embedded integration pack to `<data>/integration_packs/<id>/`.
+/// Write every embedded integration to `<data>/integrations/<id>/`.
 /// Each pack is force-refreshed (all files overwritten) when its bundled
-/// `pack.json` version exceeds the installed one; otherwise files are written
+/// `integration.json` version exceeds the installed one; otherwise files are written
 /// only when missing. Pack files are read-only in the UI, so overwriting is
 /// safe and is the only way a manifest change (e.g. a shrunk `requires_env`)
 /// reaches existing installs, which otherwise keep the first-seeded copy.
-fn write_integration_packs() {
-    write_seed_tree("integration_packs", &paths::integration_packs_dir(), "pack.json");
+fn write_integrations() {
+    write_seed_tree("integrations", &paths::integrations_dir(), "integration.json");
 }
 
-/// Materialize a single embedded integration pack into the data dir, writing
+/// Materialize a single embedded integration into the data dir, writing
 /// any of its files that are missing (which also repairs a partial install).
 /// Returns `false` if no pack with `id` is embedded in the binary.
 ///
-/// Called by [`crate::integration_packs::set_enabled`] so that *enabling* a
+/// Called by [`crate::integrations::set_enabled`] so that *enabling* a
 /// pack always guarantees its personas, skills, and api_tools are present on
 /// disk — an enabled flag with no files behind it was a real failure mode.
 /// Idempotent: existing files are left untouched (version upgrades still happen
-/// at startup via [`write_integration_packs`]).
+/// at startup via [`write_integrations`]).
 /// True when a pack with this id ships embedded in the binary (a first-party
 /// seed). Registry installs refuse ids that collide with an embedded pack so the
 /// version-gated boot seeder can never clobber a registry install.
-pub fn is_embedded_pack(id: &str) -> bool {
-    SEED.get_dir(format!("integration_packs/{id}")).is_some()
+pub fn is_embedded_integration(id: &str) -> bool {
+    SEED.get_dir(format!("integrations/{id}")).is_some()
 }
 
 pub fn install_pack(id: &str) -> bool {
-    let Some(pack_dir) = SEED.get_dir(format!("integration_packs/{id}")) else {
+    let Some(pack_dir) = SEED.get_dir(format!("integrations/{id}")) else {
         return false;
     };
-    let dest_root = paths::integration_packs_dir().join(id);
+    let dest_root = paths::integrations_dir().join(id);
     let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
     collect_files(pack_dir, pack_dir.path(), &mut files);
     for (rel_path, content) in files {
@@ -234,7 +234,7 @@ pub fn install_pack(id: &str) -> bool {
 /// Write every embedded `<seed_subdir>/<id>/` tree to `<dest_root>/<id>/`. Each
 /// item is force-refreshed (all files overwritten) when its bundled `manifest`
 /// version exceeds the installed one; otherwise files are written only when
-/// missing. Shared by integration packs (`pack.json`) and gateway channel types
+/// missing. Shared by integrations (`integration.json`) and gateway channel types
 /// (`channel_type.json`) — both ship read-only directory trees gated on a
 /// versioned manifest, so a manifest change reaches existing installs.
 fn write_seed_tree(seed_subdir: &str, dest_root: &Path, manifest: &str) {
@@ -350,7 +350,7 @@ mod tests {
     fn embedded_seed_tree_has_expected_contents() {
         assert!(!embedded_flat("personas").is_empty(), "personas should be embedded");
         assert!(!embedded_flat("skills").is_empty(), "skills should be embedded");
-        let packs = SEED.get_dir("integration_packs").expect("integration_packs embedded");
+        let packs = SEED.get_dir("integrations").expect("integrations embedded");
         let ids: Vec<&str> = packs
             .dirs()
             .filter_map(|d| d.path().file_name().and_then(|s| s.to_str()))
@@ -358,14 +358,28 @@ mod tests {
         for expected in ["email", "metalcraft-notes", "metalcraft-calendar", "metalcraft-drive"] {
             assert!(ids.contains(&expected), "pack '{expected}' should be embedded, got {ids:?}");
         }
-        // The email pack ships a manifest + persona + skill but no api_tools/
-        // (its tools are native Rust, compiled into the agent).
-        let email = SEED.get_dir("integration_packs/email").expect("email pack");
-        let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
-        collect_files(email, email.path(), &mut files);
-        let names: Vec<String> = files.iter().map(|(p, _)| p.to_string_lossy().into_owned()).collect();
-        assert!(names.iter().any(|n| n == "pack.json"), "got {names:?}");
-        assert!(names.iter().any(|n| n.starts_with("personas/")), "got {names:?}");
+        // An integration is tools and nothing else.
+        //
+        // It used to carry `personas/` and `skills/` of its own, which is what made
+        // it look like a unit of capability you install. Both belong to an agent
+        // pack now — a preset curates them — and a pack that still shipped them
+        // would resolve only through the legacy fallback kept for un-migrated pods,
+        // so first-party content must not rely on it.
+        //
+        // (The email pack ships a manifest and no `api_tools/`: its tools are native
+        // Rust, compiled into the agent and declared in `native_tools`.)
+        for id in ids {
+            let dir = SEED.get_dir(format!("integrations/{id}")).expect("pack dir");
+            let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
+            collect_files(dir, dir.path(), &mut files);
+            let names: Vec<String> =
+                files.iter().map(|(p, _)| p.to_string_lossy().into_owned()).collect();
+            assert!(names.iter().any(|n| n == "integration.json"), "{id}: got {names:?}");
+            assert!(
+                !names.iter().any(|n| n.starts_with("personas/") || n.starts_with("skills/")),
+                "{id} still ships personas or skills; they belong to an agent pack now — got {names:?}"
+            );
+        }
     }
 
     /// Every first-party `metalcraft-*` pack must carry the ecosystem tag, or the
@@ -373,8 +387,8 @@ mod tests {
     /// it. This guards a new subapp pack shipped without the tag.
     #[test]
     fn metalcraft_packs_are_tagged_ecosystem() {
-        use crate::integration_packs::{is_ecosystem, PackManifest};
-        let packs = SEED.get_dir("integration_packs").expect("integration_packs embedded");
+        use crate::integrations::{is_ecosystem, IntegrationManifest};
+        let packs = SEED.get_dir("integrations").expect("integrations embedded");
         let mut checked = 0;
         for item in packs.dirs() {
             let id = item.path().file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -382,11 +396,11 @@ mod tests {
                 continue;
             }
             let manifest_json = item
-                .get_file(item.path().join("pack.json"))
+                .get_file(item.path().join("integration.json"))
                 .and_then(|f| f.contents_utf8())
-                .unwrap_or_else(|| panic!("{id} missing pack.json"));
-            let manifest: PackManifest = serde_json::from_str(manifest_json)
-                .unwrap_or_else(|e| panic!("{id} pack.json invalid: {e}"));
+                .unwrap_or_else(|| panic!("{id} missing integration.json"));
+            let manifest: IntegrationManifest = serde_json::from_str(manifest_json)
+                .unwrap_or_else(|e| panic!("{id} integration.json invalid: {e}"));
             assert!(
                 is_ecosystem(&manifest),
                 "pack '{id}' must carry the metalcraft-ecosystem tag"

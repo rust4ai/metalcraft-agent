@@ -1,5 +1,5 @@
 ---
-description: Inspect integration packs, install agent packs, and manage the API key store by prompt using the meta tools
+description: Inspect integrations, install agent packs, and manage the API key store by prompt using the meta tools
 ---
 
 # Managing Integrations & Keys
@@ -11,20 +11,20 @@ driven by tool calls.
 
 ## The two units
 
-An **integration pack** bundles the HTTP-API tools for one external service
+An **integration** bundles the HTTP-API tools for one external service
 (Linear, GitHub, Cloudflare, …). It is not installed on its own.
 
 An **agent pack** is the install unit. It carries an agent preset, its personas
-and skills, and vendors every integration pack those personas need. Installing
+and skills, and vendors every integration those personas need. Installing
 one makes all of it resolvable at once; uninstalling removes it again.
 
 So "install the Linear integration" means: find the agent pack that provides it.
 
 ## Reading what's here
 
-- `pack_list` — every installed integration pack with id, name, description,
+- `integration_list` — every installed integration with id, name, description,
   version, and the env keys it requires (each flagged configured/missing).
-- `pack_read` — one pack's full details by `id`: manifest, the personas/skills/
+- `integration_read` — one pack's full details by `id`: manifest, the personas/skills/
   tools/flow-templates it provides, and its **README** — the setup guide covering
   which credential to get, how to obtain it, and any provider-side steps (e.g.
   creating a bot and inviting it). Read this so you can walk the user through
@@ -37,7 +37,7 @@ So "install the Linear integration" means: find the agent pack that provides it.
 - `agentpack_install` — install an agent pack from a `.agentpack` file or URL.
   Show the user its consent summary first: the domains it will reach and the
   environment keys it will want. This is a real grant, not a formality.
-- `agentpack_uninstall` — remove one, along with the integration packs only it
+- `agentpack_uninstall` — remove one, along with the integrations only it
   was using.
 - `agentpack_export` — package this pod's own preset as a distributable
   `.agentpack`.
@@ -58,10 +58,10 @@ what lets an installed pack actually authenticate.
 
 When asked to "set up the X integration using API key …":
 
-1. `pack_list` to see whether X's integration pack is already here. If it isn't,
+1. `integration_list` to see whether X's integration is already here. If it isn't,
    the user needs to install an agent pack that provides it (`agentpack_install`)
    — ask them for the source rather than guessing one.
-2. `pack_read` with that `id` to see its README and required keys. If the user
+2. `integration_read` with that `id` to see its README and required keys. If the user
    hasn't supplied the credential yet, use the README to guide them through
    obtaining it and any provider-side setup (e.g. creating a bot, inviting it
    with the right permissions), step by step — then wait for them to hand you

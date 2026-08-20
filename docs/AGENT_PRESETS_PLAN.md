@@ -25,7 +25,7 @@
         │  agent_presets/amy-kitchen.json  + memories/         │
         │  personas/{amy, amy-shopper, amy-critic}.json        │
         │  skills/{knife-skills, menu-planning}.md             │
-        │  integration_packs/{metalcraft-calendar, instacart}/ │
+        │  integrations/{metalcraft-calendar, instacart}/ │
         └──────────────────────────────────────────────────────┘
                                   │ install
                                   ▼
@@ -66,7 +66,7 @@ memory, and the agent-pack installer. The rest is renaming and rewiring.
 | agent preset | `agent_presets/<slug>.json` | `AgentPreset` | `preset_*` |
 | agent instance | `<data>/agent_instances/<id>/instance.json` | `AgentInstance` | `instance_*` |
 | conversation | `…/<id>/conversations/<cid>.json` | `Conversation` | `conversation_*` |
-| integration pack | `integration_packs/<id>/`, `pack.json` | `PackManifest` | `pack_*` (read-only) |
+| integration pack | `integrations/<id>/`, `integration.json` | `IntegrationManifest` | `pack_*` (read-only) |
 
 Never write bare "pack".
 
@@ -103,7 +103,7 @@ agent_presets/amy-kitchen/avatar.png
   ],
 
   "skills": ["knife-skills", "menu-planning", "substitutions"],
-  "integration_packs": ["metalcraft-calendar", "instacart"],
+  "integrations": ["metalcraft-calendar", "instacart"],
 
   "memories": { "file": "agent_presets/amy-kitchen/memories.jsonl", "count": 214,
                 "embed_model": "text-embedding-3-small", "dims": 384 },
@@ -324,8 +324,8 @@ Redaction (`src/memory/redact.rs`) runs at pack **build** time, not per seed.
 ### 4.1 What a pack is now
 
 ```
-integration_packs/<id>/
-  pack.json      manifest_version: 2 — id, name, description, version,
+integrations/<id>/
+  integration.json      manifest_version: 2 — id, name, description, version,
                  requires_env[], tags[], tools[], domains[]
   api_tools/*.json
   README.md
@@ -343,8 +343,8 @@ Ten agent packs vendoring `metalcraft-calendar` should not mean ten copies. Stor
 content hash and reference them:
 
 ```
-<data>/pack_store/<sha256>/{pack.json, api_tools/, README.md}
-<data>/agent_packs/<id>/integration_packs.json   → { "metalcraft-calendar": "sha256:ab12…" }
+<data>/integration_store/<sha256>/{integration.json, api_tools/, README.md}
+<data>/agent_packs/<id>/integrations.json   → { "metalcraft-calendar": "sha256:ab12…" }
 ```
 
 Dedup for free, **and two versions coexist without conflict** — which deletes the
@@ -357,7 +357,7 @@ A tool resolves if: some installed agent pack provides that integration pack, **
 current persona references it via `Persona.packs` (`src/persona.rs:144`), **and** the current
 preset lists it in `integration_packs`.
 
-So **`integration_packs.json` enable-state goes away** (`src/paths.rs:81`,
+So **`integrations.json` enable-state goes away** (`src/paths.rs:81`,
 `src/integration_packs.rs:155-256`), along with `pack_enable`/`pack_disable`. Scoping becomes
 structural — three declarations — instead of a mutable global flag. `pack_list`/`pack_read`
 survive as read-only introspection.
@@ -389,7 +389,7 @@ amy-kitchen-agent-1.4.0.agentpack        (zip)
   agent_presets/amy-kitchen.json  +  amy-kitchen/{memories.jsonl, vectors.bin, avatar.png}
   personas/{amy, amy-shopper, amy-critic}.json
   skills/{knife-skills, menu-planning, substitutions}.md
-  integration_packs/{metalcraft-calendar, instacart}/
+  integrations/{metalcraft-calendar, instacart}/
   flows/, flow_templates/                  optional, installed unscheduled (§5.5)
   README.md
   SIGNATURE                                optional, detached, over agent_pack.json
@@ -416,7 +416,7 @@ no thin/fat variant: a pack that doesn't carry its dependencies isn't valid.
   "provides": {
     "personas": ["amy", "amy-shopper", "amy-critic"],
     "skills":   ["knife-skills", "menu-planning", "substitutions"],
-    "integration_packs": [
+    "integrations": [
       { "id": "metalcraft-calendar", "version": "1.7.1", "content_sha256": "…",
         "source": "https://packs.metalcraftai.com" },
       { "id": "instacart", "version": "0.3.4", "content_sha256": "…",
@@ -442,7 +442,7 @@ failure. `parent` is fork lineage, from axoniac's `parent_hash`
 
 ### 5.3 Install
 
-`src/agent_packs/install.rs`, modelled on `integration_packs::install_from_zip`
+`src/agent_packs/install.rs`, modelled on `integrations::install_from_zip`
 (`src/integration_packs.rs:321`) — reuse its traversal rejection, size cap (raise to 64 MB for
 assets and memories), and version gate.
 
@@ -450,7 +450,7 @@ assets and memories), and version gate.
 2. Validate: every preset's personas/skills/integration_packs present; every persona's
    `packs[]` ⊆ its preset's `integration_packs` (cheap check, real containment); every pack's
    `tools[]` matches its `api_tools/`.
-3. Extract → `<data>/agent_packs/<id>/`; integration packs → `pack_store/` by hash (§4.2).
+3. Extract → `<data>/agent_packs/<id>/`; integration packs → `integration_store/` by hash (§4.2).
 4. Build the preset memory **base layers** → `<data>/memory/presets/<slug>@<version>/`.
 5. Record in `<data>/agent_packs.json` + `lockfile::record_agent_pack`.
 6. **Report**: presets, personas, skills, packs (new / deduped / new version alongside old),
@@ -632,16 +632,16 @@ Runs in `src/bin/migrate.rs`, **never on boot**.
 | Today | Becomes |
 |---|---|
 | `seed/personas/*.json`, `seed/skills/*.md`, `seed/flow_templates/*` | **`metalcraft-core`**, providing **`general-agent`** (§1.3) |
-| `seed/integration_packs/metalcraft-{calendar,notes,email,drive,contacts,code,packs}` + their personas/skills | **`metalcraft-ecosystem`**: a `metalcraft-assistant` preset, those personas/skills, the packs vendored, plus `agent-registry` |
-| `seed/integration_packs/email` (IMAP) | into `metalcraft-ecosystem` |
+| `seed/integrations/metalcraft-{calendar,notes,email,drive,contacts,code,packs}` + their personas/skills | **`metalcraft-ecosystem`**: a `metalcraft-assistant` preset, those personas/skills, the packs vendored, plus `agent-registry` |
+| `seed/integrations/email` (IMAP) | into `metalcraft-ecosystem` |
 
 Both are embedded seeds written on first run (`seed.rs:58` `ensure_defaults`, `:141`
 `write_versioned_seeds` — the version-gated force-upgrade path extends to agent packs).
 
 ### 7.2 Existing pods
 
-1. Wrap each `<data>/integration_packs/<id>/` into `<data>/agent_packs/<id>-legacy/`: pack
-   becomes a vendored dep in `pack_store/`; its `personas/`/`skills/` move up; a `<id>-legacy`
+1. Wrap each `<data>/integrations/<id>/` into `<data>/agent_packs/<id>-legacy/`: pack
+   becomes a vendored dep in `integration_store/`; its `personas/`/`skills/` move up; a `<id>-legacy`
    preset is synthesized.
 2. `<data>/personas/` and `<data>/skills/` — the user's own — **untouched**, top precedence. A
    synthesized `my-agent` preset lists them so they're reachable from the picker.
@@ -649,7 +649,7 @@ Both are embedded seeds written on first run (`seed.rs:58` `ensure_defaults`, `:
    "general-agent"`, `persistent: true`, no seeding (they predate presets).
 4. Existing global `<data>/memory/` → the delta of a `legacy` instance with no base.
    **Nobody loses memories.**
-5. Drop `integration_packs.json`. Report to `<data>/migrations/<ts>-presets.json`.
+5. Drop `integrations.json`. Report to `<data>/migrations/<ts>-presets.json`.
 
 Pods that skip the step: the server refuses to start, naming the command.
 
@@ -706,11 +706,11 @@ preinstalled"* gives axoniac a conversion path for visitors who don't have a pod
 
 | Phase | Scope |
 |---|---|
-| **AP1** | `metalcraft-packs` spec crate: `PackManifest` v2, `AgentPackManifest`, `AgentPreset`, validation, canonical hashing. Shared by agent, registries, Workshop. |
+| **AP1** | `metalcraft-packs` spec crate: `IntegrationManifest` v2, `AgentPackManifest`, `AgentPreset`, validation, canonical hashing. Shared by agent, registries, Workshop. |
 | **AP2** | Preset object + resolution (incl. the skill collision rule) + `general-agent`. `sub_agent` scoped to the roster. CLI `--preset`. **Presets over today's packs — no install changes.** |
 | **AP3** | Instances + conversations: records, lifecycle, chats→(instance, conversation) migration, every surface, `TurnRunner` carries the handle, gateway channels get permanent instances, flow schedules gain `instance` + arm/disarm. |
 | **AP4** | Two-layer memory: base/delta, handle registry + LRU, N-index `recall()`, provenance, instance-scoped `mem_*`, dream per instance. |
-| **AP5** | Agent pack format + installer + `pack_store` + lockfile + update semantics + retirement of `pack_enable`/`pack_install`/`PACKS_BASE_URL`. Integration pack v2. First-party packs. `migrate`. **The breaking release.** |
+| **AP5** | Agent pack format + installer + `integration_store` + lockfile + update semantics + retirement of `pack_enable`/`pack_install`/`PACKS_BASE_URL`. Integration pack v2. First-party packs. `migrate`. **The breaking release.** |
 | **AP6** | Registries config + `agent-registry` pack + install-from-registry + submit + `agentpack_export`. |
 | **AP7** | Workshop UI: preset picker on new chat, instance list with conversations, pack browser + permission summary, fork-on-edit, local preset + memory editing. |
 
@@ -734,7 +734,7 @@ which is the visible half of the idea.
 - A gateway channel idle-resets: a new conversation starts, memory persists.
 - An authored entry with `split: by-heading` and three `##` sections compiles to three memories,
   each carrying `source_entry`.
-- Ten packs vendoring the same integration pack → one `pack_store` entry.
+- Ten packs vendoring the same integration pack → one `integration_store` entry.
 - A persona referencing a pack its preset doesn't declare → **install fails**, naming it.
 - Uninstalling a pack with a persistent instance fails, listing the instances.
 - A pack shipping flows arms **zero** schedules.

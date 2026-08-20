@@ -3,7 +3,7 @@ use std::path::Path;
 
 // NOTE: the persona-loading tests that read a top-level `personas/` directory
 // were removed — personas now live under `seed/personas/` and are seeded into
-// the runtime data dir via integration packs, so that fixture no longer exists.
+// the runtime data dir via integrations, so that fixture no longer exists.
 // Loading personas by slug is covered end-to-end by the `*_spice_test.rs`
 // harnesses (which seed a temp data dir); the tests below cover the parts of
 // `persona` that don't depend on an on-disk personas directory.
@@ -21,7 +21,7 @@ fn build_system_prompt_without_skills() {
         name: "Test".into(),
         description: "Test persona".into(),
         tools: vec![],
-        packs: vec![],
+        integrations: vec![],
         skills: vec![],
         version: None,
         system_prompt: "You are a test.".into(),

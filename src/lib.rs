@@ -19,7 +19,7 @@ pub mod gateway_activity;
 pub mod guard;
 pub mod hub_auth;
 pub mod inbound_dedup;
-pub mod integration_packs;
+pub mod integrations;
 pub mod key_store;
 pub mod lockfile;
 pub mod memory;

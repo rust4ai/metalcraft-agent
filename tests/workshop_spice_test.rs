@@ -185,13 +185,46 @@ async fn flow_validate_flags_a_bad_flow() {
 #[tokio::test]
 async fn meta_writes_refuse_pack_owned_slugs() {
     init();
-    // Enable a pack so it has a read-only persona slug, then prove a write to
-    // that slug is refused (the user must choose a different slug).
-    metalcraft_agent::integration_packs::set_enabled("email", true).expect("enable email");
+    // Install an agent pack, then prove a write to a persona *it* provides is
+    // refused — the user has to choose a different slug rather than silently
+    // shadowing what they installed.
+    //
+    // This used to enable an integration and write over the persona it
+    // carried. Integrations do not carry personas any more: they are tools, and an
+    // agent pack is what ships an identity. Same guard, correct owner.
+    use metalcraft_agent::agent_packs::{self, bundle, manifest::*};
+    use std::collections::BTreeMap;
+
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    files.insert(
+        "agent_presets/spice-test.json".into(),
+        serde_json::to_vec(&serde_json::json!({
+            "slug": "spice-test", "name": "Spice Test", "default_persona": "spice-owned",
+            "personas": [{ "slug": "spice-owned", "role": "default" }],
+        }))
+        .unwrap(),
+    );
+    files.insert(
+        "personas/spice-owned.json".into(),
+        serde_json::to_vec(&serde_json::json!({
+            "name": "Owned", "description": "provided by an agent pack",
+            "tools": ["read_file"], "system_prompt": "You are owned.",
+        }))
+        .unwrap(),
+    );
+    let mut m = AgentPackManifest::new("spice-test-agent", "Spice Test", "1.0.0");
+    m.presets = vec!["spice-test".into()];
+    m.provides = Provides {
+        personas: vec!["spice-owned".into()],
+        skills: vec![],
+        integrations: vec![],
+    };
+    let archive = bundle::write(m, files).expect("build archive");
+    agent_packs::install(&archive, "bundle").expect("install");
 
     let out = meta_persona::PersonaWriteTool
         .call(serde_json::json!({
-            "slug": "email-agent",
+            "slug": "spice-owned",
             "persona": {
                 "name": "x", "description": "y",
                 "tools": ["read_file"], "system_prompt": "z"

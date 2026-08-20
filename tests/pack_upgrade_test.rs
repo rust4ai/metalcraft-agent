@@ -31,9 +31,9 @@ fn higher_bundled_version_reseeds_pack_but_equal_or_older_is_left_alone() {
     }
 
     let notes = data_dir
-        .join("integration_packs")
+        .join("integrations")
         .join("metalcraft-notes")
-        .join("pack.json");
+        .join("integration.json");
     fs::create_dir_all(notes.parent().unwrap()).unwrap();
 
     // Simulate an old install: an early version of the notes pack declared three

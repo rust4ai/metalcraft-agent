@@ -1,12 +1,12 @@
 //! Thin client for the Metalcraft Packs registry (packs.metalcraftai.com).
 //!
 //! Today it only downloads a pack's ZIP so the agent can install it locally (see
-//! [`crate::integration_packs::install_from_zip`]). The registry's
+//! [`crate::integrations::install_from_zip`]). The registry's
 //! `GET /api/v1/packs/{slug}/download` endpoint is public, so no auth is needed.
 use std::time::Duration;
 
 /// Bytes we refuse to download for one pack — mirrors the extract-time cap in
-/// [`crate::integration_packs`]. Packs are tiny (JSON + markdown).
+/// [`crate::integrations`]. Packs are tiny (JSON + markdown).
 const MAX_DOWNLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// The registry's base origin. Overridable via `PACKS_BASE_URL` for dev/self-host.

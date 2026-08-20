@@ -174,7 +174,7 @@ pub fn builtin_apps() -> Vec<Box<dyn App>> {
    `metalcraft-calendar` arms returning the app's `tool_names()`, and keep the
    `:235` drift test green.
 
-**`pack.json` gains an `app` block** (new optional field in `PackManifest`):
+**`integration.json` gains an `app` block** (new optional field in `IntegrationManifest`):
 ```json
 "app": { "runtime": "native", "storage": "sqlite",
          "mount": "/apps/metalcraft-notes", "spa": "web/" }
@@ -217,7 +217,7 @@ Lowest risk; the SQLite port already exists in `metalcraft-notes-r2`.
 5. **SPA**: embed the built Vite `dist/` via `rust-embed` and serve it at the
    mount root (mirrors how the agent already embeds `seed/`). Set the SPA's API
    base to the mount path.
-6. **Pack**: convert `seed/integration_packs/metalcraft-notes` to
+6. **Pack**: convert `seed/integrations/metalcraft-notes` to
    `runtime:native` — the 8 `api_tools/*.json` are now served by the native
    tools, so either delete them or keep them as an OpenAPI reference; keep the
    persona + skill.
@@ -432,7 +432,7 @@ files.
 - [ ] **P0** `src/apps/` SDK: `App` trait, `AppContext` (**`store` + `blobs`**),
   `SqliteStore`, `BlobStore` (S3/Spaces + local impl), `AppEventHub`,
   `builtin_apps()` (empty), router/registry/manifest seams, `app` block in
-  `PackManifest` + drift test. **Green, no apps.**
+  `IntegrationManifest` + drift test. **Green, no apps.**
 - [ ] **P1** Notes native: schema (harvest r2), store (port api.rs), 8 tools,
   REST+WS router, SPA embed, pack → `runtime:native`.
 - [ ] **P2** Notes data migration (export→import) + reconcile report.

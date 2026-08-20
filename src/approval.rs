@@ -161,7 +161,7 @@ impl OperationKind {
             // Read-only ones auto-approve; mutating ones require approval.
             "persona_list" | "persona_read" | "skill_list" | "skill_read" | "flow_list"
             | "flow_read" | "flow_validate" | "flow_templates_list" | "flow_template_read"
-            | "diagnostics_list" | "diagnostics_read" | "pack_list" | "pack_read" => Self::MetaRead,
+            | "diagnostics_list" | "diagnostics_read" | "integration_list" | "integration_read" => Self::MetaRead,
             "persona_write" | "persona_delete" | "skill_write" | "skill_delete" | "flow_write"
             | "flow_set_schedules" | "flow_install" | "flow_install_dependencies"
             | "flow_delete" => Self::MetaWrite,

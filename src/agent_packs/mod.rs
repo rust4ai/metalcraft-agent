@@ -1,18 +1,18 @@
 //! Agent packs — the unit of installation.
 //!
 //! An agent pack carries one agent preset plus **every** persona, skill and
-//! integration pack it needs. Installing it is the only way new capability reaches a
-//! pod; integration packs stop being an independent install unit and become vendored
+//! integration it needs. Installing it is the only way new capability reaches a
+//! pod; integrations stop being an independent install unit and become vendored
 //! dependencies (see [`store`]).
 //!
 //! ```text
 //! <data>/agent_packs/<id>/
 //!   agent_pack.json
-//!   integration_packs.json      → { "<pack id>": "<store sha256>" }
+//!   integrations.json      → { "<pack id>": "<store sha256>" }
 //!   agent_presets/<slug>.json   + <slug>/memories.jsonl
 //!   personas/<slug>.json
 //!   skills/<slug>.md
-//! <data>/pack_store/<sha256>/   the vendored packs themselves, deduplicated
+//! <data>/integration_store/<sha256>/   the vendored packs themselves, deduplicated
 //! ```
 pub mod bundle;
 pub mod manifest;
@@ -146,7 +146,7 @@ pub struct InstallReport {
 /// `gc` deletes store entries no installed pack references, and both `list()` and
 /// `read_refs` degrade a parse failure to *nothing* rather than an error. A pack with
 /// a truncated `agent_pack.json` therefore contributes zero refs, and collecting
-/// would delete the integration packs it actually depends on. Skipping is the safe
+/// would delete the integrations it actually depends on. Skipping is the safe
 /// direction: the cost is disk, and the alternative is silent data loss.
 fn manifests_all_readable() -> bool {
     let Ok(entries) = std::fs::read_dir(paths::agent_packs_dir()) else {
@@ -227,14 +227,14 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
         }
     }
 
-    // 1. vendored integration packs → the content store
-    let mut refs = store::PackRefs::new();
+    // 1. vendored integrations → the content store
+    let mut refs = store::IntegrationRefs::new();
     for (pack_id, files) in bundle::collect_pack_files(&bundle.files) {
         let existed = {
             let sha = metalcraft_packs::canonical_sha256(
                 files.iter().map(|(p, c)| (p.as_str(), c.as_slice())),
             );
-            store::entry_dir(&sha).join("pack.json").is_file()
+            store::entry_dir(&sha).join("integration.json").is_file()
         };
         let sha = store::put(&files)?;
         if existed {
@@ -261,7 +261,7 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
     let previous: std::collections::HashSet<String> =
         read_tree(&root).unwrap_or_default().into_iter().map(|(rel, _)| rel).collect();
     for (rel, bytes) in &bundle.files {
-        if rel.starts_with("integration_packs/") {
+        if rel.starts_with("integrations/") {
             continue; // lives in the store, not here
         }
         let target = root.join(rel);
@@ -290,16 +290,16 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
         .files
         .keys()
         .map(String::as_str)
-        .filter(|r| !r.starts_with("integration_packs/"))
+        .filter(|r| !r.starts_with("integrations/"))
         .collect();
     for rel in &previous {
         // Pod-managed files are not "withdrawn content" — the installer writes them
         // itself and no archive ever contains them, so a naive "not in the new
         // archive" test deletes them on every upgrade.
         //
-        // For `integration_packs.json` that was silent and expensive: the refs file
+        // For `integrations.json` that was silent and expensive: the refs file
         // is written just above, deleted here, and then `gc` below sees an agent
-        // pack referencing nothing and collects every integration pack it vendors.
+        // pack referencing nothing and collects every integration it vendors.
         // Upgrading an agent lost all of its tools, with the only trace a store
         // directory that had quietly emptied.
         if is_pod_managed(rel) || shipped.contains(rel.as_str()) {
@@ -315,7 +315,7 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
 
     // Collect anything the previous version referenced and this one does not. `gc`
     // used to run only on uninstall, so every upgrade left a full copy of each
-    // superseded integration pack on disk forever.
+    // superseded integration on disk forever.
     //
     // Runs *after* the refs are recorded, never before: garbage is defined as "not
     // referenced by any installed pack", and this pack's new refs have to be visible
@@ -392,7 +392,7 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
 }
 
 /// What an *installed* preset can reach, derived the same way an install-time
-/// summary is: from the vendored integration packs' own tool definitions.
+/// summary is: from the vendored integrations' own tool definitions.
 ///
 /// Needed because the second consent moment — arming a flow — happens long after
 /// install, and a scheduled agent acts while nobody is watching. "This flow can reach
@@ -401,9 +401,9 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
 pub fn consent_for_preset(preset: &crate::agent_preset::AgentPreset) -> ConsentSummary {
     let mut packs: HashMap<String, (Vec<u8>, Vec<(String, Vec<u8>)>)> = HashMap::new();
 
-    for id in &preset.integration_packs {
+    for id in &preset.integrations {
         let Some(dir) = store::resolve(id) else { continue };
-        let Ok(manifest) = std::fs::read(dir.join("pack.json")) else { continue };
+        let Ok(manifest) = std::fs::read(dir.join("integration.json")) else { continue };
         let mut api_tools = Vec::new();
         if let Ok(entries) = std::fs::read_dir(dir.join("api_tools")) {
             for e in entries.flatten() {
@@ -466,7 +466,7 @@ pub struct UpdateReport {
 ///
 /// **Updating is explicit.** There is no auto-update path into here: nothing changes
 /// underneath a running agent because somebody published. That matters more than it
-/// sounds — a pack's personas are prompts the model follows and its integration packs
+/// sounds — a pack's personas are prompts the model follows and its integrations
 /// run on the operator's credentials, so "the author pushed a change" must never be
 /// the same event as "your agent started behaving differently".
 ///
@@ -616,7 +616,7 @@ fn freeze_preset(slug: &str, old_tree: &[(String, Vec<u8>)]) -> Vec<String> {
 /// content, so "the new archive doesn't contain it" says nothing about whether it
 /// is still wanted.
 fn is_pod_managed(rel: &str) -> bool {
-    matches!(rel, "agent_pack.json" | "integration_packs.json")
+    matches!(rel, "agent_pack.json" | "integrations.json")
 }
 
 /// Write one packaged flow to `<data>/flows/`, disabled and unarmed.
@@ -831,7 +831,7 @@ pub fn export(preset_slug: &str, version: &str) -> Result<Vec<u8>, String> {
     }
     let mut skill_names = Vec::new();
     for slug in &wanted {
-        match crate::integration_packs::resolve_file(&skills_dir, "skills", &format!("{slug}.md")) {
+        match crate::integrations::resolve_file(&skills_dir, "skills", &format!("{slug}.md")) {
             Some((path, _)) => match std::fs::read(&path) {
                 Ok(bytes) => {
                     files.insert(format!("skills/{slug}.md"), bytes);
@@ -843,29 +843,29 @@ pub fn export(preset_slug: &str, version: &str) -> Result<Vec<u8>, String> {
         }
     }
 
-    // 5. every integration pack it declares — vendored, which is what makes the
+    // 5. every integration it declares — vendored, which is what makes the
     //    result installable with no network.
     let mut pack_refs = Vec::new();
-    for id in &preset.integration_packs {
+    for id in &preset.integrations {
         let Some(dir) = find_pack_dir(id) else {
-            missing.push(format!("integration pack '{id}' is not installed"));
+            missing.push(format!("integration '{id}' is not installed"));
             continue;
         };
         let mut count = 0usize;
         for (rel, bytes) in read_tree(&dir)? {
-            files.insert(format!("integration_packs/{id}/{rel}"), bytes);
+            files.insert(format!("integrations/{id}/{rel}"), bytes);
             count += 1;
         }
         if count == 0 {
-            missing.push(format!("integration pack '{id}' is empty"));
+            missing.push(format!("integration '{id}' is empty"));
             continue;
         }
-        let version = std::fs::read_to_string(dir.join("pack.json"))
+        let version = std::fs::read_to_string(dir.join("integration.json"))
             .ok()
-            .and_then(|s| serde_json::from_str::<metalcraft_packs::PackManifest>(&s).ok())
+            .and_then(|s| serde_json::from_str::<metalcraft_packs::IntegrationManifest>(&s).ok())
             .map(|m| m.version)
             .unwrap_or_else(|| "0.0.0".to_string());
-        pack_refs.push(manifest::PackRef {
+        pack_refs.push(manifest::IntegrationRef {
             id: id.clone(),
             version,
             content_sha256: None,
@@ -891,12 +891,12 @@ pub fn export(preset_slug: &str, version: &str) -> Result<Vec<u8>, String> {
     m.provides = manifest::Provides {
         personas: persona_names,
         skills: skill_names,
-        integration_packs: pack_refs,
+        integrations: pack_refs,
     };
 
     // Pin each vendored pack by content, so a tampered copy is caught at install.
     let by_pack = bundle::collect_pack_files(&files);
-    for r in &mut m.provides.integration_packs {
+    for r in &mut m.provides.integrations {
         if let Some(f) = by_pack.get(&r.id) {
             r.content_sha256 = Some(metalcraft_packs::canonical_sha256(
                 f.iter().map(|(p, c)| (p.as_str(), c.as_slice())),
@@ -923,14 +923,14 @@ fn pack_dir_for_preset(preset_slug: &str) -> PathBuf {
     paths::agent_presets_dir().join(preset_slug)
 }
 
-/// An integration pack's directory: the content store first, then the legacy
-/// `<data>/integration_packs/` layout that predates agent packs.
+/// An integration's directory: the content store first, then the legacy
+/// `<data>/integrations/` layout that predates agent packs.
 fn find_pack_dir(id: &str) -> Option<PathBuf> {
     if let Some(dir) = store::resolve(id) {
         return Some(dir);
     }
-    let legacy = paths::integration_packs_dir().join(id);
-    legacy.join("pack.json").is_file().then_some(legacy)
+    let legacy = paths::integrations_dir().join(id);
+    legacy.join("integration.json").is_file().then_some(legacy)
 }
 
 /// Read a directory tree into `(relative path, bytes)` pairs.
@@ -960,7 +960,7 @@ fn read_tree_all(root: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, Strin
 
 /// [`read_tree_all`] minus `personas/` and `skills/`.
 ///
-/// For **export only**: personas and skills moved out of integration packs, and an
+/// For **export only**: personas and skills moved out of integrations, and an
 /// old pack that still carries them must not smuggle them back in through an export.
 /// Anything that needs the pack as it actually is on disk — the orphan snapshot, for
 /// one — wants [`read_tree_all`] instead.

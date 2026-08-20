@@ -21,7 +21,7 @@ use super::{CalendarApp, CalendarStore, APP_ID};
 /// One reminder pass: fire any due reminders, stamping each that sends. Returns
 /// the count fired. Safe to call when the calendar app is disabled (returns 0).
 pub async fn run_reminder_tick() -> usize {
-    if !crate::integration_packs::is_enabled(APP_ID) {
+    if !crate::integrations::is_enabled(APP_ID) {
         return 0;
     }
     let ctx = match crate::apps::ctx_for(&CalendarApp) {

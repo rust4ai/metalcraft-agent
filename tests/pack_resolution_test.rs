@@ -44,9 +44,9 @@ fn persona_resolves_from_an_installed_pack() {
     fs::create_dir_all(&local_personas).unwrap();
 
     // A pack that ships `pack-persona`, laid out like a project.
-    let pack_root = data_dir.join("integration_packs").join("testpack");
+    let pack_root = data_dir.join("integrations").join("testpack");
     write(
-        &pack_root.join("pack.json"),
+        &pack_root.join("integration.json"),
         r#"{"id":"testpack","name":"Test Pack","description":"t","version":"1.0.0"}"#,
     );
     write(&pack_root.join("personas").join("pack-persona.json"), PACK_PERSONA);
@@ -58,7 +58,7 @@ fn persona_resolves_from_an_installed_pack() {
 
     // 2. A stale `enabled: false` from before the flag was retired must not hide it.
     //    Upgraded pods carry these, and honouring them would resurrect the bug.
-    write(&data_dir.join("integration_packs.json"), r#"{"testpack":{"enabled":false}}"#);
+    write(&data_dir.join("integrations.json"), r#"{"testpack":{"enabled":false}}"#);
     let persona = Persona::load("pack-persona", &local_personas)
         .expect("a stale disabled flag must not affect resolution");
     assert_eq!(persona.name, "Pack Persona");

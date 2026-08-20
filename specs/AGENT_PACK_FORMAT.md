@@ -1,6 +1,6 @@
 # Agent Pack Format — normative specification
 
-**Spec version:** 1
+**Spec version:** 2
 **Status:** normative. This document is the single definition of what a valid agent pack is.
 **Implementors:** `metalcraft-agent` (installs), `axoniac-prime` (publishes and serves),
 `metalcraft-workshop` (reads and displays), any third-party registry.
@@ -26,11 +26,18 @@
 | **agent pack** | the unit of installation — a zip | `<data>/agent_packs/<id>/` |
 | **agent preset** | the agent's identity: a default persona, a roster, its declared needs | `agent_presets/<slug>.json` |
 | **agent instance** | a live agent created from a preset; owns memory and many conversations | `<data>/agent_instances/<id>/` |
-| **integration pack** | a bundle of tool definitions. **Not independently installable** — vendored inside agent packs | `<data>/pack_store/<sha256>/` |
+| **integration** | a named, versioned, hash-pinned bundle of tool definitions plus the credentials they need. **Not installable on its own** — vendored inside agent packs | `<data>/integration_store/<sha256>/` |
 | **conversation** | one thread with an instance | `<data>/chats/<id>.json`, carrying `instance_id` |
 
-Never write bare "pack". An agent pack and an integration pack are different things and
-the ambiguity has already cost one round of confusion.
+An **agent pack** is the only thing that installs. An **integration** is a dependency
+it carries — it has no independent lifecycle, no enable/disable, and no install of its
+own.
+
+It was called an "integration pack" until spec 2. The name outlived the meaning: "pack"
+promised installability the system had stopped offering, and it collided with "agent
+pack", which really is installable. Renaming it was cheaper than continuing to explain
+the difference — this section used to have to say *"never write bare 'pack'"*, which is
+a sign the vocabulary was doing damage rather than work.
 
 ---
 
@@ -45,9 +52,9 @@ the ambiguity has already cost one round of confusion.
   agent_presets/<slug>/avatar.png      optional
   personas/<slug>.json                 every persona the preset names
   skills/<slug>.md                     every skill the preset or its personas load
-  integration_packs/<id>/pack.json     every integration pack the preset declares
-  integration_packs/<id>/api_tools/*.json
-  integration_packs/<id>/README.md     optional
+  integrations/<id>/integration.json   every integration the preset declares
+  integrations/<id>/api_tools/*.json
+  integrations/<id>/README.md          optional
   flows/<id>.json                      optional (§8)
   README.md                            optional
   SIGNATURE                            optional, detached, over agent_pack.json (§9)
@@ -97,7 +104,7 @@ is detectable rather than silently truncated.
   "provides": {
     "personas": ["amy", "amy-shopper", "amy-critic"],
     "skills":   ["knife-skills", "menu-planning"],
-    "integration_packs": [
+    "integrations": [
       { "id": "metalcraft-calendar", "version": "1.7.1",
         "content_sha256": "ab12…", "source": "https://packs.metalcraftai.com" }
     ]
@@ -114,17 +121,30 @@ is detectable rather than silently truncated.
 ```
 
 Unknown top-level fields MUST be preserved on round-trip and MUST NOT cause rejection.
-`manifest_version` other than `1` MUST be rejected.
+`manifest_version` other than `2` MUST be rejected.
+
+**Spec 1 → 2 is a real break, not a rename.** Vendored dependencies moved from
+`integration_packs/<id>/pack.json` to `integrations/<id>/integration.json`, and
+`provides.integration_packs` became `provides.integrations`. Because the archive path
+is part of what `content_sha256` covers, a v1 archive's hash cannot be reproduced under
+v2 layout — so there is no dual-read path and none is wanted. Nothing had been published
+under v1, which is the only reason this was affordable; a v1 archive is refused with its
+version in the message.
+
+The two places a v1 name survives are **`Persona.integrations`** and
+**`AgentPreset.integrations`**, which accept `packs` and `integration_packs` as serde
+aliases. Those documents live on people's pods rather than inside archives, so breaking
+them would break working installs for a word.
 
 ### 3.1 Identifiers
 
-`id`, every preset/persona/skill/integration-pack slug, and `handle` all satisfy:
+`id`, every preset/persona/skill/integration slug, and `handle` all satisfy:
 
 ```
 ^[a-z0-9][a-z0-9_-]{0,63}$
 ```
 
-Implementors MUST use `metalcraft_packs::is_valid_pack_id` where available rather than
+Implementors MUST use `metalcraft_packs::is_valid_integration_id` where available rather than
 recompiling the regex.
 
 ### 3.2 Exactly one preset
@@ -169,7 +189,7 @@ absent, the archive is unpinned: an implementor MAY accept it (local development
   ],
 
   "skills": ["knife-skills"],
-  "integration_packs": ["metalcraft-calendar"],
+  "integrations": ["metalcraft-calendar"],
   "flows": ["sunday-meal-prep"],          // optional (§8)
 
   "memories": { "file": "agent_presets/amy-kitchen/memories.jsonl", "count": 214,
@@ -217,7 +237,7 @@ rather than degraded.
 
 `requires_env` and `domains` on the manifest, and everything shown to a human before
 they approve an install, MUST be **derived from the archive's own bytes**. An author
-writes what their agent *is*; what it can reach is computed from the integration packs
+writes what their agent *is*; what it can reach is computed from the integrations
 actually inside.
 
 An implementor MUST re-derive rather than trust, and a manifest disagreeing with its own
@@ -225,9 +245,9 @@ contents is a rejection, not a warning.
 
 ### 5.1 Derivation
 
-For each `integration_packs/<id>/`:
+For each `integrations/<id>/`:
 
-- **`pack.json`** → each `requires_env` name, attributed to `<id>`; each `native_tools`
+- **`integration.json`** → each `requires_env` name, attributed to `<id>`; each `native_tools`
   name into the tool list.
 - **each `api_tools/<file>.json`**:
   - **tool name** = the document's own `name` field, falling back to the filename. A
@@ -347,10 +367,10 @@ experience this rule exists to prevent.
 | V9 | The declared preset file exists in the archive and parses | reject |
 | V10 | Preset passes §4.2 | reject |
 | V11 | Every persona in the callable roster exists at `personas/<slug>.json` | reject, naming it |
-| V12 | Every persona's `packs[]` ⊆ the preset's `integration_packs` | reject, naming both |
+| V12 | Every persona's `integrations[]` ⊆ the preset's `integrations` | reject, naming both |
 | V13 | Every skill the preset declares **and every skill its roster personas load** exists at `skills/<slug>.md` | reject, naming it |
-| V14 | Every integration pack the preset declares is vendored in the archive | reject, naming it |
-| V15 | Every `provides.integration_packs[].content_sha256`, where present, matches the vendored bytes | reject, showing both hashes |
+| V14 | Every integration the preset declares is vendored in the archive | reject, naming it |
+| V15 | Every `provides.integrations[].content_sha256`, where present, matches the vendored bytes | reject, showing both hashes |
 | V16 | Every shipped flow names only roster personas (§8) | reject, naming both |
 | V17 | ≤ 5,000 seed memories per preset (§6) | registry: reject · pod: warn |
 
@@ -457,8 +477,8 @@ origin is compared.
 
 1. Read and verify the archive (§10) **entirely in memory**. Nothing is written until
    every check has passed.
-2. Vendor integration packs into `<data>/pack_store/<sha256>/`, refcounted. Ten packs
-   vendoring the same integration pack means one stored copy, and two versions coexist
+2. Vendor integrations into `<data>/integration_store/<sha256>/`, refcounted. Ten packs
+   vendoring the same integration means one stored copy, and two versions coexist
    without conflict.
 3. Write the pack's own files to `<data>/agent_packs/<id>/`.
 4. Build the preset's memory base at `<data>/memory/presets/<slug>@<version>/`.

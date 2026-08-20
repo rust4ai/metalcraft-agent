@@ -10,7 +10,7 @@ repository = "https://github.com/rust4ai/metalcraft-agent"
 [dependencies]
 metalcraft = { version = "0.9.0", features = ["rig"] }
 metalcraft-flows = "0.4.0"
-metalcraft-packs = "0.1.1"
+metalcraft-packs = "0.2"
 rig = "0.37"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -60,3 +60,8 @@ path = "src/bin/metalcraft-daemon.rs"
 [dev-dependencies]
 spice-framework = "0.1"
 tempfile = "3"
+
+# `metalcraft-packs` 0.2 renamed the integration manifest type; it is not on
+# crates.io yet. Delete this block once it is published.
+[patch.crates-io]
+metalcraft-packs = { path = "../metalcraft-packs" }

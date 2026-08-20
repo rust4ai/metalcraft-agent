@@ -171,13 +171,13 @@ pub async fn require_pod_auth(
     next.run(req).await
 }
 
-/// Built-in apps whose integration pack is currently enabled. Enable-state is
+/// Built-in apps whose integration is currently enabled. Enable-state is
 /// the "install" switch for a native app (see `docs/POD_NATIVE_APPS_B_IMPL_PLAN.md`
 /// Phase 5).
 pub fn enabled_builtin_apps() -> Vec<Box<dyn App>> {
     builtin_apps()
         .into_iter()
-        .filter(|app| crate::integration_packs::is_enabled(app.id()))
+        .filter(|app| crate::integrations::is_enabled(app.id()))
         .collect()
 }
 
@@ -250,9 +250,9 @@ mod tests {
     fn notes_is_registered_but_gated_by_enable_state() {
         // Notes is compiled in...
         assert!(builtin_apps().iter().any(|a| a.id() == "metalcraft-notes"));
-        // ...but only active when its integration pack is enabled, so on a fresh
+        // ...but only active when its integration is enabled, so on a fresh
         // process with no enabled packs, nothing is live (behavior unchanged).
-        assert!(enabled_builtin_apps().iter().all(|a| crate::integration_packs::is_enabled(a.id())));
+        assert!(enabled_builtin_apps().iter().all(|a| crate::integrations::is_enabled(a.id())));
     }
 
     #[test]

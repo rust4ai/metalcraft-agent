@@ -30,7 +30,7 @@ or edit with `persona_write` (pass `slug` + a `persona` object); read with
   `grep`, `find_files`, `web_fetch`, `load_skill`, `sub_agent`, and the meta
   tools (`persona_*`, `skill_*`, `flow_*`, `diagnostics_*`). Only list tools
   that exist.
-- **packs** (optional) — integration pack ids (e.g. `"github"`, `"linear"`).
+- **packs** (optional) — integration ids (e.g. `"github"`, `"linear"`).
   Every HTTP-API tool the pack provides is added to the persona automatically,
   so you don't enumerate `<pack>_*` tools by name.
 - **skills** (optional) — skill slugs the agent can `load_skill`. Only list
@@ -47,7 +47,7 @@ values, so place them where you want the lists to appear:
 - `{{available_skills}}` — bulleted list of the persona's skills + descriptions.
 - `{{available_personas}}` — installed/enabled personas (use this in a
   delegating persona so it picks real `sub_agent` slugs instead of guessing).
-- `{{installed_packs}}` — enabled integration packs.
+- `{{installed_packs}}` — enabled integrations.
 
 Any list you don't reference is appended automatically with a default heading.
 

@@ -3,7 +3,7 @@
 //! depends on, and save it into `flows_dir()`.
 //!
 //! This mirrors the pack install path
-//! ([`crate::registry::fetch_zip`] + [`crate::integration_packs::install_from_zip`]),
+//! ([`crate::registry::fetch_zip`] + [`crate::integrations::install_from_zip`]),
 //! but a flow is a single self-contained JSON document, so there's no ZIP to
 //! extract — validate then write one file. The dependency report is advisory: an
 //! install never hard-fails on a missing pack (the flow just won't run until the
@@ -18,7 +18,7 @@ use crate::{paths, registry};
 /// What a flow needs beyond itself, checked against this agent's current state.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DependencyReport {
-    /// Integration packs the flow requires — the union of what the graph
+    /// Integrations the flow requires — the union of what the graph
     /// references (`sub_agent.pack` + custom vendor nodes) and what the flow's
     /// `requires` block declares.
     pub required_packs: Vec<String>,
@@ -144,12 +144,12 @@ pub fn dependency_report(flow: &metalcraft_flows::SavedFlow) -> DependencyReport
     let mut missing_packs = Vec::new();
     let mut required_env = BTreeSet::new();
     for p in &required_packs {
-        match crate::integration_packs::find_installed(p) {
+        match crate::integrations::find_installed(p) {
             Some(pack) => {
                 for k in &pack.manifest.requires_env {
                     required_env.insert(k.clone());
                 }
-                if !crate::integration_packs::is_enabled(p) {
+                if !crate::integrations::is_enabled(p) {
                     missing_packs.push(p.clone());
                 }
             }
@@ -160,11 +160,11 @@ pub fn dependency_report(flow: &metalcraft_flows::SavedFlow) -> DependencyReport
     // Version/hash conflicts against enabled packs. Hashing every enabled pack is
     // only worth it when a requirement actually pins a hash.
     let need_hash = requires.packs.iter().any(|p| p.content_sha256.is_some());
-    let available: Vec<metalcraft_flows::AvailablePack> = crate::integration_packs::enabled_packs()
+    let available: Vec<metalcraft_flows::AvailablePack> = crate::integrations::installed_integrations()
         .into_iter()
         .map(|pack| metalcraft_flows::AvailablePack {
             content_sha256: if need_hash {
-                crate::integration_packs::installed_content_sha256(&pack.manifest.id)
+                crate::integrations::installed_content_sha256(&pack.manifest.id)
             } else {
                 None
             },
@@ -248,16 +248,16 @@ pub struct PackInstallOutcome {
 /// in one place.
 fn requirement_satisfied(
     pr: &metalcraft_flows::PackRequirement,
-    installed: &crate::integration_packs::Pack,
+    installed: &crate::integrations::Integration,
 ) -> bool {
-    if !crate::integration_packs::is_enabled(&pr.id) {
+    if !crate::integrations::is_enabled(&pr.id) {
         return false;
     }
     let available = metalcraft_flows::AvailablePack {
         id: installed.manifest.id.clone(),
         version: installed.manifest.version.clone(),
         content_sha256: if pr.content_sha256.is_some() {
-            crate::integration_packs::installed_content_sha256(&pr.id)
+            crate::integrations::installed_content_sha256(&pr.id)
         } else {
             None
         },
@@ -284,12 +284,12 @@ pub async fn install_pack_requirement(
     };
 
     // Built-in packs are app-managed and can't be pulled from the registry.
-    if crate::seed::is_embedded_pack(&pr.id) {
-        if let Some(installed) = crate::integration_packs::find_installed(&pr.id) {
+    if crate::seed::is_embedded_integration(&pr.id) {
+        if let Some(installed) = crate::integrations::find_installed(&pr.id) {
             if requirement_satisfied(pr, &installed) {
                 return outcome("already-satisfied", Some(installed.manifest.version), None);
             }
-            if let Err(e) = crate::integration_packs::set_enabled(&pr.id, true) {
+            if let Err(e) = crate::integrations::set_enabled(&pr.id, true) {
                 return outcome("failed", None, Some(e));
             }
             return outcome("installed", Some(installed.manifest.version), Some("enabled built-in pack".into()));
@@ -297,7 +297,7 @@ pub async fn install_pack_requirement(
         return outcome("skipped", None, Some("built-in pack is not installed on this agent".into()));
     }
 
-    if let Some(installed) = crate::integration_packs::find_installed(&pr.id) {
+    if let Some(installed) = crate::integrations::find_installed(&pr.id) {
         if requirement_satisfied(pr, &installed) {
             return outcome("already-satisfied", Some(installed.manifest.version), None);
         }
@@ -330,10 +330,10 @@ pub async fn install_pack_requirement(
     };
 
     // Hop 3: install with hash verification, then enable.
-    if let Err(e) = crate::integration_packs::install_from_zip(&bytes, Some(&expected_hash)) {
+    if let Err(e) = crate::integrations::install_from_zip(&bytes, Some(&expected_hash)) {
         return outcome("failed", Some(version), Some(e));
     }
-    if let Err(e) = crate::integration_packs::set_enabled(&pr.id, true) {
+    if let Err(e) = crate::integrations::set_enabled(&pr.id, true) {
         return outcome("failed", Some(version), Some(e));
     }
     outcome("installed", Some(version), None)

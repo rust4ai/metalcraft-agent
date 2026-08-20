@@ -78,15 +78,15 @@ fn presets_resolve_and_instances_group_conversations() {
 
     // ── ambiguity: two enabled packs providing the same slug ─────────────────
     for pack in ["packa", "packb"] {
-        let root = data_dir.join("integration_packs").join(pack);
+        let root = data_dir.join("integrations").join(pack);
         write(
-            &root.join("pack.json"),
+            &root.join("integration.json"),
             &format!(r#"{{"id":"{pack}","name":"{pack}","description":"t","version":"1.0.0"}}"#),
         );
         write(&root.join("agent_presets").join("shared.json"), PACK_PRESET);
     }
     write(
-        &data_dir.join("integration_packs.json"),
+        &data_dir.join("integrations.json"),
         r#"{"packa":{"enabled":true},"packb":{"enabled":true}}"#,
     );
 

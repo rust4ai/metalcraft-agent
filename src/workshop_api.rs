@@ -227,7 +227,7 @@ struct KeyRevealResponse {
     value: String,
 }
 
-/// A key recommended by one or more *enabled* integration packs (from their
+/// A key recommended by one or more *enabled* integrations (from their
 /// `requires_env`), with whether it currently resolves (key store or env) and
 /// which packs declare it. Drives the "keys these packs still need" list in
 /// the key store UI — `configured: false` is the hint to add it.
@@ -289,7 +289,7 @@ async fn auth_middleware(
         title = "Metalcraft Agent API",
         version = env!("CARGO_PKG_VERSION"),
         description = "The pod's workshop admin API. Manages personas, skills, flows, keys, \
-            chats, diagnostics sessions, integration packs, and gateway channels. Authenticate \
+            chats, diagnostics sessions, integrations, and gateway channels. Authenticate \
             with a Bearer token: the static WORKSHOP_API_KEY or a Metalcraft ID token (mck_…) \
             scoped to this pod.",
     ),
@@ -317,7 +317,7 @@ async fn auth_middleware(
         list_keys, list_recommended_keys, put_key, delete_key, reveal_key,
         list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
         list_scheduled_tasks, delete_scheduled_task,
-        list_integration_packs, get_integration_pack, delete_integration_pack, put_pack_enabled, post_install_pack,
+        list_integrations, get_integration, delete_integration, put_integration_enabled, post_install_integration,
         get_lockfile, post_lockfile_restore,
         list_gateway_activity,
         list_channels, create_channel, update_channel, delete_channel, list_channel_events,
@@ -335,7 +335,7 @@ async fn auth_middleware(
         crate::flow_install::DependencyReport, crate::flow_install::PackInstallOutcome,
         crate::lockfile::Lock, crate::lockfile::LockEntry, RestoreOutcome, RestoreResult,
         ChatSummary, ChatDetail, ChatMessageWire, CreateChatRequest, ChatTurnRequest, ChatEvent,
-        IntegrationPackSummary, IntegrationPackDetail, SetEnabledRequest, InstallPackRequest, UninstallPackResult,
+        IntegrationSummary, IntegrationDetail, SetEnabledRequest, InstallPackRequest, UninstallPackResult,
         MgRegisterRequest, MgConnectRequest,
         crate::channels::Channel, CreateChannelRequest, UpdateChannelRequest,
         crate::persona::Persona, crate::persona::PersonaSummary,
@@ -348,7 +348,7 @@ async fn auth_middleware(
         crate::agent_packs::UpdateReport, crate::agent_packs::PersonaFallback,
         crate::agent_packs::Orphaned,
         crate::agent_packs::ConsentSummary, crate::agent_packs::manifest::Provides,
-        crate::agent_packs::manifest::PackRef, crate::agent_packs::manifest::Author,
+        crate::agent_packs::manifest::IntegrationRef, crate::agent_packs::manifest::Author,
         crate::agent_packs::manifest::Parent, crate::agent_packs::manifest::EnvRequirement,
         ExportAgentPackRequest,
         crate::memory::InstanceMemoryView, crate::memory::MemorySample,
@@ -375,8 +375,8 @@ async fn auth_middleware(
         (name = "keys", description = "The agent key/secret store"),
         (name = "chats", description = "Interactive chat sessions"),
         (name = "scheduled-tasks", description = "Scheduled follow-ups"),
-        (name = "integration-packs", description = "Installable integration packs"),
-        (name = "agent-packs", description = "Installable agent packs — an agent plus every persona, skill and integration pack it needs"),
+        (name = "integrations", description = "Installable integrations"),
+        (name = "agent-packs", description = "Installable agent packs — an agent plus every persona, skill and integration it needs"),
         (name = "agent-presets", description = "Agents this pod can be — a default persona, its callable roster, and the skills and packs they need"),
         (name = "agent-instances", description = "Agents that exist — each with its own memory and conversations"),
         (name = "gateway", description = "Messaging gateway channels + Metalcraft connect"),
@@ -514,12 +514,12 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/chats/{id}/events", get(get_chat_events))
         .route("/api/v1/scheduled-tasks", get(list_scheduled_tasks))
         .route("/api/v1/scheduled-tasks/{id}", delete(delete_scheduled_task))
-        .route("/api/v1/integration-packs", get(list_integration_packs))
+        .route("/api/v1/integrations", get(list_integrations))
         // Static `/install` before the `{id}` param route (matchit prefers the
         // literal; different method anyway) — install a registry pack onto the pod.
-        .route("/api/v1/integration-packs/install", post(post_install_pack))
-        .route("/api/v1/integration-packs/{id}", get(get_integration_pack).delete(delete_integration_pack))
-        .route("/api/v1/integration-packs/{id}/enabled", put(put_pack_enabled))
+        .route("/api/v1/integrations/install", post(post_install_integration))
+        .route("/api/v1/integrations/{id}", get(get_integration).delete(delete_integration))
+        .route("/api/v1/integrations/{id}/enabled", put(put_integration_enabled))
         .route("/api/v1/lockfile", get(get_lockfile))
         .route("/api/v1/lockfile/restore", post(post_lockfile_restore))
         // Gateway activity feed (inbound/outbound across all channels).
@@ -732,7 +732,7 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
 /// User-local personas plus enabled-pack personas, with locals shadowing
 /// packs on slug collision.
 fn list_persona_summaries() -> Vec<PersonaSummary> {
-    let layered = crate::integration_packs::list_files_layered(
+    let layered = crate::integrations::list_files_layered(
         &paths::personas_dir(),
         "personas",
         "json",
@@ -761,7 +761,7 @@ fn list_persona_summaries() -> Vec<PersonaSummary> {
 
 // ── Agent packs ──────────────────────────────────────────────────────────────
 // The unit of installation. An agent pack provides one agent preset plus every
-// persona, skill and integration pack it needs.
+// persona, skill and integration it needs.
 
 #[utoipa::path(
     get,
@@ -1625,7 +1625,7 @@ async fn delete_agent_preset(Path(slug): Path<String>) -> Response {
 )]
 async fn get_persona(Path(slug): Path<String>) -> Response {
     let filename = format!("{slug}.json");
-    let Some((path, _origin)) = crate::integration_packs::resolve_file(
+    let Some((path, _origin)) = crate::integrations::resolve_file(
         &paths::personas_dir(),
         "personas",
         &filename,
@@ -1657,7 +1657,7 @@ async fn put_persona(Path(slug): Path<String>, Json(persona): Json<Persona>) -> 
     let filename = format!("{slug}.json");
     let local_exists = paths::personas_dir().join(&filename).exists();
     if !local_exists {
-        if let Some((_, origin)) = crate::integration_packs::resolve_file(
+        if let Some((_, origin)) = crate::integrations::resolve_file(
             &paths::personas_dir(),
             "personas",
             &filename,
@@ -1666,7 +1666,7 @@ async fn put_persona(Path(slug): Path<String>, Json(persona): Json<Persona>) -> 
                 return err_json(
                     StatusCode::CONFLICT,
                     format!(
-                        "persona '{slug}' is provided by the '{pack_id}' integration pack and is read-only. Choose a different slug."
+                        "persona '{slug}' is provided by the '{pack_id}' integration and is read-only. Choose a different slug."
                     ),
                 );
             }
@@ -1732,7 +1732,7 @@ async fn put_skill(Path(slug): Path<String>, Json(skill): Json<Skill>) -> Respon
     let filename = format!("{slug}.md");
     let local_exists = paths::skills_dir().join(&filename).exists();
     if !local_exists {
-        if let Some((_, origin)) = crate::integration_packs::resolve_file(
+        if let Some((_, origin)) = crate::integrations::resolve_file(
             &paths::skills_dir(),
             "skills",
             &filename,
@@ -1741,7 +1741,7 @@ async fn put_skill(Path(slug): Path<String>, Json(skill): Json<Skill>) -> Respon
                 return err_json(
                     StatusCode::CONFLICT,
                     format!(
-                        "skill '{slug}' is provided by the '{pack_id}' integration pack and is read-only. Choose a different slug."
+                        "skill '{slug}' is provided by the '{pack_id}' integration and is read-only. Choose a different slug."
                     ),
                 );
             }
@@ -2338,7 +2338,7 @@ async fn post_install_flow(Json(req): Json<InstallFlowRequest>) -> Response {
     }
 }
 
-/// Install the integration packs an already-installed flow declares in its
+/// Install the integrations an already-installed flow declares in its
 /// `requires` block: for each, resolve its semver range against the registry,
 /// download that exact version, verify the content hash, install, and enable it.
 /// Returns one outcome per pack. Idempotent — packs already satisfied are left
@@ -2402,7 +2402,7 @@ async fn get_diagnostics_session(Path(id): Path<String>) -> Response {
 // ── API Tool handlers ───────────────────────────────────────────────────
 
 fn list_api_tool_summaries() -> Vec<ApiToolSummary> {
-    let layered = crate::integration_packs::list_files_layered(
+    let layered = crate::integrations::list_files_layered(
         &paths::api_tools_dir(),
         "api_tools",
         "json",
@@ -2443,7 +2443,7 @@ async fn list_api_tools() -> Json<Vec<ApiToolSummary>> {
 )]
 async fn get_api_tool(Path(name): Path<String>) -> Response {
     let filename = format!("{name}.json");
-    let Some((path, _)) = crate::integration_packs::resolve_file(
+    let Some((path, _)) = crate::integrations::resolve_file(
         &paths::api_tools_dir(),
         "api_tools",
         &filename,
@@ -2472,7 +2472,7 @@ async fn put_api_tool(Path(name): Path<String>, Json(mut config): Json<HttpApiTo
     let filename = format!("{name}.json");
     let local_exists = paths::api_tools_dir().join(&filename).exists();
     if !local_exists {
-        if let Some((_, origin)) = crate::integration_packs::resolve_file(
+        if let Some((_, origin)) = crate::integrations::resolve_file(
             &paths::api_tools_dir(),
             "api_tools",
             &filename,
@@ -2481,7 +2481,7 @@ async fn put_api_tool(Path(name): Path<String>, Json(mut config): Json<HttpApiTo
                 return err_json(
                     StatusCode::CONFLICT,
                     format!(
-                        "api-tool '{name}' is provided by the '{pack_id}' integration pack and is read-only. Choose a different name."
+                        "api-tool '{name}' is provided by the '{pack_id}' integration and is read-only. Choose a different name."
                     ),
                 );
             }
@@ -2605,10 +2605,10 @@ async fn list_keys() -> Json<Vec<KeyEntry>> {
     responses((status = 200, body = Vec<RecommendedKey>)),
 )]
 async fn list_recommended_keys() -> Json<Vec<RecommendedKey>> {
-    // Recommendations from enabled integration packs. The `packs` field carries
+    // Recommendations from enabled integrations. The `packs` field carries
     // the source label (pack id) so the key-store UI can show "who wants this".
     let mut merged: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
-    for (name, sources) in crate::integration_packs::recommended_env() {
+    for (name, sources) in crate::integrations::recommended_env() {
         merged.entry(name).or_default().extend(sources);
     }
     let out = merged
@@ -2767,7 +2767,7 @@ struct FlowTemplate {
 }
 
 fn list_flow_template_summaries() -> Vec<FlowTemplateSummary> {
-    let layered = crate::integration_packs::list_files_layered(
+    let layered = crate::integrations::list_files_layered(
         &paths::flow_templates_dir(),
         "flow_templates",
         "json",
@@ -2813,7 +2813,7 @@ async fn list_flow_templates() -> Json<Vec<FlowTemplateSummary>> {
 )]
 async fn get_flow_template(Path(slug): Path<String>) -> Response {
     let filename = format!("{slug}.json");
-    let Some((path, origin)) = crate::integration_packs::resolve_file(
+    let Some((path, origin)) = crate::integrations::resolve_file(
         &paths::flow_templates_dir(),
         "flow_templates",
         &filename,
@@ -4332,10 +4332,10 @@ use futures_util::StreamExt;
 #[allow(dead_code)]
 fn _stream_trait_in_scope<T: Stream<Item = ()>>(_: T) {}
 
-// ── Integration pack handlers ───────────────────────────────────────────
+// ── Integration handlers ───────────────────────────────────────────
 
 #[derive(Serialize, utoipa::ToSchema)]
-struct IntegrationPackSummary {
+struct IntegrationSummary {
     id: String,
     name: String,
     description: String,
@@ -4351,7 +4351,7 @@ struct IntegrationPackSummary {
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
-struct IntegrationPackDetail {
+struct IntegrationDetail {
     id: String,
     name: String,
     description: String,
@@ -4394,24 +4394,24 @@ fn list_file_stems(dir: &std::path::Path, ext: &str) -> Vec<String> {
 
 #[utoipa::path(
     get,
-    path = "/api/v1/integration-packs",
-    tag = "integration-packs",
-    responses((status = 200, body = Vec<IntegrationPackSummary>)),
+    path = "/api/v1/integrations",
+    tag = "integrations",
+    responses((status = 200, body = Vec<IntegrationSummary>)),
 )]
-async fn list_integration_packs() -> Json<Vec<IntegrationPackSummary>> {
-    let state = crate::integration_packs::load_state();
-    let packs = crate::integration_packs::list_installed();
+async fn list_integrations() -> Json<Vec<IntegrationSummary>> {
+    let state = crate::integrations::load_state();
+    let packs = crate::integrations::list_installed();
     let summaries = packs
         .into_iter()
-        .map(|p| IntegrationPackSummary {
+        .map(|p| IntegrationSummary {
             enabled: state.get(&p.manifest.id).map(|s| s.enabled).unwrap_or(false),
             personas: count_files(&p.personas_dir(), "json"),
             skills: count_files(&p.skills_dir(), "md"),
             // Declarative HTTP-API tools (api_tools/*.json) plus any native Rust
             // tools the pack contributes (e.g. the s3 pack's S3 tools,
-            // which ship no api_tools/ files). See `tools::native_pack_tool_names`.
+            // which ship no api_tools/ files). See `tools::native_integration_tool_names`.
             api_tools: count_files(&p.api_tools_dir(), "json")
-                + crate::tools::native_pack_tool_names(&p.manifest.id).len(),
+                + crate::tools::native_integration_tool_names(&p.manifest.id).len(),
             flow_templates: count_files(&p.flow_templates_dir(), "json"),
             id: p.manifest.id,
             name: p.manifest.name,
@@ -4425,29 +4425,29 @@ async fn list_integration_packs() -> Json<Vec<IntegrationPackSummary>> {
 
 #[utoipa::path(
     get,
-    path = "/api/v1/integration-packs/{id}",
-    tag = "integration-packs",
+    path = "/api/v1/integrations/{id}",
+    tag = "integrations",
     params(("id" = String, Path, description = "Pack id")),
-    responses((status = 200, body = IntegrationPackDetail), (status = 404, body = ErrorResponse)),
+    responses((status = 200, body = IntegrationDetail), (status = 404, body = ErrorResponse)),
 )]
-async fn get_integration_pack(Path(id): Path<String>) -> Response {
-    let Some(pack) = crate::integration_packs::list_installed()
+async fn get_integration(Path(id): Path<String>) -> Response {
+    let Some(pack) = crate::integrations::list_installed()
         .into_iter()
         .find(|p| p.manifest.id == id)
     else {
         return err_json(StatusCode::NOT_FOUND, format!("pack '{id}' not found"));
     };
-    let enabled = crate::integration_packs::is_enabled(&id);
+    let enabled = crate::integrations::is_enabled(&id);
     // Read file lists before moving the manifest fields out of `pack`.
     let personas = list_file_stems(&pack.personas_dir(), "json");
     let skills = list_file_stems(&pack.skills_dir(), "md");
     // Declarative HTTP-API tools plus any native Rust tools the pack ships (see
-    // the summary builder above and `tools::native_pack_tool_names`).
+    // the summary builder above and `tools::native_integration_tool_names`).
     let mut api_tools = list_file_stems(&pack.api_tools_dir(), "json");
-    api_tools.extend(crate::tools::native_pack_tool_names(&id));
+    api_tools.extend(crate::tools::native_integration_tool_names(&id));
     api_tools.sort();
     let flow_templates = list_file_stems(&pack.flow_templates_dir(), "json");
-    Json(IntegrationPackDetail {
+    Json(IntegrationDetail {
         id: pack.manifest.id,
         name: pack.manifest.name,
         description: pack.manifest.description,
@@ -4473,8 +4473,8 @@ struct UninstallPackResult {
 
 #[utoipa::path(
     delete,
-    path = "/api/v1/integration-packs/{id}",
-    tag = "integration-packs",
+    path = "/api/v1/integrations/{id}",
+    tag = "integrations",
     params(("id" = String, Path, description = "Pack id")),
     responses(
         (status = 200, body = UninstallPackResult, description = "Uninstalled; body lists anything that still depends on the pack"),
@@ -4482,8 +4482,8 @@ struct UninstallPackResult {
         (status = 400, body = ErrorResponse),
     ),
 )]
-async fn delete_integration_pack(Path(id): Path<String>) -> Response {
-    match crate::integration_packs::uninstall(&id) {
+async fn delete_integration(Path(id): Path<String>) -> Response {
+    match crate::integrations::uninstall(&id) {
         Ok(true) => {
             let _ = crate::lockfile::remove_pack(&id);
             Json(pack_dependents(&id)).into_response()
@@ -4511,7 +4511,7 @@ fn pack_dependents(id: &str) -> UninstallPackResult {
         .filter_map(|slug| {
             crate::persona::Persona::load(&slug, &personas_dir).ok().map(|p| (slug, p))
         })
-        .filter(|(_, p)| p.packs.iter().any(|x| x == id))
+        .filter(|(_, p)| p.integrations.iter().any(|x| x == id))
         .map(|(slug, _)| slug)
         .collect();
 
@@ -4526,7 +4526,7 @@ struct SetEnabledRequest {
     enabled: bool,
 }
 
-/// Retired. An integration pack is no longer independently enabled or disabled —
+/// Retired. An integration is no longer independently enabled or disabled —
 /// an agent pack is the install unit, and the packs it vendors are simply present
 /// (see `docs/AGENT_PACKS_PLAN.md`).
 ///
@@ -4535,20 +4535,20 @@ struct SetEnabledRequest {
 /// on showing a state the runtime does not honour.
 #[utoipa::path(
     put,
-    path = "/api/v1/integration-packs/{id}/enabled",
-    tag = "integration-packs",
+    path = "/api/v1/integrations/{id}/enabled",
+    tag = "integrations",
     params(("id" = String, Path, description = "Pack id")),
     request_body = SetEnabledRequest,
     responses((status = 410, description = "Retired — uninstall the agent pack instead", body = ErrorResponse)),
 )]
-async fn put_pack_enabled(
+async fn put_integration_enabled(
     Path(id): Path<String>,
     Json(_req): Json<SetEnabledRequest>,
 ) -> Response {
     err_json(
         StatusCode::GONE,
         format!(
-            "integration packs are no longer enabled or disabled individually; '{id}' \
+            "integrations are no longer enabled or disabled individually; '{id}' \
              is available because an installed agent pack provides it. Uninstall \
              that agent pack to remove it."
         ),
@@ -4556,19 +4556,19 @@ async fn put_pack_enabled(
 }
 
 /// Build the same summary the list endpoint returns, for a single installed pack.
-fn pack_summary(pack: &crate::integration_packs::Pack) -> IntegrationPackSummary {
-    IntegrationPackSummary {
-        enabled: crate::integration_packs::is_enabled(&pack.manifest.id),
-        personas: count_files(&pack.personas_dir(), "json"),
-        skills: count_files(&pack.skills_dir(), "md"),
-        api_tools: count_files(&pack.api_tools_dir(), "json")
-            + crate::tools::native_pack_tool_names(&pack.manifest.id).len(),
-        flow_templates: count_files(&pack.flow_templates_dir(), "json"),
-        id: pack.manifest.id.clone(),
-        name: pack.manifest.name.clone(),
-        description: pack.manifest.description.clone(),
-        version: pack.manifest.version.clone(),
-        requires_env: pack.manifest.requires_env.clone(),
+fn integration_summary(integration: &crate::integrations::Integration) -> IntegrationSummary {
+    IntegrationSummary {
+        enabled: crate::integrations::is_enabled(&integration.manifest.id),
+        personas: count_files(&integration.personas_dir(), "json"),
+        skills: count_files(&integration.skills_dir(), "md"),
+        api_tools: count_files(&integration.api_tools_dir(), "json")
+            + crate::tools::native_integration_tool_names(&integration.manifest.id).len(),
+        flow_templates: count_files(&integration.flow_templates_dir(), "json"),
+        id: integration.manifest.id.clone(),
+        name: integration.manifest.name.clone(),
+        description: integration.manifest.description.clone(),
+        version: integration.manifest.version.clone(),
+        requires_env: integration.manifest.requires_env.clone(),
     }
 }
 
@@ -4590,16 +4590,16 @@ struct InstallPackRequest {
 /// the new pack's summary (same shape as the list endpoint).
 #[utoipa::path(
     post,
-    path = "/api/v1/integration-packs/install",
-    tag = "integration-packs",
+    path = "/api/v1/integrations/install",
+    tag = "integrations",
     request_body = InstallPackRequest,
     responses(
-        (status = 200, body = IntegrationPackSummary),
+        (status = 200, body = IntegrationSummary),
         (status = 400, body = ErrorResponse),
         (status = 502, body = ErrorResponse),
     ),
 )]
-async fn post_install_pack(Json(req): Json<InstallPackRequest>) -> Response {
+async fn post_install_integration(Json(req): Json<InstallPackRequest>) -> Response {
     let slug = req.slug.trim().to_string();
     if slug.is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "slug is required");
@@ -4608,24 +4608,28 @@ async fn post_install_pack(Json(req): Json<InstallPackRequest>) -> Response {
         Ok(b) => b,
         Err(e) => return err_json(StatusCode::BAD_GATEWAY, e),
     };
-    let id = match crate::integration_packs::install_from_zip(&bytes, req.content_sha256.as_deref()) {
+    let id = match crate::integrations::install_from_zip(&bytes, req.content_sha256.as_deref()) {
         Ok(id) => id,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
     };
-    if let Err(e) = crate::integration_packs::set_enabled(&id, true) {
+    if let Err(e) = crate::integrations::set_enabled(&id, true) {
         return err_json(StatusCode::BAD_REQUEST, e);
     }
-    match crate::integration_packs::find_installed(&id) {
-        Some(pack) => {
-            // Pin this pack in the lockfile so a rebuilt/cloned pod reinstalls the exact
-            // version + verified content. Best-effort: a lockfile write never fails install.
-            if let Some(hash) = crate::integration_packs::installed_content_sha256(&id) {
+    match crate::integrations::find_installed(&id) {
+        Some(integration) => {
+            // Pin it in the lockfile so a rebuilt/cloned pod reinstalls the exact
+            // version + verified content. Best-effort: a lockfile write never fails
+            // an install.
+            if let Some(hash) = crate::integrations::installed_content_sha256(&id) {
                 let _ = crate::lockfile::record_pack(
-                    &id, &pack.manifest.version, &hash, &crate::registry::base_url());
+                    &id, &integration.manifest.version, &hash, &crate::registry::base_url());
             }
-            Json(pack_summary(&pack)).into_response()
+            Json(integration_summary(&integration)).into_response()
         }
-        None => err_json(StatusCode::INTERNAL_SERVER_ERROR, "pack installed but not found"),
+        None => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "integration installed but not found",
+        ),
     }
 }
 
@@ -4694,9 +4698,9 @@ async fn restore_pack(e: &crate::lockfile::LockEntry) -> RestoreOutcome {
         Ok(b) => b,
         Err(err) => return done("failed", Some(err)),
     };
-    match crate::integration_packs::install_from_zip(&bytes, Some(&e.content_sha256)) {
+    match crate::integrations::install_from_zip(&bytes, Some(&e.content_sha256)) {
         Ok(id) => {
-            let _ = crate::integration_packs::set_enabled(&id, true);
+            let _ = crate::integrations::set_enabled(&id, true);
             done("installed", None)
         }
         Err(err) => done("failed", Some(err)),

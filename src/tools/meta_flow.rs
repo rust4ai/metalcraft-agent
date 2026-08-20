@@ -249,7 +249,7 @@ impl metalcraft::Tool for FlowInstallDependenciesTool {
         "flow_install_dependencies"
     }
     fn description(&self) -> &str {
-        "Install and enable the integration packs a saved flow declares in its `requires` block. For each required pack: resolve its version range against the registry, download that exact version, verify the content hash, install, and enable it. Idempotent — packs already installed, enabled, and in-range are left untouched. Returns one outcome per pack (installed | already-satisfied | skipped | failed). Run this after flow_install when the dependency report lists missing packs, before flow_run."
+        "Install and enable the integrations a saved flow declares in its `requires` block. For each required pack: resolve its version range against the registry, download that exact version, verify the content hash, install, and enable it. Idempotent — packs already installed, enabled, and in-range are left untouched. Returns one outcome per pack (installed | already-satisfied | skipped | failed). Run this after flow_install when the dependency report lists missing packs, before flow_run."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -478,7 +478,7 @@ impl metalcraft::Tool for FlowTemplatesListTool {
         serde_json::json!({ "type": "object", "properties": {}, "required": [] })
     }
     async fn call(&self, _args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let layered = crate::integration_packs::list_files_layered(
+        let layered = crate::integrations::list_files_layered(
             &paths::flow_templates_dir(),
             "flow_templates",
             "json",
@@ -522,7 +522,7 @@ impl metalcraft::Tool for FlowTemplateReadTool {
         let slug = args["slug"]
             .as_str()
             .ok_or_else(|| missing_param("flow_template_read", "slug"))?;
-        let Some((path, _origin)) = crate::integration_packs::resolve_file(
+        let Some((path, _origin)) = crate::integrations::resolve_file(
             &paths::flow_templates_dir(),
             "flow_templates",
             &format!("{slug}.json"),

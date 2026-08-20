@@ -115,7 +115,7 @@ Bundled defaults are seeded on first run and never overwrite your edits.
 Packs bundle personas, skills, HTTP tools, and flow templates. They are disabled by default.
 
 - List and toggle packs via the Workshop API
-  (`GET /api/v1/integration-packs`, `PUT /api/v1/integration-packs/{id}/enabled`).
+  (`GET /api/v1/integrations`, `PUT /api/v1/integrations/{id}/enabled`).
 - After enabling a pack, store its required secrets in the key store
   (`PUT /api/v1/keys/{name}`), guided by `GET /api/v1/keys/recommended`.
 - Sixteen packs ship today: `calcom`, `cloudflare`, `digitalocean_spaces`, `discord`,

@@ -5039,9 +5039,7 @@ dependencies = [
 
 [[package]]
 name = "metalcraft-packs"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adea8c0e1c516bffa1ba6060607d0ddee5ec7965f926521b4f9dd461e8e4cfc1"
+version = "0.2.0"
 dependencies = [
  "hex",
  "semver",

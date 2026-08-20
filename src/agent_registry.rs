@@ -30,7 +30,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// An agent pack carries seed memories and assets, so it is larger than an
-/// integration pack — but still small. A bomb guard, matching the extract-time cap in
+/// integration — but still small. A bomb guard, matching the extract-time cap in
 /// [`crate::agent_packs::bundle::MAX_BUNDLE_BYTES`].
 const MAX_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 

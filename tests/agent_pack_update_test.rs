@@ -50,7 +50,7 @@ fn v1() -> (AgentPackManifest, BTreeMap<String, Vec<u8>>) {
     m.provides = Provides {
         personas: vec!["amy".into(), "amy-shopper".into()],
         skills: vec![],
-        integration_packs: vec![],
+        integrations: vec![],
     };
     (m, f)
 }
@@ -124,7 +124,7 @@ fn an_update_carries_agents_forward_and_says_what_changed() {
     m3.provides = Provides {
         personas: vec!["amy".into()],
         skills: vec![],
-        integration_packs: vec![],
+        integrations: vec![],
     };
     let mut f3 = BTreeMap::new();
     f3.insert("agent_presets/amy-baking.json".into(), preset("amy-baking", "amy", &[]));

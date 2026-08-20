@@ -1,4 +1,4 @@
-//! Wire-up test for the **metalcraft-code** integration pack.
+//! Wire-up test for the **metalcraft-code** integration.
 //!
 //! No network. Seeds bundled packs into an isolated data dir, enables
 //! `metalcraft-code`, loads its persona, and asserts every tool resolves to a
@@ -12,7 +12,7 @@ use std::sync::Once;
 
 use metalcraft_agent::approval::{OperationKind, PermissionLevel};
 use metalcraft_agent::persona::Persona;
-use metalcraft_agent::{integration_packs, paths, seed};
+use metalcraft_agent::{integrations, paths, seed};
 
 const PACK_ID: &str = "metalcraft-code";
 const PERSONA_SLUG: &str = "metalcraft-code-agent";
@@ -81,7 +81,7 @@ fn init() {
             std::env::set_var("METALCRAFT_DATA_DIR", &data_dir);
         }
         seed::ensure_defaults();
-        integration_packs::set_enabled(PACK_ID, true).expect("enable metalcraft-code pack");
+        integrations::set_enabled(PACK_ID, true).expect("enable metalcraft-code pack");
     });
 }
 
@@ -89,11 +89,11 @@ fn init() {
 fn metalcraft_code_pack_wires_up() {
     init();
 
-    assert!(integration_packs::is_enabled(PACK_ID), "pack should be enabled after init()");
+    assert!(integrations::is_enabled(PACK_ID), "pack should be enabled after init()");
 
     let persona = Persona::load(PERSONA_SLUG, &paths::personas_dir())
         .expect("metalcraft-code-agent persona should resolve from the enabled pack");
-    assert!(persona.packs.iter().any(|p| p == PACK_ID));
+    assert!(persona.integrations.iter().any(|p| p == PACK_ID));
     let resolved = persona.resolved_tool_names();
     for tool in EXPECTED_TOOLS {
         assert!(resolved.iter().any(|t| t == tool), "missing expected tool `{tool}`");
@@ -104,7 +104,7 @@ fn metalcraft_code_pack_wires_up() {
     let api_tools_dir = paths::api_tools_dir();
     for tool in EXPECTED_TOOLS {
         let (path, _origin) =
-            integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
+            integrations::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .unwrap_or_else(|| panic!("api tool `{tool}` should resolve"));
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
@@ -123,7 +123,7 @@ fn metalcraft_code_pack_wires_up() {
     // Per-workspace tools address the workspace by {id}.
     for tool in ["mcode_get_workspace", "mcode_clone", "mcode_exec", "mcode_git"] {
         let (p, _) =
-            integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
+            integrations::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("resolves");
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
@@ -133,12 +133,12 @@ fn metalcraft_code_pack_wires_up() {
         );
     }
 
-    let pack = integration_packs::find_installed(PACK_ID).expect("pack installed");
+    let pack = integrations::find_installed(PACK_ID).expect("pack installed");
     let readme = pack.readme().expect("README");
     assert!(readme.contains("METALCRAFT_TOKEN") && readme.contains("code.metalcraftai.com"));
     assert_eq!(pack.item_slugs("api_tools", "json").len(), EXPECTED_TOOLS.len());
 
-    let recommended = integration_packs::recommended_env();
+    let recommended = integrations::recommended_env();
     assert!(
         recommended
             .iter()

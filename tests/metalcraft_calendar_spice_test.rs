@@ -1,4 +1,4 @@
-//! Wire-up test for the **metalcraft-calendar** integration pack.
+//! Wire-up test for the **metalcraft-calendar** integration.
 //!
 //! No network. Seeds the bundled packs into an isolated data dir, enables
 //! `metalcraft-calendar`, loads the `metalcraft-calendar-agent` persona, and asserts
@@ -11,7 +11,7 @@ use std::sync::Once;
 
 use metalcraft_agent::approval::{OperationKind, PermissionLevel};
 use metalcraft_agent::persona::Persona;
-use metalcraft_agent::{integration_packs, paths, seed};
+use metalcraft_agent::{integrations, paths, seed};
 
 const PACK_ID: &str = "metalcraft-calendar";
 const PERSONA_SLUG: &str = "metalcraft-calendar-agent";
@@ -71,7 +71,7 @@ fn init() {
             std::env::set_var("METALCRAFT_DATA_DIR", &data_dir);
         }
         seed::ensure_defaults();
-        integration_packs::set_enabled(PACK_ID, true).expect("enable metalcraft-calendar pack");
+        integrations::set_enabled(PACK_ID, true).expect("enable metalcraft-calendar pack");
     });
 }
 
@@ -79,12 +79,12 @@ fn init() {
 fn metalcraft_calendar_pack_wires_up() {
     init();
 
-    assert!(integration_packs::is_enabled(PACK_ID), "pack should be enabled after init()");
+    assert!(integrations::is_enabled(PACK_ID), "pack should be enabled after init()");
 
     let persona = Persona::load(PERSONA_SLUG, &paths::personas_dir())
         .expect("metalcraft-calendar-agent persona should resolve from the enabled pack");
     assert!(
-        persona.packs.iter().any(|p| p == PACK_ID),
+        persona.integrations.iter().any(|p| p == PACK_ID),
         "persona should be scoped to the metalcraft-calendar pack via `packs`"
     );
     let resolved = persona.resolved_tool_names();
@@ -100,7 +100,7 @@ fn metalcraft_calendar_pack_wires_up() {
     let api_tools_dir = paths::api_tools_dir();
     for tool in EXPECTED_TOOLS {
         let (path, _origin) =
-            integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
+            integrations::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .unwrap_or_else(|| panic!("api tool `{tool}` should resolve from the pack"));
         let raw = std::fs::read_to_string(&path).expect("read api tool config");
         let cfg: serde_json::Value = serde_json::from_str(&raw)
@@ -123,7 +123,7 @@ fn metalcraft_calendar_pack_wires_up() {
     // Write tools that carry a body map params into it.
     for tool in ["mcal_create_calendar", "mcal_create_event", "mcal_update_event", "mcal_add_guests"] {
         let (p, _) =
-            integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
+            integrations::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("write tool resolves");
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
@@ -133,7 +133,7 @@ fn metalcraft_calendar_pack_wires_up() {
     // Slug-scoped tools must carry the {calendar} path placeholder.
     for tool in ["mcal_list_events", "mcal_get_event", "mcal_create_event", "mcal_sync", "mcal_add_guests", "mcal_remove_guest", "mcal_add_meeting", "mcal_remove_meeting"] {
         let (p, _) =
-            integration_packs::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
+            integrations::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("slug tool resolves");
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
@@ -143,17 +143,39 @@ fn metalcraft_calendar_pack_wires_up() {
         );
     }
 
-    let pack = integration_packs::find_installed(PACK_ID).expect("pack installed");
+    let pack = integrations::find_installed(PACK_ID).expect("pack installed");
     let readme = pack.readme().expect("pack should ship a README");
     assert!(
         readme.contains("METALCRAFT_TOKEN") && readme.contains("calendar.metalcraftai.com"),
         "README should explain the token and the fixed calendar.metalcraftai.com base"
     );
     assert_eq!(pack.item_slugs("api_tools", "json").len(), EXPECTED_TOOLS.len());
-    assert!(pack.item_slugs("personas", "json").iter().any(|s| s == PERSONA_SLUG));
-    assert!(pack.item_slugs("skills", "md").iter().any(|s| s == "metalcraft-calendar"));
+    assert!(
+        pack.item_slugs("personas", "json").is_empty() && pack.item_slugs("skills", "md").is_empty(),
+        "an integration carries tools and nothing else; its persona and skill are seeded \
+         on the pod and curated by a preset"
+    );
+    // …and they are still there to be curated.
+    assert!(
+        integrations::resolve_file(
+            &paths::personas_dir(),
+            "personas",
+            &format!("{PERSONA_SLUG}.json"),
+        )
+        .is_some(),
+        "the calendar persona should be seeded on the pod"
+    );
+    assert!(
+        integrations::resolve_file(
+            &paths::skills_dir(),
+            "skills",
+            "metalcraft-calendar.md",
+        )
+        .is_some(),
+        "the calendar skill should be seeded on the pod"
+    );
 
-    let recommended = integration_packs::recommended_env();
+    let recommended = integrations::recommended_env();
     assert!(
         recommended
             .iter()

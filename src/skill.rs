@@ -13,7 +13,7 @@ use crate::paths;
 pub struct SkillSummary {
     pub slug: String,
     pub description: String,
-    /// Set when this skill is provided by an enabled integration pack.
+    /// Set when this skill is provided by an enabled integration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pack_id: Option<String>,
     /// True for pack-provided skills — the workshop disables Save/Delete.
@@ -37,7 +37,7 @@ pub struct Skill {
 /// shadows a pack skill of the same slug.
 pub fn list_skill_summaries() -> Vec<SkillSummary> {
     let layered =
-        crate::integration_packs::list_files_layered(&paths::skills_dir(), "skills", "md");
+        crate::integrations::list_files_layered(&paths::skills_dir(), "skills", "md");
     let mut summaries: Vec<SkillSummary> = layered
         .into_iter()
         .filter_map(|(path, origin)| {
@@ -61,7 +61,7 @@ pub fn list_skill_summaries() -> Vec<SkillSummary> {
 pub fn load_skill(slug: &str) -> Option<Skill> {
     let filename = format!("{slug}.md");
     let (path, origin) =
-        crate::integration_packs::resolve_file(&paths::skills_dir(), "skills", &filename)?;
+        crate::integrations::resolve_file(&paths::skills_dir(), "skills", &filename)?;
     let content = std::fs::read_to_string(&path).ok()?;
     let description = crate::persona::parse_frontmatter_description(&content).unwrap_or_default();
     let body = crate::persona::strip_frontmatter(&content).to_string();
@@ -84,7 +84,7 @@ pub fn save_skill(slug: &str, skill: &Skill) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))
 }
 
-/// True when `slug` is currently provided by an integration pack and there is
+/// True when `slug` is currently provided by an integration and there is
 /// no local file shadowing it — i.e. writing/deleting it via the user path must
 /// be refused. Returns the owning pack id for the error message.
 pub fn pack_owner_blocking_write(slug: &str) -> Option<String> {
@@ -92,7 +92,7 @@ pub fn pack_owner_blocking_write(slug: &str) -> Option<String> {
     if paths::skills_dir().join(&filename).exists() {
         return None;
     }
-    crate::integration_packs::resolve_file(&paths::skills_dir(), "skills", &filename)
+    crate::integrations::resolve_file(&paths::skills_dir(), "skills", &filename)
         .and_then(|(_, origin)| origin.pack_id().map(String::from))
 }
 

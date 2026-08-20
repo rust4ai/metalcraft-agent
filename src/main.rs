@@ -185,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let failed = report.failed.len();
         if failed > 0 {
             eprintln!(
-                "\n{} {failed} integration pack(s) could not be wrapped; they are unchanged.",
+                "\n{} {failed} integration(s) could not be wrapped; they are unchanged.",
                 ui::warning("Warning:")
             );
         }
