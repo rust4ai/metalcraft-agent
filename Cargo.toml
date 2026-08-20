@@ -60,8 +60,3 @@ path = "src/bin/metalcraft-daemon.rs"
 [dev-dependencies]
 spice-framework = "0.1"
 tempfile = "3"
-
-# `metalcraft-packs` 0.2 renamed the integration manifest type; it is not on
-# crates.io yet. Delete this block once it is published.
-[patch.crates-io]
-metalcraft-packs = { path = "../metalcraft-packs" }
