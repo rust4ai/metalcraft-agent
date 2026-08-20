@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 const APP_NAME: &str = "metalcraft-agent";
@@ -99,6 +99,85 @@ pub fn integrations_dir() -> PathBuf {
 
 pub fn integrations_state_file() -> PathBuf {
     data_dir().join("integrations.json")
+}
+
+/// Move a pre-0.30 data dir onto the post-rename paths.
+///
+/// "Integration pack" became "integration" in 0.30, and four paths moved with it.
+/// Three of those are load-bearing on an *existing* pod, and the worst is the
+/// quietest: an installed agent pack records which store entries it uses in
+/// `<data>/agent_packs/<id>/integration_packs.json`, and [`store::read_refs`]
+/// degrades a missing file to *no refs*. Upgrade without this and every installed
+/// agent pack resolves zero integrations — the agent loses every HTTP tool it had,
+/// with nothing in the logs and every file still on disk under its old name.
+///
+/// **Why this runs on boot**, when `AGENT_PRESETS_PLAN.md` §7 says migration never
+/// should: that rule is about *restructuring* — wrapping packs into agent packs,
+/// turning chats into instances — where the shape of the data changes and an
+/// operator should choose the moment. This changes nothing but a filename. It is
+/// idempotent, it never overwrites, and the alternative is a pod that silently
+/// stops working until somebody runs a command they have no reason to know about.
+///
+/// [`store::read_refs`]: crate::agent_packs::store::read_refs
+pub fn migrate_legacy_integration_paths() {
+    let data = data_dir();
+
+    // Directories and top-level files, first — the manifest pass below walks the
+    // renamed directories, so it has to run after them.
+    let mut moves: Vec<(PathBuf, PathBuf)> = vec![
+        (data.join("pack_store"), data.join("integration_store")),
+        (data.join("integration_packs"), data.join("integrations")),
+        (data.join("integration_packs.json"), data.join("integrations.json")),
+        (data.join("integration_packs.lock"), data.join("integrations.lock")),
+    ];
+
+    // Each installed agent pack's refs file. This is the one that costs an agent
+    // its tools, so it is worth walking the directory for.
+    if let Ok(entries) = std::fs::read_dir(agent_packs_dir()) {
+        for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+            moves.push((
+                e.path().join("integration_packs.json"),
+                e.path().join("integrations.json"),
+            ));
+        }
+    }
+
+    for (from, to) in moves {
+        rename_if_free(&from, &to);
+    }
+
+    // Then the manifest inside each stored entry and each side-loaded integration.
+    // `store::resolve` treats a missing manifest as a missing entry, so skipping
+    // this would leave the refs intact and still pointing at nothing.
+    //
+    // The entry's directory name — its content hash — is deliberately not
+    // recomputed. It is an identity assigned at install, never re-derived, and
+    // rewriting it would invalidate every ref that already names it.
+    for parent in [data.join("integration_store"), data.join("integrations")] {
+        let Ok(entries) = std::fs::read_dir(&parent) else { continue };
+        for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+            rename_if_free(&e.path().join("pack.json"), &e.path().join("integration.json"));
+        }
+    }
+}
+
+/// Rename `from` to `to`, unless `to` already exists.
+///
+/// Both existing is the case worth refusing rather than resolving: renaming over a
+/// live file to tidy up a name is not a trade worth making silently, so say so and
+/// leave the operator with both.
+fn rename_if_free(from: &Path, to: &Path) {
+    if !from.exists() {
+        return;
+    }
+    if to.exists() {
+        log::warn!("both {} and {} exist; leaving them alone", from.display(), to.display());
+        return;
+    }
+    match std::fs::rename(from, to) {
+        Ok(()) => log::info!("migrated {} -> {}", from.display(), to.display()),
+        Err(e) => log::warn!("could not migrate {}: {e}", from.display()),
+    }
 }
 
 /// One-shot marker written after the daemon auto-enables the Metalcraft

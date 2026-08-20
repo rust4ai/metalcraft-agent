@@ -56,6 +56,10 @@ fn as_refs(v: &[(String, String)]) -> Vec<(&str, &str)> {
 /// (personas upgrade on version bump; everything else is written only when
 /// missing — packs gate on their own `integration.json` version).
 pub fn ensure_defaults() {
+    // Before anything reads a path: an upgraded pod still has its data under the
+    // pre-0.30 names, and reading past them costs it every tool it had installed.
+    paths::migrate_legacy_integration_paths();
+
     let dirs = [
         paths::personas_dir(),
         paths::agent_presets_dir(),
