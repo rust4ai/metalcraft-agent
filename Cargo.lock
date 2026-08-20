@@ -5019,6 +5019,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tower",
  "utoipa",
  "utoipa-scalar",
  "uuid",

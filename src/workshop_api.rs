@@ -3391,8 +3391,12 @@ async fn post_create_chat(
         }
     };
 
-    // An explicit persona wins, but must be one this agent can actually be — the same
-    // containment `sub_agent` enforces, applied at the front door.
+    // An explicit persona wins *for this conversation only*, and must be one this agent
+    // can actually be — the same containment `sub_agent` enforces, applied at the front
+    // door. It is not a persona move: this used to write the override back to the
+    // instance, so starting one chat as a named persona silently repointed that agent
+    // for every conversation after it. Moving an agent's persona is what
+    // `PATCH /api/v1/agents/{id}` is for, and it is a thing someone asks for on purpose.
     let persona_slug = match &req.persona_slug {
         Some(p) => {
             if let Ok(preset) =
@@ -3425,7 +3429,6 @@ async fn post_create_chat(
         instance.name = name.clone();
         instance.persistent = true;
     }
-    instance.persona = persona_slug.clone();
     instance.touch();
     if let Err(e) = instance.save() {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, e);
