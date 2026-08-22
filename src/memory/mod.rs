@@ -51,7 +51,17 @@ use types::{Event, Link, LinkKind, Memory, MemoryKind, Source, Stats};
 const DEFAULT_MAX_MEMORIES: usize = 100_000;
 
 static MEMORY: OnceLock<Arc<RwLock<MemoryIndex>>> = OnceLock::new();
-static EMBEDDINGS: OnceLock<Option<Arc<Embeddings>>> = OnceLock::new();
+/// The process-wide embedder.
+///
+/// A `OnceLock` would be simpler, but it can only be written once: a pod that
+/// boots with no provider key and is bound one later would keep answering
+/// "keyword search only" for the life of the process. Now that a key can arrive
+/// through the key store mid-life, absence has to stay re-checkable. Successes
+/// are cached; a missing key is not.
+static EMBEDDINGS: std::sync::RwLock<Option<Arc<Embeddings>>> = std::sync::RwLock::new(None);
+/// Guards the "no key / could not initialize" log so a per-recall re-check does
+/// not turn into a per-recall log line.
+static EMBED_QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the memory subsystem is on. `MEMORY_ENABLED=0|false|off` disables it;
 /// anything else (including unset) leaves it enabled.
@@ -79,38 +89,63 @@ fn max_memories() -> usize {
 /// round trip, so that alone is checked here; everything else is handled by the
 /// breaker in [`embed`].
 pub fn embeddings() -> Option<Arc<Embeddings>> {
-    EMBEDDINGS
-        .get_or_init(|| {
-            let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-            if key.trim().is_empty() {
-                log::info!(
-                    "memory: no OPENAI_API_KEY — recall will use keyword + graph search only"
-                );
-                return None;
+    use std::sync::atomic::Ordering;
+
+    if let Some(existing) = EMBEDDINGS.read().ok().and_then(|slot| slot.clone()) {
+        return Some(existing);
+    }
+
+    // Resolved through the key store first, so a provider bound from a client is
+    // picked up here on the next recall rather than at the next restart — and through
+    // the same fallback the turn path uses, so a managed pod embeds with its injected
+    // Metalcraft token instead of quietly downgrading recall to keyword search.
+    let Some(key) = crate::runtime::inference_api_key() else {
+        if !EMBED_QUIET.swap(true, Ordering::Relaxed) {
+            log::info!(
+                "memory: no inference credential — recall will use keyword + graph search only"
+            );
+        }
+        return None;
+    };
+
+    let model = embed::configured_model();
+    let dims = embed::configured_dims();
+    match embed::OpenAiEmbedder::new(&key, &model, dims) {
+        Ok(e) => {
+            log::info!("memory: embeddings via {model} at {dims} dims");
+            let embeddings = Arc::new(Embeddings::new(Arc::new(e)));
+            if let Ok(mut slot) = EMBEDDINGS.write() {
+                // Another thread may have won the race; keep whichever landed
+                // first so callers all share one breaker.
+                let stored = slot.get_or_insert_with(|| embeddings.clone()).clone();
+                EMBED_QUIET.store(false, Ordering::Relaxed);
+                return Some(stored);
             }
-            let model = embed::configured_model();
-            let dims = embed::configured_dims();
-            match embed::OpenAiEmbedder::new(&key, &model, dims) {
-                Ok(e) => {
-                    log::info!("memory: embeddings via {model} at {dims} dims");
-                    Some(Arc::new(Embeddings::new(Arc::new(e))))
-                }
-                Err(e) => {
-                    log::warn!("memory: could not initialize embeddings ({e}) — keyword search only");
-                    None
-                }
+            Some(embeddings)
+        }
+        Err(e) => {
+            if !EMBED_QUIET.swap(true, Ordering::Relaxed) {
+                log::warn!("memory: could not initialize embeddings ({e}) — keyword search only");
             }
-        })
-        .clone()
+            None
+        }
+    }
 }
 
-/// Install a specific embedder. Returns `false` if one is already set, since the
-/// backing `OnceLock` can only be written once per process.
+/// Install a specific embedder. Returns `false` if one is already set, so a test
+/// cannot silently swap the embedder out from under another.
 ///
 /// Exists for tests ([`embed::NullEmbedder`]); production goes through
 /// [`embeddings`].
 pub fn set_embedder(embedder: Arc<dyn Embedder>) -> bool {
-    EMBEDDINGS.set(Some(Arc::new(Embeddings::new(embedder)))).is_ok()
+    let Ok(mut slot) = EMBEDDINGS.write() else {
+        return false;
+    };
+    if slot.is_some() {
+        return false;
+    }
+    *slot = Some(Arc::new(Embeddings::new(embedder)));
+    true
 }
 
 /// Current embedding availability, for `mem_stats` and diagnostics.

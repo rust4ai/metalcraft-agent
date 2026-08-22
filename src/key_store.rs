@@ -284,6 +284,29 @@ pub fn lookup_scoped(channel_id: Option<&str>, name: &str) -> Option<String> {
     lookup(name)
 }
 
+/// Like [`lookup`], but treats a blank value as absent **at every level**.
+///
+/// The difference matters for settings a UI writes: `lookup` is `stored.or(env)`,
+/// so a key saved as an empty string shadows a perfectly good environment value
+/// and the caller sees `Some("")`. For a provider API key that turns "the user
+/// cleared the field" into "authenticate with the empty string", which fails far
+/// from where it was caused. Here an empty stored value simply falls through to
+/// env, and an empty env value falls through to `None`.
+pub fn lookup_present(name: &str) -> Option<String> {
+    let stored = KeyStore::load(&paths::keys_file()).get(name).map(str::to_string);
+    let env = std::env::var(name).ok();
+    resolve_present(name, stored, env)
+}
+
+/// Pure form of [`lookup_present`], so the precedence is testable without touching
+/// global env or the on-disk keys.json.
+pub fn resolve_present(name: &str, stored: Option<String>, env: Option<String>) -> Option<String> {
+    fn present(v: Option<String>) -> Option<String> {
+        v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
+    resolve(name, present(stored), present(env))
+}
+
 /// Pure precedence rule behind [`lookup`], split out so it's unit-testable without
 /// touching global env or the on-disk keys.json. For [`ENV_AUTHORITATIVE`] keys a
 /// non-empty `env` value wins; otherwise `stored` wins, then `env`.
@@ -422,6 +445,26 @@ mod tests {
         // …and falls back to env when unstored.
         let got = resolve("OPENAI_API_KEY", None, Some("from-env".into()));
         assert_eq!(got.as_deref(), Some("from-env"));
+    }
+
+    #[test]
+    fn a_blank_stored_value_falls_through_to_env() {
+        // Clearing a field in a UI must not authenticate with the empty string.
+        let got = resolve_present("OPENAI_API_KEY", Some("   ".into()), Some("from-env".into()));
+        assert_eq!(got.as_deref(), Some("from-env"));
+        assert_eq!(resolve_present("OPENAI_API_KEY", Some("".into()), None), None);
+    }
+
+    #[test]
+    fn a_stored_value_still_wins_when_both_are_present() {
+        let got = resolve_present("OPENAI_BASE_URL", Some("https://stored".into()), Some("https://env".into()));
+        assert_eq!(got.as_deref(), Some("https://stored"));
+    }
+
+    #[test]
+    fn present_resolution_keeps_the_env_authoritative_exception() {
+        let got = resolve_present("METALCRAFT_TOKEN", Some("stale".into()), Some("injected".into()));
+        assert_eq!(got.as_deref(), Some("injected"));
     }
 
     #[test]

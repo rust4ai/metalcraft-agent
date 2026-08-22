@@ -34,17 +34,18 @@ pub const DEFAULT_PERSONA: &str = "orchestrator-agent";
 ///   2. `STARKBOT_MODEL` — legacy/local override.
 ///   3. [`DEFAULT_MODEL`] — the compile-time fallback for local/dev use.
 ///
-/// This is the single source of truth so every unspecified-model path honours the
-/// same env, rather than each site hard-coding [`DEFAULT_MODEL`]. Compaction is
+/// Each name resolves through the key store first and the process environment
+/// second, so a model chosen in a client applies on the next turn without a pod
+/// restart — the same rule the API key and base URL follow.
+///
+/// This is the single source of truth so every unspecified-model path resolves
+/// the same way, rather than each site hard-coding [`DEFAULT_MODEL`]. Compaction is
 /// deliberately excluded (it uses a fixed model) so it never routes through the
 /// user's possibly-costlier default.
 pub fn configured_default_model() -> String {
     for key in ["METALCRAFT_MODEL", "STARKBOT_MODEL"] {
-        if let Ok(v) = std::env::var(key) {
-            let v = v.trim();
-            if !v.is_empty() {
-                return v.to_string();
-            }
+        if let Some(v) = crate::key_store::lookup_present(key) {
+            return v;
         }
     }
     DEFAULT_MODEL.to_string()
@@ -412,6 +413,17 @@ mod capture_tests {
 /// via the injected `METALCRAFT_TOKEN`). `openai::Client::new` ignores the base URL;
 /// this mirrors rig's own `from_env` (builder + optional `base_url`).
 ///
+/// Build the completion client for the configured **interface source**.
+///
+/// The API key and base URL resolve through the key store first and the process
+/// environment second ([`key_store::lookup_present`]), which is what lets a client
+/// bind a provider over the API and have it take effect on the **next turn** —
+/// this function runs per turn, so nothing is cached across one. Before that they
+/// were read straight from env, so binding a source meant restarting the pod, and
+/// a hosted pod's env is not something its owner can edit.
+///
+/// [`key_store::lookup_present`]: crate::key_store::lookup_present
+///
 /// Returns rig 0.38's **default** client, which targets OpenAI's **Responses API**
 /// and POSTs to `{base}/responses`. We deliberately do NOT use `.completions_api()`
 /// here: the chat/completions surface strictly requires every assistant
@@ -425,13 +437,66 @@ mod capture_tests {
 /// through it still bills credits.
 pub fn build_openai_client(api_key: &str) -> Result<openai::Client, Box<dyn std::error::Error>> {
     let mut builder = openai::Client::builder().api_key(api_key);
-    if let Ok(base) = std::env::var("OPENAI_BASE_URL") {
-        let base = base.trim();
-        if !base.is_empty() {
-            builder = builder.base_url(base);
-        }
+    if let Some(base) = crate::key_store::lookup_present("OPENAI_BASE_URL") {
+        builder = builder.base_url(&base);
     }
     Ok(builder.build()?)
+}
+
+/// The credential inference authenticates with.
+///
+/// `OPENAI_API_KEY` when this pod has one. Otherwise — **and only when inference is
+/// routed through the Metalcraft gateway** — this pod's own `METALCRAFT_TOKEN`. The
+/// gateway takes an `mck_…` account PAT (with `write`: spending credits is a write),
+/// and the control plane injects one into every managed pod. Without this fallback a
+/// pod holding a perfectly good ecosystem identity still answered "No OPENAI_API_KEY"
+/// and asked its owner to paste a credential they had already given the ecosystem.
+///
+/// The gateway check is an allowlist rather than "is a base URL set", and that is the
+/// load-bearing part: `OPENAI_BASE_URL` can point anywhere, and falling back for an
+/// arbitrary base would hand this account's token to whatever proxy someone typed.
+pub fn inference_api_key() -> Option<String> {
+    resolve_inference_key(
+        crate::key_store::lookup_present("OPENAI_API_KEY"),
+        crate::key_store::lookup_present("OPENAI_BASE_URL"),
+        crate::key_store::lookup_present("METALCRAFT_TOKEN"),
+    )
+}
+
+/// Pure form of [`inference_api_key`], so the precedence — and the refusal to send
+/// the pod token anywhere else — is testable without global env.
+fn resolve_inference_key(
+    openai_key: Option<String>,
+    base_url: Option<String>,
+    pod_token: Option<String>,
+) -> Option<String> {
+    if let Some(key) = openai_key {
+        return Some(key);
+    }
+    base_url
+        .filter(|base| is_metalcraft_gateway(base))
+        .and(pod_token)
+}
+
+/// Whether `base` is a Metalcraft inference endpoint: an ecosystem host over https,
+/// or loopback, which is a developer running the gateway themselves.
+fn is_metalcraft_gateway(base: &str) -> bool {
+    let Some((scheme, rest)) = base.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // Userinfo first: `https://inference.metalcraftai.com@evil.example/` is not an
+    // ecosystem host, and reading the part before the `@` is how it would look like one.
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    let host = match host_port.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default().to_ascii_lowercase(),
+        None => host_port.split(':').next().unwrap_or_default().to_ascii_lowercase(),
+    };
+    match scheme.to_ascii_lowercase().as_str() {
+        "https" => host == "metalcraftai.com" || host.ends_with(".metalcraftai.com"),
+        "http" => matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"),
+        _ => false,
+    }
 }
 
 impl AgentRuntimeContext {
@@ -440,9 +505,11 @@ impl AgentRuntimeContext {
 
         let personas_dir = crate::paths::personas_dir();
         let skills_dir = crate::paths::skills_dir();
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-            "OPENAI_API_KEY environment variable not set. Add it to your .env file or export it."
-        })?;
+        let api_key = inference_api_key().ok_or(
+            "No inference credential. Set OPENAI_API_KEY from a workshop client (Keys), \
+             add it to your .env file, or run with METALCRAFT_TOKEN and OPENAI_BASE_URL \
+             pointed at the Metalcraft gateway.",
+        )?;
 
         Ok(Self {
             personas_dir,
@@ -779,7 +846,48 @@ fn classify_code(raw: &str) -> ErrorCode {
 
 #[cfg(test)]
 mod inference_tests {
-    use super::{classify_turn_error, ErrorCode};
+    use super::{classify_turn_error, resolve_inference_key, ErrorCode};
+
+    /// The pod already holds an ecosystem credential the gateway accepts, so being
+    /// asked to paste a second one was asking twice for the same thing. What this must
+    /// not do is hand that credential to a base URL that merely speaks the same API.
+    #[test]
+    fn the_pod_token_authenticates_inference_only_at_the_gateway() {
+        let key = |k: Option<&str>, base: Option<&str>, token: Option<&str>| {
+            resolve_inference_key(
+                k.map(str::to_string),
+                base.map(str::to_string),
+                token.map(str::to_string),
+            )
+        };
+        let gw = Some("https://inference.metalcraftai.com/v1");
+        let tok = Some("mck_live_abc");
+
+        assert_eq!(key(Some("sk-real"), gw, tok).as_deref(), Some("sk-real"), "an explicit key wins");
+        assert_eq!(key(None, gw, tok).as_deref(), Some("mck_live_abc"), "otherwise the pod's own token");
+        assert_eq!(key(None, gw, None), None, "nothing to fall back to");
+        assert_eq!(key(None, None, tok), None, "plain OpenAI is not ours to authenticate");
+
+        for elsewhere in [
+            "https://api.openai.com/v1",
+            "https://metalcraftai.com.evil.example/v1",
+            // The allowed host, in the one position that is not the host.
+            "https://inference.metalcraftai.com@evil.example/v1",
+            // Plaintext to a real host would put the token on the wire.
+            "http://inference.metalcraftai.com/v1",
+            "not a url",
+        ] {
+            assert_eq!(
+                key(None, Some(elsewhere), tok),
+                None,
+                "{elsewhere} must never receive this pod's account token"
+            );
+        }
+
+        // A developer running the gateway locally is doing it deliberately, and the
+        // token does not leave the machine.
+        assert_eq!(key(None, Some("http://localhost:8080/v1"), tok).as_deref(), Some("mck_live_abc"));
+    }
 
     fn code(s: &str) -> ErrorCode {
         classify_turn_error(s).code
