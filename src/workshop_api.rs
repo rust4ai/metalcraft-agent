@@ -834,10 +834,21 @@ struct InstallAgentPackQuery {
 /// dialog inspects a thing and then installs *that same thing*, and any difference
 /// between the two paths would be a difference between what was approved and what
 /// was done.
+/// An archive to inspect or install, and where it came from.
+///
+/// `resolved` is present only when a registry answered for it: an upload has no host
+/// to attribute the install to, and neither does a path on disk.
+struct PackBytes {
+    bytes: Vec<u8>,
+    /// What the lockfile pins — a URL, a path, or `"upload"`.
+    source: String,
+    resolved: Option<crate::agent_registry::Resolved>,
+}
+
 async fn agent_pack_bytes(
     q: &InstallAgentPackQuery,
     body: &axum::body::Bytes,
-) -> Result<(Vec<u8>, String), Response> {
+) -> Result<PackBytes, Response> {
     if let Some(reference) = q.reference.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
         let resolved = crate::agent_registry::resolve(reference)
             .await
@@ -849,13 +860,17 @@ async fn agent_pack_bytes(
         return match crate::agent_registry::fetch(&resolved.download_url).await {
             // Record the *resolved* origin, not the reference the user typed, so the
             // lockfile pins where the bytes actually came from.
-            Ok(b) => Ok((b, resolved.download_url)),
+            Ok(b) => Ok(PackBytes {
+                bytes: b,
+                source: resolved.download_url.clone(),
+                resolved: Some(resolved),
+            }),
             Err(e) => Err(err_json(StatusCode::BAD_GATEWAY, e)),
         };
     }
     if let Some(url) = q.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
         return match crate::agent_registry::fetch(url).await {
-            Ok(b) => Ok((b, url.to_string())),
+            Ok(b) => Ok(PackBytes { bytes: b, source: url.to_string(), resolved: None }),
             // A refused origin is the caller's mistake (400); a registry that failed
             // to answer is not (502).
             Err(e) if e.contains("will not download") => {
@@ -866,12 +881,16 @@ async fn agent_pack_bytes(
     }
     if let Some(path) = q.path.as_deref() {
         return match std::fs::read(path) {
-            Ok(b) => Ok((b, path.to_string())),
+            Ok(b) => Ok(PackBytes { bytes: b, source: path.to_string(), resolved: None }),
             Err(e) => Err(err_json(StatusCode::BAD_REQUEST, format!("reading {path}: {e}"))),
         };
     }
     if !body.is_empty() {
-        return Ok((body.to_vec(), "upload".to_string()));
+        return Ok(PackBytes {
+            bytes: body.to_vec(),
+            source: "upload".to_string(),
+            resolved: None,
+        });
     }
     Err(err_json(
         StatusCode::BAD_REQUEST,
@@ -929,7 +948,7 @@ async fn post_inspect_agent_pack(
     Query(q): Query<InstallAgentPackQuery>,
     body: axum::body::Bytes,
 ) -> Response {
-    let (bytes, source) = match agent_pack_bytes(&q, &body).await {
+    let PackBytes { bytes, source, .. } = match agent_pack_bytes(&q, &body).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -1001,7 +1020,7 @@ async fn post_update_agent_pack(
     Query(q): Query<InstallAgentPackQuery>,
     body: axum::body::Bytes,
 ) -> Response {
-    let (bytes, source) = match agent_pack_bytes(&q, &body).await {
+    let PackBytes { bytes, source, .. } = match agent_pack_bytes(&q, &body).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -1245,12 +1264,20 @@ async fn post_install_agent_pack(
     Query(q): Query<InstallAgentPackQuery>,
     body: axum::body::Bytes,
 ) -> Response {
-    let (bytes, source) = match agent_pack_bytes(&q, &body).await {
+    let PackBytes { bytes, source, resolved } = match agent_pack_bytes(&q, &body).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
     match crate::agent_packs::install(&bytes, &source) {
-        Ok(report) => Json(report).into_response(),
+        Ok(report) => {
+            // Told after the fact, in the background, and only when a registry is the
+            // one that answered. The install has already happened locally; a host that
+            // is down must not delay the response, and cannot undo it.
+            if let Some(resolved) = resolved {
+                tokio::spawn(async move { crate::agent_registry::report_install(&resolved).await });
+            }
+            Json(report).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }
 }

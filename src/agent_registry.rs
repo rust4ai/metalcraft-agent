@@ -78,14 +78,13 @@ impl Default for Registries {
                 token_key: None,
             },
         );
-        registries.insert(
-            "metalcraft".to_string(),
-            Registry {
-                url: "https://packs.metalcraftai.com".to_string(),
-                trust: Trust::FirstParty,
-                token_key: None,
-            },
-        );
+        // `packs.metalcraftai.com` was here too, and it does not serve agent packs:
+        // it serves *integration* packs, at `/api/v1/packs/*`, which is a different
+        // unit reached through [`crate::registry`]. Every agent-pack call to it 404s.
+        // A configured host that cannot answer is worse than an absent one — it puts
+        // a tab in front of someone that can only ever say "this host has nothing",
+        // and it makes an id ambiguity check ask a host that has no opinion. Add it
+        // back the day it implements §11.1.
         Self { default: "axoniac".to_string(), registries }
     }
 }
@@ -774,6 +773,31 @@ pub async fn search(
     Ok(results.iter().filter_map(|v| hit_from(name, v)).collect())
 }
 
+/// Tell the host an install happened.
+///
+/// Fire and forget, by construction: the install already succeeded locally, and a
+/// registry that is slow, down, or does not implement this must not turn that into a
+/// failure the operator sees. Errors are logged at debug and dropped.
+///
+/// Sent only for a pack that came *from* a registry — an upload or a local path has no
+/// host to tell, and an inspect is not an install.
+pub async fn report_install(resolved: &Resolved) {
+    let cfg = load();
+    let Some(reg) = cfg.get(&resolved.registry) else { return };
+    let Ok(id) = pack_id(&resolved.id) else { return };
+    let url = format!("{}/api/v1/agent-packs/{id}/installed", reg.url.trim_end_matches('/'));
+    let Ok(client) = client().await else { return };
+    let mut req = client.post(&url);
+    if let Some(token) = token_for(reg) {
+        req = req.bearer_auth(token);
+    }
+    match req.send().await {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => log::debug!("{} did not record the install: {}", resolved.registry, r.status()),
+        Err(e) => log::debug!("could not tell {} about the install: {e}", resolved.registry),
+    }
+}
+
 /// What a host says about one pack, without downloading it (§11.1 `/manifest`).
 pub async fn manifest(name: &str, id: &str) -> Result<serde_json::Value, RegistryError> {
     let cfg = load();
@@ -807,6 +831,11 @@ fn hit_from(registry: &str, v: &serde_json::Value) -> Option<SearchHit> {
     // database key has a handle, and one without handles is already naming packs in
     // `id`, so the first field that is a *name* wins.
     let id = field("handle").or_else(|| field("slug")).or_else(|| field("id"))?;
+    // Checked here rather than at install time. The id is what the reference is built
+    // from, and `pack_id` will refuse a malformed one when somebody presses Install —
+    // so listing it would be offering a button that cannot work, with the explanation
+    // arriving one click too late.
+    let id = pack_id(&id).ok()?;
     let name = field("name").unwrap_or_else(|| id.clone());
     Some(SearchHit {
         reference: format!("{registry}:@{id}"),
@@ -914,21 +943,38 @@ mod tests {
     }
 
     #[test]
-    fn both_first_party_hosts_are_configured_by_default() {
-        // A pod that has never been configured can still install from the social
-        // host *and* from the ecosystem host. Shipping only one of them was why
-        // installing from axoniac needed an environment variable.
+    fn the_agent_pack_host_is_configured_by_default() {
+        // A pod that has never been configured can still install an agent pack.
+        // Shipping no default at all was why installing from axoniac needed an
+        // environment variable.
         let origins = default_origins();
         assert!(origins.iter().any(|o| o.contains("axoniac.com")), "{origins:?}");
-        assert!(origins.iter().any(|o| o.contains("packs.metalcraftai.com")), "{origins:?}");
+        // `packs.metalcraftai.com` serves *integration* packs and 404s every
+        // agent-pack path, so it is not one of these. Configuring a host that cannot
+        // answer only produces a tab that says "this host has nothing".
+        assert!(
+            !origins.iter().any(|o| o.contains("packs.metalcraftai.com")),
+            "the integration-pack host is not an agent-pack registry: {origins:?}"
+        );
     }
 
     #[test]
     fn the_default_registry_is_the_social_one() {
         let cfg = Registries::default();
         assert_eq!(cfg.default, "axoniac");
+        // `verified-only`, because anyone can publish there. That is the whole reason
+        // the trust levels exist, and softening it for the default host would empty
+        // them of meaning.
         assert_eq!(cfg.get("axoniac").map(|r| r.trust), Some(Trust::VerifiedOnly));
-        assert_eq!(cfg.get("metalcraft").map(|r| r.trust), Some(Trust::FirstParty));
+    }
+
+    /// A host can put anything in a search result. What it cannot do is make this pod
+    /// offer an install button for something it will refuse to fetch.
+    #[test]
+    fn a_result_this_pod_could_never_install_is_not_listed() {
+        assert!(hit_from("acme", &serde_json::json!({ "handle": "../secrets" })).is_none());
+        assert!(hit_from("acme", &serde_json::json!({ "id": "Not A Handle" })).is_none());
+        assert!(hit_from("acme", &serde_json::json!({ "handle": "helpdesk" })).is_some());
     }
 
     #[test]

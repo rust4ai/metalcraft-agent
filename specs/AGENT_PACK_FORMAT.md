@@ -407,9 +407,15 @@ pod already has the bytes and a noisier agent beats a failed install.
 
 ## 11. The registry protocol
 
-**Registries are a protocol, not a host.** axoniac.com is the social discovery host;
-packs.metalcraftai.com serves the first-party ecosystem packs; a company may self-host.
-A pod treats them as interchangeable — the crates.io alternative-registries model.
+**Registries are a protocol, not a host.** axoniac.com is the social discovery host and
+the only one configured by default; a company may self-host, and a pod treats every host
+as interchangeable — the crates.io alternative-registries model.
+
+`packs.metalcraftai.com` is **not** one of these. It serves *integration* packs at
+`/api/v1/packs/*` — a different unit, reached by a different client — and answers 404 to
+every path below. Configuring a host that cannot answer is worse than configuring none:
+it offers a browse tab that can only ever be empty, and it makes §11.3's ambiguity check
+consult a host with no opinion.
 
 ### 11.1 The four endpoints
 
@@ -431,6 +437,13 @@ A host MAY accept both.
   an `ETag` equal to the content hash.
 - **`/search`** is optional; a host may be fetch-only. A search result carries at
   minimum `{ handle, name, version, tagline?, category?, tags[] }`.
+- **`POST /{id}/installed`** is optional, and a pod calls it after an install it
+  completed *from that host* — never after an inspect, an upload, or a local path. It
+  is a **soft signal**: unauthenticated (installing a public pack is unauthenticated,
+  and counting only linked accounts would be a worse number), and a pod sends it fire
+  and forget. A host that does not implement it answers 404, which is not an error.
+  The alternative is the number this replaced: a count nothing ever reported, ordering
+  listings by zero while looking like a signal.
 
 A private or unlisted pack MUST 404 rather than 403 for a viewer who cannot see it —
 never leak that it exists.
@@ -441,10 +454,9 @@ never leak that it exists.
 {
   "default": "axoniac",
   "registries": {
-    "axoniac":    { "url": "https://axoniac.com",            "trust": "verified-only" },
-    "metalcraft": { "url": "https://packs.metalcraftai.com", "trust": "first-party" },
-    "acme":       { "url": "https://agents.acme.internal",   "trust": "explicit",
-                    "token_key": "ACME_TOKEN" }
+    "axoniac": { "url": "https://axoniac.com",          "trust": "verified-only" },
+    "acme":    { "url": "https://agents.acme.internal", "trust": "explicit",
+                 "token_key": "ACME_TOKEN" }
   }
 }
 ```
