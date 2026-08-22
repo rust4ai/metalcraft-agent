@@ -1,0 +1,607 @@
+# The data artifacts of metalcraft-agent and how they compose.
+# Gridwillow blueprint — https://gridwillow.com
+# Normative spec for the pack format: specs/AGENT_PACK_FORMAT.md
+
+blueprint metalcraft_artifacts
+  title    The Artifact Graph
+  tagline  what a person authors, what ships in a zip, and what a running agent actually reads
+  branch   master
+  stamp    v0.30.0
+
+stat Artifacts   = 6 authored · 1 installable
+stat Data root   = $METALCRAFT_DATA_DIR or ~/.local/share/metalcraft-agent
+stat Spec        = agent pack format, spec version 2
+
+# ------------------------------------------------------------------
+# what a person authors
+# ------------------------------------------------------------------
+
+group authoring "Authored primitives"
+  note none of these install on their own — an agent pack is the only unit that does
+
+lib persona "Persona" x1.5
+  is    a system prompt plus the exact tool grant that goes with it
+  why >
+    The only artifact that carries a prompt. tools names native tools by hand and
+    integrations adopts every <id>_* HTTP tool an integration provides, so a persona
+    can take a whole surface without enumerating it. resolved_tool_names is the union
+    and is what the registry and the step guard are built from — never the raw tools
+    field. The packs serde alias is still read, because personas written before the
+    0.30 rename are sitting on people's pods.
+  src   src/persona.rs
+  fact  On disk    = personas/<slug>.json
+  fact  Versioned  = optional semver, drives seed force-upgrade
+  list  Fields     = name, description, tools, integrations, skills, version, system_prompt
+  num   Seeded     = 16
+
+lib skill "Skill"
+  is    a markdown doc with YAML frontmatter, pulled in on demand
+  why >
+    Frontmatter carries one description: line; the body is methodology. A persona can
+    attach skills up front, and any persona holding load_skill can pull one mid-turn —
+    strip_frontmatter serves the body and nothing else. Skills hold no tools and no
+    permissions, which is why they are the cheapest thing in the system to write.
+  src   src/skill.rs src/tools/load_skill.rs
+  fact  On disk = skills/<slug>.md
+  num   Seeded  = 25
+
+lib apitool "HTTP API tool"
+  is    one JSON document describing one HTTP call, exposed as one model tool
+  why >
+    name, method, url, headers and a JSON-Schema parameters block become a
+    callable tool with no Rust written. Header values reference secrets as $NAME, and
+    body_mapping decides how flat arguments become a request body — params_nested
+    exists so a tool can expose scalars a model provider will validate while still
+    producing deep JSON. poll: true exempts a status-check tool from loop detection.
+  src   src/tools/http_api.rs
+  list  body_mapping = none, params, params_nested, template
+  fact  On disk      = api_tools/<name>.json, or inside an integration
+
+lib integration "Integration" x1.3
+  is    a versioned bundle of tool definitions and the credentials they need
+  why >
+    A directory laid out like a small project: integration.json, api_tools/, and
+    optional personas/, skills/, README.md. Since 0.30 it has no independent
+    lifecycle — no install, no enable flag. Availability is decided by declaration:
+    a persona or preset that names it gets its tools, and nothing else does. The
+    README is operator documentation the agent can read aloud while setting one up.
+  src   src/integrations.rs seed/integrations/
+  fact  Manifest  = integration.json (metalcraft_packs::IntegrationManifest)
+  list  Fields    = id, name, description, version, requires_env, tags
+  num   Seeded    = 8
+
+lib preset "Agent preset" x1.6
+  is    the agent's identity — a default persona, a roster, and its declared needs
+  why >
+    A pure composition object: it stores no prompt and no tools, only which personas are
+    in play and which skills and integrations they need. Roles split the roster three
+    ways — default is what a new instance starts as, subagent is what sub_agent may
+    delegate to, internal is reachable but never offered in a picker. An empty roster
+    with a non-empty default_persona is the minimal valid preset.
+  src   src/agent_preset.rs
+  fact  On disk        = agent_presets/<slug>.json
+  fact  Ambiguity      = two packs providing one slug is an error, never a shadow
+  fact  model          = a capability floor, not a model name
+  list  Roles          = default, subagent, internal
+  num   Seeded         = 2
+
+lib flow "Flow"
+  is    a saved node graph the daemon can run on a schedule, as a named persona
+  why >
+    Nodes carry a persona, so a flow was the one place the containment rule did not
+    reach — it could name any persona on the pod. Binding a flow to a preset closes that:
+    it may only name the callable roster. Schedules live in the flow document; the
+    instance a schedule fires as does not, because an instance id is pod-local and must
+    never travel in a published flow.
+  src   src/flows.rs src/flow_bindings.rs
+  fact  On disk   = flows/<id>.json (metalcraft_flows::SavedFlow)
+  fact  Install   = lands with every schedule disabled, always
+  list  Schedules = manual, every_minutes, every_hours, cron
+
+# ------------------------------------------------------------------
+# distribution
+# ------------------------------------------------------------------
+
+group distribution "Distribution"
+  note the archive is verified whole, in memory, before one byte reaches disk
+
+lib agentpack "Agent pack" x1.8
+  is    the only installable unit — a zip carrying exactly one preset and everything it names
+  why >
+    Self-contained by construction: installing must succeed with no network, so a pack that
+    declares a dependency it does not vendor is invalid and there is no thin variant.
+    content_sha256 covers every file except the manifest, so the manifest can pin what it
+    describes without hashing itself. requires_env and domains are derived from the
+    vendored bytes and never trusted from the author — a manifest disagreeing with its own
+    contents is a rejection, not a warning.
+  src   src/agent_packs/ specs/AGENT_PACK_FORMAT.md
+  fact  Archive    = <id>-<version>.agentpack, DEFLATE
+  fact  Manifest   = agent_pack.json, manifest_version 2
+  fact  Presets    = exactly one; zero and two are both rejected
+  fact  Size cap   = 64 MiB decompressed, measured on bytes read
+  list  Carries    = agent_presets/, personas/, skills/, integrations/, flows/, memories.jsonl
+  link  Spec       = specs/AGENT_PACK_FORMAT.md
+
+ext registry "Pack registry"
+  is    any host serving the four-endpoint pack protocol — a protocol, not a place
+  why >
+    axoniac.com, packs.metalcraftai.com and a company's own host are interchangeable to a
+    pod, on the crates.io alternative-registries model. An id present in more than one
+    configured registry is an error unless qualified, because a silent first match is the
+    supply-chain substitution attack. Redirects are never followed.
+  list  Endpoints = /version, /manifest, /download, /search
+  list  Trust     = first-party, verified-only, explicit
+  env   PACKS_BASE_URL FLOWS_BASE_URL
+
+svc installer "Installer" x1.4
+  is    validates the archive entirely in memory, then writes in a fixed order
+  why >
+    Seventeen checks run and every failure is reported at once, because an author fixing one
+    error per round-trip is the experience the rule exists to prevent. Upgrades write new
+    files before removing withdrawn ones, so an in-flight turn never loses its personas
+    mid-sentence. Store garbage collection runs after the new refs are recorded, and is
+    skipped entirely if any installed pack's manifest is unreadable.
+  src   src/agent_packs/bundle.rs
+  list  Rejects = path traversal, bad hash, two presets, uncontained persona, unvendored integration
+  num   Checks  = 17
+
+store packsdir "agent_packs/"
+  is    installed packs, one directory each, holding what they provide
+  why >
+    The pack's own files land here verbatim — its manifest, its preset, its personas and
+    skills. Its integrations do not: those go to the content store, and this directory keeps
+    only an integrations.json map of id to hash. That indirection is what lets two packs
+    share one copy and two versions coexist.
+  fact  Path  = <data>/agent_packs/<id>/
+  fact  Index = <data>/agent_packs.json
+  list  Holds = agent_pack.json, agent_presets/, personas/, skills/, integrations.json
+
+store packstore "Integration store" x1.2
+  is    content-addressed integrations, keyed by hash and refcounted
+  why >
+    Ten packs vendoring the same calendar integration means one stored copy. Because the key
+    is the content and not the id, two different versions coexist without conflict — which
+    deletes the "highest version wins" ambiguity entirely; a pack simply gets the bytes it
+    was built against. An entry is removed only when no installed pack still references it.
+  src   src/agent_packs/store.rs
+  fact  Path  = <data>/integration_store/<sha256>/
+  fact  Hash  = metalcraft_packs::canonical_sha256 over sorted (path, bytes)
+
+store lock "metalcraft.lock"
+  is    every installed artifact pinned to name, version, hash and origin
+  why >
+    Its purpose is reproducibility across pod rebuilds and clones: replaying the lock
+    reinstalls identical versions verified by hash, rather than drifting to whatever is
+    newest. Written as a side effect of install and uninstall, so it always reflects the
+    current set. Reads are lock-free; writes serialize through an advisory file lock,
+    because the daemon and the workshop API can both mutate it.
+  src   src/lockfile.rs
+  list  Sections = agent_packs, packs, flows
+
+lib seed "Embedded seed"
+  is    the default personas, skills, integrations and flow templates, compiled into the binary
+  why >
+    include_dir! embeds the whole seed/ tree, so a released binary is self-contained and
+    needs no folder shipped beside it. Skills and flows are write-if-missing; personas are
+    version-gated, so a bundled persona with a higher semver overwrites the installed copy
+    while a user-authored one — which has no version — is never touched.
+  src   src/seed.rs seed/
+
+# ------------------------------------------------------------------
+# the pod
+# ------------------------------------------------------------------
+
+group pod "The pod's data dir"
+  note user-local always wins; a pack can add to the pod but never overwrite what you wrote
+
+store localdirs "User-local files" x1.2
+  is    everything you authored on this pod, in flat directories by kind
+  why >
+    The same shapes packs ship, written by hand or by the workshop. A local file shadows a
+    pack file of the same slug, which is the whole override story: to change a pack's
+    persona, save one with its slug. Pack-owned items are read-only through the API, and the
+    error names the owning pack rather than refusing blankly.
+  fact  Path  = <data>/
+  list  Dirs  = personas/, skills/, agent_presets/, api_tools/, flows/, flow_templates/, chats/
+
+svc resolver "Layered resolver" x1.3
+  is    resolves a slug to a file and reports which layer it came from
+  why >
+    One function decides visibility for every artifact kind: user-local first, then each
+    installed agent pack, then any legacy integration. Listings deduplicate by file stem so a
+    shadowed pack entry never appears twice. Each hit carries its origin, which is how the
+    workshop knows to grey out Save on something it does not own.
+  src   src/integrations.rs
+  list  Layers = local, agent pack, integration
+  list  Api    = resolve_file, resolve_or_explain, list_files_layered
+
+store keys "keys.json"
+  is    the scoped plaintext secret store the $NAME placeholders resolve against
+  why >
+    Global keys and per-channel keys live in one v2 document, so a channel's secrets get
+    short clean names without transport prefixes. Lookup is store-first then environment,
+    which lets a pasted key override an env default. METALCRAFT_TOKEN inverts that on
+    purpose — the control plane injects it per pod, and a stale pasted key must never
+    shadow a freshly injected one.
+  src   src/key_store.rs
+  fact  Path    = <data>/keys.json, schema v2
+  fact  Storage = plaintext; OS file permissions are the protection
+  list  Scopes  = global, channel(<id>)
+
+# ------------------------------------------------------------------
+# live
+# ------------------------------------------------------------------
+
+group live "Live agents"
+  note an instance is not a conversation, and that distinction is the load-bearing one
+
+svc instance "Agent instance" x1.7
+  is    a live agent minted from a preset, owning memory and many conversations
+  why >
+    A gateway session resets its state on idle; if an instance were a single conversation an
+    agent would forget you between text messages. Instead the reset ends a conversation and
+    the instance carries on, which is what makes per-instance memory worth having. Its preset
+    is immutable for its life — memory is seeded from that preset, so swapping it mid-life is
+    incoherent. Switching agents means starting a new instance.
+  src   src/agent_instance.rs
+  fact  Path       = <data>/agent_instances/<id>/
+  fact  Id         = inst_<uuid simple>
+  fact  Orphaned   = keeps memory and chats against a frozen preset copy; never deleted
+  list  Origins    = workshop, cli, gateway, flow
+  list  Follows    = persona prompts, tools, skills, roster, seed memories
+  list  Never      = learned memory, conversations, name, persistent
+
+store chats "Conversations"
+  is    one thread with one instance, stored where transcripts always were
+  why >
+    Adding instances did not add a second copy of the transcript. A chat record simply gained
+    an instance_id, which leaves the entire turn path untouched — this is grouping and
+    identity, not new storage. Existing chats are backfilled into instances on first boot.
+  fact  Path = <data>/chats/<id>.json
+
+store base "Memory base"
+  is    a preset's seed memories, built once per version, immutable and shared
+  why >
+    Built at install from the pack's memories.jsonl and refcounted across every instance of
+    that preset — twenty instances hold one copy of the vectors, on disk and in RAM. Records
+    are Source::Seeded, marking "the author gave me this" as distinct from anything the
+    agent learned. Precomputed vectors are reused only when both embed model and dimensions
+    match; a mismatch rebuilds silently, because recall degrades but never fails.
+  src   src/memory/
+  fact  Path = <data>/memory/presets/<slug>@<version>/
+  num   Cap  = 5,000
+
+store delta "Memory delta"
+  is    one instance's own memory — everything it learned, plus its tombstones
+  why >
+    Every write lands here. Editing a base memory materialises that one record into the delta
+    and shadows it by id; forgetting one writes a tombstone that also lives here, which is
+    precisely why a forgotten memory stays forgotten when the base is repointed at a new pack
+    version. Instance creation is therefore O(1): a pointer and an empty delta.
+  fact  Path  = <data>/memory/instances/<instance_id>/
+  list  Holds = wal, snapshot, tombstones, vectors
+
+svc runtime "Turn runtime" x1.5
+  is    assembles the prompt, builds the tool registry, and runs one turn
+  why >
+    Every entry point — CLI, daemon chat, one-shot flow node — constructs an agent the same
+    way. It resolves the persona through the layered resolver, splices in the attached skills
+    and the live memory profile, and builds the tool registry from resolved_tool_names so
+    the step guard and the model agree on exactly one list.
+  src   src/runtime.rs src/context.rs
+  list  Steps = load context, resolve persona, assemble prompt, register tools, compact, execute
+
+svc subagent "sub_agent"
+  is    delegates a subtask to another persona, scoped to the preset's roster
+  why >
+    Its persona enum is the preset's callable roster and nothing wider, so delegation cannot
+    reach an agent the pack never declared. The child inherits the parent's instance id, so a
+    delegated subtask remembers into the same place rather than opening a second store nobody
+    reads.
+  src   src/tools/sub_agent.rs
+
+job daemon "Daemon"
+  is    the poll loop that fires due flows and scheduled follow-ups
+  why >
+    Each tick it evaluates every enabled flow's schedules, fires anything due, and drains
+    persisted follow-ups. A single invalid schedule fails its whole flow rather than firing a
+    guess, so the log makes the misconfiguration obvious. It also hosts the workshop API.
+  src   src/daemon.rs src/scheduled_tasks.rs
+
+entry workshop "Workshop API"
+  is    the REST and SSE surface the GUI and the gateway both come in through
+  why >
+    One Axum router covers personas, skills, presets, instances, chats, flows, packs and keys,
+    plus live chat and inbound webhooks. It is the same CRUD the *_meta tools use, so the
+    prompt-driven path and the GUI read and write identically — there is no second code path
+    that can drift.
+  src   src/workshop_api.rs
+  link  Schema = openapi/openapi.json
+
+# ------------------------------------------------------------------
+# how they compose
+# ------------------------------------------------------------------
+
+preset -read-> persona "the roster"
+  carry default_persona + personas[] { slug, role, description }
+  why >
+    The preset names slugs; the persona files are resolved separately and may come from a
+    different layer entirely. A roster persona that does not exist fails the install, naming it.
+  vol   0.9
+
+preset -read-> skill "declared skills"
+  carry skills[] -> skills/<slug>.md
+  why   Validated at install alongside every skill the roster personas load, not just these.
+  vol   0.5
+
+preset -read-> integration "declared integrations"
+  carry integrations[] -> integration ids, alias integration_packs
+  why >
+    This list is the containment boundary. Every persona's own integrations must be a subset
+    of it, which is what makes the consent summary complete.
+  vol   0.6
+
+persona -read-> skill "attached skills"
+  carry skills[] spliced into the system prompt at build time
+  why   Attached up front, unlike load_skill, which pulls a body mid-turn on the model's call.
+  vol   0.5
+
+persona -read-> integration "adopted surfaces"
+  carry integrations[] -> every <id>_* tool name, via resolved_tool_names
+  why >
+    The reason a persona can adopt a whole integration in one line. Native-tool integrations
+    contribute here too, but only while actually installed.
+  vol   0.8
+
+integration -spawn-> apitool "tool definitions"
+  carry api_tools/<name>.json -> HttpApiToolConfig -> one registered tool
+  why   The tool's own name field wins over its filename, so a tool that lies still cannot hide.
+  vol   0.7
+
+agentpack -data-> installer "the archive"
+  carry agent_pack.json, agent_presets/, personas/, skills/, integrations/, flows/
+  why >
+    Read and verified whole, in memory. Nothing is written until all seventeen checks pass,
+    because a half-installed identity is worse than a refused one.
+  vol   0.9
+
+registry -data-> installer "download"
+  carry GET /api/v1/agent-packs/{id}/download -> application/zip
+  why   Content-addressed and immutable, so the ETag is the content hash and caching is trivial.
+  vol   0.4
+
+installer -write-> packsdir "what the pack provides"
+  carry agent_pack.json + agent_presets/<slug>.json + personas/ + skills/
+  why   New files land before withdrawn ones are removed, so every path that resolved still does.
+  vol   0.8
+
+installer -write-> packstore "vendored integrations"
+  carry integration_store/<sha256>/{integration.json, api_tools/}
+  why   Idempotent — an entry that already exists is left alone, which makes the second vendoring free.
+  vol   0.7
+
+installer -write-> base "seed memories"
+  carry memories.jsonl -> memory/presets/<slug>@<version>/
+  why   A corrupt line costs one memory and is counted, never the whole pack.
+  vol   0.5
+
+installer -write-> lock "the pin"
+  carry LockEntry { name, version, content_sha256, source }
+  why   Written on install and uninstall both, so the file is the current set rather than a history.
+  vol   0.3
+
+packsdir -read-> packstore "hash indirection"
+  carry agent_packs/<id>/integrations.json -> { "metalcraft-calendar": "<sha256>" }
+  why >
+    The one hop that makes deduplication and version coexistence work. Ids are ambiguous
+    across versions; hashes are not.
+  vol   0.6
+
+seed -spawn-> localdirs "first run"
+  carry include_dir!("seed/") -> <data>/{personas, skills, api_tools, flow_templates, integrations}
+  why   Personas upgrade by semver; everything else is write-if-missing and never clobbers your edits.
+  vol   0.4
+
+localdirs -data-> resolver "layer 1"
+  carry <data>/personas/<slug>.json — checked first, always wins
+  why >
+    Checked on every lookup, before any pack is consulted. A user file shadows a pack file of
+    the same slug, which is the whole override story — to change a pack's persona, save one
+    under its name. The shadowing is silent by design; nothing tells you it happened.
+  vol   0.8
+
+packsdir -data-> resolver "layer 2"
+  carry agent_packs/<id>/{personas, skills, agent_presets}/<slug>.*
+  why >
+    Walked in installed order once the local dir misses. For personas and skills a second
+    provider is simply shadowed, but a preset slug offered by two packs is an error naming
+    both — talking to an agent you did not install is worse than a failed lookup.
+  vol   0.7
+
+packstore -data-> resolver "tool layer"
+  carry integration_store/<sha256>/api_tools/*.json
+  why >
+    Reached through each pack's integrations.json rather than by id, so the tools a persona
+    adopts are the exact bytes its pack was built against. An integration nothing declares
+    contributes nothing, because availability is by declaration and not by a global flag.
+  vol   0.6
+
+resolver -data-> runtime "resolved artifacts"
+  carry (PathBuf, IntegrationOrigin) for the persona, its skills, and its tools
+  why >
+    The origin travels with the file. That is how a listing can mark a pack-provided item
+    read-only without a second lookup, and how a miss can name the pack that would have
+    provided it.
+  vol   0.9
+
+preset -spawn-> instance "minting an agent"
+  carry AgentInstance::new(preset, origin) -> inst_<uuid>
+  why   The preset slug is recorded and frozen; the version alongside it is diagnostics only.
+  vol   0.8
+
+instance -write-> chats "conversations"
+  carry chats/<id>.json gains instance_id
+  why   One instance, many threads. Ending a thread on idle does not end the agent.
+  vol   0.7
+
+instance -read-> base "shared recall"
+  carry memory/presets/<slug>@<version>/ — read-only, refcounted
+  why   Repointed to the new version on update; new records appear, tombstoned ones stay gone.
+  vol   0.6
+
+instance -write-> delta "learned memory"
+  carry wal append -> snapshot + tombstones, fused with the base at recall
+  why   Never touched by an update. Somebody's agent is in there.
+  vol   0.8
+
+runtime -read-> instance "identity for the turn"
+  carry instance.persona, instance_id, and the preset's callable roster
+  why >
+    Read once at the top of every turn. The instance decides which persona speaks and which
+    memory namespace gets written; the roster decides how far delegation may reach. An
+    orphaned instance resolves against its frozen preset copy here and keeps working.
+  vol   0.9
+
+runtime -read-> chats "history"
+  carry Vec<Message> -> token estimate -> compaction when over budget
+  why >
+    Loaded per turn and measured before the model call. Over budget the transcript is
+    compacted rather than truncated, and anything durable in that summary is rescued into
+    memory as Source::Compaction — so compacting does not quietly cost the agent a fact.
+  vol   0.7
+
+runtime -call-> apitool "tool call"
+  carry HttpApiTool::call(args) -> reqwest -> JSON back to the model
+  why >
+    Fires whenever the model names a tool the persona resolved to. A non-2xx becomes
+    ToolCallFailed carrying the status, so the model sees the failure rather than an empty
+    success. Repeated identical calls trip the loop guard unless the tool is marked poll.
+  vol   0.8
+
+runtime -spawn-> subagent "delegation"
+  carry sub_agent { persona, task }, persona enum = preset.callable_personas()
+  why >
+    Fires when a turn delegates. The persona parameter is an enum of the roster and nothing
+    wider, so delegation cannot reach an agent the pack never declared. The child inherits the
+    parent's instance id, so what it learns lands in one store rather than a second one.
+  vol   0.4
+
+subagent -read-> persona "runs as"
+  carry preset.allows_persona(slug) — internal roles included, never offered
+  why >
+    Resolved through the same layered lookup as any other persona, so a sub-agent picks up
+    your local override if you wrote one. Internal-role personas resolve here but never appear
+    in the enum, which is precisely what the internal role means.
+  vol   0.4
+
+runtime -read-> skill "load_skill"
+  carry load_skill { skill } -> strip_frontmatter(body) into the transcript
+  why >
+    Fires mid-turn on the model's own call, unlike the persona's attached skills which sit in
+    the prompt from the start. The parameter is an enum of what this pod actually has, so an
+    invented skill name fails at the schema rather than reading an arbitrary file.
+  vol   0.5
+
+apitool -read-> keys "credentials"
+  carry $METALCRAFT_TOKEN in headers -> key_store::lookup_scoped
+  why >
+    Every $NAME in a header is also what the pack format derives the consent summary from,
+    because those are the references authors routinely leave out of requires_env.
+  vol   0.7
+
+daemon -call-> flow "due schedules"
+  carry parse_schedules(SavedFlow) -> ScheduledTrigger { cron, timezone, persona, inputs }
+  why   Validation runs first; an invalid schedule drops the whole flow rather than firing a guess.
+  vol   0.6
+
+flow -spawn-> instance "arming a schedule"
+  carry flow_bindings::arm(flow, schedule_id) -> a persistent instance, one conversation per firing
+  why >
+    Scheduled work accumulates memory across runs, so a morning briefer can notice it said the
+    same thing yesterday.
+  vol   0.5
+
+workshop -call-> runtime "live chat"
+  carry POST /api/chat { message, chat_id } -> SSE token stream
+  why >
+    The GUI and the gateway both arrive here, and both go through the same TurnRunner the CLI
+    uses. A gateway session that idles out ends the conversation and leaves the instance
+    standing, which is the reason an agent does not forget you between text messages.
+  vol   0.8
+
+workshop -write-> localdirs "authoring"
+  carry PUT /api/personas/<slug> — refused with the owning pack id when not user-local
+  why >
+    Writes only ever land in the user-local dir. Editing a pack-provided item means saving a
+    local copy that shadows it, and the refusal names the owning pack so the answer is
+    actionable. The same CRUD backs the meta tools, so there is no second path to drift.
+  vol   0.6
+
+# ------------------------------------------------------------------
+# narrative
+# ------------------------------------------------------------------
+
+tab what "What it does"
+  h  Six things you write, one thing you ship
+  p >
+    A [[persona|persona]] is the only artifact holding a prompt. A [[skill|skill]] is
+    methodology with no permissions attached. An [[integration|integration]] is tool
+    definitions plus the credentials they need. An [[agent preset|preset]] composes those
+    into an identity — a default persona, a roster, and a declared list of what they need —
+    and stores nothing of its own.
+  p >
+    None of them install. The only installable unit is the [[agent pack|agentpack]], a zip
+    carrying exactly one preset and every persona, skill and integration that preset names.
+    Self-contained by construction: an install must succeed with no network at all.
+  note Hover a block for what it is. Click one for its fields and every connection in and out.
+
+tab resolution "How a slug becomes a file"
+  h  Three layers, first hit wins
+  p >
+    Everything addressed by slug goes through one [[resolver|resolver]]: your own files
+    first, then each installed pack, then any legacy integration. A local file shadows a
+    pack file of the same slug, and that is the entire override story — to change a pack's
+    persona, save one with its slug.
+  p >
+    One deliberate exception. A preset slug provided by two packs is an error naming both,
+    never a silent pick, because talking to an agent you did not install is worse than a
+    failed lookup.
+  ---
+  p >
+    Each hit carries its origin, which is why the workshop can grey out Save on something
+    you do not own, and why a miss can name the pack that would have provided it.
+  code |
+    resolve_file(&paths::personas_dir(), "personas", "amy.json")
+      -> Some((PathBuf, IntegrationOrigin::Pack { id: "amy-kitchen" }))
+
+tab live "What runs"
+  h  An instance is not a conversation
+  p >
+    Picking a preset mints an [[agent instance|instance]] — a live agent that owns memory
+    and many threads. A gateway session resets on idle; if an instance were one conversation
+    the agent would forget you between text messages. Instead the reset ends a thread and
+    the instance carries on.
+  p >
+    Its memory is two layers. The [[base|base]] is the preset's seed memories, built once
+    per version and shared by every instance of it. The [[delta|delta]] is what this agent
+    learned, and it is the only one anything writes to. Recall queries both and fuses;
+    forgetting a base memory writes a {{tombstone}} into the delta, which is exactly why it
+    stays forgotten when the base moves to a new pack version.
+  note An instance's preset is immutable for its life. Switching agents starts a new one.
+
+tab consent "What you are approving"
+  h  Derived from the bytes, never from the description
+  p >
+    The domains an [[agent pack|agentpack]] can reach and the credentials it needs are
+    computed from the integrations actually inside the archive — every $NAME in a header,
+    every host in a URL, every non-GET method. A manifest that disagrees with its own
+    contents is a rejection, not a warning.
+  p >
+    Two rules make that summary complete. Every persona's integrations must be a subset of
+    its preset's, so a pack cannot reach anywhere it did not disclose. And {{mutating_tools}}
+    is required, because a read-only agent is a materially smaller commitment than one that
+    can write, and a surface that cannot say which it is has not obtained consent.
+  note Install never arms a schedule. Flows land disabled and the report says how many.
+
+term "tombstone" = a forget-marker stored in the instance delta, so it survives the shared base being replaced
+term "mutating_tools" = the derived list of a pack's tools whose HTTP method is anything other than GET

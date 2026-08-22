@@ -10,3 +10,7 @@
 
 # Scratch: files staged for manual deletion (agent sessions cannot rm on this host).
 /_to_delete
+
+# Compiled gridwillow blueprints — ~1 MB of inlined three.js, regenerated from
+# the .bp source with: bp export docs/<name>.bp -o docs/<name>.html
+/docs/*.html
