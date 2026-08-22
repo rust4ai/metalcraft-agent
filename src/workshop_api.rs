@@ -308,6 +308,8 @@ async fn auth_middleware(
         get_flow_schedules, put_flow_schedules, post_flow_schedule, delete_flow_schedule,
         get_flow_binding, put_flow_binding, post_arm_schedule, delete_arm_schedule,
         post_inspect_agent_pack, get_agent_pack_registries, post_update_agent_pack,
+        get_registry_status, post_registry_connect, post_registry_disconnect,
+        get_registry_search, get_registry_manifest,
         get_flow_schedules_preview,
         post_install_flow_dependencies,
         list_flow_runs, get_flow_run, post_resume_flow_run,
@@ -355,6 +357,8 @@ async fn auth_middleware(
         InstanceDetail, CreateInstanceRequest, PatchInstanceRequest, NewConversationRequest,
         ScheduledFlowRef, InstanceFlows, PresetDetail, RosterPersona, InstanceList, InstanceListItem,
         AgentPackPreview, Registries, RegistryView, crate::agent_registry::Trust,
+        crate::agent_registry::Connection, crate::agent_registry::ConnectionState,
+        crate::agent_registry::SearchHit,
         FlowBindingView, FlowPersonaCheck, ArmedSchedule, ArmConsent,
         BindFlowRequest, ArmScheduleRequest,
         crate::skill::Skill, crate::skill::SkillSummary,
@@ -448,6 +452,22 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/agent-packs/install", post(post_install_agent_pack))
         .route("/api/v1/agent-packs/inspect", post(post_inspect_agent_pack))
         .route("/api/v1/agent-packs/registries", get(get_agent_pack_registries))
+        // A registry is browsable and connectable, not just an origin the pod will
+        // fetch from. Everything here is proxied rather than called from a browser:
+        // the origin check, the pod's own credential and the redirect refusal all
+        // live on this side, and a client that called the host directly would have
+        // none of them.
+        .route("/api/v1/agent-packs/registries/{name}/status", get(get_registry_status))
+        .route("/api/v1/agent-packs/registries/{name}/connect", post(post_registry_connect))
+        .route(
+            "/api/v1/agent-packs/registries/{name}/disconnect",
+            post(post_registry_disconnect),
+        )
+        .route("/api/v1/agent-packs/registries/{name}/search", get(get_registry_search))
+        .route(
+            "/api/v1/agent-packs/registries/{name}/packs/{id}/manifest",
+            get(get_registry_manifest),
+        )
         .route("/api/v1/agent-packs/export", post(post_export_agent_pack))
         .route("/api/v1/agent-packs/{id}", get(get_agent_pack))
         .route("/api/v1/agent-packs/{id}", delete(delete_agent_pack))
@@ -1049,6 +1069,168 @@ struct RegistryView {
     url: String,
     trust: crate::agent_registry::Trust,
     is_default: bool,
+}
+
+// ── Registry connection ──────────────────────────────────────────────────────
+//
+// Browsing and installing a *public* pack needs no credential, so none of this is on
+// the critical path for "install the agent I just found". What it buys is the rest:
+// private packs, and a host that can say which account this pod belongs to. The
+// credential is the one the pod already holds — connecting points a registry at it.
+
+/// One place where a registry failure becomes a status code.
+///
+/// The distinctions are the ones a UI acts on differently: a typo in a name, a
+/// malformed reference, a host that does not have the pack, a host that does not offer
+/// this part of the protocol at all, and a host having a bad day. Reading them off a
+/// typed error rather than off message text means rewording an error cannot silently
+/// change what the API returns.
+fn registry_error(e: crate::agent_registry::RegistryError) -> Response {
+    use crate::agent_registry::RegistryError as E;
+    let code = match &e {
+        E::Unknown(_) | E::NotFound(_) => StatusCode::NOT_FOUND,
+        E::BadReference(_) => StatusCode::BAD_REQUEST,
+        E::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
+        // Not a failure: the operator configured this pod by environment variable and
+        // this is us declining to write a file that would never be read.
+        E::Locked(_) => StatusCode::CONFLICT,
+        E::Host(_) => StatusCode::BAD_GATEWAY,
+    };
+    err_json(code, e.to_string())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent-packs/registries/{name}/status",
+    tag = "agent-packs",
+    params(("name" = String, Path, description = "A configured registry name")),
+    responses(
+        (status = 200, description = "What this pod is to that registry", body = crate::agent_registry::Connection),
+        (status = 404, description = "No such registry is configured", body = ErrorResponse),
+    ),
+)]
+async fn get_registry_status(Path(name): Path<String>) -> Response {
+    match crate::agent_registry::status(&name).await {
+        Ok(c) => Json(c).into_response(),
+        Err(e) => registry_error(e),
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct ConnectRegistryQuery {
+    /// Which key-store entry holds the bearer to send. Defaults to this pod's
+    /// Metalcraft ID token — the point of the whole exercise is that no new credential
+    /// is created, so the default is the one that already exists.
+    #[serde(default)]
+    token_key: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/agent-packs/registries/{name}/connect",
+    tag = "agent-packs",
+    params(
+        ("name" = String, Path, description = "A configured registry name"),
+        ("token_key" = Option<String>, Query, description = "Key-store entry to draw the bearer from; defaults to METALCRAFT_TOKEN"),
+    ),
+    responses(
+        (status = 200, description = "Where the connection got to", body = crate::agent_registry::Connection),
+        (status = 404, description = "No such registry is configured", body = ErrorResponse),
+        (status = 409, description = "Registries come from AGENT_PACK_REGISTRIES and cannot be edited", body = ErrorResponse),
+    ),
+)]
+async fn post_registry_connect(
+    Path(name): Path<String>,
+    Query(q): Query<ConnectRegistryQuery>,
+) -> Response {
+    let key = q
+        .token_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .unwrap_or(crate::agent_registry::POD_TOKEN_KEY);
+    match crate::agent_registry::connect(&name, key).await {
+        Ok(c) => Json(c).into_response(),
+        Err(e) => registry_error(e),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/agent-packs/registries/{name}/disconnect",
+    tag = "agent-packs",
+    params(("name" = String, Path, description = "A configured registry name")),
+    responses(
+        (status = 200, description = "The registry, now anonymous", body = crate::agent_registry::Connection),
+        (status = 404, description = "No such registry is configured", body = ErrorResponse),
+        (status = 409, description = "Registries come from AGENT_PACK_REGISTRIES and cannot be edited", body = ErrorResponse),
+    ),
+)]
+async fn post_registry_disconnect(Path(name): Path<String>) -> Response {
+    match crate::agent_registry::disconnect(&name).await {
+        Ok(c) => Json(c).into_response(),
+        Err(e) => registry_error(e),
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct RegistrySearchQuery {
+    /// Free text. Omitted asks the host for whatever it puts forward, which is a
+    /// browse list rather than an empty search.
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent-packs/registries/{name}/search",
+    tag = "agent-packs",
+    params(
+        ("name" = String, Path, description = "A configured registry name"),
+        ("q" = Option<String>, Query, description = "Search text; omit to browse"),
+        ("limit" = Option<u32>, Query, description = "1–100, default 25"),
+    ),
+    responses(
+        (status = 200, description = "What that host publishes"),
+        (status = 404, description = "No such registry is configured", body = ErrorResponse),
+        (status = 501, description = "That host is fetch-only and does not offer search", body = ErrorResponse),
+        (status = 502, description = "The host could not be searched", body = ErrorResponse),
+    ),
+)]
+async fn get_registry_search(
+    Path(name): Path<String>,
+    Query(q): Query<RegistrySearchQuery>,
+) -> Response {
+    match crate::agent_registry::search(&name, q.q.as_deref(), q.limit.unwrap_or(25)).await {
+        Ok(results) => {
+            Json(serde_json::json!({ "registry": name, "results": results })).into_response()
+        }
+        Err(e) => registry_error(e),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent-packs/registries/{name}/packs/{id}/manifest",
+    tag = "agent-packs",
+    params(
+        ("name" = String, Path, description = "A configured registry name"),
+        ("id" = String, Path, description = "The pack's handle on that host"),
+    ),
+    responses(
+        (status = 200, description = "The pack's manifest, as the host serves it"),
+        (status = 400, description = "That is not a usable pack id", body = ErrorResponse),
+        (status = 404, description = "No such registry, or no such pack on it", body = ErrorResponse),
+        (status = 502, description = "The host would not serve it", body = ErrorResponse),
+    ),
+)]
+async fn get_registry_manifest(Path((name, id)): Path<(String, String)>) -> Response {
+    match crate::agent_registry::manifest(&name, &id).await {
+        Ok(m) => Json(m).into_response(),
+        Err(e) => registry_error(e),
+    }
 }
 
 #[utoipa::path(

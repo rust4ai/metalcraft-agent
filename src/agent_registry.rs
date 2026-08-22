@@ -113,6 +113,13 @@ fn config_file() -> std::path::PathBuf {
     crate::paths::data_dir().join("registries.json")
 }
 
+/// The `AGENT_PACK_REGISTRIES` override, if it is set to anything. Read in one place
+/// because two questions depend on it: what [`load`] returns, and whether writing the
+/// config file would mean anything (it would not — the override replaces it wholesale).
+fn env_override() -> Option<String> {
+    std::env::var("AGENT_PACK_REGISTRIES").ok().filter(|v| !v.trim().is_empty())
+}
+
 /// The configured registries.
 ///
 /// Precedence: `AGENT_PACK_REGISTRIES` (a bare comma-separated origin list, kept for
@@ -120,9 +127,7 @@ fn config_file() -> std::path::PathBuf {
 /// then the built-in defaults. The env override wins because it is the thing someone
 /// reaches for when the config file is exactly what they are trying to bypass.
 pub fn load() -> Registries {
-    if let Ok(v) = std::env::var("AGENT_PACK_REGISTRIES")
-        && !v.trim().is_empty()
-    {
+    if let Some(v) = env_override() {
         let mut registries = BTreeMap::new();
         for (i, url) in v.split(',').map(str::trim).filter(|s| !s.is_empty()).enumerate() {
             // An origin list carries no trust information, so the only honest reading
@@ -327,6 +332,7 @@ pub async fn resolve(raw: &str) -> Result<Resolved, String> {
             })
         }
         Reference::Qualified { registry, id } => {
+            let id = pack_id(&id).map_err(|e| e.to_string())?;
             let Some(reg) = cfg.get(&registry) else {
                 return Err(format!(
                     "no registry named '{registry}' is configured. Configured: {}.",
@@ -338,6 +344,7 @@ pub async fn resolve(raw: &str) -> Result<Resolved, String> {
                 .ok_or_else(|| format!("'{id}' is not published on {registry}"))
         }
         Reference::Bare { id } => {
+            let id = pack_id(&id).map_err(|e| e.to_string())?;
             let mut hits: Vec<Resolved> = Vec::new();
             let mut errors: Vec<String> = Vec::new();
             for (name, reg) in &cfg.registries {
@@ -436,6 +443,387 @@ pub async fn fetch(url: &str) -> Result<Vec<u8>, String> {
         return Err("that agent pack is too large".to_string());
     }
     Ok(bytes.to_vec())
+}
+
+// ── connection: who this pod is to a registry ────────────────────────────────
+//
+// The four protocol endpoints are anonymous for a public pack, so browsing and
+// installing one need no credential at all. What a credential buys is the rest: a
+// private pack, and a host able to answer "which account is this pod?". Every pod
+// already holds exactly one such credential — the Metalcraft ID token the control
+// plane injects — so connecting is *pointing a registry at it*. Nothing is minted,
+// no secret moves, and there is no second account to keep in step.
+
+/// The key-store entry holding this pod's Metalcraft ID token. Platform-managed
+/// (`key_store::ENV_AUTHORITATIVE`), so the injected value always wins over a stale
+/// one somebody pasted.
+pub const POD_TOKEN_KEY: &str = "METALCRAFT_TOKEN";
+
+/// How far a registry connection got, in the only terms a UI can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConnectionState {
+    /// The host resolved this pod's token to an account there.
+    Connected,
+    /// The token is good and no account on the host claims it yet. The one state a
+    /// button can fix, which is why it is not folded into [`Self::Rejected`] —
+    /// `link_url` is where that button goes.
+    Unlinked,
+    /// This pod sends no credential to this host. Public packs still install.
+    NoToken,
+    /// The host refused the token: expired, revoked, or from another ecosystem.
+    Rejected,
+    /// The host serves packs and has no identity endpoint. Nothing is wrong — §11.1
+    /// is four endpoints and none of them is `whoami`; there is simply nothing here
+    /// to connect.
+    Unsupported,
+    /// We could not ask.
+    Unreachable,
+}
+
+/// What this pod is to one registry.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct Connection {
+    pub registry: String,
+    pub url: String,
+    pub trust: Trust,
+    /// The key-store entry this registry draws its bearer from — the name, never the
+    /// value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_key: Option<String>,
+    pub state: ConnectionState,
+    /// Where a human goes to finish the connection. Taken from the host's own answer
+    /// rather than assembled here: a URL we guessed is a URL we would still be sending
+    /// people to after the host moved it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_url: Option<String>,
+    /// Whatever the host will say about the account — an email, usually.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// The host's own words when something went wrong, for a UI to show verbatim
+    /// instead of inventing an explanation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Whether `name` is a registry this pod knows about — the difference between a typo
+/// and a host that is having a bad day.
+pub fn configured(name: &str) -> bool {
+    load().get(name).is_some()
+}
+
+/// Why a registry call produced no answer.
+///
+/// The distinctions here are the ones a caller acts on differently — a typo in a
+/// registry name, a malformed reference, a host that does not have the pack, and a
+/// host having a bad day are four different conversations. They were briefly one
+/// `String`, and the HTTP layer had to sniff the message text to pick a status code,
+/// which is a coupling that breaks the first time someone rewords an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryError {
+    /// This pod has no registry by that name.
+    Unknown(String),
+    /// The caller's reference cannot be used.
+    BadReference(String),
+    /// The host does not publish it — or will not admit it does, which §11.1 requires
+    /// it to make indistinguishable.
+    NotFound(String),
+    /// The host serves packs but not this part of the protocol.
+    Unsupported(String),
+    /// The host answered badly, or not at all.
+    Host(String),
+    /// The configuration is not ours to write.
+    Locked(String),
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            Self::Unknown(m)
+            | Self::BadReference(m)
+            | Self::NotFound(m)
+            | Self::Unsupported(m)
+            | Self::Host(m)
+            | Self::Locked(m) => m,
+        };
+        f.write_str(msg)
+    }
+}
+
+fn unknown_registry(cfg: &Registries, name: &str) -> RegistryError {
+    RegistryError::Unknown(format!(
+        "no registry named '{name}' is configured. Configured: {}.",
+        cfg.registries.keys().cloned().collect::<Vec<_>>().join(", ")
+    ))
+}
+
+/// The bearer this registry is configured to send, if the entry names one and the key
+/// store actually holds it.
+fn token_for(reg: &Registry) -> Option<String> {
+    reg.token_key
+        .as_deref()
+        .and_then(crate::key_store::lookup)
+        .filter(|t| !t.trim().is_empty())
+}
+
+/// Ask a registry who this pod is.
+///
+/// Every failure is a `Connection`, not an `Err`: "the host is down" and "you are not
+/// linked yet" are things a settings panel *renders*, and turning them into errors
+/// would make the panel unable to tell them apart from a typo in the registry name —
+/// which is the one case that really is an error.
+pub async fn status(name: &str) -> Result<Connection, RegistryError> {
+    let cfg = load();
+    let reg = cfg.get(name).ok_or_else(|| unknown_registry(&cfg, name))?;
+    let mut conn = Connection {
+        registry: name.to_string(),
+        url: reg.url.clone(),
+        trust: reg.trust,
+        token_key: reg.token_key.clone(),
+        state: ConnectionState::NoToken,
+        link_url: None,
+        account: None,
+        detail: None,
+    };
+
+    let Some(token) = token_for(reg) else {
+        // Either no key is named or the store does not hold it. Both mean one thing to
+        // a caller: this pod is anonymous here.
+        return Ok(conn);
+    };
+
+    let url = format!("{}/api/v1/whoami", reg.url.trim_end_matches('/'));
+    let http = client().await.map_err(RegistryError::Host)?;
+    let resp = match http.get(&url).bearer_auth(token).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            conn.state = ConnectionState::Unreachable;
+            conn.detail = Some(e.to_string());
+            return Ok(conn);
+        }
+    };
+    let code = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    conn.detail = body.get("error").and_then(|v| v.as_str()).map(str::to_string);
+    conn.link_url = body.get("link_url").and_then(|v| v.as_str()).map(str::to_string);
+    conn.account = body
+        .get("email")
+        .or_else(|| body.get("account"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    conn.state = match code {
+        c if c.is_success() => ConnectionState::Connected,
+        // The structured refusal: the host knows this token and has no account
+        // attached to it, and says where to attach one.
+        reqwest::StatusCode::FORBIDDEN if conn.link_url.is_some() => ConnectionState::Unlinked,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            ConnectionState::Rejected
+        }
+        reqwest::StatusCode::NOT_FOUND => ConnectionState::Unsupported,
+        c => {
+            conn.detail.get_or_insert_with(|| format!("{name} answered {c}"));
+            ConnectionState::Unreachable
+        }
+    };
+    Ok(conn)
+}
+
+/// Start presenting a credential this pod already holds to `name`, and report where
+/// that got us. This is the whole of "initialize": one line of config, then the same
+/// status probe the panel would have made anyway.
+pub async fn connect(name: &str, token_key: &str) -> Result<Connection, RegistryError> {
+    set_token_key(name, Some(token_key))?;
+    status(name).await
+}
+
+/// Stop presenting one. Public packs keep working, which is why this is safe to offer
+/// next to the button that turned it on.
+pub async fn disconnect(name: &str) -> Result<Connection, RegistryError> {
+    set_token_key(name, None)?;
+    status(name).await
+}
+
+fn set_token_key(name: &str, token_key: Option<&str>) -> Result<(), RegistryError> {
+    // `AGENT_PACK_REGISTRIES` replaces the file wholesale, so a write here would be a
+    // write `load` never reads. Refuse rather than appear to work — a settings panel
+    // that silently does nothing is worse than one that explains itself.
+    if env_override().is_some() {
+        return Err(RegistryError::Locked(
+            "this pod's registries come from AGENT_PACK_REGISTRIES, which replaces the \
+             config file. Unset it to manage registries from the workshop."
+                .to_string(),
+        ));
+    }
+    let mut cfg = load();
+    let Some(reg) = cfg.registries.get_mut(name) else {
+        return Err(unknown_registry(&cfg, name));
+    };
+    reg.token_key = token_key.map(str::to_string);
+    save(&cfg).map_err(RegistryError::Host)
+}
+
+// ── browse ───────────────────────────────────────────────────────────────────
+
+/// One result from a host's `/search`.
+///
+/// Everything past the name is optional because a fetch-only host is a real
+/// deployment rather than a degenerate one (§11.1 makes `/search` optional in the
+/// first place). A browse list renders what it got; it does not refuse what it
+/// didn't.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct SearchHit {
+    /// What to install: `axoniac:@amy_kitchen`. **Qualified, always** — an
+    /// unqualified reference is an error the moment two configured hosts publish the
+    /// same id (§11.3), and a browse list is precisely where that collision surfaces.
+    pub reference: String,
+    /// The id on this host, without the `@`.
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tagline: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    /// Whether the host vouches for it — worth exactly as much as the host's `trust`
+    /// makes it worth, and on a `verified-only` host it is what decides whether this
+    /// pod will install the pack at all.
+    pub verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_count: Option<i64>,
+}
+
+/// An id we are willing to put in a URL path — §3.1's identifier, exactly.
+///
+/// An allowlist rather than a list of characters to avoid: a `..` segment is
+/// normalised away by any URL parser, turning "show me this pack's manifest" into a
+/// call to whatever else the host serves at that path. The spec already says what an
+/// id looks like (`^[a-z0-9][a-z0-9_-]{0,63}$`), so requiring it costs nothing real.
+pub fn pack_id(id: &str) -> Result<String, RegistryError> {
+    let id = id.trim().trim_start_matches('@');
+    let shaped = id.len() <= 64
+        && id.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    if !shaped {
+        return Err(RegistryError::BadReference(format!(
+            "'{id}' is not a valid agent pack id: lowercase letters, digits, '_' and '-', \
+             starting with a letter or digit (AGENT_PACK_FORMAT.md §3.1)"
+        )));
+    }
+    Ok(id.to_string())
+}
+
+async fn get_json(
+    reg: &Registry,
+    url: &str,
+) -> Result<(reqwest::StatusCode, serde_json::Value), RegistryError> {
+    let mut req = client().await.map_err(RegistryError::Host)?.get(url);
+    if let Some(token) = token_for(reg) {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| RegistryError::Host(format!("registry request failed: {e}")))?;
+    let code = resp.status();
+    let body = resp.json::<serde_json::Value>().await.unwrap_or_default();
+    Ok((code, body))
+}
+
+/// Browse a host. An empty `q` asks for whatever it puts forward, which is a browse
+/// list rather than an empty search.
+pub async fn search(
+    name: &str,
+    q: Option<&str>,
+    limit: u32,
+) -> Result<Vec<SearchHit>, RegistryError> {
+    let cfg = load();
+    let reg = cfg.get(name).ok_or_else(|| unknown_registry(&cfg, name))?;
+    let mut url = reqwest::Url::parse(&format!(
+        "{}/api/v1/agent-packs/search",
+        reg.url.trim_end_matches('/')
+    ))
+    .map_err(|e| RegistryError::Host(format!("registry '{name}' has an unusable url: {e}")))?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        if let Some(q) = q.map(str::trim).filter(|q| !q.is_empty()) {
+            pairs.append_pair("q", q);
+        }
+        pairs.append_pair("limit", &limit.clamp(1, 100).to_string());
+    }
+
+    let (code, body) = get_json(reg, url.as_str()).await?;
+    if code == reqwest::StatusCode::NOT_FOUND || code == reqwest::StatusCode::NOT_IMPLEMENTED {
+        // Optional in the protocol, so this is a fact about the host rather than a
+        // fault: say what still works instead of showing an error with no way forward.
+        return Err(RegistryError::Unsupported(format!(
+            "{name} does not offer search. Install by reference instead — '{name}:@handle'."
+        )));
+    }
+    if !code.is_success() {
+        return Err(RegistryError::Host(format!("{name} answered {code} to a search")));
+    }
+    let results = body.get("results").and_then(|r| r.as_array()).ok_or_else(|| {
+        RegistryError::Host(format!("{name} returned a search body with no results array"))
+    })?;
+    Ok(results.iter().filter_map(|v| hit_from(name, v)).collect())
+}
+
+/// What a host says about one pack, without downloading it (§11.1 `/manifest`).
+pub async fn manifest(name: &str, id: &str) -> Result<serde_json::Value, RegistryError> {
+    let cfg = load();
+    let reg = cfg.get(name).ok_or_else(|| unknown_registry(&cfg, name))?;
+    let id = pack_id(id)?;
+    let url = format!(
+        "{}/api/v1/agent-packs/{id}/manifest",
+        reg.url.trim_end_matches('/')
+    );
+    let (code, body) = get_json(reg, &url).await?;
+    match code {
+        c if c.is_success() => Ok(body),
+        // A host must 404 a pack the viewer cannot see rather than 403 it (§11.1), so
+        // these are the same answer as far as anyone here is concerned.
+        reqwest::StatusCode::NOT_FOUND => {
+            Err(RegistryError::NotFound(format!("'{id}' is not published on {name}")))
+        }
+        c => Err(RegistryError::Host(format!("{name} answered {c} for '{id}'"))),
+    }
+}
+
+fn hit_from(registry: &str, v: &serde_json::Value) -> Option<SearchHit> {
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+    };
+    // §11.1: the reference is the handle where the host has one, falling back to the
+    // pack's own id. Taken in that order deliberately — a host whose `id` is a
+    // database key has a handle, and one without handles is already naming packs in
+    // `id`, so the first field that is a *name* wins.
+    let id = field("handle").or_else(|| field("slug")).or_else(|| field("id"))?;
+    let name = field("name").unwrap_or_else(|| id.clone());
+    Some(SearchHit {
+        reference: format!("{registry}:@{id}"),
+        id,
+        name,
+        version: field("version"),
+        tagline: field("tagline").or_else(|| field("description")),
+        category: field("category"),
+        tags: v
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+        avatar_url: field("avatar_url"),
+        verified: v.get("verified").and_then(|b| b.as_bool()).unwrap_or(false),
+        install_count: v.get("install_count").and_then(|n| n.as_i64()),
+    })
 }
 
 #[cfg(test)]
@@ -591,6 +979,72 @@ mod tests {
         assert!(
             trust_permits(&first_party, false).is_ok(),
             "a first-party host's packs are not gated on a verified flag it never sets"
+        );
+    }
+
+    /// The id lands in a URL path, so the guard is an allowlist of what §3.1 says an
+    /// id is — not a blocklist of what looks dangerous today.
+    #[test]
+    fn a_pack_id_that_could_leave_its_path_is_refused() {
+        assert_eq!(pack_id("amy_kitchen").as_deref(), Ok("amy_kitchen"));
+        assert_eq!(pack_id("@amy_kitchen").as_deref(), Ok("amy_kitchen"), "the @ is sugar");
+        assert_eq!(pack_id(" mitch-reviews ").as_deref(), Ok("mitch-reviews"));
+
+        for hostile in [
+            // Normalised away by any URL parser, landing on another endpoint entirely.
+            "../version",
+            "..",
+            // A second path segment is a second endpoint.
+            "amy/../../keys",
+            "amy?x=1",
+            "amy#frag",
+            // Percent-encoding is how the above gets past a naive character check.
+            "%2e%2e",
+            "amy kitchen",
+            "Amy_Kitchen",
+            "",
+        ] {
+            assert!(
+                matches!(pack_id(hostile), Err(RegistryError::BadReference(_))),
+                "{hostile:?} must not reach a URL path — and it is the caller's mistake"
+            );
+        }
+    }
+
+    /// A browse result is only useful if it can be installed, and §11.3 makes an
+    /// unqualified reference an error the moment two hosts publish the same id — so
+    /// the reference a listing hands back is qualified, always.
+    #[test]
+    fn a_search_hit_is_installable_without_ambiguity() {
+        let row = serde_json::json!({
+            "id": "1f0b6a1e-0000-4000-8000-000000000000",
+            "handle": "amy_kitchen",
+            "slug": "amy-kitchen",
+            "name": "Amy",
+            "version": "1.2.0",
+            "tagline": "cooks",
+            "tags": ["food", "home"],
+            "verified": true,
+            "install_count": 42,
+        });
+        let hit = hit_from("axoniac", &row).expect("a row with a handle is a hit");
+        assert_eq!(hit.reference, "axoniac:@amy_kitchen");
+        assert_eq!(hit.id, "amy_kitchen", "the handle, not the host's database key");
+        assert_eq!(hit.version.as_deref(), Some("1.2.0"));
+        assert!(hit.verified);
+        assert_eq!(hit.tags, vec!["food", "home"]);
+
+        // A fetch-only host that names packs in `id` and publishes nothing else still
+        // renders: everything past the name is optional in the protocol.
+        let sparse = serde_json::json!({ "id": "helpdesk", "name": "Helpdesk" });
+        let hit = hit_from("acme", &sparse).expect("id alone is enough");
+        assert_eq!(hit.reference, "acme:@helpdesk");
+        assert_eq!(hit.version, None);
+        assert!(!hit.verified, "a host that says nothing vouches for nothing");
+
+        assert!(
+            hit_from("acme", &serde_json::json!({ "name": "no id" })).is_none(),
+            "a result nothing can be installed from is not a result"
         );
     }
 }

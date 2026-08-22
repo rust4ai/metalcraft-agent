@@ -455,6 +455,28 @@ never leak that it exists.
 | `verified-only` | refuses a pack the host has not marked verified, unless overridden |
 | `explicit` | the user added this host by hand; prompt on every install |
 
+### 11.3a Connecting a pod to a host (optional)
+
+The four endpoints are anonymous for a public pack, so nothing above requires a
+credential. A host that also serves **private** packs, or that wants to say which
+account a pod belongs to, MAY answer:
+
+```
+GET /api/v1/whoami   (Bearer)  → 200 { linked, email? }        this pod's account
+                               → 403 { error, link_url }       no account claims this token
+                               → 404                            the host has no identity layer
+```
+
+A pod connects by pointing a registry entry's `token_key` at a credential it already
+holds — on Metalcraft that is `METALCRAFT_TOKEN`, injected by the control plane. **No
+credential is minted for a registry**, and the pod sends one only to hosts explicitly
+configured with a `token_key`.
+
+The `403` is the load-bearing case, and it is why this is a distinct status rather than
+a bare refusal: it means *the token is good and no account has claimed it*, which is the
+one state a human can fix in one click. `link_url` is where that click goes. A pod MUST
+show the host's own `link_url` rather than construct one.
+
 ### 11.3 Reference resolution
 
 - `@amy_kitchen` resolves against `default`.
