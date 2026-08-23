@@ -93,6 +93,11 @@ pub struct FlowRunSummary {
     /// it needs). Shown in flow-debug UIs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// The conversation this run wrote itself into, so a caller can link a run
+    /// straight to its transcript. Absent for a run with no agent, and for a
+    /// tool-only flow that never spoke.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
 }
 
 /// Stepwise executor over a single flow run.
@@ -128,6 +133,15 @@ pub struct FlowExecutor<'a> {
     /// inside the flow obeys the same containment as a chat. `None` for unbound
     /// flows, which behave as they always did.
     preset_personas: Option<Vec<String>>,
+    /// The conversation this run records itself into, opened lazily on the first
+    /// node that actually says something. `None` until then — and forever, for a
+    /// run with no agent (§2.3 of `docs/FLOWS_AS_AGENTS_PLAN.md`: a run creates a
+    /// conversation exactly when it has an instance to create it in) or for a
+    /// tool-only flow, which should not leave an empty chat behind.
+    chat_id: Option<String>,
+    /// Whether this run has written its opening marker yet. A rolling
+    /// conversation holds several firings, so each one names itself once.
+    run_marked: bool,
 }
 
 /// The roster of the preset a flow is bound to, if it is bound and the preset
@@ -199,8 +213,41 @@ impl<'a> FlowExecutor<'a> {
             created_at: None,
             warnings,
             instance_id: None,
+            chat_id: None,
+            run_marked: false,
             preset_personas: roster_for(&flow_id),
         })
+    }
+
+    /// Record one node's turn in the agent's conversation, opening one if this is
+    /// the run's first spoken node.
+    ///
+    /// Silent when the run has no agent: an ad-hoc run of an unarmed flow stays
+    /// exactly as it was — memoryless, and leaving no transcript to mislead
+    /// anyone about whose memory it touched.
+    async fn record_turn(&mut self, prompt: &str, answer: &str) {
+        let Some(instance_id) = self.instance_id.clone() else {
+            return;
+        };
+        if self.chat_id.is_none() {
+            self.chat_id = crate::workshop_api::flow_conversation(
+                &instance_id,
+                &self.default_persona,
+                &self.model_name,
+                &self.cwd,
+            )
+            .await;
+        }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let opening = if self.run_marked {
+            prompt.to_string()
+        } else {
+            self.run_marked = true;
+            format!("▶ {}\n\n{prompt}", self.flow.name)
+        };
+        crate::workshop_api::record_flow_turn(&chat_id, &opening, answer).await;
     }
 
     /// Run as a specific agent instance, so this run's turns recall from (and
@@ -236,6 +283,12 @@ impl<'a> FlowExecutor<'a> {
             warnings,
             instance_id: run.instance_id.clone(),
             preset_personas: roster_for(&flow_id),
+            // A run that paused Monday and resumes Thursday continues the thread
+            // it paused in, rather than resuming into nothing — which is the
+            // difference between approving something you still have the context
+            // for and approving a stranger's request.
+            chat_id: run.chat_id.clone(),
+            run_marked: run.chat_id.is_some(),
         }
     }
 
@@ -368,6 +421,7 @@ impl<'a> FlowExecutor<'a> {
             steps: self.steps,
             variables: self.variables.into_value(),
             warnings: self.warnings,
+            chat_id: self.chat_id,
         }
     }
 
@@ -400,6 +454,7 @@ impl<'a> FlowExecutor<'a> {
             flow: Some(self.flow.clone()),
             warnings: self.warnings.clone(),
             instance_id: self.instance_id.clone(),
+            chat_id: self.chat_id.clone(),
             created_at,
             updated_at: now,
         };
@@ -598,11 +653,21 @@ impl<'a> FlowExecutor<'a> {
                 preset_personas: self.preset_personas.clone(),
             },
         )
-        .await;
+        .await
+        // Flattened to a string immediately: the boxed error is not `Send`, and
+        // recording the turn below is an await point, so holding it across one
+        // would make every caller's future non-Send. Nothing reads it but
+        // `to_string` anyway.
+        .map_err(|e| e.to_string());
 
         match outcome {
             Ok(RunOutcome::Completed(state)) => {
                 let answer = state.final_answer().unwrap_or("").to_string();
+                // Recorded before routing, so a node whose answer fails its
+                // schema check is still in the transcript: "it replied, and the
+                // reply was not what the flow needed" is a debuggable story,
+                // while a silently dropped turn is not.
+                self.record_turn(&prompt, &answer).await;
                 // With a declared schema, the answer must be structured. Extract
                 // JSON even if the model wrapped it in ``` fences or prose; if
                 // none is found, route `error` rather than smuggle a raw string
@@ -748,13 +813,25 @@ impl<'a> FlowExecutor<'a> {
             call_args["pack"] = json!(pk);
         }
 
-        match tool.call(call_args).await {
+        // Same reason as `run_prompt`: the tool's error is not `Send` and the turn
+        // is recorded across an await.
+        match tool.call(call_args).await.map_err(|e| e.to_string()) {
             Ok(result) => {
                 let is_err = result
                     .get("error")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 let answer = result.get("result").cloned().unwrap_or(Value::Null);
+                // A delegated task is work the agent did; a `branch` node is a
+                // routing decision and is deliberately *not* recorded — a
+                // conversation full of "which way should I go?" would bury the
+                // turns a person actually wants to read. The diagnostics session
+                // still holds every step either way.
+                let spoken = match &answer {
+                    Value::String(t) => t.clone(),
+                    other => other.to_string(),
+                };
+                self.record_turn(&task, &spoken).await;
                 if let Some(var) = &data.output_var {
                     self.variables.set(var, answer.clone());
                 }

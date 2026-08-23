@@ -127,7 +127,12 @@ response shape.
 
 ---
 
-## 4. B — one conversation per firing *(the load-bearing change)*
+## 4. B — one conversation per firing *(the load-bearing change)* — **DONE**
+
+*Landed 2026-08-23. `FlowExecutor.chat_id` + `workshop_api::{flow_conversation,
+record_flow_turn}` + `FlowRun.chat_id` / `FlowRunSummary.chat_id`, proven by
+`tests/flow_conversation_test.rs`. Three decisions the implementation had to make
+that this section had left open are recorded in §4.5.*
 
 Today a flow run writes a diagnostics session and nothing else: `grep chat src/flow_exec.rs`
 returns one comment. The run is real, the memory capture is real, and none of it is
@@ -192,6 +197,36 @@ what you actually want to read.
 
 **Size:** medium. One threaded field, one lazy constructor, one sink — but it touches the
 executor's three turn-running node types and the resume path.
+
+### 4.5 What the implementation settled
+
+**The conversation is the record, not the execution context.** Nodes still run as
+independent one-shots through `run_one_shot_task`, passing values through the flow's own
+variables; they do not see each other's transcript. Making the chat the *context* would
+turn a flow from a graph with explicit data flow into an ever-growing thread — a different
+product, and not one anybody asked for. What the chat gives is visibility: the agent's
+conversation list, turn counts, and every transcript UI start working on flow runs with no
+client change at all.
+
+**`branch` nodes are not recorded; `prompt` and `sub_agent` are.** A branch is a routing
+decision ("which way should I go?"); a conversation full of them would bury the turns a
+person actually wants to read. The diagnostics session still holds every step, so nothing
+is lost — it is a question of which record is *readable*. A prompt node is recorded even
+when its answer then fails an `output_schema` check, because "it replied, and the reply was
+not what the flow needed" is a debuggable story while a silently dropped turn is not.
+
+**The rolling window lives in memory, not on disk.** `flow_threads()` maps
+`instance_id → (chat_id, last turn)` in the same process-global style as the chat store.
+The window asks "is this still the same working session", which is a live-process question
+— and after a restart the next firing starting a fresh conversation is honest, because the
+pod is not mid-thought any more. Resume does *not* depend on it: a paused run carries
+`FlowRun.chat_id`, so a run that paused Monday continues its own thread on Thursday however
+long the daemon has been down.
+
+One incidental fix fell out: `run_one_shot_task`'s and `SubAgentTool::call`'s errors are
+boxed `dyn StdError`, which is not `Send`. Recording a turn is an `await`, so holding those
+across it made every caller's future non-`Send`. Both are now flattened with
+`.map_err(|e| e.to_string())` at the call site — nothing read them but `to_string` anyway.
 
 ---
 
@@ -306,11 +341,15 @@ once already — see `687e996`).
 
 - `GET /api/v1/flows` lists **disabled** flows, and reports `instance_id` for an armed
   schedule and `null` for an unarmed one.
-- A scheduled firing of an armed flow produces a conversation in its instance; the instance's
-  `conversation_count` goes 0 → 1 and the transcript holds the run.
-- A second firing **within** the TTL appends to that conversation; a firing **after** it
-  starts a second one (§4.3).
-- A tool-only flow (no prompt/branch/sub_agent node) creates **no** conversation.
+- ✅ A scheduled firing of an armed flow produces a conversation in its instance; the
+  instance's `conversation_count` goes 0 → 1 and the transcript holds the run.
+  (`flow_conversation_test`)
+- ✅ A second firing **within** the TTL appends to that conversation (`flow_conversation_test`);
+  a firing **after** it starts a second one (§4.3) — the expiry half is not yet covered by a
+  test, since it would mean either a 15-minute wait or an injectable clock.
+- ✅ A tool-only flow (no prompt/branch/sub_agent node) creates **no** conversation — an
+  empty chat in an agent's list reads as "it talked to you and you missed it".
+  (`flow_conversation_test`)
 - A client subscribed to `GET /chats/{id}/events` receives the firing's frames without
   having initiated the turn.
 - A run that pauses on `approval` and resumes three days later resumes **in the same
@@ -331,14 +370,17 @@ Existing coverage to keep green: `tests/flow_binding_test.rs`, `tests/flow_pause
 
 | | Scope | Size | Unblocks |
 |---|---|---|---|
-| **A** | `GET /api/v1/flows` (§3) | small | the entire client half — do first |
-| **B** | conversation per firing (§4). Completes AP4's "Remaining" | medium | live transcripts, the fleet stops lying |
+| **A** | ✅ `GET /api/v1/flows` (§3) | small | the entire client half — do first |
+| **B** | ✅ conversation per firing (§4). Completes AP4's "Remaining" | medium | live transcripts, the fleet stops lying |
 | **C** | run-now as the bound agent (§5) | small | the Automations view's primary action |
 | **D** | ~~arm consent summary~~ — **already built** (§6); optionally echo `FlowBindingView` from `POST …/arm` | none / tiny | the arm dialog, which is client work |
 | **E** | instance status (§7) | small | fleet status dots |
 
 A → B is the recommended order even though B is bigger: with A alone the client can list
-automations, but every one of them opens onto an agent with nothing to show.
+automations, but every one of them opens onto an agent with nothing to show. **Both are
+done**; the client half (`metalcraft-front` PLAN §10.7, UI_PLAN S9) ships the Automations
+surface on top of them. What is left is **C** (run-now as the bound agent) and the client's
+arm dialog, which needs no pod work — see §6.
 
 ---
 

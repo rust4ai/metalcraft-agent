@@ -1352,6 +1352,110 @@
         }
       }
     },
+    "/api/v1/chats/{id}/clear": {
+      "post": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "Drop this chat's conversation but keep the chat — `/clear`.",
+        "description": "The chat row, its persona and its model survive; only the message history\ngoes. Distinct from `DELETE /chats/{id}`, which removes the chat itself.",
+        "operationId": "post_chat_clear",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatContext"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The chat is mid-turn"
+          }
+        }
+      }
+    },
+    "/api/v1/chats/{id}/compact": {
+      "post": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "Compact this chat's context now — `/compact`.",
+        "description": "Deliberately does everything an automatic compaction does, including handing\nthe summary to memory: it is the most concentrated account of the conversation\nthat will ever exist and the LLM call is already paid for, so a forced\ncompaction that dropped it would quietly be worth less than one that happened\nby itself.\n\nRefuses mid-turn. Compaction rewrites the message list the running turn is\nreading, and \"your context changed under you\" is not a failure mode worth\nhaving.",
+        "operationId": "post_chat_compact",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCompacted"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The chat is mid-turn"
+          }
+        }
+      }
+    },
+    "/api/v1/chats/{id}/context": {
+      "get": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "What this chat's context costs right now — the read behind `/tokens`, and the\nnumber a client needs to show headroom before someone hits the wall.",
+        "operationId": "get_chat_context",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatContext"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/chats/{id}/events": {
       "get": {
         "tags": [
@@ -3745,6 +3849,82 @@
           }
         }
       },
+      "ChatCompacted": {
+        "type": "object",
+        "description": "The result of a forced compaction.",
+        "required": [
+          "compacted",
+          "tokens_before",
+          "tokens_after",
+          "messages_before",
+          "messages_after"
+        ],
+        "properties": {
+          "compacted": {
+            "type": "boolean",
+            "description": "False when there was nothing old enough to summarize — not an error, and\nthe honest answer for a short conversation."
+          },
+          "messages_after": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "messages_before": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The summary that replaced the old half, when one was produced."
+          },
+          "tokens_after": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tokens_before": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ChatContext": {
+        "type": "object",
+        "description": "What a chat's context currently costs.",
+        "required": [
+          "estimated_tokens",
+          "message_count",
+          "context_window",
+          "compact_threshold_tokens",
+          "would_compact"
+        ],
+        "properties": {
+          "compact_threshold_tokens": {
+            "type": "integer",
+            "description": "Automatic compaction fires above this. A client can render the headroom.",
+            "minimum": 0
+          },
+          "context_window": {
+            "type": "integer",
+            "description": "The window compaction sizes against.",
+            "minimum": 0
+          },
+          "estimated_tokens": {
+            "type": "integer",
+            "description": "Rough estimate (~4 chars per token), the same one compaction decides on.\nNot the provider's count — good enough to answer \"how full is this?\".",
+            "minimum": 0
+          },
+          "message_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "would_compact": {
+            "type": "boolean",
+            "description": "Whether the next turn would compact on its own."
+          }
+        }
+      },
       "ChatDetail": {
         "type": "object",
         "required": [
@@ -4758,6 +4938,13 @@
           "updated_at"
         ],
         "properties": {
+          "chat_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The conversation this run is writing itself into, so a resumed run\ncontinues the thread it paused in rather than starting a stranger's.\nAbsent when the run has no agent (nothing to record into) or never reached\na node that spoke."
+          },
           "created_at": {
             "type": "string",
             "description": "RFC-3339 creation timestamp."
@@ -4850,6 +5037,13 @@
           "variables"
         ],
         "properties": {
+          "chat_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The conversation this run wrote itself into, so a caller can link a run\nstraight to its transcript. Absent for a run with no agent, and for a\ntool-only flow that never spoke."
+          },
           "flow_id": {
             "type": "string",
             "description": "The flow that ran."

@@ -113,6 +113,18 @@ pub fn compact(state: &mut AgentState, summary: String, keep_recent: usize) {
     state.messages.extend(recent);
 }
 
+/// Why a compaction is being attempted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionTrigger {
+    /// The context crossed [`CompactionConfig::compact_threshold`] before a turn.
+    Threshold,
+    /// Someone asked for it — `/compact`. Skips the threshold check, because the
+    /// point of asking is that you want it *now*: the automatic rule fires at 60%
+    /// of the window, which is long after the point where someone can feel a
+    /// conversation getting heavy and wants room before the question that matters.
+    Forced,
+}
+
 /// Check if compaction is needed and perform it using the given model.
 ///
 /// Returns the summary that was produced, or `None` if no compaction was needed.
@@ -126,13 +138,49 @@ pub async fn compact_if_needed<M: CompletionModel + 'static>(
     model: &M,
     config: &CompactionConfig,
 ) -> Result<Option<String>, String> {
-    let tokens = estimate_tokens(state);
-    if tokens < config.threshold_tokens() {
-        return Ok(None);
-    }
+    compact_with(state, model, config, CompactionTrigger::Threshold).await
+}
 
-    let split = safe_split(&state.messages, config.keep_recent_messages);
+/// Compact now, whatever the context size — the primitive behind `/compact`.
+///
+/// Still returns `None` when there is genuinely nothing to do: a conversation with
+/// nothing older than `keep_recent_messages` has no old half to summarize, and
+/// saying so beats paying for a summary of nothing.
+pub async fn compact_now<M: CompletionModel + 'static>(
+    state: &mut AgentState,
+    model: &M,
+    config: &CompactionConfig,
+) -> Result<Option<String>, String> {
+    compact_with(state, model, config, CompactionTrigger::Forced).await
+}
+
+/// Whether an attempt should go on to the summarization call, which costs an LLM
+/// round trip — split out so the one asymmetry between the triggers is testable
+/// without a model.
+///
+/// `Forced` skips the size check and nothing else. It still needs an old half to
+/// summarize: with none, there is no work to do and no reason to pay for a call.
+fn should_summarize(
+    tokens: usize,
+    split: usize,
+    config: &CompactionConfig,
+    trigger: CompactionTrigger,
+) -> bool {
     if split == 0 {
+        return false;
+    }
+    trigger == CompactionTrigger::Forced || tokens >= config.threshold_tokens()
+}
+
+async fn compact_with<M: CompletionModel + 'static>(
+    state: &mut AgentState,
+    model: &M,
+    config: &CompactionConfig,
+    trigger: CompactionTrigger,
+) -> Result<Option<String>, String> {
+    let tokens = estimate_tokens(state);
+    let split = safe_split(&state.messages, config.keep_recent_messages);
+    if !should_summarize(tokens, split, config, trigger) {
         return Ok(None);
     }
     let old_messages = &state.messages[..split];
@@ -223,6 +271,28 @@ mod tests {
             name: name.into(),
             result: result.into(),
         }
+    }
+
+    #[test]
+    fn forcing_a_compaction_skips_the_size_check_and_nothing_else() {
+        let config = CompactionConfig::default();
+        let under = config.threshold_tokens() - 1;
+        let over = config.threshold_tokens() + 1;
+
+        // The reason `/compact` exists: automatic compaction only fires at 60% of
+        // the window, which is long after the point where someone can feel a
+        // conversation getting heavy and wants room before the next question.
+        assert!(!should_summarize(under, 20, &config, CompactionTrigger::Threshold));
+        assert!(should_summarize(under, 20, &config, CompactionTrigger::Forced));
+
+        // Both still compact once the context is genuinely large.
+        assert!(should_summarize(over, 20, &config, CompactionTrigger::Threshold));
+        assert!(should_summarize(over, 20, &config, CompactionTrigger::Forced));
+
+        // Neither pays for a summary of nothing: with no messages older than
+        // `keep_recent_messages` there is no old half to fold up.
+        assert!(!should_summarize(over, 0, &config, CompactionTrigger::Forced));
+        assert!(!should_summarize(under, 0, &config, CompactionTrigger::Forced));
     }
 
     #[test]

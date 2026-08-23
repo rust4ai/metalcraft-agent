@@ -69,6 +69,12 @@ pub struct FlowRun {
     /// on records written before agent instances existed, which resume as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
+    /// The conversation this run is writing itself into, so a resumed run
+    /// continues the thread it paused in rather than starting a stranger's.
+    /// Absent when the run has no agent (nothing to record into) or never reached
+    /// a node that spoke.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
     /// RFC-3339 creation timestamp.
     pub created_at: String,
     /// RFC-3339 last-update timestamp.
@@ -135,6 +141,7 @@ mod tests {
             flow: None,
             warnings: vec![],
             instance_id: None,
+            chat_id: None,
             created_at: "2026-07-27T00:00:00Z".into(),
             updated_at: "2026-07-27T00:00:00Z".into(),
         }

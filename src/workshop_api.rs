@@ -96,6 +96,172 @@ async fn chat_event_sender(chat_id: &str) -> tokio::sync::broadcast::Sender<Chat
         .clone()
 }
 
+// ── A flow firing's conversation ────────────────────────────────────────
+//
+// A scheduled flow already runs *as* an agent: `flow_bindings::arm` mints a
+// persistent instance and the executor threads its id through every turn, so the
+// memory is real. What was missing is the **record** — a firing left a
+// diagnostics session and nothing a person would read, so a flow-born agent
+// listed zero conversations and opened onto an empty transcript. An agent that
+// has never visibly done anything is indistinguishable from one that does not
+// work.
+//
+// So a firing writes itself into a chat: the same `chats/<id>.json` a typed
+// conversation uses, carrying the same `instance_id`. Two things fall out of
+// that choice rather than needing to be built:
+//
+//   * the chat's live bus already exists, so a client watching
+//     `GET /chats/{id}/events` sees a 3am cron replay in real time — the same
+//     path scheduled follow-ups use (`deliver_followup_to_chat`);
+//   * the agent's conversation list, turn counts, and every transcript UI start
+//     working on flow runs with no client change at all.
+//
+// **The conversation is the record, not the execution context.** Nodes still run
+// as independent one-shots through `run_one_shot_task`, passing values by the
+// flow's own variables; they do not see each other's transcript. Making the chat
+// the context would change what a flow *is* — a graph with explicit data flow —
+// into an ever-growing thread, which is a different product.
+//
+// See `docs/FLOWS_AS_AGENTS_PLAN.md` §4.
+
+/// The conversation each agent's flow runs are currently recording into, with
+/// the time of the last turn written. Process-global, like the chat store.
+type FlowThreads = Arc<Mutex<HashMap<String, (String, chrono::DateTime<chrono::Utc>)>>>;
+
+fn flow_threads() -> FlowThreads {
+    static T: std::sync::OnceLock<FlowThreads> = std::sync::OnceLock::new();
+    T.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone()
+}
+
+/// How long after its last turn a firing still joins the previous conversation.
+///
+/// "A new conversation per firing" is right for a daily briefer and wrong for a
+/// five-minute cron, which would mint 288 threads a day and bury the agent's real
+/// ones. This is the rule the pod already uses everywhere else to decide whether
+/// something is still the same conversation — the gateway's idle reset, and the
+/// follow-up policy — so flows are consistent with the rest rather than special.
+/// A fast cron produces one rolling thread, which is what anyone would want to
+/// read; a daily one produces a thread per day.
+const FLOW_CONVERSATION_TTL_SECS: i64 = DEFAULT_GATEWAY_SESSION_TTL_SECS as i64;
+
+/// The conversation this agent's next flow turn belongs in, creating one if the
+/// last is stale or gone.
+///
+/// `pub` (like [`deliver_followup_to_chat`]) because it is chat plumbing driven
+/// from outside the HTTP handlers — here, by the flow executor.
+///
+/// In memory rather than on disk on purpose: the window asks "is this still the
+/// same working session", which is a live-process question. After a restart the
+/// next firing starts a fresh conversation, which is honest — the pod is not
+/// mid-thought any more.
+pub async fn flow_conversation(
+    instance_id: &str,
+    persona: &str,
+    model: &str,
+    cwd: &str,
+) -> Option<String> {
+    let store = chat_store();
+    let threads = flow_threads();
+    let mut open = threads.lock().await;
+
+    if let Some((chat_id, last)) = open.get(instance_id) {
+        let fresh = (chrono::Utc::now() - *last).num_seconds() < FLOW_CONVERSATION_TTL_SECS;
+        // A chat deleted from under us must not resurrect as a ghost id.
+        if fresh && store.lock().await.contains_key(chat_id) {
+            return Some(chat_id.clone());
+        }
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let session = ChatSession {
+        id: id.clone(),
+        instance_id: Some(instance_id.to_string()),
+        persona_slug: persona.to_string(),
+        model_name: model.to_string(),
+        cwd: cwd.to_string(),
+        preset: SessionPreset::Workshop,
+        state: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        // The flow run has its own diagnostics session (`flow_exec` builds one,
+        // tagged with `flow_id` + `instance_id`); a second logger here would
+        // split one run's trace across two session dirs.
+        diagnostics: None,
+        trace: None,
+        busy: false,
+        pending: std::collections::VecDeque::new(),
+    };
+    store
+        .lock()
+        .await
+        .insert(id.clone(), Arc::new(Mutex::new(session)));
+    open.insert(
+        instance_id.to_string(),
+        (id.clone(), chrono::Utc::now()),
+    );
+    Some(id)
+}
+
+/// Append one flow node's turn to a conversation and publish it live.
+///
+/// `prompt` lands as the user message because that is what it is from the
+/// agent's side: the instruction it was given. The flow's own marker (`▶ …`) is
+/// prefixed by the caller on the first turn of a run, so a rolling thread still
+/// shows where each firing began.
+pub async fn record_flow_turn(chat_id: &str, prompt: &str, answer: &str) {
+    let Some(session) = chat_store().lock().await.get(chat_id).cloned() else {
+        return;
+    };
+
+    let sender = chat_event_sender(chat_id).await;
+    let turn_index = {
+        let s = session.lock().await;
+        s.state
+            .as_ref()
+            .map(|st| {
+                st.messages
+                    .iter()
+                    .filter(|m| matches!(m, AgentMessage::User(_)))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    // A send error only means nobody is listening; the turn is persisted below.
+    let _ = sender.send(ChatEvent::TurnStarted {
+        turn_index,
+        user_message: prompt.to_string(),
+        session_id: None,
+    });
+
+    {
+        let mut s = session.lock().await;
+        let mut state = match s.state.take() {
+            Some(prev) => prev.continue_with(prompt.to_string()),
+            None => AgentState::new(prompt.to_string()),
+        };
+        state.messages.push(AgentMessage::Assistant(answer.to_string()));
+        // The node has already finished by the time it is recorded, so the turn
+        // is complete the moment it lands.
+        state.is_done = true;
+        s.state = Some(state);
+    }
+    persist_chat(&session).await;
+
+    let _ = sender.send(ChatEvent::Reply {
+        content: answer.to_string(),
+    });
+    let _ = sender.send(ChatEvent::Done {
+        status: "completed".into(),
+        reason: None,
+    });
+
+    if let Some(instance_id) = session.lock().await.instance_id.clone() {
+        flow_threads()
+            .lock()
+            .await
+            .insert(instance_id, (chat_id.to_string(), chrono::Utc::now()));
+    }
+}
+
 struct ChatSession {
     id: String,
     /// The agent instance this conversation belongs to. `None` only for records
@@ -328,6 +494,7 @@ async fn auth_middleware(
         list_keys, list_recommended_keys, put_key, delete_key, reveal_key,
         get_inference_status,
         list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
+        get_chat_context, post_chat_compact, post_chat_clear,
         list_scheduled_tasks, delete_scheduled_task,
         list_integrations, get_integration, delete_integration, put_integration_enabled, post_install_integration,
         get_lockfile, post_lockfile_restore,
@@ -339,7 +506,7 @@ async fn auth_middleware(
     components(schemas(
         ErrorResponse, ProjectSnapshot, ProjectLayout, ApiToolSummary,
         KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
-        InferenceStatus,
+        InferenceStatus, ChatContext, ChatCompacted,
         FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, RunFlowOutput, ResumeFlowRunRequest,
         InstallFlowRequest, InstallDependenciesResponse, SchedulePreview,
         FlowList, FlowListItem, FlowListSchedule,
@@ -591,6 +758,9 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/chats", get(list_chats).post(post_create_chat))
         .route("/api/v1/chats/{id}", get(get_chat).delete(delete_chat))
         .route("/api/v1/chats/{id}/turn", post(post_chat_turn))
+        .route("/api/v1/chats/{id}/context", get(get_chat_context))
+        .route("/api/v1/chats/{id}/compact", post(post_chat_compact))
+        .route("/api/v1/chats/{id}/clear", post(post_chat_clear))
         .route("/api/v1/chats/{id}/events", get(get_chat_events))
         .route("/api/v1/scheduled-tasks", get(list_scheduled_tasks))
         .route(
@@ -4152,6 +4322,245 @@ async fn delete_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>)
     } else {
         err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"))
     }
+}
+
+// ── Chat context: what a slash command acts on ──────────────────────────
+//
+// Everything a long conversation needs done *to* it rather than *said* to it.
+// These exist because a client had no way to ask: typing `/compact` into a chat
+// sent the literal text to the model, which spent a turn interpreting it as
+// prose. Compaction was reachable only by drifting past 60% of the window.
+
+/// What a chat's context currently costs.
+#[derive(Serialize, utoipa::ToSchema)]
+struct ChatContext {
+    /// Rough estimate (~4 chars per token), the same one compaction decides on.
+    /// Not the provider's count — good enough to answer "how full is this?".
+    estimated_tokens: usize,
+    message_count: usize,
+    /// The window compaction sizes against.
+    context_window: usize,
+    /// Automatic compaction fires above this. A client can render the headroom.
+    compact_threshold_tokens: usize,
+    /// Whether the next turn would compact on its own.
+    would_compact: bool,
+}
+
+/// The result of a forced compaction.
+#[derive(Serialize, utoipa::ToSchema)]
+struct ChatCompacted {
+    /// False when there was nothing old enough to summarize — not an error, and
+    /// the honest answer for a short conversation.
+    compacted: bool,
+    tokens_before: usize,
+    tokens_after: usize,
+    messages_before: usize,
+    messages_after: usize,
+    /// The summary that replaced the old half, when one was produced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+}
+
+fn chat_context_of(state: Option<&AgentState>) -> ChatContext {
+    let config = crate::context::CompactionConfig::default();
+    let estimated_tokens = state.map(crate::context::estimate_tokens).unwrap_or(0);
+    let threshold =
+        (config.context_window as f64 * config.compact_threshold) as usize;
+    ChatContext {
+        estimated_tokens,
+        message_count: state.map(|s| s.messages.len()).unwrap_or(0),
+        context_window: config.context_window,
+        compact_threshold_tokens: threshold,
+        would_compact: estimated_tokens >= threshold,
+    }
+}
+
+/// What this chat's context costs right now — the read behind `/tokens`, and the
+/// number a client needs to show headroom before someone hits the wall.
+#[utoipa::path(
+    get,
+    path = "/api/v1/chats/{id}/context",
+    tag = "chats",
+    params(("id" = String, Path, description = "Chat id")),
+    responses((status = 200, body = ChatContext)),
+)]
+async fn get_chat_context(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    let chats = state.chats.lock().await;
+    let Some(session) = chats.get(&id).cloned() else {
+        return err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"));
+    };
+    drop(chats);
+    let s = session.lock().await;
+    Json(chat_context_of(s.state.as_ref())).into_response()
+}
+
+/// Compact this chat's context now — `/compact`.
+///
+/// Deliberately does everything an automatic compaction does, including handing
+/// the summary to memory: it is the most concentrated account of the conversation
+/// that will ever exist and the LLM call is already paid for, so a forced
+/// compaction that dropped it would quietly be worth less than one that happened
+/// by itself.
+///
+/// Refuses mid-turn. Compaction rewrites the message list the running turn is
+/// reading, and "your context changed under you" is not a failure mode worth
+/// having.
+#[utoipa::path(
+    post,
+    path = "/api/v1/chats/{id}/compact",
+    tag = "chats",
+    params(("id" = String, Path, description = "Chat id")),
+    responses(
+        (status = 200, body = ChatCompacted),
+        (status = 409, description = "The chat is mid-turn"),
+    ),
+)]
+async fn post_chat_compact(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    let chats = state.chats.lock().await;
+    let Some(session) = chats.get(&id).cloned() else {
+        return err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"));
+    };
+    drop(chats);
+
+    // Claim the session the same way a turn does, so the two can never interleave.
+    let (mut agent_state, model_name, persona_slug, instance_id) = {
+        let mut s = session.lock().await;
+        if s.busy {
+            return err_json(StatusCode::CONFLICT, "chat is already mid-turn");
+        }
+        let Some(agent_state) = s.state.clone() else {
+            // Nothing said yet: report the no-op rather than inventing a summary.
+            return Json(ChatCompacted {
+                compacted: false,
+                tokens_before: 0,
+                tokens_after: 0,
+                messages_before: 0,
+                messages_after: 0,
+                summary: None,
+            })
+            .into_response();
+        };
+        s.busy = true;
+        (
+            agent_state,
+            s.model_name.clone(),
+            s.persona_slug.clone(),
+            s.instance_id.clone(),
+        )
+    };
+
+    /// Release `busy` on every exit path — an early return that left it set would
+    /// wedge the chat for the rest of the process.
+    async fn release(session: &Arc<Mutex<ChatSession>>) {
+        session.lock().await.busy = false;
+    }
+
+    // Built before any await: `from_environment`'s error is a non-Send boxed
+    // error and must not be held across a yield point.
+    let context_result = AgentRuntimeContext::from_environment().map_err(|e| e.to_string());
+    let context = match context_result {
+        Ok(c) => c,
+        Err(msg) => {
+            release(&session).await;
+            return err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("runtime not available: {msg}"),
+            );
+        }
+    };
+    let client_result =
+        crate::runtime::build_openai_client(&context.api_key).map_err(|e| e.to_string());
+    let client = match client_result {
+        Ok(c) => c,
+        Err(msg) => {
+            release(&session).await;
+            return err_json(StatusCode::SERVICE_UNAVAILABLE, msg);
+        }
+    };
+
+    // The trait that puts `completion_model` on a rig client; scoped here so the
+    // import cannot collide with the turn path's own model construction.
+    use rig::client::CompletionClient as _;
+
+    let tokens_before = crate::context::estimate_tokens(&agent_state);
+    let messages_before = agent_state.messages.len();
+    let outcome = crate::context::compact_now(
+        &mut agent_state,
+        &client.completion_model(&model_name),
+        &crate::context::CompactionConfig::default(),
+    )
+    .await;
+
+    let summary = match outcome {
+        Ok(summary) => summary,
+        Err(msg) => {
+            release(&session).await;
+            return err_json(StatusCode::BAD_GATEWAY, format!("could not compact: {msg}"));
+        }
+    };
+
+    let tokens_after = crate::context::estimate_tokens(&agent_state);
+    let messages_after = agent_state.messages.len();
+    {
+        let mut s = session.lock().await;
+        // Only on success: a failed summary must not truncate anyone's history.
+        if summary.is_some() {
+            s.state = Some(agent_state);
+        }
+        s.busy = false;
+    }
+    if let Some(summary) = &summary {
+        crate::memory::capture::record_compaction(
+            &crate::memory::capture::CaptureContext {
+                chat_id: Some(id.clone()),
+                persona: Some(persona_slug),
+                instance_id,
+            },
+            summary,
+        );
+        persist_chat(&session).await;
+    }
+
+    Json(ChatCompacted {
+        compacted: summary.is_some(),
+        tokens_before,
+        tokens_after,
+        messages_before,
+        messages_after,
+        summary,
+    })
+    .into_response()
+}
+
+/// Drop this chat's conversation but keep the chat — `/clear`.
+///
+/// The chat row, its persona and its model survive; only the message history
+/// goes. Distinct from `DELETE /chats/{id}`, which removes the chat itself.
+#[utoipa::path(
+    post,
+    path = "/api/v1/chats/{id}/clear",
+    tag = "chats",
+    params(("id" = String, Path, description = "Chat id")),
+    responses(
+        (status = 200, body = ChatContext),
+        (status = 409, description = "The chat is mid-turn"),
+    ),
+)]
+async fn post_chat_clear(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    let chats = state.chats.lock().await;
+    let Some(session) = chats.get(&id).cloned() else {
+        return err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"));
+    };
+    drop(chats);
+    {
+        let mut s = session.lock().await;
+        if s.busy {
+            return err_json(StatusCode::CONFLICT, "chat is already mid-turn");
+        }
+        s.state = None;
+    }
+    persist_chat(&session).await;
+    Json(chat_context_of(None)).into_response()
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
