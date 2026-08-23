@@ -72,6 +72,63 @@ fn default_body_mapping() -> String {
 
 /// A generic HTTP tool constructed from a JSON config file.
 /// Implements the metalcraft::Tool trait so it can be registered like any native tool.
+/// Credentials this pod can supply on the ecosystem's behalf, and the only hosts each
+/// may be sent to: `(the name a pack asks for, what to send instead, where)`.
+///
+/// The Octaweave pack asks for `$OCTAWEAVE_API_KEY` — an `owk_` workspace key a person
+/// mints and pastes. Octaweave also accepts an `mck_` account token, which names the
+/// human and carries exactly their existing reach (`ECOSYSTEM_PIVOT_PLAN.md` §3.1), and
+/// every managed pod already holds one. So the paste asks a second time for a
+/// credential the pod has.
+///
+/// **The host list is the whole safety property.** A pack is a stranger's code that
+/// this pod runs against real accounts; one that named its variable
+/// `OCTAWEAVE_API_KEY` and pointed at its own server would otherwise be handed this
+/// pod's Metalcraft token. A fallback keyed on the variable name alone would be a
+/// credential-exfiltration primitive with a friendly name.
+///
+/// A key the operator actually set always wins — this only fills a gap.
+const ECOSYSTEM_FALLBACKS: &[(&str, &str, &[&str])] =
+    &[("OCTAWEAVE_API_KEY", "METALCRAFT_TOKEN", &["octaweave.com"])];
+
+/// The pod's own credential for `var`, if this host is one it may be sent to.
+fn ecosystem_fallback(var: &str, host: Option<&str>) -> Option<String> {
+    crate::key_store::lookup_present(fallback_name_for(var, host?)?)
+}
+
+/// Which credential stands in for `var` at `host` — the decision, without reading any
+/// secret, so the host rule is testable on its own.
+fn fallback_name_for(var: &str, host: &str) -> Option<&'static str> {
+    let host = host.to_ascii_lowercase();
+    ECOSYSTEM_FALLBACKS
+        .iter()
+        .find(|(name, _, hosts)| {
+            *name == var
+                && hosts
+                    .iter()
+                    .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+        })
+        .map(|(_, fallback, _)| *fallback)
+}
+
+/// The host a request is about to reach, lowercased. `None` when the URL is not one
+/// — which denies the fallback, since an unknown destination is not an allowed one.
+fn host_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("http") {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // Userinfo strip: `https://octaweave.com@evil.example/` is not octaweave.com, and
+    // reading the part before the `@` is exactly how it would pass for it.
+    let host_port = authority.rsplit('@').next()?;
+    let host = match host_port.strip_prefix('[') {
+        Some(v6) => v6.split(']').next()?.to_string(),
+        None => host_port.split(':').next()?.to_string(),
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
 pub struct HttpApiTool {
     config: HttpApiToolConfig,
 }
@@ -148,6 +205,15 @@ impl HttpApiTool {
     /// [`crate::key_store::lookup`]), so managed keys and `.env` values both
     /// work. Unknown names expand to an empty string.
     fn expand_env(s: &str) -> String {
+        Self::expand_env_for(s, None)
+    }
+
+    /// The same expansion, told which host the value is about to be sent to.
+    ///
+    /// Only headers are expanded this way, because a header is where a credential
+    /// goes — and because knowing the destination is what makes
+    /// [`ecosystem_fallback`] safe to offer at all.
+    fn expand_env_for(s: &str, host: Option<&str>) -> String {
         let mut result = s.to_string();
         // Find all $WORD patterns (not inside braces for simplicity)
         while let Some(start) = result.find('$') {
@@ -159,7 +225,9 @@ impl HttpApiTool {
                 break;
             }
             let var_name = &rest[..end];
-            let replacement = crate::key_store::lookup(var_name).unwrap_or_default();
+            let replacement = crate::key_store::lookup(var_name)
+                .or_else(|| ecosystem_fallback(var_name, host))
+                .unwrap_or_default();
             result = format!("{}{}{}", &result[..start], replacement, &rest[end..]);
         }
         result
@@ -481,9 +549,12 @@ impl metalcraft::Tool for HttpApiTool {
 
         let mut req = client.request(method, &url);
 
-        // Apply headers with env var expansion
+        // Apply headers with env var expansion. The host goes in because a credential
+        // this pod supplies on the ecosystem's behalf may only travel to that
+        // ecosystem's own services — see `ecosystem_fallback`.
+        let host = host_of(&url);
         for (key, value) in &self.config.headers {
-            let expanded_value = Self::expand_env(value);
+            let expanded_value = Self::expand_env_for(value, host.as_deref());
             req = req.header(key.as_str(), expanded_value);
         }
 
@@ -514,6 +585,61 @@ impl metalcraft::Tool for HttpApiTool {
                 "body": crate::tools::truncate_output(&body_text, 50_000),
             })),
         }
+    }
+}
+
+#[cfg(test)]
+mod ecosystem_credential_tests {
+    use super::{fallback_name_for, host_of, HttpApiTool};
+
+    /// A pack is a stranger's code. The pod will stand in for a credential it holds,
+    /// but only when the request is going to the service that credential belongs to —
+    /// otherwise "name your variable OCTAWEAVE_API_KEY" would be all it takes to be
+    /// handed this pod's Metalcraft token.
+    #[test]
+    fn a_stood_in_credential_only_travels_to_its_own_service() {
+        assert_eq!(
+            fallback_name_for("OCTAWEAVE_API_KEY", "octaweave.com"),
+            Some("METALCRAFT_TOKEN")
+        );
+        assert_eq!(
+            fallback_name_for("OCTAWEAVE_API_KEY", "API.Octaweave.com"),
+            Some("METALCRAFT_TOKEN"),
+            "subdomains of the service, case-insensitively"
+        );
+
+        for hostile in [
+            "octaweave.com.evil.example",
+            "evil.example",
+            "notoctaweave.com",
+            "",
+        ] {
+            assert_eq!(
+                fallback_name_for("OCTAWEAVE_API_KEY", hostile),
+                None,
+                "{hostile} must not receive a credential this pod supplied"
+            );
+        }
+        // A name nobody registered gets nothing anywhere.
+        assert_eq!(fallback_name_for("SOME_OTHER_KEY", "octaweave.com"), None);
+    }
+
+    #[test]
+    fn a_url_that_hides_its_host_resolves_to_no_host() {
+        assert_eq!(host_of("https://octaweave.com/api/v1/notes").as_deref(), Some("octaweave.com"));
+        assert_eq!(host_of("https://Octaweave.com:8443/x").as_deref(), Some("octaweave.com"));
+        // The allowed host in the one position that is not the host.
+        assert_eq!(host_of("https://octaweave.com@evil.example/x").as_deref(), Some("evil.example"));
+        assert_eq!(host_of("file:///etc/passwd"), None);
+        assert_eq!(host_of("not a url"), None);
+    }
+
+    /// Without a host there is no permission to stand in — an expansion that does not
+    /// know where it is going gets the empty string, as it always did.
+    #[test]
+    fn expansion_without_a_destination_offers_nothing() {
+        let expanded = HttpApiTool::expand_env_for("Bearer $OCTAWEAVE_API_KEY", None);
+        assert_eq!(expanded, "Bearer ");
     }
 }
 

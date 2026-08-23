@@ -24,6 +24,7 @@ pub mod key_store;
 pub mod lockfile;
 pub mod memory;
 pub mod metalcraft_gateway;
+pub mod octaweave;
 pub mod paths;
 pub mod persona;
 pub mod registry;
