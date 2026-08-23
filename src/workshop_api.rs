@@ -3606,6 +3606,51 @@ struct RunFlowRequest {
     /// missing inputs fall back to their declared defaults. Ignored by v1 flows.
     #[serde(default)]
     inputs: Option<serde_json::Value>,
+    /// Run as this agent, so the run recalls from and writes to its memory and
+    /// leaves a conversation behind. Omitted resolves from the flow's armed
+    /// schedules — see [`instance_for_manual_run`].
+    #[serde(default)]
+    instance_id: Option<String>,
+}
+
+/// Which agent a hand-triggered run should be.
+///
+/// Explicit wins. Otherwise the flow's armed agent, when there is exactly one:
+/// pressing "run now" on an automation that fires every morning should be the
+/// same act as the morning firing, not a stranger doing the same work with no
+/// memory of it.
+///
+/// Several *different* agents (possible only when someone deliberately attached
+/// schedules to separate ones) resolves to none, plus a warning naming them.
+/// Picking one would silently write to a memory nobody chose; refusing the run
+/// outright would break every caller that ran the flow before this existed. A
+/// run that worked, said what it could not decide, and named the field that
+/// decides it is the honest middle.
+///
+/// Returns `(instance, warning)`.
+fn instance_for_manual_run(
+    flow_id: &str,
+    explicit: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    if let Some(id) = explicit {
+        return (Some(id.to_string()), None);
+    }
+    let binding = crate::flow_bindings::get(flow_id);
+    let mut armed: Vec<String> = binding.instances.into_values().collect();
+    armed.sort();
+    armed.dedup();
+    match armed.len() {
+        0 => (None, None),
+        1 => (armed.into_iter().next(), None),
+        _ => (
+            None,
+            Some(format!(
+                "flow '{flow_id}' is armed to {} different agents ({}); ran without one.                  Pass `instance_id` to run as a specific agent.",
+                armed.len(),
+                armed.join(", ")
+            )),
+        ),
+    }
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -3635,6 +3680,11 @@ enum RunFlowOutput {
     request_body = RunFlowRequest,
     responses((status = 200, description = "v2 flows return a FlowRunSummary; v1 flows return a RunFlowResponse", body = RunFlowOutput)),
 )]
+// A v2 run resolves an agent (§5 of `docs/FLOWS_AS_AGENTS_PLAN.md`) so a manual
+// run of an armed automation is the same act as its scheduled firing: same
+// memory, and a conversation you can read afterwards. A flow nobody armed still
+// runs memoryless and leaves nothing behind — testing an unbound flow stays a
+// test. v1 flows are unchanged; the legacy path has no instance to thread.
 async fn post_run_flow(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
@@ -3667,17 +3717,23 @@ async fn post_run_flow(
     // keep the legacy per-prompt response.
     if crate::flow_exec::is_v2_flow(&flow) {
         let inputs = req.inputs.clone().unwrap_or_else(|| serde_json::json!({}));
-        return match crate::flow_exec::run_flow_v2(
+        let (instance_id, ambiguous) =
+            instance_for_manual_run(&flow.id, req.instance_id.as_deref());
+        return match crate::flow_exec::run_flow_v2_as(
             &context,
             flow,
             &state.cwd,
             persona_override.as_deref(),
             &model_name,
             &inputs,
+            instance_id,
         )
         .await
         {
-            Ok(summary) => Json(summary).into_response(),
+            Ok(mut summary) => {
+                summary.warnings.extend(ambiguous);
+                Json(summary).into_response()
+            }
             Err(e) => err_json(StatusCode::BAD_REQUEST, e),
         };
     }

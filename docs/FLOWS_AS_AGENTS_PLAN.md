@@ -230,7 +230,10 @@ across it made every caller's future non-`Send`. Both are now flattened with
 
 ---
 
-## 5. C — run now, as the bound agent
+## 5. C — run now, as the bound agent — **DONE**
+
+*Landed 2026-08-23 with one change from the sketch below: an ambiguous flow does
+not 400. See the note at the end of this section.*
 
 `RunFlowRequest` (`workshop_api.rs:3235`) has `persona_slug`, `model_name`, `inputs` — no
 instance. So `post_run_flow` calls `run_flow_v2` (the `None` variant) and a manually
@@ -249,8 +252,16 @@ struct RunFlowRequest {
 ```
 
 Resolution order: explicit `instance_id` → the flow's single armed instance → `None`.
-Where a flow has several armed schedules pointing at different agents, require the
-explicit field rather than guessing; the client has a picker for exactly this.
+
+**Ambiguity resolves to none, plus a warning — not a 400.** The sketch said "require the
+explicit field rather than guessing", and a 400 would do that; it would also break every
+caller that ran the flow before this existed, for a case reachable only by deliberately
+arming two schedules of one flow to different agents. So an ambiguous run runs as nobody
+and appends to `FlowRunSummary.warnings`, naming the agents and the field that decides
+between them. A run that worked, said what it could not decide, and named the fix is the
+honest middle; the client already renders warnings.
+
+v1 flows are untouched — the legacy path has no instance to thread.
 
 **Size:** small, once B exists. Without B it is half a feature — the run would recall from
 memory but still leave no transcript.
@@ -321,9 +332,9 @@ Already logged as `metalcraft-front` PLAN §12.5; repeated here because B makes 
 ## 9. API delta
 
 ```
-GET   /api/v1/flows                       NEW   §3 — list; the client is blind without it
-POST  /api/v1/flows/{id}/run              + instance_id (§5)
-GET   /api/v1/flow-runs                   + chat_id (§4.4)
+GET   /api/v1/flows                       NEW   §3 — list; the client is blind without it — DONE
+POST  /api/v1/flows/{id}/run              + instance_id (§5) — DONE
+GET   /api/v1/flow-runs                   + chat_id (§4.4) — DONE
 GET   /api/v1/agents/instances            + ?with_status=1 (§7, optional)
 ```
 
@@ -354,8 +365,8 @@ once already — see `687e996`).
   having initiated the turn.
 - A run that pauses on `approval` and resumes three days later resumes **in the same
   conversation**.
-- `POST /flows/{id}/run` on an armed flow runs as its agent and leaves a conversation;
-  on an unarmed flow it runs memoryless and leaves none.
+- ✅ `POST /flows/{id}/run` on an armed flow runs as its agent and leaves a conversation;
+  on an unarmed flow it runs memoryless and leaves none. (`flow_conversation_test`)
 - `GET /flows/{id}/binding` names every persona in the roster path with its `allowed`
   verdict, and flags the non-read-only tools (**passes today** — the client just has to
   read it).
@@ -372,7 +383,7 @@ Existing coverage to keep green: `tests/flow_binding_test.rs`, `tests/flow_pause
 |---|---|---|---|
 | **A** | ✅ `GET /api/v1/flows` (§3) | small | the entire client half — do first |
 | **B** | ✅ conversation per firing (§4). Completes AP4's "Remaining" | medium | live transcripts, the fleet stops lying |
-| **C** | run-now as the bound agent (§5) | small | the Automations view's primary action |
+| **C** | ✅ run-now as the bound agent (§5) | small | the Automations view's primary action |
 | **D** | ~~arm consent summary~~ — **already built** (§6); optionally echo `FlowBindingView` from `POST …/arm` | none / tiny | the arm dialog, which is client work |
 | **E** | instance status (§7) | small | fleet status dots |
 

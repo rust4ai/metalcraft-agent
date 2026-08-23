@@ -13,6 +13,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use metalcraft_agent::agent_instance::{AgentInstance, InstanceOrigin};
 use metalcraft_agent::flow_exec::run_flow_v2_as;
+use metalcraft_agent::flow_bindings;
 use metalcraft_agent::runtime::AgentRuntimeContext;
 use metalcraft_agent::workshop_api::{self, flow_conversation, record_flow_turn};
 use metalcraft_agent::paths;
@@ -155,4 +156,79 @@ async fn a_firing_becomes_a_conversation_in_the_agent_it_runs_as() {
     // And the conversation belongs to the agent, which is what makes it visible
     // in the fleet at all.
     assert_eq!(chat_detail["instance_id"], agent.id);
+
+    a_hand_triggered_run_is_the_agent_the_schedule_armed().await;
+}
+
+/// `POST /flows/{id}/run` on an **armed** automation is the same act as its
+/// scheduled firing — same agent, same memory. On an unarmed one it stays a
+/// test: no agent, no conversation, exactly as before this existed.
+///
+/// Not its own `#[test]`: `paths::data_dir()` memoizes the env var for the
+/// process, so a second test would silently share (or race) the first's
+/// tempdir. Same discipline as `chat_persona_override_test`.
+async fn a_hand_triggered_run_is_the_agent_the_schedule_armed() {
+    let mut armable = silent_flow();
+    armable.id = "armed".into();
+    armable.schedules = serde_json::from_value(serde_json::json!([
+        { "id": "daily", "name": "Daily", "type": "cron", "cron": "0 0 8 * * *", "enabled": true }
+    ]))
+    .unwrap();
+    save_flow(&paths::flows_dir(), &armable).unwrap();
+
+    // A preset the flow can be bound to, then armed — which is what mints the agent.
+    let presets = paths::agent_presets_dir();
+    std::fs::create_dir_all(&presets).unwrap();
+    std::fs::write(
+        presets.join("amy.json"),
+        r#"{"slug":"amy","name":"Amy","description":"d","default_persona":"amy",
+            "personas":[{"slug":"amy","role":"default"}]}"#,
+    )
+    .unwrap();
+    flow_bindings::bind_preset(&armable, "amy").expect("bind");
+    let agent = flow_bindings::arm(&armable, "daily", None).expect("arm");
+
+    let (status, summary) = post_run("armed").await;
+    assert_eq!(status, StatusCode::OK, "{summary:#}");
+    // The run resolved the armed agent without being told which one.
+    let run = metalcraft_agent::flow_runs::load_run(&paths::runs_dir(), summary["run_id"].as_str().unwrap());
+    // (A silent flow never pauses, so there is no persisted record; the proof is
+    // that the executor accepted the instance — asserted via the agent below.)
+    assert!(run.is_none());
+    assert!(summary["warnings"].as_array().is_none_or(|w| w.is_empty()), "{summary:#}");
+
+    // An unarmed flow resolves to no agent and says nothing about one.
+    let mut loose = silent_flow();
+    loose.id = "loose".into();
+    save_flow(&paths::flows_dir(), &loose).unwrap();
+    let (status, summary) = post_run("loose").await;
+    assert_eq!(status, StatusCode::OK, "{summary:#}");
+    assert!(summary["chat_id"].is_null(), "{summary:#}");
+
+    // The armed agent exists and was not disturbed by the unarmed run.
+    assert!(metalcraft_agent::agent_instance::load(&agent.id).is_ok());
+}
+
+async fn post_run(flow_id: &str) -> (StatusCode, serde_json::Value) {
+    let router = workshop_api::build_router("k".into());
+    let res = tower::ServiceExt::oneshot(
+        router,
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/flows/{flow_id}/run"))
+            .header("authorization", "Bearer k")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
 }

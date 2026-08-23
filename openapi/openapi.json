@@ -6990,6 +6990,13 @@
           "inputs": {
             "description": "Values for the flow's declared entry `inputs`. Object of `{ name: value }`;\nmissing inputs fall back to their declared defaults. Ignored by v1 flows."
           },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Run as this agent, so the run recalls from and writes to its memory and\nleaves a conversation behind. Omitted resolves from the flow's armed\nschedules — see [`instance_for_manual_run`]."
+          },
           "model_name": {
             "type": [
               "string",
