@@ -89,7 +89,7 @@ is detectable rather than silently truncated.
 
 ```jsonc
 {
-  "manifest_version": 1,
+  "manifest_version": 2,                  // this document's spec version (§3.4)
   "id": "amy-kitchen-agent",              // required, §3.1
   "handle": "amy_kitchen",                // optional, registry handle
   "name": "Amy's Kitchen Agent",          // required
@@ -136,6 +136,20 @@ The two places a v1 name survives are **`Persona.integrations`** and
 aliases. Those documents live on people's pods rather than inside archives, so breaking
 them would break working installs for a word.
 
+### 3.4 Two documents, two version numbers
+
+`agent_pack.json` and `agent_presets/<slug>.json` each carry a `manifest_version`, and
+they are **independent**. The archive manifest is at **2**; the preset document is at
+**1** and did not change when the archive layout did, because nothing about a preset
+changed — spec 1 → 2 moved vendored dependencies and renamed a field on the *manifest*.
+
+So a valid spec-2 pack contains an `agent_pack.json` with `"manifest_version": 2` and an
+`agent_presets/<slug>.json` with `"manifest_version": 1`. That looks like a mistake and
+is not one; implementors have shipped it that way on both sides (`metalcraft-agent`'s
+`MANIFEST_VERSION = 2` for archives against `AgentPreset`'s `default = 1`, and
+`axoniac-prime`'s seeder writing each). Bumping the preset to 2 would assert a format
+change that never happened, and would invalidate every preset already on disk.
+
 ### 3.1 Identifiers
 
 `id`, every preset/persona/skill/integration slug, and `handle` all satisfy:
@@ -174,7 +188,8 @@ absent, the archive is unpinned: an implementor MAY accept it (local development
 
 ```jsonc
 {
-  "manifest_version": 1,
+  "manifest_version": 1,                  // the preset document's own version — not the
+                                          // archive spec version. See §3.4.
   "slug": "amy-kitchen",
   "name": "Amy's Kitchen Agent",
   "tagline": "…",
@@ -359,7 +374,7 @@ experience this rule exists to prevent.
 | V1 | Every archive path is safe (§2.1) | reject |
 | V2 | Decompressed total ≤ 64 MiB, measured on bytes read (§2.2) | reject |
 | V3 | `agent_pack.json` present at the archive root and parses | reject |
-| V4 | `manifest_version == 1` | reject |
+| V4 | `manifest_version == 2` | reject |
 | V5 | `id` matches §3.1 | reject |
 | V6 | `version` parses as semver | reject |
 | V7 | `content_sha256`, if present, matches the recomputed hash (§3.3) | reject **before any write** |
