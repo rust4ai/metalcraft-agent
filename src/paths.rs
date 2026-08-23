@@ -127,8 +127,14 @@ pub fn migrate_legacy_integration_paths() {
     let mut moves: Vec<(PathBuf, PathBuf)> = vec![
         (data.join("pack_store"), data.join("integration_store")),
         (data.join("integration_packs"), data.join("integrations")),
-        (data.join("integration_packs.json"), data.join("integrations.json")),
-        (data.join("integration_packs.lock"), data.join("integrations.lock")),
+        (
+            data.join("integration_packs.json"),
+            data.join("integrations.json"),
+        ),
+        (
+            data.join("integration_packs.lock"),
+            data.join("integrations.lock"),
+        ),
     ];
 
     // Each installed agent pack's refs file. This is the one that costs an agent
@@ -154,9 +160,14 @@ pub fn migrate_legacy_integration_paths() {
     // recomputed. It is an identity assigned at install, never re-derived, and
     // rewriting it would invalidate every ref that already names it.
     for parent in [data.join("integration_store"), data.join("integrations")] {
-        let Ok(entries) = std::fs::read_dir(&parent) else { continue };
+        let Ok(entries) = std::fs::read_dir(&parent) else {
+            continue;
+        };
         for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
-            rename_if_free(&e.path().join("pack.json"), &e.path().join("integration.json"));
+            rename_if_free(
+                &e.path().join("pack.json"),
+                &e.path().join("integration.json"),
+            );
         }
     }
 }
@@ -171,7 +182,11 @@ fn rename_if_free(from: &Path, to: &Path) {
         return;
     }
     if to.exists() {
-        log::warn!("both {} and {} exist; leaving them alone", from.display(), to.display());
+        log::warn!(
+            "both {} and {} exist; leaving them alone",
+            from.display(),
+            to.display()
+        );
         return;
     }
     match std::fs::rename(from, to) {
@@ -236,7 +251,9 @@ pub fn scheduled_tasks_file() -> PathBuf {
 /// at install and read by every instance of that preset, so twenty agents cost one
 /// copy on disk and one in RAM.
 pub fn memory_preset_dir(slug: &str, version: &str) -> PathBuf {
-    memory_dir().join("presets").join(format!("{slug}@{version}"))
+    memory_dir()
+        .join("presets")
+        .join(format!("{slug}@{version}"))
 }
 
 /// This instance's own memories — the writable delta over its preset base.

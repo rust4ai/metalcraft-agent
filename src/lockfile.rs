@@ -51,7 +51,12 @@ fn one() -> u32 {
 
 impl Default for Lock {
     fn default() -> Self {
-        Lock { version: 1, packs: Vec::new(), flows: Vec::new(), agent_packs: Vec::new() }
+        Lock {
+            version: 1,
+            packs: Vec::new(),
+            flows: Vec::new(),
+            agent_packs: Vec::new(),
+        }
     }
 }
 
@@ -118,7 +123,12 @@ fn upsert(list: &mut Vec<LockEntry>, entry: LockEntry) {
 }
 
 /// Record (or update) a pinned pack in the lockfile.
-pub fn record_pack(name: &str, version: &str, content_sha256: &str, source: &str) -> Result<(), String> {
+pub fn record_pack(
+    name: &str,
+    version: &str,
+    content_sha256: &str,
+    source: &str,
+) -> Result<(), String> {
     mutate(|doc| {
         upsert(
             &mut doc.packs,
@@ -133,7 +143,12 @@ pub fn record_pack(name: &str, version: &str, content_sha256: &str, source: &str
 }
 
 /// Record (or update) a pinned flow in the lockfile.
-pub fn record_agent_pack(name: &str, version: &str, content_sha256: &str, source: &str) -> Result<(), String> {
+pub fn record_agent_pack(
+    name: &str,
+    version: &str,
+    content_sha256: &str,
+    source: &str,
+) -> Result<(), String> {
     mutate(|doc| {
         upsert(
             &mut doc.agent_packs,
@@ -148,7 +163,12 @@ pub fn record_agent_pack(name: &str, version: &str, content_sha256: &str, source
 }
 
 /// Record (or update) a pinned flow in the lockfile.
-pub fn record_flow(name: &str, version: &str, content_sha256: &str, source: &str) -> Result<(), String> {
+pub fn record_flow(
+    name: &str,
+    version: &str,
+    content_sha256: &str,
+    source: &str,
+) -> Result<(), String> {
     mutate(|doc| {
         upsert(
             &mut doc.flows,
@@ -188,10 +208,34 @@ mod tests {
     #[test]
     fn upsert_replaces_by_name_and_sorts() {
         let mut list = Vec::new();
-        upsert(&mut list, LockEntry { name: "z".into(), version: "1".into(), content_sha256: "a".into(), source: "s".into() });
-        upsert(&mut list, LockEntry { name: "a".into(), version: "1".into(), content_sha256: "b".into(), source: "s".into() });
+        upsert(
+            &mut list,
+            LockEntry {
+                name: "z".into(),
+                version: "1".into(),
+                content_sha256: "a".into(),
+                source: "s".into(),
+            },
+        );
+        upsert(
+            &mut list,
+            LockEntry {
+                name: "a".into(),
+                version: "1".into(),
+                content_sha256: "b".into(),
+                source: "s".into(),
+            },
+        );
         // Replace z's version.
-        upsert(&mut list, LockEntry { name: "z".into(), version: "2".into(), content_sha256: "c".into(), source: "s".into() });
+        upsert(
+            &mut list,
+            LockEntry {
+                name: "z".into(),
+                version: "2".into(),
+                content_sha256: "c".into(),
+                source: "s".into(),
+            },
+        );
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "a");
         assert_eq!(list[1].name, "z");

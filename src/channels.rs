@@ -192,19 +192,24 @@ pub fn list_channels() -> Vec<Channel> {
         mc.connected = s.connected;
     }
     let mut out = vec![mc];
-    out.extend(stored.into_iter().filter(|s| s.slug != DEFAULT_SLUG).map(|s| Channel {
-        slug: s.slug,
-        name: s.name,
-        url: s.url,
-        enabled: s.enabled,
-        managed: false,
-        integration_id: s.integration_id,
-        agent_preset: s.agent_preset,
-        persona: s.persona,
-        model: s.model,
-        active_number: s.active_number,
-        connected: s.connected,
-    }));
+    out.extend(
+        stored
+            .into_iter()
+            .filter(|s| s.slug != DEFAULT_SLUG)
+            .map(|s| Channel {
+                slug: s.slug,
+                name: s.name,
+                url: s.url,
+                enabled: s.enabled,
+                managed: false,
+                integration_id: s.integration_id,
+                agent_preset: s.agent_preset,
+                persona: s.persona,
+                model: s.model,
+                active_number: s.active_number,
+                connected: s.connected,
+            }),
+    );
     out
 }
 
@@ -216,7 +221,9 @@ pub fn resolve_by_integration(integration_id: &str) -> Option<Channel> {
     if id.is_empty() {
         return None;
     }
-    list_channels().into_iter().find(|c| c.integration_id.as_deref() == Some(id))
+    list_channels()
+        .into_iter()
+        .find(|c| c.integration_id.as_deref() == Some(id))
 }
 
 /// The inbound HMAC secret for a channel (scoped `WEBHOOK_SECRET`), or `None`.
@@ -229,7 +236,9 @@ pub fn set_webhook_secret(slug: &str, secret: &str) -> Result<(), String> {
     let path = paths::keys_file();
     let mut store = crate::key_store::KeyStore::load(&path);
     store.upsert_channel(slug, WEBHOOK_SECRET_KEY, secret);
-    store.save(&path).map_err(|e| format!("failed to store webhook secret: {e}"))
+    store
+        .save(&path)
+        .map_err(|e| format!("failed to store webhook secret: {e}"))
 }
 
 /// Gateway link fields written on connect.
@@ -325,7 +334,10 @@ pub fn slugify(raw: &str) -> String {
 /// custom channel is disabled or missing its secret, or the pod isn't linked
 /// (no `METALCRAFT_TOKEN`) for the default channel.
 pub fn resolve_channel(slug: Option<&str>) -> Result<ResolvedChannel, String> {
-    let slug = slug.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SLUG);
+    let slug = slug
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_SLUG);
 
     if slug == DEFAULT_SLUG {
         // Prefer an adopted audience-scoped token (written at connect), falling
@@ -333,8 +345,14 @@ pub fn resolve_channel(slug: Option<&str>) -> Result<ResolvedChannel, String> {
         let secret = crate::key_store::lookup_scoped(Some(DEFAULT_SLUG), SECRET_KEY)
             .filter(|s| !s.is_empty())
             .or_else(|| crate::key_store::lookup("METALCRAFT_TOKEN").filter(|s| !s.is_empty()))
-            .ok_or("METALCRAFT_TOKEN is not set — this pod isn't linked to a Metalcraft ID account")?;
-        return Ok(ResolvedChannel { slug: DEFAULT_SLUG.to_string(), url: metalcraft_url(), secret });
+            .ok_or(
+                "METALCRAFT_TOKEN is not set — this pod isn't linked to a Metalcraft ID account",
+            )?;
+        return Ok(ResolvedChannel {
+            slug: DEFAULT_SLUG.to_string(),
+            url: metalcraft_url(),
+            secret,
+        });
     }
 
     let ch = get_channel(slug).ok_or_else(|| format!("no channel with slug '{slug}'"))?;
@@ -344,7 +362,11 @@ pub fn resolve_channel(slug: Option<&str>) -> Result<ResolvedChannel, String> {
     let secret = crate::key_store::lookup_scoped(Some(slug), SECRET_KEY)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("channel '{slug}' has no secret configured"))?;
-    Ok(ResolvedChannel { slug: ch.slug, url: ch.url, secret })
+    Ok(ResolvedChannel {
+        slug: ch.slug,
+        url: ch.url,
+        secret,
+    })
 }
 
 // ── CRUD for custom channels ─────────────────────────────────────────────
@@ -370,12 +392,17 @@ pub fn create_channel(
     if secret.is_empty() {
         return Err("channel secret must not be empty".into());
     }
-    let slug = slug.map(slugify).filter(|s| !s.is_empty()).unwrap_or_else(|| slugify(name));
+    let slug = slug
+        .map(slugify)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| slugify(name));
     if slug.is_empty() {
         return Err("could not derive a slug from the channel name".into());
     }
     if slug == DEFAULT_SLUG {
-        return Err(format!("'{DEFAULT_SLUG}' is reserved for the built-in channel"));
+        return Err(format!(
+            "'{DEFAULT_SLUG}' is reserved for the built-in channel"
+        ));
     }
     let mut stored = load_stored();
     if stored.iter().any(|c| c.slug == slug) {
@@ -482,7 +509,9 @@ pub fn set_secret(slug: &str, secret: &str) -> Result<(), String> {
     let path = paths::keys_file();
     let mut store = crate::key_store::KeyStore::load(&path);
     store.upsert_channel(slug, SECRET_KEY, secret);
-    store.save(&path).map_err(|e| format!("failed to store channel secret: {e}"))
+    store
+        .save(&path)
+        .map_err(|e| format!("failed to store channel secret: {e}"))
 }
 
 // ── Send ─────────────────────────────────────────────────────────────────
@@ -526,9 +555,12 @@ pub async fn send(
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        let detail = extract_error(&text)
-            .unwrap_or_else(|| crate::tools::truncate_output(text.trim(), 500));
-        return Err(format!("gateway returned HTTP {} — {detail}", status.as_u16()));
+        let detail =
+            extract_error(&text).unwrap_or_else(|| crate::tools::truncate_output(text.trim(), 500));
+        return Err(format!(
+            "gateway returned HTTP {} — {detail}",
+            status.as_u16()
+        ));
     }
 
     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();

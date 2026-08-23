@@ -86,7 +86,11 @@ pub fn find(id: &str) -> Option<InstalledAgentPack> {
     let root = pack_dir(id);
     let raw = std::fs::read_to_string(root.join("agent_pack.json")).ok()?;
     let manifest: AgentPackManifest = serde_json::from_str(&raw).ok()?;
-    Some(InstalledAgentPack { id: manifest.id.clone(), manifest, root: root.display().to_string() })
+    Some(InstalledAgentPack {
+        id: manifest.id.clone(),
+        manifest,
+        root: root.display().to_string(),
+    })
 }
 
 /// Every installed agent pack. A malformed one is skipped with a warning — one bad
@@ -258,8 +262,11 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
     // an in-flight turn lose its agent's personas, presets and tools mid-turn. This
     // way every path that existed before still resolves throughout, and only the
     // genuinely withdrawn ones stop.
-    let previous: std::collections::HashSet<String> =
-        read_tree(&root).unwrap_or_default().into_iter().map(|(rel, _)| rel).collect();
+    let previous: std::collections::HashSet<String> = read_tree(&root)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(rel, _)| rel)
+        .collect();
     for (rel, bytes) in &bundle.files {
         if rel.starts_with("integrations/") {
             continue; // lives in the store, not here
@@ -269,12 +276,17 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("creating {}: {e}", parent.display()))?;
         }
-        std::fs::write(&target, bytes)
-            .map_err(|e| format!("writing {}: {e}", target.display()))?;
-        if let Some(p) = rel.strip_prefix("personas/").and_then(|p| p.strip_suffix(".json")) {
+        std::fs::write(&target, bytes).map_err(|e| format!("writing {}: {e}", target.display()))?;
+        if let Some(p) = rel
+            .strip_prefix("personas/")
+            .and_then(|p| p.strip_suffix(".json"))
+        {
             report.personas.push(p.to_string());
         }
-        if let Some(s) = rel.strip_prefix("skills/").and_then(|s| s.strip_suffix(".md")) {
+        if let Some(s) = rel
+            .strip_prefix("skills/")
+            .and_then(|s| s.strip_suffix(".md"))
+        {
             report.skills.push(s.to_string());
         }
     }
@@ -350,7 +362,10 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
     // pack's preset so the roster check has something to check against.
     if let Some(preset_slug) = bundle.preset_slug() {
         for (rel, bytes) in &bundle.files {
-            let Some(name) = rel.strip_prefix("flows/").and_then(|f| f.strip_suffix(".json")) else {
+            let Some(name) = rel
+                .strip_prefix("flows/")
+                .and_then(|f| f.strip_suffix(".json"))
+            else {
                 continue;
             };
             match install_flow_unscheduled(name, bytes, preset_slug) {
@@ -402,8 +417,12 @@ pub fn consent_for_preset(preset: &crate::agent_preset::AgentPreset) -> ConsentS
     let mut packs: HashMap<String, (Vec<u8>, Vec<(String, Vec<u8>)>)> = HashMap::new();
 
     for id in &preset.integrations {
-        let Some(dir) = store::resolve(id) else { continue };
-        let Ok(manifest) = std::fs::read(dir.join("integration.json")) else { continue };
+        let Some(dir) = store::resolve(id) else {
+            continue;
+        };
+        let Ok(manifest) = std::fs::read(dir.join("integration.json")) else {
+            continue;
+        };
         let mut api_tools = Vec::new();
         if let Ok(entries) = std::fs::read_dir(dir.join("api_tools")) {
             for e in entries.flatten() {
@@ -478,8 +497,8 @@ pub struct UpdateReport {
 pub fn update(bytes: &[u8], source: &str) -> Result<UpdateReport, String> {
     let bundle = Bundle::read(bytes)?;
     let id = bundle.manifest.id.clone();
-    let previous = find(&id)
-        .ok_or_else(|| format!("agent pack '{id}' is not installed; install it first"))?;
+    let previous =
+        find(&id).ok_or_else(|| format!("agent pack '{id}' is not installed; install it first"))?;
     let from_version = previous.manifest.version.clone();
     let old_presets = previous.manifest.presets.clone();
 
@@ -510,7 +529,8 @@ pub fn update(bytes: &[u8], source: &str) -> Result<UpdateReport, String> {
 
         // The preset survived: the agent follows it. Only its persona can have gone.
         if bundle.manifest.presets.contains(&inst.agent_preset) {
-            let Ok(preset) = crate::agent_preset::AgentPreset::load(&inst.agent_preset, &presets_dir)
+            let Ok(preset) =
+                crate::agent_preset::AgentPreset::load(&inst.agent_preset, &presets_dir)
             else {
                 continue;
             };
@@ -524,7 +544,10 @@ pub fn update(bytes: &[u8], source: &str) -> Result<UpdateReport, String> {
                 inst.persona_fallback_from = Some(inst.persona.clone());
                 inst.persona = preset.default_persona.clone();
                 if let Err(e) = inst.save() {
-                    log::warn!("update: could not record persona fallback for {}: {e}", inst.id);
+                    log::warn!(
+                        "update: could not record persona fallback for {}: {e}",
+                        inst.id
+                    );
                 }
             }
         } else {
@@ -571,7 +594,9 @@ fn freeze_preset(slug: &str, old_tree: &[(String, Vec<u8>)]) -> Vec<String> {
     let mut frozen = Vec::new();
 
     let want = format!("agent_presets/{slug}.json");
-    let Some((_, raw)) = old_tree.iter().find(|(p, _)| *p == want) else { return frozen };
+    let Some((_, raw)) = old_tree.iter().find(|(p, _)| *p == want) else {
+        return frozen;
+    };
     let Ok(preset) = serde_json::from_slice::<crate::agent_preset::AgentPreset>(raw) else {
         return frozen;
     };
@@ -588,12 +613,17 @@ fn freeze_preset(slug: &str, old_tree: &[(String, Vec<u8>)]) -> Vec<String> {
         }
     }
 
-    let mut wanted: Vec<String> =
-        preset.callable_personas().iter().map(|p| format!("personas/{p}.json")).collect();
+    let mut wanted: Vec<String> = preset
+        .callable_personas()
+        .iter()
+        .map(|p| format!("personas/{p}.json"))
+        .collect();
     wanted.extend(preset.skills.iter().map(|s| format!("skills/{s}.md")));
 
     for rel in wanted {
-        let Some((_, bytes)) = old_tree.iter().find(|(p, _)| *p == rel) else { continue };
+        let Some((_, bytes)) = old_tree.iter().find(|(p, _)| *p == rel) else {
+            continue;
+        };
         let dest = paths::data_dir().join(&rel);
         if dest.is_file() {
             continue;
@@ -649,14 +679,20 @@ fn install_flow_unscheduled(name: &str, bytes: &[u8], preset_slug: &str) -> Resu
     // theirs; a pack upgrade that silently reverted them would be indistinguishable
     // from data loss.
     if metalcraft_flows::load_flow(&paths::flows_dir(), &flow.id).is_some() {
-        return Err(format!("a flow with id '{}' already exists; leaving it alone", flow.id));
+        return Err(format!(
+            "a flow with id '{}' already exists; leaving it alone",
+            flow.id
+        ));
     }
 
     metalcraft_flows::save_flow(&paths::flows_dir(), &flow).map_err(|e| e.to_string())?;
     // Bind after saving: the binding names a flow, and a binding pointing at nothing
     // is worse than no binding.
     if let Err(e) = crate::flow_bindings::bind_preset(&flow, preset_slug) {
-        log::warn!("agent pack: saved flow '{}' but could not bind it: {e}", flow.id);
+        log::warn!(
+            "agent pack: saved flow '{}' but could not bind it: {e}",
+            flow.id
+        );
     }
     Ok(flow.id)
 }
@@ -695,8 +731,7 @@ pub fn uninstall(id: &str, force: bool) -> Result<UninstallReport, String> {
     }
 
     let root = pack_dir(id);
-    std::fs::remove_dir_all(&root)
-        .map_err(|e| format!("removing {}: {e}", root.display()))?;
+    std::fs::remove_dir_all(&root).map_err(|e| format!("removing {}: {e}", root.display()))?;
 
     let mut state = load_state();
     state.installed.remove(id);
@@ -719,9 +754,17 @@ pub fn uninstall(id: &str, force: bool) -> Result<UninstallReport, String> {
     // Only now, once the refs are gone, can the store tell what is unreferenced —
     // and only if every remaining pack is readable, or its content would look like
     // garbage. See `manifests_all_readable`.
-    let freed = if manifests_all_readable() { store::gc() } else { 0 };
+    let freed = if manifests_all_readable() {
+        store::gc()
+    } else {
+        0
+    };
 
-    Ok(UninstallReport { id: id.to_string(), orphaned_agents: dependents, packs_freed: freed })
+    Ok(UninstallReport {
+        id: id.to_string(),
+        orphaned_agents: dependents,
+        packs_freed: freed,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -735,11 +778,16 @@ pub struct UninstallReport {
 
 fn version_ge(a: &str, b: &str) -> bool {
     let parse = |v: &str| -> Vec<u64> {
-        v.split(['.', '-', '+']).map(|p| p.parse::<u64>().unwrap_or(0)).collect()
+        v.split(['.', '-', '+'])
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
     };
     let (a, b) = (parse(a), parse(b));
     for i in 0..a.len().max(b.len()) {
-        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        let (x, y) = (
+            a.get(i).copied().unwrap_or(0),
+            b.get(i).copied().unwrap_or(0),
+        );
         if x != y {
             return x > y;
         }
@@ -754,11 +802,13 @@ mod tests {
     #[test]
     fn downgrades_are_refused_but_reinstalls_are_not() {
         assert!(version_ge("1.1.0", "1.0.0"));
-        assert!(version_ge("1.0.0", "1.0.0"), "reinstalling the same version is allowed");
+        assert!(
+            version_ge("1.0.0", "1.0.0"),
+            "reinstalling the same version is allowed"
+        );
         assert!(!version_ge("1.0.0", "1.1.0"));
     }
 }
-
 
 // ── export ───────────────────────────────────────────────────────────────────
 
@@ -781,12 +831,15 @@ pub fn export(preset_slug: &str, version: &str) -> Result<Vec<u8>, String> {
     let mut missing: Vec<String> = Vec::new();
 
     // 1. the preset itself
-    let preset_json = serde_json::to_vec_pretty(&preset)
-        .map_err(|e| format!("serializing preset: {e}"))?;
+    let preset_json =
+        serde_json::to_vec_pretty(&preset).map_err(|e| format!("serializing preset: {e}"))?;
     files.insert(format!("agent_presets/{preset_slug}.json"), preset_json);
 
     // 2. its seed memories, wherever the preset lives
-    for dir in [presets_dir.join(preset_slug), pack_dir_for_preset(preset_slug)] {
+    for dir in [
+        presets_dir.join(preset_slug),
+        pack_dir_for_preset(preset_slug),
+    ] {
         let seed = dir.join("memories.jsonl");
         if seed.is_file()
             && let Ok(bytes) = std::fs::read(&seed)
@@ -939,18 +992,20 @@ fn read_tree_all(root: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, Strin
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| format!("reading {}: {e}", dir.display()))?;
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
         for e in entries.filter_map(|e| e.ok()) {
             let path = e.path();
             if path.is_dir() {
                 stack.push(path);
                 continue;
             }
-            let Ok(rel) = path.strip_prefix(root) else { continue };
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
             let rel = rel.to_string_lossy().replace('\\', "/");
-            let bytes = std::fs::read(&path)
-                .map_err(|e| format!("reading {}: {e}", path.display()))?;
+            let bytes =
+                std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
             out.push((rel, bytes));
         }
     }

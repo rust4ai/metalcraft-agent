@@ -38,7 +38,7 @@ const MAX_PACK_BYTES: u64 = 16 * 1024 * 1024;
 // classify packs identically. Re-exported here so existing
 // `crate::integrations::{IntegrationManifest, ECOSYSTEM_TAG, is_ecosystem}` paths
 // keep working unchanged.
-pub use metalcraft_packs::{is_ecosystem, IntegrationManifest, ECOSYSTEM_TAG};
+pub use metalcraft_packs::{ECOSYSTEM_TAG, IntegrationManifest, is_ecosystem};
 
 /// Ids of installed packs tagged [`ECOSYSTEM_TAG`], in sorted-id order. This is
 /// the exact set the daemon auto-enables on a managed pod's first boot.
@@ -75,10 +75,18 @@ pub struct IntegrationState {
 /// off disk on demand. Disk I/O happens inside the workshop API handlers
 /// which are already on a tokio runtime.
 impl Integration {
-    pub fn personas_dir(&self) -> PathBuf { self.root.join("personas") }
-    pub fn skills_dir(&self) -> PathBuf { self.root.join("skills") }
-    pub fn api_tools_dir(&self) -> PathBuf { self.root.join("api_tools") }
-    pub fn flow_templates_dir(&self) -> PathBuf { self.root.join("flow_templates") }
+    pub fn personas_dir(&self) -> PathBuf {
+        self.root.join("personas")
+    }
+    pub fn skills_dir(&self) -> PathBuf {
+        self.root.join("skills")
+    }
+    pub fn api_tools_dir(&self) -> PathBuf {
+        self.root.join("api_tools")
+    }
+    pub fn flow_templates_dir(&self) -> PathBuf {
+        self.root.join("flow_templates")
+    }
 
     /// Human-facing setup guide shipped at the pack root (`README.md`), if any.
     /// This is documentation for the operator — how to obtain the pack's API
@@ -192,11 +200,12 @@ fn save_state(state: &HashMap<String, IntegrationState>) -> std::io::Result<()> 
 /// an agent-side `pack_enable` and a workshop toggle would stomp one another),
 /// then persists atomically via [`save_state`]. Readers stay lock-free: the
 /// atomic rename means they always see a complete old-or-new file.
-fn mutate_state<T>(f: impl FnOnce(&mut HashMap<String, IntegrationState>) -> T) -> Result<T, String> {
+fn mutate_state<T>(
+    f: impl FnOnce(&mut HashMap<String, IntegrationState>) -> T,
+) -> Result<T, String> {
     let lock_path = paths::data_dir().join("integrations.lock");
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create state dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create state dir: {e}"))?;
     }
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -261,7 +270,11 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<(), String> {
                 s.enabled = enabled;
                 s.enabled_at = enabled_at.clone();
             })
-            .or_insert(IntegrationState { enabled, enabled_at, source: None });
+            .or_insert(IntegrationState {
+                enabled,
+                enabled_at,
+                source: None,
+            });
     })
 }
 
@@ -273,7 +286,11 @@ pub fn set_source(id: &str, source: &str) -> Result<(), String> {
         state
             .entry(id.to_string())
             .and_modify(|s| s.source = Some(src.clone()))
-            .or_insert(IntegrationState { enabled: false, enabled_at: None, source: Some(src) });
+            .or_insert(IntegrationState {
+                enabled: false,
+                enabled_at: None,
+                source: Some(src),
+            });
     })
 }
 
@@ -332,7 +349,8 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
 /// does **not** enable the pack (the caller decides, typically
 /// `set_enabled(id, true)` right after).
 pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<String, String> {
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a valid zip: {e}"))?;
+    let mut zip =
+        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a valid zip: {e}"))?;
 
     // Learn the pack id from the (required, top-level) manifest.
     let manifest_json = {
@@ -340,11 +358,12 @@ pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<S
             .by_name("integration.json")
             .map_err(|_| "archive has no top-level integration.json".to_string())?;
         let mut s = String::new();
-        f.read_to_string(&mut s).map_err(|e| format!("reading integration.json: {e}"))?;
+        f.read_to_string(&mut s)
+            .map_err(|e| format!("reading integration.json: {e}"))?;
         s
     };
-    let manifest: IntegrationManifest =
-        serde_json::from_str(&manifest_json).map_err(|e| format!("invalid integration.json: {e}"))?;
+    let manifest: IntegrationManifest = serde_json::from_str(&manifest_json)
+        .map_err(|e| format!("invalid integration.json: {e}"))?;
     let id = manifest.id.clone();
     if !valid_pack_id(&id) {
         return Err(format!("invalid pack id '{id}'"));
@@ -372,7 +391,9 @@ pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<S
     let mut files: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
     let mut total: u64 = 0;
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| format!("reading zip entry: {e}"))?;
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("reading zip entry: {e}"))?;
         if entry.is_dir() {
             continue;
         }
@@ -381,7 +402,10 @@ pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<S
         let rel = PathBuf::from(&raw);
         if raw.starts_with('/')
             || rel.components().any(|c| {
-                matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+                matches!(
+                    c,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
             })
         {
             return Err(format!("unsafe path in zip: {}", entry.name()));
@@ -391,14 +415,17 @@ pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<S
             return Err("pack exceeds the maximum allowed size".to_string());
         }
         let mut buf = Vec::with_capacity(entry.size().min(MAX_PACK_BYTES) as usize);
-        entry.read_to_end(&mut buf).map_err(|e| format!("reading {}: {e}", entry.name()))?;
+        entry
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("reading {}: {e}", entry.name()))?;
         files.insert(raw, buf);
     }
 
     // Integrity pin: refuse to install bytes that don't match the expected hash.
     if let Some(expected) = expected_sha256 {
-        let actual =
-            metalcraft_packs::canonical_sha256(files.iter().map(|(p, c)| (p.as_str(), c.as_slice())));
+        let actual = metalcraft_packs::canonical_sha256(
+            files.iter().map(|(p, c)| (p.as_str(), c.as_slice())),
+        );
         if !actual.eq_ignore_ascii_case(expected) {
             return Err(format!(
                 "pack '{id}' content hash {actual} does not match the expected {expected}"
@@ -410,7 +437,8 @@ pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<S
     for (raw, buf) in &files {
         let target = dest_root.join(raw);
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("creating {}: {e}", parent.display()))?;
         }
         std::fs::write(&target, buf).map_err(|e| format!("writing {}: {e}", target.display()))?;
     }
@@ -480,10 +508,13 @@ pub fn installed_integrations() -> Vec<Integration> {
 /// The caller decides which are actually missing by resolving each name via
 /// [`crate::key_store::lookup`]. Returned in sorted key order.
 pub fn recommended_env() -> Vec<(String, Vec<String>)> {
-    let mut map: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut map: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for pack in installed_integrations() {
         for key in &pack.manifest.requires_env {
-            map.entry(key.clone()).or_default().push(pack.manifest.id.clone());
+            map.entry(key.clone())
+                .or_default()
+                .push(pack.manifest.id.clone());
         }
     }
     map.into_iter().collect()
@@ -565,7 +596,12 @@ pub fn resolve_file(
     for pack in installed_integrations() {
         let candidate = pack.root.join(pack_subdir).join(filename);
         if candidate.exists() {
-            return Some((candidate, IntegrationOrigin::Pack { id: pack.manifest.id }));
+            return Some((
+                candidate,
+                IntegrationOrigin::Pack {
+                    id: pack.manifest.id,
+                },
+            ));
         }
     }
     None
@@ -685,7 +721,10 @@ mod tests {
 
     #[test]
     fn is_ecosystem_matches_only_the_tag() {
-        assert!(is_ecosystem(&manifest("metalcraft-notes", &[ECOSYSTEM_TAG])));
+        assert!(is_ecosystem(&manifest(
+            "metalcraft-notes",
+            &[ECOSYSTEM_TAG]
+        )));
         assert!(!is_ecosystem(&manifest("github", &[])));
         // A superset of tags still matches on the ecosystem tag.
         assert!(is_ecosystem(&manifest("x", &["other", ECOSYSTEM_TAG])));
@@ -740,7 +779,10 @@ mod tests {
     fn install_from_zip_refuses_embedded_id() {
         // `email` ships embedded, so a registry pack claiming that id is refused
         // before anything is written to disk.
-        let z = zip_of(&[("integration.json", r#"{"id":"email","name":"x","description":"","version":"9.9.9"}"#)]);
+        let z = zip_of(&[(
+            "integration.json",
+            r#"{"id":"email","name":"x","description":"","version":"9.9.9"}"#,
+        )]);
         let err = install_from_zip(&z, None).unwrap_err();
         assert!(err.contains("built-in"), "got: {err}");
     }
@@ -758,7 +800,10 @@ mod tests {
 
     #[test]
     fn install_from_zip_rejects_invalid_id() {
-        let z = zip_of(&[("integration.json", r#"{"id":"Bad Id","name":"x","description":"","version":"1.0.0"}"#)]);
+        let z = zip_of(&[(
+            "integration.json",
+            r#"{"id":"Bad Id","name":"x","description":"","version":"1.0.0"}"#,
+        )]);
         let err = install_from_zip(&z, None).unwrap_err();
         assert!(err.contains("invalid pack id"), "got: {err}");
     }

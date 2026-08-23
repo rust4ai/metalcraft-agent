@@ -10,7 +10,7 @@ const CONTEXT_LINES: usize = 3;
 
 // Dark background tints for removed/added lines (24-bit color)
 const BG_REMOVED: &str = "\x1b[48;2;60;20;20m"; // dark red
-const BG_ADDED: &str = "\x1b[48;2;20;50;20m";   // dark green
+const BG_ADDED: &str = "\x1b[48;2;20;50;20m"; // dark green
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
 
@@ -209,13 +209,19 @@ pub fn preview_edit_diff(old_text: &str, new_text: &str) -> String {
 
     if old_suffix > prefix {
         for line in &old_lines[prefix..old_suffix] {
-            output.push(format!("{BG_REMOVED}\x1b[31m- {}{RESET}", truncate_line(line)));
+            output.push(format!(
+                "{BG_REMOVED}\x1b[31m- {}{RESET}",
+                truncate_line(line)
+            ));
         }
     }
 
     if new_suffix > prefix {
         for line in &new_lines[prefix..new_suffix] {
-            output.push(format!("{BG_ADDED}\x1b[32m+ {}{RESET}", truncate_line(line)));
+            output.push(format!(
+                "{BG_ADDED}\x1b[32m+ {}{RESET}",
+                truncate_line(line)
+            ));
         }
     }
 
@@ -253,7 +259,10 @@ fn truncate_line(line: &str) -> String {
     if line.chars().count() <= MAX_LINE_LENGTH {
         line.to_string()
     } else {
-        let truncated: String = line.chars().take(cmp::max(1, MAX_LINE_LENGTH - 1)).collect();
+        let truncated: String = line
+            .chars()
+            .take(cmp::max(1, MAX_LINE_LENGTH - 1))
+            .collect();
         format!("{}…", truncated)
     }
 }

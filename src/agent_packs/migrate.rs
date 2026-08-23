@@ -158,11 +158,11 @@ fn adopt_running_flows(dry_run: bool, failed: &mut Vec<(String, String)>) -> Vec
 /// Build (and unless `dry_run`, install) one legacy agent pack.
 fn wrap(id: &str, agent_pack_id: &str, dry_run: bool) -> Result<MigratedPack, String> {
     let pack_root = paths::integrations_dir().join(id);
-    let manifest: metalcraft_packs::IntegrationManifest =
-        serde_json::from_str(&std::fs::read_to_string(pack_root.join("integration.json")).map_err(
-            |e| format!("reading integration.json: {e}"),
-        )?)
-        .map_err(|e| format!("parsing integration.json: {e}"))?;
+    let manifest: metalcraft_packs::IntegrationManifest = serde_json::from_str(
+        &std::fs::read_to_string(pack_root.join("integration.json"))
+            .map_err(|e| format!("reading integration.json: {e}"))?,
+    )
+    .map_err(|e| format!("parsing integration.json: {e}"))?;
 
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
@@ -287,7 +287,7 @@ fn wrap(id: &str, agent_pack_id: &str, dry_run: bool) -> Result<MigratedPack, St
     let preset_slug = agent_pack_id.to_string();
     let default_persona = personas[0].0.clone();
     let preset = crate::agent_preset::AgentPreset {
-        manifest_version: 1,
+        manifest_version: crate::agent_preset::PRESET_MANIFEST_VERSION,
         slug: preset_slug.clone(),
         name: manifest.name.clone(),
         tagline: None,
@@ -348,8 +348,7 @@ fn wrap(id: &str, agent_pack_id: &str, dry_run: bool) -> Result<MigratedPack, St
     let bytes = super::bundle::write(m, files)?;
     // Parse it back even on a dry run: the point of a dry run is to learn whether
     // this *would* work, which is only answerable by validating.
-    super::Bundle::read(&bytes)
-        .map_err(|e| format!("the wrapper would not install: {e}"))?;
+    super::Bundle::read(&bytes).map_err(|e| format!("the wrapper would not install: {e}"))?;
     if !dry_run {
         super::install(&bytes, "migration")?;
     }
@@ -368,14 +367,18 @@ fn read_tree(root: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.filter_map(|e| e.ok()) {
             let path = e.path();
             if path.is_dir() {
                 stack.push(path);
                 continue;
             }
-            let Ok(rel) = path.strip_prefix(root) else { continue };
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
             let bytes =
                 std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
             out.push((rel.to_string_lossy().replace('\\', "/"), bytes));

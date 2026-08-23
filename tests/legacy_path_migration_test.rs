@@ -49,7 +49,10 @@ fn a_pre_030_data_dir_keeps_working_after_the_rename() {
     // A side-loaded integration, and the enable-state file.
     fs::create_dir_all(data_dir.join("integration_packs").join("legacy-thing")).unwrap();
     fs::write(
-        data_dir.join("integration_packs").join("legacy-thing").join("pack.json"),
+        data_dir
+            .join("integration_packs")
+            .join("legacy-thing")
+            .join("pack.json"),
         br#"{"id":"legacy-thing","name":"Legacy","description":"d","version":"1.0.0"}"#,
     )
     .unwrap();
@@ -76,13 +79,30 @@ fn a_pre_030_data_dir_keeps_working_after_the_rename() {
 
     // The side-loaded integration survived too — under both new names, directory
     // and manifest.
-    assert!(data_dir.join("integrations/legacy-thing/integration.json").is_file());
-    assert!(!data_dir.join("integrations/legacy-thing/pack.json").exists());
+    assert!(
+        data_dir
+            .join("integrations/legacy-thing/integration.json")
+            .is_file()
+    );
+    assert!(
+        !data_dir
+            .join("integrations/legacy-thing/pack.json")
+            .exists()
+    );
     // …and so did the manifest inside the stored entry, which is what
     // `store::resolve` actually looks for.
-    assert!(data_dir.join("integration_store").join(&sha).join("integration.json").is_file());
+    assert!(
+        data_dir
+            .join("integration_store")
+            .join(&sha)
+            .join("integration.json")
+            .is_file()
+    );
     assert!(data_dir.join("integrations.json").is_file());
-    assert!(!data_dir.join("pack_store").exists(), "the old paths are gone, not copied");
+    assert!(
+        !data_dir.join("pack_store").exists(),
+        "the old paths are gone, not copied"
+    );
 
     // ── idempotent ──────────────────────────────────────────────────────────
     metalcraft_agent::paths::migrate_legacy_integration_paths();

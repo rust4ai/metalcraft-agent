@@ -57,10 +57,14 @@ pub fn append(path: &Path, id: &str, vec: &[f32]) -> std::io::Result<()> {
 fn write_record<W: Write>(w: &mut W, id: &str, vec: &[f32]) -> std::io::Result<()> {
     let id_bytes = id.as_bytes();
     if id_bytes.len() > u8::MAX as usize {
-        return Err(std::io::Error::other("memory id too long for the vector record header"));
+        return Err(std::io::Error::other(
+            "memory id too long for the vector record header",
+        ));
     }
     if vec.len() > u16::MAX as usize {
-        return Err(std::io::Error::other("embedding has more dimensions than the record header allows"));
+        return Err(std::io::Error::other(
+            "embedding has more dimensions than the record header allows",
+        ));
     }
     w.write_all(&(vec.len() as u16).to_le_bytes())?;
     w.write_all(&[id_bytes.len() as u8])?;
@@ -195,7 +199,11 @@ mod tests {
         append(&p, "same", &[9.0, 9.0]).unwrap();
         let (map, _) = load(&p);
         assert_eq!(map.len(), 1);
-        assert_eq!(map["same"], vec![9.0, 9.0], "re-embedding is a plain append");
+        assert_eq!(
+            map["same"],
+            vec![9.0, 9.0],
+            "re-embedding is a plain append"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

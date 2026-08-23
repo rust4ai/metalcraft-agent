@@ -1,5 +1,5 @@
 use crate::paths;
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -112,17 +112,26 @@ pub fn ensure_defaults() {
 fn retire_obsolete_seeds() {
     // The `whatsapp` integration became the native, generic
     // `gateway_send_message` tool.
-    retire_dir(paths::integrations_dir().join("whatsapp"), "'whatsapp' integration");
+    retire_dir(
+        paths::integrations_dir().join("whatsapp"),
+        "'whatsapp' integration",
+    );
     // The channel *type/instance* model was replaced by the simple channels
     // connection model (channels.json); drop the seeded manifest tree so old
     // channel types stop lingering on upgraded installs.
-    retire_dir(paths::gateway_channels_dir(), "gateway channel type manifests");
+    retire_dir(
+        paths::gateway_channels_dir(),
+        "gateway channel type manifests",
+    );
 }
 
 fn retire_dir(dir: PathBuf, label: &str) {
     if dir.is_dir() {
         if let Err(e) = fs::remove_dir_all(&dir) {
-            eprintln!("Warning: could not remove retired {label} at {}: {e}", dir.display());
+            eprintln!(
+                "Warning: could not remove retired {label} at {}: {e}",
+                dir.display()
+            );
         } else {
             log::info!("Retired obsolete {label}");
         }
@@ -167,7 +176,9 @@ fn write_versioned_seeds(dir: &Path, seeds: &[(&str, &str)]) {
 
 /// Read and parse the `version` of a seed file already on disk, if any.
 fn installed_version(target: &Path) -> Option<(u64, u64, u64)> {
-    fs::read_to_string(target).ok().and_then(|c| json_version(&c))
+    fs::read_to_string(target)
+        .ok()
+        .and_then(|c| json_version(&c))
 }
 
 /// Parse a JSON document's `version` field into a comparable (major, minor,
@@ -191,7 +202,11 @@ fn json_version(doc: &str) -> Option<(u64, u64, u64)> {
 /// safe and is the only way a manifest change (e.g. a shrunk `requires_env`)
 /// reaches existing installs, which otherwise keep the first-seeded copy.
 fn write_integrations() {
-    write_seed_tree("integrations", &paths::integrations_dir(), "integration.json");
+    write_seed_tree(
+        "integrations",
+        &paths::integrations_dir(),
+        "integration.json",
+    );
 }
 
 /// Materialize a single embedded integration into the data dir, writing
@@ -320,16 +335,26 @@ mod tests {
         fs::write(dir.join("p.json"), r#"{"name":"old"}"#).unwrap();
         write_versioned_seeds(&dir, &[("p.json", r#"{"name":"new","version":"1.1.0"}"#)]);
         let got = fs::read_to_string(dir.join("p.json")).unwrap();
-        assert!(got.contains("\"new\""), "versioned seed should overwrite versionless install");
+        assert!(
+            got.contains("\"new\""),
+            "versioned seed should overwrite versionless install"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn versioned_seed_skips_equal_or_newer_install() {
         let dir = tmp_dir("skip");
-        fs::write(dir.join("p.json"), r#"{"name":"installed","version":"1.1.0"}"#).unwrap();
+        fs::write(
+            dir.join("p.json"),
+            r#"{"name":"installed","version":"1.1.0"}"#,
+        )
+        .unwrap();
         // Same version -> no overwrite (preserves any user edit at this version).
-        write_versioned_seeds(&dir, &[("p.json", r#"{"name":"bundled","version":"1.1.0"}"#)]);
+        write_versioned_seeds(
+            &dir,
+            &[("p.json", r#"{"name":"bundled","version":"1.1.0"}"#)],
+        );
         let got = fs::read_to_string(dir.join("p.json")).unwrap();
         assert!(got.contains("installed"), "equal version must not clobber");
         fs::remove_dir_all(&dir).unwrap();
@@ -342,7 +367,10 @@ mod tests {
         fs::write(dir.join("p.json"), r#"{"name":"installed"}"#).unwrap();
         write_versioned_seeds(&dir, &[("p.json", r#"{"name":"bundled"}"#)]);
         let got = fs::read_to_string(dir.join("p.json")).unwrap();
-        assert!(got.contains("installed"), "unversioned seed must not overwrite existing");
+        assert!(
+            got.contains("installed"),
+            "unversioned seed must not overwrite existing"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -352,15 +380,29 @@ mod tests {
     /// the `metalcraft-agent-external-packs` repo and are no longer embedded.)
     #[test]
     fn embedded_seed_tree_has_expected_contents() {
-        assert!(!embedded_flat("personas").is_empty(), "personas should be embedded");
-        assert!(!embedded_flat("skills").is_empty(), "skills should be embedded");
+        assert!(
+            !embedded_flat("personas").is_empty(),
+            "personas should be embedded"
+        );
+        assert!(
+            !embedded_flat("skills").is_empty(),
+            "skills should be embedded"
+        );
         let packs = SEED.get_dir("integrations").expect("integrations embedded");
         let ids: Vec<&str> = packs
             .dirs()
             .filter_map(|d| d.path().file_name().and_then(|s| s.to_str()))
             .collect();
-        for expected in ["email", "metalcraft-notes", "metalcraft-calendar", "metalcraft-drive"] {
-            assert!(ids.contains(&expected), "pack '{expected}' should be embedded, got {ids:?}");
+        for expected in [
+            "email",
+            "metalcraft-notes",
+            "metalcraft-calendar",
+            "metalcraft-drive",
+        ] {
+            assert!(
+                ids.contains(&expected),
+                "pack '{expected}' should be embedded, got {ids:?}"
+            );
         }
         // An integration is tools and nothing else.
         //
@@ -373,14 +415,23 @@ mod tests {
         // (The email pack ships a manifest and no `api_tools/`: its tools are native
         // Rust, compiled into the agent and declared in `native_tools`.)
         for id in ids {
-            let dir = SEED.get_dir(format!("integrations/{id}")).expect("pack dir");
+            let dir = SEED
+                .get_dir(format!("integrations/{id}"))
+                .expect("pack dir");
             let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
             collect_files(dir, dir.path(), &mut files);
-            let names: Vec<String> =
-                files.iter().map(|(p, _)| p.to_string_lossy().into_owned()).collect();
-            assert!(names.iter().any(|n| n == "integration.json"), "{id}: got {names:?}");
+            let names: Vec<String> = files
+                .iter()
+                .map(|(p, _)| p.to_string_lossy().into_owned())
+                .collect();
             assert!(
-                !names.iter().any(|n| n.starts_with("personas/") || n.starts_with("skills/")),
+                names.iter().any(|n| n == "integration.json"),
+                "{id}: got {names:?}"
+            );
+            assert!(
+                !names
+                    .iter()
+                    .any(|n| n.starts_with("personas/") || n.starts_with("skills/")),
                 "{id} still ships personas or skills; they belong to an agent pack now — got {names:?}"
             );
         }
@@ -391,11 +442,15 @@ mod tests {
     /// it. This guards a new subapp pack shipped without the tag.
     #[test]
     fn metalcraft_packs_are_tagged_ecosystem() {
-        use crate::integrations::{is_ecosystem, IntegrationManifest};
+        use crate::integrations::{IntegrationManifest, is_ecosystem};
         let packs = SEED.get_dir("integrations").expect("integrations embedded");
         let mut checked = 0;
         for item in packs.dirs() {
-            let id = item.path().file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let id = item
+                .path()
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
             if !id.starts_with("metalcraft-") {
                 continue;
             }
@@ -411,6 +466,9 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 4, "expected the 4 metalcraft-* packs, checked {checked}");
+        assert!(
+            checked >= 4,
+            "expected the 4 metalcraft-* packs, checked {checked}"
+        );
     }
 }

@@ -3,16 +3,15 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{
-        sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{delete, get, patch, post, put},
-    Json,
 };
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -21,17 +20,17 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::approval::ApprovalMode;
 use crate::diagnostics::{DiagnosticsLogger, SessionInfo};
-use crate::trace::TraceLogger;
+use crate::diagnostics_browse::{
+    DiagnosticsSessionSummary, list_diagnostics_sessions, read_diagnostics_session,
+};
 use crate::flows;
 use crate::paths;
 use crate::persona::{Persona, PersonaSummary};
 use crate::runtime::{AgentRuntimeContext, RuntimeOptions};
 use crate::session_io::SessionPreset;
-use crate::diagnostics_browse::{
-    list_diagnostics_sessions, read_diagnostics_session, DiagnosticsSessionSummary,
-};
-use crate::skill::{list_skill_summaries, load_skill, save_skill, Skill, SkillSummary};
+use crate::skill::{Skill, SkillSummary, list_skill_summaries, load_skill, save_skill};
 use crate::tools::http_api::HttpApiToolConfig;
+use crate::trace::TraceLogger;
 use metalcraft::{AgentMessage, AgentState, GuardAction, RunOutcome, StepGuard};
 
 /// Configuration for the workshop API server.
@@ -58,7 +57,9 @@ fn chat_store() -> ChatStore {
             match crate::agent_instance::backfill_from_chats(&paths::chats_dir()) {
                 Ok(r) if r.migrated > 0 => log::info!(
                     "Bound {} legacy chat(s) to new agent instances ({} already bound, {} skipped)",
-                    r.migrated, r.already_bound, r.skipped
+                    r.migrated,
+                    r.already_bound,
+                    r.skipped
                 ),
                 Ok(_) => {}
                 Err(e) => log::warn!("agent-instance backfill failed: {e}"),
@@ -81,7 +82,8 @@ type ChatBroadcasters = Arc<Mutex<HashMap<String, tokio::sync::broadcast::Sender
 
 fn chat_broadcasters() -> ChatBroadcasters {
     static B: std::sync::OnceLock<ChatBroadcasters> = std::sync::OnceLock::new();
-    B.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone()
+    B.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
 }
 
 /// Get (or create) the broadcast sender for a chat. Kept alive in the registry
@@ -265,7 +267,13 @@ async fn auth_middleware(
     let ok = (!state.api_key.is_empty() && provided == state.api_key)
         || crate::hub_auth::verify_pod_bearer(provided).await;
     if !ok {
-        return (StatusCode::UNAUTHORIZED, Json(ErrorResponse { error: "unauthorized".into() })).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".into(),
+            }),
+        )
+            .into_response();
     }
 
     next.run(request).await
@@ -451,19 +459,31 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/agent-packs", get(list_agent_packs))
         .route("/api/v1/agent-packs/install", post(post_install_agent_pack))
         .route("/api/v1/agent-packs/inspect", post(post_inspect_agent_pack))
-        .route("/api/v1/agent-packs/registries", get(get_agent_pack_registries))
+        .route(
+            "/api/v1/agent-packs/registries",
+            get(get_agent_pack_registries),
+        )
         // A registry is browsable and connectable, not just an origin the pod will
         // fetch from. Everything here is proxied rather than called from a browser:
         // the origin check, the pod's own credential and the redirect refusal all
         // live on this side, and a client that called the host directly would have
         // none of them.
-        .route("/api/v1/agent-packs/registries/{name}/status", get(get_registry_status))
-        .route("/api/v1/agent-packs/registries/{name}/connect", post(post_registry_connect))
+        .route(
+            "/api/v1/agent-packs/registries/{name}/status",
+            get(get_registry_status),
+        )
+        .route(
+            "/api/v1/agent-packs/registries/{name}/connect",
+            post(post_registry_connect),
+        )
         .route(
             "/api/v1/agent-packs/registries/{name}/disconnect",
             post(post_registry_disconnect),
         )
-        .route("/api/v1/agent-packs/registries/{name}/search", get(get_registry_search))
+        .route(
+            "/api/v1/agent-packs/registries/{name}/search",
+            get(get_registry_search),
+        )
         .route(
             "/api/v1/agent-packs/registries/{name}/packs/{id}/manifest",
             get(get_registry_manifest),
@@ -471,18 +491,30 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/agent-packs/export", post(post_export_agent_pack))
         .route("/api/v1/agent-packs/{id}", get(get_agent_pack))
         .route("/api/v1/agent-packs/{id}", delete(delete_agent_pack))
-        .route("/api/v1/agent-packs/{id}/update", post(post_update_agent_pack))
+        .route(
+            "/api/v1/agent-packs/{id}/update",
+            post(post_update_agent_pack),
+        )
         .route("/api/v1/agents/instances", get(list_agent_instances))
         .route("/api/v1/agents/instances", post(post_create_agent_instance))
         .route("/api/v1/agents/instances/{id}", get(get_agent_instance))
         .route("/api/v1/agents/instances/{id}", patch(patch_agent_instance))
-        .route("/api/v1/agents/instances/{id}/memory", get(get_agent_instance_memory))
-        .route("/api/v1/agents/instances/{id}/flows", get(get_agent_instance_flows))
+        .route(
+            "/api/v1/agents/instances/{id}/memory",
+            get(get_agent_instance_memory),
+        )
+        .route(
+            "/api/v1/agents/instances/{id}/flows",
+            get(get_agent_instance_flows),
+        )
         .route(
             "/api/v1/agents/instances/{id}/conversations",
             post(post_instance_conversation),
         )
-        .route("/api/v1/agents/instances/{id}", delete(delete_agent_instance))
+        .route(
+            "/api/v1/agents/instances/{id}",
+            delete(delete_agent_instance),
+        )
         .route("/api/v1/agent-presets", get(list_agent_presets))
         .route("/api/v1/agent-presets/{slug}", get(get_agent_preset))
         .route("/api/v1/agent-presets/{slug}", put(put_agent_preset))
@@ -505,16 +537,34 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/flows/{id}/schedules", get(get_flow_schedules))
         .route("/api/v1/flows/{id}/schedules", put(put_flow_schedules))
         .route("/api/v1/flows/{id}/schedules", post(post_flow_schedule))
-        .route("/api/v1/flows/{id}/schedules/preview", get(get_flow_schedules_preview))
-        .route("/api/v1/flows/{id}/schedules/{sid}", delete(delete_flow_schedule))
+        .route(
+            "/api/v1/flows/{id}/schedules/preview",
+            get(get_flow_schedules_preview),
+        )
+        .route(
+            "/api/v1/flows/{id}/schedules/{sid}",
+            delete(delete_flow_schedule),
+        )
         .route("/api/v1/flows/{id}/binding", get(get_flow_binding))
         .route("/api/v1/flows/{id}/binding", put(put_flow_binding))
-        .route("/api/v1/flows/{id}/schedules/{sid}/arm", post(post_arm_schedule))
-        .route("/api/v1/flows/{id}/schedules/{sid}/arm", delete(delete_arm_schedule))
-        .route("/api/v1/flows/{id}/install-dependencies", post(post_install_flow_dependencies))
+        .route(
+            "/api/v1/flows/{id}/schedules/{sid}/arm",
+            post(post_arm_schedule),
+        )
+        .route(
+            "/api/v1/flows/{id}/schedules/{sid}/arm",
+            delete(delete_arm_schedule),
+        )
+        .route(
+            "/api/v1/flows/{id}/install-dependencies",
+            post(post_install_flow_dependencies),
+        )
         .route("/api/v1/flow-runs", get(list_flow_runs))
         .route("/api/v1/flow-runs/{run_id}", get(get_flow_run))
-        .route("/api/v1/flow-runs/{run_id}/resume", post(post_resume_flow_run))
+        .route(
+            "/api/v1/flow-runs/{run_id}/resume",
+            post(post_resume_flow_run),
+        )
         .route("/api/v1/flow-templates", get(list_flow_templates))
         .route("/api/v1/flow-templates/{slug}", get(get_flow_template))
         .route("/api/v1/diagnostics", get(list_diagnostics))
@@ -533,13 +583,25 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/chats/{id}/turn", post(post_chat_turn))
         .route("/api/v1/chats/{id}/events", get(get_chat_events))
         .route("/api/v1/scheduled-tasks", get(list_scheduled_tasks))
-        .route("/api/v1/scheduled-tasks/{id}", delete(delete_scheduled_task))
+        .route(
+            "/api/v1/scheduled-tasks/{id}",
+            delete(delete_scheduled_task),
+        )
         .route("/api/v1/integrations", get(list_integrations))
         // Static `/install` before the `{id}` param route (matchit prefers the
         // literal; different method anyway) — install a registry pack onto the pod.
-        .route("/api/v1/integrations/install", post(post_install_integration))
-        .route("/api/v1/integrations/{id}", get(get_integration).delete(delete_integration))
-        .route("/api/v1/integrations/{id}/enabled", put(put_integration_enabled))
+        .route(
+            "/api/v1/integrations/install",
+            post(post_install_integration),
+        )
+        .route(
+            "/api/v1/integrations/{id}",
+            get(get_integration).delete(delete_integration),
+        )
+        .route(
+            "/api/v1/integrations/{id}/enabled",
+            put(put_integration_enabled),
+        )
         .route("/api/v1/lockfile", get(get_lockfile))
         .route("/api/v1/lockfile/restore", post(post_lockfile_restore))
         // Gateway activity feed (inbound/outbound across all channels).
@@ -547,14 +609,32 @@ pub fn build_router(api_key: String) -> Router {
         // Channels — the simple {slug, name, url, secret} connection model. The
         // built-in `metalcraft` channel is always present; these manage customs.
         .route("/api/v1/channels", get(list_channels).post(create_channel))
-        .route("/api/v1/channels/{slug}", put(update_channel).delete(delete_channel))
+        .route(
+            "/api/v1/channels/{slug}",
+            put(update_channel).delete(delete_channel),
+        )
         .route("/api/v1/channels/{slug}/events", get(list_channel_events))
         // Metalcraft Gateway — zero-copy connect (status / inline register / connect).
-        .route("/api/v1/gateway/metalcraft/status", get(gateway_metalcraft_status))
-        .route("/api/v1/gateway/metalcraft/register", post(gateway_metalcraft_register))
-        .route("/api/v1/gateway/metalcraft/connect", post(gateway_metalcraft_connect))
-        .route("/api/v1/gateway/metalcraft/disconnect", post(gateway_metalcraft_disconnect))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .route(
+            "/api/v1/gateway/metalcraft/status",
+            get(gateway_metalcraft_status),
+        )
+        .route(
+            "/api/v1/gateway/metalcraft/register",
+            post(gateway_metalcraft_register),
+        )
+        .route(
+            "/api/v1/gateway/metalcraft/connect",
+            post(gateway_metalcraft_connect),
+        )
+        .route(
+            "/api/v1/gateway/metalcraft/disconnect",
+            post(gateway_metalcraft_disconnect),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         // Health check — registered after the auth layer so it stays
         // unauthenticated (for Railway / DO App Platform probes).
         .route("/health", get(health))
@@ -721,8 +801,10 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
     let keys = list_key_summaries();
     let agent_presets =
         crate::agent_preset::AgentPreset::list_summaries(&paths::agent_presets_dir());
-    let agent_instances: Vec<_> =
-        crate::agent_instance::list().into_iter().filter(|i| i.persistent).collect();
+    let agent_instances: Vec<_> = crate::agent_instance::list()
+        .into_iter()
+        .filter(|i| i.persistent)
+        .collect();
 
     Json(ProjectSnapshot {
         personas,
@@ -752,11 +834,8 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
 /// User-local personas plus enabled-pack personas, with locals shadowing
 /// packs on slug collision.
 fn list_persona_summaries() -> Vec<PersonaSummary> {
-    let layered = crate::integrations::list_files_layered(
-        &paths::personas_dir(),
-        "personas",
-        "json",
-    );
+    let layered =
+        crate::integrations::list_files_layered(&paths::personas_dir(), "personas", "json");
     let mut out = Vec::with_capacity(layered.len());
     for (path, origin) in layered {
         let Some(slug) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
@@ -803,7 +882,10 @@ async fn list_agent_packs() -> Response {
 async fn get_agent_pack(Path(id): Path<String>) -> Response {
     match crate::agent_packs::find(&id) {
         Some(p) => Json(p).into_response(),
-        None => err_json(StatusCode::NOT_FOUND, format!("agent pack '{id}' is not installed")),
+        None => err_json(
+            StatusCode::NOT_FOUND,
+            format!("agent pack '{id}' is not installed"),
+        ),
     }
 }
 
@@ -849,7 +931,12 @@ async fn agent_pack_bytes(
     q: &InstallAgentPackQuery,
     body: &axum::body::Bytes,
 ) -> Result<PackBytes, Response> {
-    if let Some(reference) = q.reference.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+    if let Some(reference) = q
+        .reference
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
         let resolved = crate::agent_registry::resolve(reference)
             .await
             .map_err(|e| err_json(StatusCode::BAD_REQUEST, e))?;
@@ -870,19 +957,28 @@ async fn agent_pack_bytes(
     }
     if let Some(url) = q.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
         return match crate::agent_registry::fetch(url).await {
-            Ok(b) => Ok(PackBytes { bytes: b, source: url.to_string(), resolved: None }),
+            Ok(b) => Ok(PackBytes {
+                bytes: b,
+                source: url.to_string(),
+                resolved: None,
+            }),
             // A refused origin is the caller's mistake (400); a registry that failed
             // to answer is not (502).
-            Err(e) if e.contains("will not download") => {
-                Err(err_json(StatusCode::BAD_REQUEST, e))
-            }
+            Err(e) if e.contains("will not download") => Err(err_json(StatusCode::BAD_REQUEST, e)),
             Err(e) => Err(err_json(StatusCode::BAD_GATEWAY, e)),
         };
     }
     if let Some(path) = q.path.as_deref() {
         return match std::fs::read(path) {
-            Ok(b) => Ok(PackBytes { bytes: b, source: path.to_string(), resolved: None }),
-            Err(e) => Err(err_json(StatusCode::BAD_REQUEST, format!("reading {path}: {e}"))),
+            Ok(b) => Ok(PackBytes {
+                bytes: b,
+                source: path.to_string(),
+                resolved: None,
+            }),
+            Err(e) => Err(err_json(
+                StatusCode::BAD_REQUEST,
+                format!("reading {path}: {e}"),
+            )),
         };
     }
     if !body.is_empty() {
@@ -1264,7 +1360,11 @@ async fn post_install_agent_pack(
     Query(q): Query<InstallAgentPackQuery>,
     body: axum::body::Bytes,
 ) -> Response {
-    let PackBytes { bytes, source, resolved } = match agent_pack_bytes(&q, &body).await {
+    let PackBytes {
+        bytes,
+        source,
+        resolved,
+    } = match agent_pack_bytes(&q, &body).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -1330,7 +1430,9 @@ async fn post_export_agent_pack(Json(req): Json<ExportAgentPackRequest>) -> Resp
     };
     match req.out {
         Some(out) => match std::fs::write(&out, &bytes) {
-            Ok(()) => Json(serde_json::json!({ "path": out, "bytes": bytes.len() })).into_response(),
+            Ok(()) => {
+                Json(serde_json::json!({ "path": out, "bytes": bytes.len() })).into_response()
+            }
             Err(e) => err_json(StatusCode::BAD_REQUEST, format!("writing {out}: {e}")),
         },
         None => (
@@ -1407,7 +1509,10 @@ async fn get_agent_instance_flows(Path(id): Path<String>) -> Response {
     if crate::agent_instance::load(&id).is_err() {
         return err_json(StatusCode::NOT_FOUND, format!("no agent '{id}'"));
     }
-    Json(InstanceFlows { scheduled: scheduled_for(&id) }).into_response()
+    Json(InstanceFlows {
+        scheduled: scheduled_for(&id),
+    })
+    .into_response()
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -1478,7 +1583,12 @@ async fn get_agent_instance(Path(id): Path<String>) -> Response {
         Ok(instance) => {
             let conversations = conversations_of(&instance.id);
             let scheduled = scheduled_for(&instance.id);
-            Json(InstanceDetail { instance, conversations, scheduled }).into_response()
+            Json(InstanceDetail {
+                instance,
+                conversations,
+                scheduled,
+            })
+            .into_response()
         }
         Err(e) => err_json(StatusCode::NOT_FOUND, e),
     }
@@ -1501,7 +1611,10 @@ struct CreateInstanceRequest {
 )]
 async fn post_create_agent_instance(Json(req): Json<CreateInstanceRequest>) -> Response {
     use crate::agent_instance::{AgentInstance, InstanceOrigin};
-    let slug = req.agent_preset.as_deref().unwrap_or(crate::agent_preset::DEFAULT_PRESET);
+    let slug = req
+        .agent_preset
+        .as_deref()
+        .unwrap_or(crate::agent_preset::DEFAULT_PRESET);
     let preset = match crate::agent_preset::AgentPreset::load(slug, &paths::agent_presets_dir()) {
         Ok(p) => p,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
@@ -1534,7 +1647,13 @@ async fn delete_agent_instance(Path(id): Path<String>) -> Response {
     if !scheduled.is_empty() {
         let what: Vec<String> = scheduled
             .iter()
-            .map(|f| format!("{} ({})", f.flow_name.as_deref().unwrap_or(&f.flow_id), f.schedule_ids.join(", ")))
+            .map(|f| {
+                format!(
+                    "{} ({})",
+                    f.flow_name.as_deref().unwrap_or(&f.flow_id),
+                    f.schedule_ids.join(", ")
+                )
+            })
             .collect();
         return err_json(
             StatusCode::CONFLICT,
@@ -1634,7 +1753,10 @@ async fn get_agent_instance_memory(
     Query(q): Query<MemoryViewQuery>,
 ) -> Response {
     if crate::agent_instance::load(&id).is_err() {
-        return err_json(StatusCode::NOT_FOUND, format!("agent instance '{id}' not found"));
+        return err_json(
+            StatusCode::NOT_FOUND,
+            format!("agent instance '{id}' not found"),
+        );
     }
     let view = crate::memory::instance_view(&id, q.limit.unwrap_or(50).clamp(1, 500)).await;
     Json(view).into_response()
@@ -1798,7 +1920,9 @@ async fn put_agent_preset(
                 if let Some(pack_id) = summary.pack_id {
                     return err_json(
                         StatusCode::CONFLICT,
-                        format!("agent preset '{slug}' is provided by the '{pack_id}' pack and is read-only. Choose a different slug."),
+                        format!(
+                            "agent preset '{slug}' is provided by the '{pack_id}' pack and is read-only. Choose a different slug."
+                        ),
                     );
                 }
             }
@@ -1834,11 +1958,9 @@ async fn delete_agent_preset(Path(slug): Path<String>) -> Response {
 )]
 async fn get_persona(Path(slug): Path<String>) -> Response {
     let filename = format!("{slug}.json");
-    let Some((path, _origin)) = crate::integrations::resolve_file(
-        &paths::personas_dir(),
-        "personas",
-        &filename,
-    ) else {
+    let Some((path, _origin)) =
+        crate::integrations::resolve_file(&paths::personas_dir(), "personas", &filename)
+    else {
         return err_json(StatusCode::NOT_FOUND, format!("persona '{slug}' not found"));
     };
     let Ok(content) = std::fs::read_to_string(&path) else {
@@ -1846,7 +1968,10 @@ async fn get_persona(Path(slug): Path<String>) -> Response {
     };
     match serde_json::from_str::<Persona>(&content) {
         Ok(persona) => Json(persona).into_response(),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to parse: {e}")),
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to parse: {e}"),
+        ),
     }
 }
 
@@ -1866,11 +1991,9 @@ async fn put_persona(Path(slug): Path<String>, Json(persona): Json<Persona>) -> 
     let filename = format!("{slug}.json");
     let local_exists = paths::personas_dir().join(&filename).exists();
     if !local_exists {
-        if let Some((_, origin)) = crate::integrations::resolve_file(
-            &paths::personas_dir(),
-            "personas",
-            &filename,
-        ) {
+        if let Some((_, origin)) =
+            crate::integrations::resolve_file(&paths::personas_dir(), "personas", &filename)
+        {
             if let Some(pack_id) = origin.pack_id() {
                 return err_json(
                     StatusCode::CONFLICT,
@@ -1941,11 +2064,9 @@ async fn put_skill(Path(slug): Path<String>, Json(skill): Json<Skill>) -> Respon
     let filename = format!("{slug}.md");
     let local_exists = paths::skills_dir().join(&filename).exists();
     if !local_exists {
-        if let Some((_, origin)) = crate::integrations::resolve_file(
-            &paths::skills_dir(),
-            "skills",
-            &filename,
-        ) {
+        if let Some((_, origin)) =
+            crate::integrations::resolve_file(&paths::skills_dir(), "skills", &filename)
+        {
             if let Some(pack_id) = origin.pack_id() {
                 return err_json(
                     StatusCode::CONFLICT,
@@ -1986,7 +2107,10 @@ async fn delete_skill(Path(slug): Path<String>) -> Response {
     }
     match std::fs::remove_file(&path) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete: {e}")),
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to delete: {e}"),
+        ),
     }
 }
 
@@ -2014,7 +2138,10 @@ async fn get_flow(Path(id): Path<String>) -> Response {
     request_body = Object,
     responses((status = 200, description = "Saved")),
 )]
-async fn put_flow(Path(id): Path<String>, Json(mut flow): Json<metalcraft_flows::SavedFlow>) -> Response {
+async fn put_flow(
+    Path(id): Path<String>,
+    Json(mut flow): Json<metalcraft_flows::SavedFlow>,
+) -> Response {
     flow.id = id;
     // The schedules endpoints validate cron expressions; this one did not, so a
     // client saving a whole flow could store a schedule that parses as JSON, saves
@@ -2069,10 +2196,7 @@ struct SchedulePreview {
 
 /// Persist `schedules` onto flow `id`, validating shape + cron syntax first.
 /// Returns the saved list on success.
-fn save_flow_schedules(
-    id: &str,
-    schedules: Vec<metalcraft_flows::FlowScheduleSpec>,
-) -> Response {
+fn save_flow_schedules(id: &str, schedules: Vec<metalcraft_flows::FlowScheduleSpec>) -> Response {
     let Some(mut flow) = metalcraft_flows::load_flow(&paths::flows_dir(), id) else {
         return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
     };
@@ -2264,7 +2388,11 @@ fn arm_consent(preset: Option<&crate::agent_preset::AgentPreset>) -> ArmConsent 
         };
     };
     let consent = crate::agent_packs::consent_for_preset(preset);
-    let requires_env: Vec<String> = consent.requires_env.iter().map(|e| e.name.clone()).collect();
+    let requires_env: Vec<String> = consent
+        .requires_env
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
     ArmConsent {
         preset_name: preset.name.clone(),
         missing_env: requires_env
@@ -2319,7 +2447,9 @@ fn binding_view(flow: &metalcraft_flows::SavedFlow) -> FlowBindingView {
                 .instances
                 .into_iter()
                 .map(|(schedule_id, instance_id)| ArmedSchedule {
-                    instance_name: crate::agent_instance::load(&instance_id).ok().map(|i| i.name),
+                    instance_name: crate::agent_instance::load(&instance_id)
+                        .ok()
+                        .map(|i| i.name),
                     schedule_id,
                     instance_id,
                 })
@@ -2466,7 +2596,9 @@ fn schedule_preview(spec: &metalcraft_flows::FlowScheduleSpec) -> SchedulePrevie
         ScheduleTrigger::Minutes { interval } => {
             let now = Utc::now();
             let runs = (1..=N as i64)
-                .filter_map(|k| now.checked_add_signed(chrono::TimeDelta::minutes(k * *interval as i64)))
+                .filter_map(|k| {
+                    now.checked_add_signed(chrono::TimeDelta::minutes(k * *interval as i64))
+                })
                 .map(|t| t.to_rfc3339())
                 .collect();
             (format!("Every {interval} minute(s)"), runs)
@@ -2474,7 +2606,9 @@ fn schedule_preview(spec: &metalcraft_flows::FlowScheduleSpec) -> SchedulePrevie
         ScheduleTrigger::Hours { interval } => {
             let now = Utc::now();
             let runs = (1..=N as i64)
-                .filter_map(|k| now.checked_add_signed(chrono::TimeDelta::hours(k * *interval as i64)))
+                .filter_map(|k| {
+                    now.checked_add_signed(chrono::TimeDelta::hours(k * *interval as i64))
+                })
                 .map(|t| t.to_rfc3339())
                 .collect();
             (format!("Every {interval} hour(s)"), runs)
@@ -2539,7 +2673,11 @@ async fn post_install_flow(Json(req): Json<InstallFlowRequest>) -> Response {
             // registry) so a rebuilt/cloned pod reinstalls the same document. Best-effort.
             if let Ok((version, Some(hash))) = crate::registry::flow_version(&req.slug).await {
                 let _ = crate::lockfile::record_flow(
-                    &req.slug, &version, &hash, &crate::registry::flows_base_url());
+                    &req.slug,
+                    &version,
+                    &hash,
+                    &crate::registry::flows_base_url(),
+                );
             }
             Json(result).into_response()
         }
@@ -2567,7 +2705,11 @@ async fn post_install_flow_dependencies(Path(id): Path<String>) -> Response {
         return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
     };
     let outcomes = crate::flow_install::install_flow_dependencies(&flow).await;
-    Json(InstallDependenciesResponse { flow: id, packs: outcomes }).into_response()
+    Json(InstallDependenciesResponse {
+        flow: id,
+        packs: outcomes,
+    })
+    .into_response()
 }
 
 /// Response for `POST /flows/{id}/install-dependencies`.
@@ -2611,11 +2753,8 @@ async fn get_diagnostics_session(Path(id): Path<String>) -> Response {
 // ── API Tool handlers ───────────────────────────────────────────────────
 
 fn list_api_tool_summaries() -> Vec<ApiToolSummary> {
-    let layered = crate::integrations::list_files_layered(
-        &paths::api_tools_dir(),
-        "api_tools",
-        "json",
-    );
+    let layered =
+        crate::integrations::list_files_layered(&paths::api_tools_dir(), "api_tools", "json");
     let mut summaries: Vec<ApiToolSummary> = layered
         .into_iter()
         .filter_map(|(path, origin)| {
@@ -2652,19 +2791,26 @@ async fn list_api_tools() -> Json<Vec<ApiToolSummary>> {
 )]
 async fn get_api_tool(Path(name): Path<String>) -> Response {
     let filename = format!("{name}.json");
-    let Some((path, _)) = crate::integrations::resolve_file(
-        &paths::api_tools_dir(),
-        "api_tools",
-        &filename,
-    ) else {
-        return err_json(StatusCode::NOT_FOUND, format!("api-tool '{name}' not found"));
+    let Some((path, _)) =
+        crate::integrations::resolve_file(&paths::api_tools_dir(), "api_tools", &filename)
+    else {
+        return err_json(
+            StatusCode::NOT_FOUND,
+            format!("api-tool '{name}' not found"),
+        );
     };
     match std::fs::read_to_string(&path) {
         Ok(content) => match serde_json::from_str::<HttpApiToolConfig>(&content) {
             Ok(config) => Json(config).into_response(),
-            Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to parse: {e}")),
+            Err(e) => err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to parse: {e}"),
+            ),
         },
-        Err(_) => err_json(StatusCode::NOT_FOUND, format!("api-tool '{name}' not found")),
+        Err(_) => err_json(
+            StatusCode::NOT_FOUND,
+            format!("api-tool '{name}' not found"),
+        ),
     }
 }
 
@@ -2676,16 +2822,17 @@ async fn get_api_tool(Path(name): Path<String>) -> Response {
     request_body = crate::tools::http_api::HttpApiToolConfig,
     responses((status = 200, description = "Saved")),
 )]
-async fn put_api_tool(Path(name): Path<String>, Json(mut config): Json<HttpApiToolConfig>) -> Response {
+async fn put_api_tool(
+    Path(name): Path<String>,
+    Json(mut config): Json<HttpApiToolConfig>,
+) -> Response {
     config.name = name.clone();
     let filename = format!("{name}.json");
     let local_exists = paths::api_tools_dir().join(&filename).exists();
     if !local_exists {
-        if let Some((_, origin)) = crate::integrations::resolve_file(
-            &paths::api_tools_dir(),
-            "api_tools",
-            &filename,
-        ) {
+        if let Some((_, origin)) =
+            crate::integrations::resolve_file(&paths::api_tools_dir(), "api_tools", &filename)
+        {
             if let Some(pack_id) = origin.pack_id() {
                 return err_json(
                     StatusCode::CONFLICT,
@@ -2700,7 +2847,10 @@ async fn put_api_tool(Path(name): Path<String>, Json(mut config): Json<HttpApiTo
     match serde_json::to_string_pretty(&config) {
         Ok(content) => match std::fs::write(&path, content) {
             Ok(()) => Json(config).into_response(),
-            Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write: {e}")),
+            Err(e) => err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to write: {e}"),
+            ),
         },
         Err(e) => err_json(StatusCode::BAD_REQUEST, format!("Failed to serialize: {e}")),
     }
@@ -2723,7 +2873,10 @@ async fn delete_api_tool(Path(name): Path<String>) -> Response {
     }
     match std::fs::remove_file(&path) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete: {e}")),
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to delete: {e}"),
+        ),
     }
 }
 
@@ -2761,7 +2914,9 @@ fn list_key_summaries() -> Vec<KeySummary> {
 /// Whether a channel's secrets are managed by its connection (the built-in
 /// `metalcraft` channel) — such secrets are read-only in the UI.
 fn is_channel_managed(channel_slug: &str) -> bool {
-    crate::channels::get_channel(channel_slug).map(|c| c.managed).unwrap_or(false)
+    crate::channels::get_channel(channel_slug)
+        .map(|c| c.managed)
+        .unwrap_or(false)
 }
 
 /// All stored keys with scope + managed flags, for the scope-aware Keys page.
@@ -2816,7 +2971,8 @@ async fn list_keys() -> Json<Vec<KeyEntry>> {
 async fn list_recommended_keys() -> Json<Vec<RecommendedKey>> {
     // Recommendations from enabled integrations. The `packs` field carries
     // the source label (pack id) so the key-store UI can show "who wants this".
-    let mut merged: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut merged: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for (name, sources) in crate::integrations::recommended_env() {
         merged.entry(name).or_default().extend(sources);
     }
@@ -2886,7 +3042,10 @@ async fn put_key(Path(name): Path<String>, Json(body): Json<KeyValueBody>) -> Re
             managed: false,
         })
         .into_response(),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write: {e}")),
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write: {e}"),
+        ),
     }
 }
 
@@ -2910,7 +3069,10 @@ async fn reveal_key(Path(name): Path<String>, Query(q): Query<KeyScopeQuery>) ->
     };
     match value {
         Some(value) => Json(KeyRevealResponse { value }).into_response(),
-        None => err_json(StatusCode::NOT_FOUND, format!("key '{name}' has no stored value to reveal")),
+        None => err_json(
+            StatusCode::NOT_FOUND,
+            format!("key '{name}' has no stored value to reveal"),
+        ),
     }
 }
 
@@ -2951,7 +3113,10 @@ async fn delete_key(Path(name): Path<String>, Query(q): Query<KeyScopeQuery>) ->
     }
     match store.save(&path) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write: {e}")),
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write: {e}"),
+        ),
     }
 }
 
@@ -3027,16 +3192,27 @@ async fn get_flow_template(Path(slug): Path<String>) -> Response {
         "flow_templates",
         &filename,
     ) else {
-        return err_json(StatusCode::NOT_FOUND, format!("template '{slug}' not found"));
+        return err_json(
+            StatusCode::NOT_FOUND,
+            format!("template '{slug}' not found"),
+        );
     };
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return err_json(StatusCode::NOT_FOUND, format!("template '{slug}' not found")),
+        Err(_) => {
+            return err_json(
+                StatusCode::NOT_FOUND,
+                format!("template '{slug}' not found"),
+            );
+        }
     };
     let value: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("parse error: {e}"));
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("parse error: {e}"),
+            );
         }
     };
     let name = value
@@ -3118,7 +3294,9 @@ async fn post_run_flow(
     // is only an optional override, so don't manufacture a default here — that
     // would mislabel the run's session. v1 flows still fall back below.
     let persona_override = req.persona_slug.clone().filter(|s| !s.trim().is_empty());
-    let model_name = req.model_name.unwrap_or_else(crate::runtime::configured_default_model);
+    let model_name = req
+        .model_name
+        .unwrap_or_else(crate::runtime::configured_default_model);
 
     let Some(flow) = metalcraft_flows::load_flow(&crate::paths::flows_dir(), &id) else {
         return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
@@ -3143,8 +3321,7 @@ async fn post_run_flow(
         };
     }
 
-    let persona_slug =
-        persona_override.unwrap_or_else(crate::runtime::configured_default_persona);
+    let persona_slug = persona_override.unwrap_or_else(crate::runtime::configured_default_persona);
     match flows::run_flow(&context, &id, &state.cwd, &persona_slug, &model_name).await {
         Ok(results) => Json(RunFlowResponse {
             flow_id: id,
@@ -3266,8 +3443,12 @@ struct ChatDetail {
 #[derive(Serialize, Deserialize, Clone, utoipa::ToSchema)]
 #[serde(tag = "role", rename_all = "snake_case")]
 enum ChatMessageWire {
-    User { content: String },
-    Assistant { content: String },
+    User {
+        content: String,
+    },
+    Assistant {
+        content: String,
+    },
     /// A reasoning item preserved so it can be replayed with its tool call on a
     /// later turn (Responses API requirement for reasoning models). Persisted so
     /// the pairing survives a reload — dropping it would re-trigger the "function
@@ -3301,13 +3482,23 @@ impl From<&AgentMessage> for ChatMessageWire {
                 id: id.clone(),
                 encrypted: encrypted.clone(),
             },
-            AgentMessage::ToolCall { id, call_id, name, args } => Self::ToolCall {
+            AgentMessage::ToolCall {
+                id,
+                call_id,
+                name,
+                args,
+            } => Self::ToolCall {
                 id: id.clone(),
                 call_id: call_id.clone(),
                 name: name.clone(),
                 args: args.clone(),
             },
-            AgentMessage::ToolResult { id, call_id, name, result } => Self::ToolResult {
+            AgentMessage::ToolResult {
+                id,
+                call_id,
+                name,
+                result,
+            } => Self::ToolResult {
                 id: id.clone(),
                 call_id: call_id.clone(),
                 name: name.clone(),
@@ -3325,12 +3516,28 @@ impl From<ChatMessageWire> for AgentMessage {
             ChatMessageWire::Reasoning { id, encrypted } => {
                 AgentMessage::Reasoning { id, encrypted }
             }
-            ChatMessageWire::ToolCall { id, call_id, name, args } => {
-                AgentMessage::ToolCall { id, call_id, name, args }
-            }
-            ChatMessageWire::ToolResult { id, call_id, name, result } => {
-                AgentMessage::ToolResult { id, call_id, name, result }
-            }
+            ChatMessageWire::ToolCall {
+                id,
+                call_id,
+                name,
+                args,
+            } => AgentMessage::ToolCall {
+                id,
+                call_id,
+                name,
+                args,
+            },
+            ChatMessageWire::ToolResult {
+                id,
+                call_id,
+                name,
+                result,
+            } => AgentMessage::ToolResult {
+                id,
+                call_id,
+                name,
+                result,
+            },
         }
     }
 }
@@ -3474,7 +3681,7 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
             diagnostics: None,
             trace: None, // recreated lazily on the first turn, like diagnostics
             busy: false, // anything that was busy at shutdown couldn't have
-                          // finished cleanly; reset so the user can retry.
+            // finished cleanly; reset so the user can retry.
             pending: std::collections::VecDeque::new(),
         };
         out.insert(pc.id.clone(), Arc::new(Mutex::new(session)));
@@ -3630,7 +3837,10 @@ async fn post_create_chat(
     // Validate persona exists before creating a chat — fail fast instead of
     // surfacing the error mid-stream.
     if Persona::load(&persona_slug, &paths::personas_dir()).is_err() {
-        return err_json(StatusCode::BAD_REQUEST, format!("persona '{persona_slug}' not found"));
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            format!("persona '{persona_slug}' not found"),
+        );
     }
 
     // Naming an agent is what keeps it: an unnamed chat instance is disposable.
@@ -3644,7 +3854,9 @@ async fn post_create_chat(
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    let model_name = req.model_name.unwrap_or_else(crate::runtime::configured_default_model);
+    let model_name = req
+        .model_name
+        .unwrap_or_else(crate::runtime::configured_default_model);
     let diagnostics = DiagnosticsLogger::new().ok().map(Arc::new);
     // The OTLP trace shares the diagnostics session-dir name so traces/<id> and
     // sessions/<id> line up. Best-effort, like diagnostics: never block a chat.
@@ -3684,7 +3896,11 @@ async fn post_create_chat(
             }
         }
     }
-    state.chats.lock().await.insert(id.clone(), session_arc.clone());
+    state
+        .chats
+        .lock()
+        .await
+        .insert(id.clone(), session_arc.clone());
     persist_chat(&session_arc).await;
     let s = session_arc.lock().await;
     Json(ChatSummary {
@@ -3854,7 +4070,12 @@ async fn post_chat_turn(
         let prior_turns = s
             .state
             .as_ref()
-            .map(|st| st.messages.iter().filter(|m| matches!(m, AgentMessage::User(_))).count())
+            .map(|st| {
+                st.messages
+                    .iter()
+                    .filter(|m| matches!(m, AgentMessage::User(_)))
+                    .count()
+            })
             .unwrap_or(0);
         let next_state = match s.state.take() {
             Some(prev) => prev.continue_with(req.message.clone()),
@@ -4021,7 +4242,8 @@ async fn post_chat_turn(
                 let mut assistant_text = String::new();
                 let mut new_tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
                 // (id, name, wire, raw_result) — raw_result feeds the trace span.
-                let mut new_tool_results: Vec<(String, String, ChatMessageWire, String)> = Vec::new();
+                let mut new_tool_results: Vec<(String, String, ChatMessageWire, String)> =
+                    Vec::new();
 
                 for m in new {
                     match m {
@@ -4035,7 +4257,9 @@ async fn post_chat_turn(
                         AgentMessage::ToolCall { id, name, args, .. } => {
                             new_tool_calls.push((id.clone(), name.clone(), args.clone()));
                         }
-                        AgentMessage::ToolResult { id, name, result, .. } => {
+                        AgentMessage::ToolResult {
+                            id, name, result, ..
+                        } => {
                             new_tool_results.push((
                                 id.clone(),
                                 name.clone(),
@@ -4182,22 +4406,24 @@ async fn post_chat_turn(
                     if let Some(t) = &trace {
                         t.end_turn(true);
                     }
-                    let _ = tx.send(ChatEvent::Done {
-                        status: "completed".into(),
-                        reason: None,
-                    })
-                    .await;
+                    let _ = tx
+                        .send(ChatEvent::Done {
+                            status: "completed".into(),
+                            reason: None,
+                        })
+                        .await;
                 }
                 Ok(RunOutcome::Interrupted { state, reason, .. }) => {
                     s.state = Some(state);
                     if let Some(t) = &trace {
                         t.end_turn(true);
                     }
-                    let _ = tx.send(ChatEvent::Done {
-                        status: "interrupted".into(),
-                        reason: Some(reason),
-                    })
-                    .await;
+                    let _ = tx
+                        .send(ChatEvent::Done {
+                            status: "interrupted".into(),
+                            reason: Some(reason),
+                        })
+                        .await;
                 }
                 Ok(RunOutcome::Failed { state, node, error }) => {
                     // metalcraft >=0.6.0 hands back the partial state on a node
@@ -4217,17 +4443,19 @@ async fn post_chat_turn(
                     // the raw `reason` still rides in the trailing `done` for old
                     // clients and diagnostics deep-linking.
                     let ce = crate::runtime::classify_turn_error(&error);
-                    let _ = tx.send(ChatEvent::Error {
-                        code: ce.code.as_str().into(),
-                        message: ce.user_message,
-                        retryable: ce.retryable,
-                    })
-                    .await;
-                    let _ = tx.send(ChatEvent::Done {
-                        status: "failed".into(),
-                        reason: Some(reason),
-                    })
-                    .await;
+                    let _ = tx
+                        .send(ChatEvent::Error {
+                            code: ce.code.as_str().into(),
+                            message: ce.user_message,
+                            retryable: ce.retryable,
+                        })
+                        .await;
+                    let _ = tx
+                        .send(ChatEvent::Done {
+                            status: "failed".into(),
+                            reason: Some(reason),
+                        })
+                        .await;
                 }
                 Err(e) => {
                     // A framework-level error (step-limit, checkpoint) with no
@@ -4244,17 +4472,19 @@ async fn post_chat_turn(
                     }
                     s.state = Some(state_before_turn);
                     let ce = crate::runtime::classify_turn_error(&reason);
-                    let _ = tx.send(ChatEvent::Error {
-                        code: ce.code.as_str().into(),
-                        message: ce.user_message,
-                        retryable: ce.retryable,
-                    })
-                    .await;
-                    let _ = tx.send(ChatEvent::Done {
-                        status: "failed".into(),
-                        reason: Some(reason),
-                    })
-                    .await;
+                    let _ = tx
+                        .send(ChatEvent::Error {
+                            code: ce.code.as_str().into(),
+                            message: ce.user_message,
+                            retryable: ce.retryable,
+                        })
+                        .await;
+                    let _ = tx
+                        .send(ChatEvent::Done {
+                            status: "failed".into(),
+                            reason: Some(reason),
+                        })
+                        .await;
                 }
             }
         }
@@ -4263,7 +4493,8 @@ async fn post_chat_turn(
 
     let stream = ReceiverStream::new(rx).map(|ev| -> Result<Event, Infallible> {
         Ok(Event::default().json_data(&ev).unwrap_or_else(|_| {
-            Event::default().data("{\"kind\":\"done\",\"status\":\"failed\",\"reason\":\"serialize\"}")
+            Event::default()
+                .data("{\"kind\":\"done\",\"status\":\"failed\",\"reason\":\"serialize\"}")
         }))
     });
 
@@ -4290,14 +4521,17 @@ async fn get_chat_events(State(_state): State<Arc<ApiState>>, Path(id): Path<Str
         match res {
             Ok(ev) => Some(Ok::<Event, Infallible>(
                 Event::default().json_data(&ev).unwrap_or_else(|_| {
-                    Event::default().data("{\"kind\":\"done\",\"status\":\"failed\",\"reason\":\"serialize\"}")
+                    Event::default()
+                        .data("{\"kind\":\"done\",\"status\":\"failed\",\"reason\":\"serialize\"}")
                 }),
             )),
             // A lagged subscriber just skips missed events rather than erroring.
             Err(_) => None,
         }
     });
-    Sse::new(stream).keep_alive(KeepAlive::new()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new())
+        .into_response()
 }
 
 /// List scheduled follow-ups (pending + recently completed), newest first.
@@ -4324,7 +4558,11 @@ async fn delete_scheduled_task(
     Path(id): Path<String>,
 ) -> Response {
     match crate::scheduled_tasks::cancel(&id) {
-        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "cancelled": true }))).into_response(),
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "cancelled": true })),
+        )
+            .into_response(),
         Ok(false) => err_json(StatusCode::NOT_FOUND, "no pending follow-up with that id"),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -4616,7 +4854,10 @@ async fn list_integrations() -> Json<Vec<IntegrationSummary>> {
     let summaries = packs
         .into_iter()
         .map(|p| IntegrationSummary {
-            enabled: state.get(&p.manifest.id).map(|s| s.enabled).unwrap_or(false),
+            enabled: state
+                .get(&p.manifest.id)
+                .map(|s| s.enabled)
+                .unwrap_or(false),
             personas: count_files(&p.personas_dir(), "json"),
             skills: count_files(&p.skills_dir(), "md"),
             // Declarative HTTP-API tools (api_tools/*.json) plus any native Rust
@@ -4713,7 +4954,11 @@ fn pack_dependents(id: &str) -> UninstallPackResult {
     let dependent_flows = metalcraft_flows::list_flows(&flows_dir)
         .into_iter()
         .filter_map(|s| metalcraft_flows::load_flow(&flows_dir, &s.id))
-        .filter(|f| crate::flow_install::required_packs(f).iter().any(|p| p == id))
+        .filter(|f| {
+            crate::flow_install::required_packs(f)
+                .iter()
+                .any(|p| p == id)
+        })
         .map(|f| f.id)
         .collect();
 
@@ -4721,13 +4966,18 @@ fn pack_dependents(id: &str) -> UninstallPackResult {
     let dependent_personas = crate::persona::Persona::list_available(&personas_dir)
         .into_iter()
         .filter_map(|slug| {
-            crate::persona::Persona::load(&slug, &personas_dir).ok().map(|p| (slug, p))
+            crate::persona::Persona::load(&slug, &personas_dir)
+                .ok()
+                .map(|p| (slug, p))
         })
         .filter(|(_, p)| p.integrations.iter().any(|x| x == id))
         .map(|(slug, _)| slug)
         .collect();
 
-    UninstallPackResult { dependent_flows, dependent_personas }
+    UninstallPackResult {
+        dependent_flows,
+        dependent_personas,
+    }
 }
 
 /// Kept only so the retired endpoint below still documents the body clients used
@@ -4834,7 +5084,11 @@ async fn post_install_integration(Json(req): Json<InstallPackRequest>) -> Respon
             // an install.
             if let Some(hash) = crate::integrations::installed_content_sha256(&id) {
                 let _ = crate::lockfile::record_pack(
-                    &id, &integration.manifest.version, &hash, &crate::registry::base_url());
+                    &id,
+                    &integration.manifest.version,
+                    &hash,
+                    &crate::registry::base_url(),
+                );
             }
             Json(integration_summary(&integration)).into_response()
         }
@@ -4933,7 +5187,10 @@ async fn restore_flow(e: &crate::lockfile::LockEntry) -> RestoreOutcome {
     };
     // Verify integrity against the locked hash before trusting the bytes.
     if crate::lockfile::sha256_hex(&bytes) != e.content_sha256 {
-        return done("failed", Some("content hash does not match the locked hash".into()));
+        return done(
+            "failed",
+            Some("content hash does not match the locked hash".into()),
+        );
     }
     let flow: metalcraft_flows::SavedFlow = match serde_json::from_slice(&bytes) {
         Ok(f) => f,
@@ -4941,7 +5198,11 @@ async fn restore_flow(e: &crate::lockfile::LockEntry) -> RestoreOutcome {
     };
     let errors = metalcraft_flows::validate(&flow);
     if !errors.is_empty() {
-        let msg = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
+        let msg = errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
         return done("failed", Some(format!("flow failed validation: {msg}")));
     }
     match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
@@ -5041,8 +5302,17 @@ struct UpdateChannelRequest {
     request_body = UpdateChannelRequest,
     responses((status = 200, body = crate::channels::Channel), (status = 400, body = ErrorResponse)),
 )]
-async fn update_channel(Path(slug): Path<String>, Json(req): Json<UpdateChannelRequest>) -> Response {
-    match crate::channels::update_channel(&slug, &req.name, &req.url, req.enabled, req.secret.as_deref()) {
+async fn update_channel(
+    Path(slug): Path<String>,
+    Json(req): Json<UpdateChannelRequest>,
+) -> Response {
+    match crate::channels::update_channel(
+        &slug,
+        &req.name,
+        &req.url,
+        req.enabled,
+        req.secret.as_deref(),
+    ) {
         Ok(ch) => Json(ch).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }
@@ -5119,9 +5389,10 @@ struct MgConnectRequest {
 async fn gateway_metalcraft_connect(Json(req): Json<MgConnectRequest>) -> Response {
     match crate::metalcraft_gateway::connect(req.webhook_base, req.connection_token).await {
         Ok(r) => Json(r).into_response(),
-        Err(e) if e == crate::metalcraft_gateway::VERIFY_REQUIRED => {
-            err_json(StatusCode::CONFLICT, "Register and verify your phone number before connecting")
-        }
+        Err(e) if e == crate::metalcraft_gateway::VERIFY_REQUIRED => err_json(
+            StatusCode::CONFLICT,
+            "Register and verify your phone number before connecting",
+        ),
         Err(e) => err_json(StatusCode::BAD_GATEWAY, e),
     }
 }
@@ -5147,7 +5418,8 @@ async fn gateway_metalcraft_disconnect() -> Response {
 const MAX_WEBHOOK_TASKS: usize = 4;
 
 fn webhook_semaphore() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
-    static SEM: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    static SEM: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
     SEM.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_WEBHOOK_TASKS)))
 }
 
@@ -5303,7 +5575,10 @@ async fn route_gateway_inbound(
         .as_deref()
         .or(inbound.external_id.as_deref());
     if crate::inbound_dedup::is_duplicate(dedup_key) {
-        log::info!("duplicate inbound (id={}); skipping — already processed", dedup_key.unwrap_or("?"));
+        log::info!(
+            "duplicate inbound (id={}); skipping — already processed",
+            dedup_key.unwrap_or("?")
+        );
         crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
             direction: "inbound".into(),
             platform: "text".into(),
@@ -5398,10 +5673,14 @@ async fn inbound_pull_loop(state: Arc<ApiState>) {
                 backoff = 1;
                 match resp.json::<serde_json::Value>().await {
                     Ok(v) => {
-                        let message_id =
-                            v.get("message_id").and_then(|x| x.as_str()).map(str::to_string);
+                        let message_id = v
+                            .get("message_id")
+                            .and_then(|x| x.as_str())
+                            .map(str::to_string);
                         if let Some(payload) = v.get("payload") {
-                            if let Some(inbound) = crate::tools::gateway_webhook::parse_inbound(payload) {
+                            if let Some(inbound) =
+                                crate::tools::gateway_webhook::parse_inbound(payload)
+                            {
                                 let _ = route_gateway_inbound(state.clone(), inbound, None).await;
                             }
                         }
@@ -5419,7 +5698,10 @@ async fn inbound_pull_loop(state: Arc<ApiState>) {
                 // 401/403 (token stale — the heal loop refreshes it), 404 (no managed
                 // integration yet), or 5xx. Back off; don't hot-loop.
                 crate::metalcraft_gateway::set_streaming(false);
-                log::warn!("inbound pull: gateway returned HTTP {}", resp.status().as_u16());
+                log::warn!(
+                    "inbound pull: gateway returned HTTP {}",
+                    resp.status().as_u16()
+                );
                 tokio::time::sleep(Duration::from_secs(backoff)).await;
                 backoff = (backoff * 2).min(60);
             }
@@ -5486,10 +5768,21 @@ struct NormalizedInbound {
 fn gateway_chat_id(channel_slug: &str, sender: &str) -> String {
     // Reduce a phone number to bare digits (dropping any `whatsapp:` prefix and
     // punctuation) for a stable, filename-safe suffix.
-    let digits: String = sender.trim_start_matches("whatsapp:").chars().filter(|c| c.is_ascii_digit()).collect();
+    let digits: String = sender
+        .trim_start_matches("whatsapp:")
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
     let suffix = if digits.is_empty() {
-        let s: String = sender.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-        if s.is_empty() { "anon".to_string() } else { s.to_ascii_lowercase() }
+        let s: String = sender
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if s.is_empty() {
+            "anon".to_string()
+        } else {
+            s.to_ascii_lowercase()
+        }
     } else {
         digits
     };
@@ -5544,7 +5837,10 @@ fn gateway_reply_sink(
                     crate::tools::twilio::send_whatsapp(&recipient, &content, from.as_deref()).await
                 }
                 _ => match crate::channels::resolve_channel(Some(&channel_slug)) {
-                    Ok(ch) => crate::channels::send(&ch, &recipient, &content, None, from.as_deref()).await,
+                    Ok(ch) => {
+                        crate::channels::send(&ch, &recipient, &content, None, from.as_deref())
+                            .await
+                    }
                     Err(e) => Err(e),
                 },
             };
@@ -5597,7 +5893,10 @@ async fn get_or_create_gateway_session(
     let instance_id = match crate::agent_instance::for_channel(&n.channel_slug, &channel_preset) {
         Ok(i) => Some(i.id),
         Err(e) => {
-            log::warn!("gateway channel '{}': could not bind an agent instance: {e}", n.channel_slug);
+            log::warn!(
+                "gateway channel '{}': could not bind an agent instance: {e}",
+                n.channel_slug
+            );
             None
         }
     };
@@ -5752,7 +6051,11 @@ async fn run_one_gateway_turn(
                 s.state = Some(st);
                 None
             }
-            Ok(RunOutcome::Failed { state: st, node, error }) => {
+            Ok(RunOutcome::Failed {
+                state: st,
+                node,
+                error,
+            }) => {
                 let raw = format!("{node}: {error}");
                 if let Some(logger) = &s.diagnostics {
                     logger.log_error(&raw);
@@ -5807,7 +6110,10 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
         let mut s = session.lock().await;
         if s.busy {
             s.pending.push_back(n.body.clone());
-            log::info!("Inbound from {} queued — chat {chat_id} is mid-turn", n.sender);
+            log::info!(
+                "Inbound from {} queued — chat {chat_id} is mid-turn",
+                n.sender
+            );
             crate::gateway_activity::record(crate::gateway_activity::GatewayEvent {
                 direction: "inbound".into(),
                 platform: "text".into(),
@@ -5827,14 +6133,14 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
         // `AgentState::new` when `state` is None). Gives a clean session after a
         // gap and sheds any pre-upgrade turns a reasoning model would 400 on. TTL
         // is per-channel (`session_ttl_minutes` setting); 0 disables it.
-        let ttl_secs = n.session_ttl_secs.unwrap_or(DEFAULT_GATEWAY_SESSION_TTL_SECS);
+        let ttl_secs = n
+            .session_ttl_secs
+            .unwrap_or(DEFAULT_GATEWAY_SESSION_TTL_SECS);
         if ttl_secs > 0 && s.state.is_some() {
             let ttl = std::time::Duration::from_secs(ttl_secs);
             if gateway_session_is_stale(&chat_id, ttl) {
                 s.state = None;
-                log::info!(
-                    "Gateway chat {chat_id}: idle > {ttl_secs}s — starting a fresh session"
-                );
+                log::info!("Gateway chat {chat_id}: idle > {ttl_secs}s — starting a fresh session");
                 // This is the one place the system says "that conversation is
                 // over", so it is the right place to tell memory the episode can
                 // be distilled without waiting for a gap to prove it.

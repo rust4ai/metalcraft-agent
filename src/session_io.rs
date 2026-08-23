@@ -82,7 +82,9 @@ mod tests {
         assert!(json.contains("\"kind\":\"gateway\""));
         let back: SessionPreset = serde_json::from_str(&json).unwrap();
         match back {
-            SessionPreset::Gateway { adapter, recipient, .. } => {
+            SessionPreset::Gateway {
+                adapter, recipient, ..
+            } => {
                 assert_eq!(adapter, "gateway");
                 assert_eq!(recipient, "+15550001234");
             }

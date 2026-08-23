@@ -131,15 +131,17 @@ pub fn resolve_run_at(
 ) -> Result<DateTime<Utc>, String> {
     let run_at = match (delay, at) {
         (Some(d), None) => now + ChronoDuration::seconds(parse_delay_secs(d)?),
-        (None, Some(a)) => a
-            .parse::<DateTime<Utc>>()
-            .map_err(|_| format!("could not parse `at` time '{a}' (use RFC3339, e.g. 2026-07-23T18:04:00Z)"))?,
+        (None, Some(a)) => a.parse::<DateTime<Utc>>().map_err(|_| {
+            format!("could not parse `at` time '{a}' (use RFC3339, e.g. 2026-07-23T18:04:00Z)")
+        })?,
         (Some(_), Some(_)) => return Err("provide either `delay` or `at`, not both".into()),
         (None, None) => return Err("provide a `delay` (e.g. \"3m\") or an `at` time".into()),
     };
     let secs = (run_at - now).num_seconds();
     if secs < MIN_DELAY_SECS {
-        return Err(format!("run time is too soon (min {MIN_DELAY_SECS}s from now)"));
+        return Err(format!(
+            "run time is too soon (min {MIN_DELAY_SECS}s from now)"
+        ));
     }
     if secs > MAX_DELAY_SECS {
         return Err(format!(

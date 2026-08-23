@@ -85,7 +85,10 @@ impl Default for Registries {
         // a tab in front of someone that can only ever say "this host has nothing",
         // and it makes an id ambiguity check ask a host that has no opinion. Add it
         // back the day it implements §11.1.
-        Self { default: "axoniac".to_string(), registries }
+        Self {
+            default: "axoniac".to_string(),
+            registries,
+        }
     }
 }
 
@@ -104,7 +107,10 @@ impl Registries {
     }
 
     pub fn origins(&self) -> Vec<String> {
-        self.registries.values().map(|r| r.url.trim_end_matches('/').to_string()).collect()
+        self.registries
+            .values()
+            .map(|r| r.url.trim_end_matches('/').to_string())
+            .collect()
     }
 }
 
@@ -116,7 +122,9 @@ fn config_file() -> std::path::PathBuf {
 /// because two questions depend on it: what [`load`] returns, and whether writing the
 /// config file would mean anything (it would not — the override replaces it wholesale).
 fn env_override() -> Option<String> {
-    std::env::var("AGENT_PACK_REGISTRIES").ok().filter(|v| !v.trim().is_empty())
+    std::env::var("AGENT_PACK_REGISTRIES")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
 }
 
 /// The configured registries.
@@ -128,7 +136,12 @@ fn env_override() -> Option<String> {
 pub fn load() -> Registries {
     if let Some(v) = env_override() {
         let mut registries = BTreeMap::new();
-        for (i, url) in v.split(',').map(str::trim).filter(|s| !s.is_empty()).enumerate() {
+        for (i, url) in v
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .enumerate()
+        {
             // An origin list carries no trust information, so the only honest reading
             // is "the operator named this deliberately" — which is `explicit`.
             registries.insert(
@@ -141,7 +154,10 @@ pub fn load() -> Registries {
             );
         }
         let default = registries.keys().next().cloned().unwrap_or_default();
-        return Registries { default, registries };
+        return Registries {
+            default,
+            registries,
+        };
     }
 
     match std::fs::read_to_string(config_file()) {
@@ -228,14 +244,18 @@ pub fn parse_reference(raw: &str) -> Result<Reference, String> {
     if let Some((registry, rest)) = raw.split_once(':') {
         let id = rest.trim_start_matches('@');
         if registry.is_empty() || id.is_empty() {
-            return Err(format!("'{raw}' is not a valid reference; try 'axoniac:@amy_kitchen'"));
+            return Err(format!(
+                "'{raw}' is not a valid reference; try 'axoniac:@amy_kitchen'"
+            ));
         }
         return Ok(Reference::Qualified {
             registry: registry.to_string(),
             id: id.to_string(),
         });
     }
-    Ok(Reference::Bare { id: raw.trim_start_matches('@').to_string() })
+    Ok(Reference::Bare {
+        id: raw.trim_start_matches('@').to_string(),
+    })
 }
 
 /// What a registry says about a pack, and where to get it.
@@ -263,11 +283,7 @@ async fn client() -> Result<reqwest::Client, String> {
 
 /// Ask one registry for a pack's current version. `Ok(None)` means "this host does
 /// not have it", which is different from "this host is broken".
-async fn ask_version(
-    name: &str,
-    reg: &Registry,
-    id: &str,
-) -> Result<Option<Resolved>, String> {
+async fn ask_version(name: &str, reg: &Registry, id: &str) -> Result<Option<Resolved>, String> {
     let base = reg.url.trim_end_matches('/');
     let url = format!("{base}/api/v1/agent-packs/{id}/version");
     let mut req = client().await?.get(&url);
@@ -284,8 +300,10 @@ async fn ask_version(
     if !resp.status().is_success() {
         return Err(format!("{name} returned {} for {id}", resp.status()));
     }
-    let body: serde_json::Value =
-        resp.json().await.map_err(|e| format!("{name}: unreadable response: {e}"))?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("{name}: unreadable response: {e}"))?;
 
     let version = body
         .get("version")
@@ -301,7 +319,10 @@ async fn ask_version(
             .unwrap_or_default()
             .to_string(),
         download_url: format!("{base}/api/v1/agent-packs/{id}/download"),
-        verified: body.get("verified").and_then(|v| v.as_bool()).unwrap_or(false),
+        verified: body
+            .get("verified")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         trust: reg.trust,
     }))
 }
@@ -335,7 +356,11 @@ pub async fn resolve(raw: &str) -> Result<Resolved, String> {
             let Some(reg) = cfg.get(&registry) else {
                 return Err(format!(
                     "no registry named '{registry}' is configured. Configured: {}.",
-                    cfg.registries.keys().cloned().collect::<Vec<_>>().join(", ")
+                    cfg.registries
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             };
             ask_version(&registry, reg, &id)
@@ -360,12 +385,18 @@ pub async fn resolve(raw: &str) -> Result<Resolved, String> {
                 1 => Ok(hits.remove(0)),
                 0 if errors.is_empty() => Err(format!(
                     "'{id}' is not published on any configured registry ({})",
-                    cfg.registries.keys().cloned().collect::<Vec<_>>().join(", ")
+                    cfg.registries
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )),
                 0 => Err(format!("could not resolve '{id}': {}", errors.join("; "))),
                 _ => {
-                    let qualified: Vec<String> =
-                        hits.iter().map(|h| format!("{}:@{id}", h.registry)).collect();
+                    let qualified: Vec<String> = hits
+                        .iter()
+                        .map(|h| format!("{}:@{id}", h.registry))
+                        .collect();
                     Err(format!(
                         "'{id}' is published on more than one configured registry ({}). \
                          Say which one you mean — this is not a preference, it is how a \
@@ -423,7 +454,10 @@ pub async fn fetch(url: &str) -> Result<Vec<u8>, String> {
         req = req.bearer_auth(token);
     }
 
-    let resp = req.send().await.map_err(|e| format!("download failed: {e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("download failed: {e}"))?;
     let status = resp.status();
     if status.is_redirection() {
         return Err(format!(
@@ -434,10 +468,16 @@ pub async fn fetch(url: &str) -> Result<Vec<u8>, String> {
     if !status.is_success() {
         return Err(format!("registry returned {status} for {url}"));
     }
-    if resp.content_length().is_some_and(|l| l as usize > MAX_DOWNLOAD_BYTES) {
+    if resp
+        .content_length()
+        .is_some_and(|l| l as usize > MAX_DOWNLOAD_BYTES)
+    {
         return Err("that agent pack is too large".to_string());
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("reading response: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("reading response: {e}"))?;
     if bytes.len() > MAX_DOWNLOAD_BYTES {
         return Err("that agent pack is too large".to_string());
     }
@@ -552,7 +592,11 @@ impl std::fmt::Display for RegistryError {
 fn unknown_registry(cfg: &Registries, name: &str) -> RegistryError {
     RegistryError::Unknown(format!(
         "no registry named '{name}' is configured. Configured: {}.",
-        cfg.registries.keys().cloned().collect::<Vec<_>>().join(", ")
+        cfg.registries
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
     ))
 }
 
@@ -603,8 +647,14 @@ pub async fn status(name: &str) -> Result<Connection, RegistryError> {
     };
     let code = resp.status();
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
-    conn.detail = body.get("error").and_then(|v| v.as_str()).map(str::to_string);
-    conn.link_url = body.get("link_url").and_then(|v| v.as_str()).map(str::to_string);
+    conn.detail = body
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    conn.link_url = body
+        .get("link_url")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     conn.account = body
         .get("email")
         .or_else(|| body.get("account"))
@@ -620,7 +670,8 @@ pub async fn status(name: &str) -> Result<Connection, RegistryError> {
         }
         reqwest::StatusCode::NOT_FOUND => ConnectionState::Unsupported,
         c => {
-            conn.detail.get_or_insert_with(|| format!("{name} answered {c}"));
+            conn.detail
+                .get_or_insert_with(|| format!("{name} answered {c}"));
             ConnectionState::Unreachable
         }
     };
@@ -765,11 +816,18 @@ pub async fn search(
         )));
     }
     if !code.is_success() {
-        return Err(RegistryError::Host(format!("{name} answered {code} to a search")));
+        return Err(RegistryError::Host(format!(
+            "{name} answered {code} to a search"
+        )));
     }
-    let results = body.get("results").and_then(|r| r.as_array()).ok_or_else(|| {
-        RegistryError::Host(format!("{name} returned a search body with no results array"))
-    })?;
+    let results = body
+        .get("results")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| {
+            RegistryError::Host(format!(
+                "{name} returned a search body with no results array"
+            ))
+        })?;
     Ok(results.iter().filter_map(|v| hit_from(name, v)).collect())
 }
 
@@ -783,9 +841,16 @@ pub async fn search(
 /// host to tell, and an inspect is not an install.
 pub async fn report_install(resolved: &Resolved) {
     let cfg = load();
-    let Some(reg) = cfg.get(&resolved.registry) else { return };
-    let Ok(id) = pack_id(&resolved.id) else { return };
-    let url = format!("{}/api/v1/agent-packs/{id}/installed", reg.url.trim_end_matches('/'));
+    let Some(reg) = cfg.get(&resolved.registry) else {
+        return;
+    };
+    let Ok(id) = pack_id(&resolved.id) else {
+        return;
+    };
+    let url = format!(
+        "{}/api/v1/agent-packs/{id}/installed",
+        reg.url.trim_end_matches('/')
+    );
     let Ok(client) = client().await else { return };
     let mut req = client.post(&url);
     if let Some(token) = token_for(reg) {
@@ -793,8 +858,15 @@ pub async fn report_install(resolved: &Resolved) {
     }
     match req.send().await {
         Ok(r) if r.status().is_success() => {}
-        Ok(r) => log::debug!("{} did not record the install: {}", resolved.registry, r.status()),
-        Err(e) => log::debug!("could not tell {} about the install: {e}", resolved.registry),
+        Ok(r) => log::debug!(
+            "{} did not record the install: {}",
+            resolved.registry,
+            r.status()
+        ),
+        Err(e) => log::debug!(
+            "could not tell {} about the install: {e}",
+            resolved.registry
+        ),
     }
 }
 
@@ -812,10 +884,12 @@ pub async fn manifest(name: &str, id: &str) -> Result<serde_json::Value, Registr
         c if c.is_success() => Ok(body),
         // A host must 404 a pack the viewer cannot see rather than 403 it (§11.1), so
         // these are the same answer as far as anyone here is concerned.
-        reqwest::StatusCode::NOT_FOUND => {
-            Err(RegistryError::NotFound(format!("'{id}' is not published on {name}")))
-        }
-        c => Err(RegistryError::Host(format!("{name} answered {c} for '{id}'"))),
+        reqwest::StatusCode::NOT_FOUND => Err(RegistryError::NotFound(format!(
+            "'{id}' is not published on {name}"
+        ))),
+        c => Err(RegistryError::Host(format!(
+            "{name} answered {c} for '{id}'"
+        ))),
     }
 }
 
@@ -830,7 +904,9 @@ fn hit_from(registry: &str, v: &serde_json::Value) -> Option<SearchHit> {
     // pack's own id. Taken in that order deliberately — a host whose `id` is a
     // database key has a handle, and one without handles is already naming packs in
     // `id`, so the first field that is a *name* wins.
-    let id = field("handle").or_else(|| field("slug")).or_else(|| field("id"))?;
+    let id = field("handle")
+        .or_else(|| field("slug"))
+        .or_else(|| field("id"))?;
     // Checked here rather than at install time. The id is what the reference is built
     // from, and `pack_id` will refuse a malformed one when somebody presses Install —
     // so listing it would be offering a button that cannot work, with the explanation
@@ -847,7 +923,11 @@ fn hit_from(registry: &str, v: &serde_json::Value) -> Option<SearchHit> {
         tags: v
             .get("tags")
             .and_then(|t| t.as_array())
-            .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
         avatar_url: field("avatar_url"),
         verified: v.get("verified").and_then(|b| b.as_bool()).unwrap_or(false),
@@ -885,8 +965,13 @@ mod tests {
     #[test]
     fn an_allowlisted_origin_is_accepted_at_any_path() {
         with_registries("https://axoniac.example", || {
-            assert!(is_allowed("https://axoniac.example/api/v1/agent-packs/amy/download"));
-            assert!(is_allowed("https://AXONIAC.example/x"), "host match is case-insensitive");
+            assert!(is_allowed(
+                "https://axoniac.example/api/v1/agent-packs/amy/download"
+            ));
+            assert!(
+                is_allowed("https://AXONIAC.example/x"),
+                "host match is case-insensitive"
+            );
         });
     }
 
@@ -913,12 +998,20 @@ mod tests {
     #[test]
     fn the_scheme_must_match_too() {
         with_registries("https://axoniac.example", || {
-            assert!(!is_allowed("http://axoniac.example/x"), "plaintext is a different origin");
+            assert!(
+                !is_allowed("http://axoniac.example/x"),
+                "plaintext is a different origin"
+            );
         });
         // …and a local dev registry over http works when that is what was configured.
         with_registries("http://localhost:8080", || {
-            assert!(is_allowed("http://localhost:8080/api/v1/agent-packs/x/download"));
-            assert!(!is_allowed("http://localhost:9999/x"), "the port is part of the origin");
+            assert!(is_allowed(
+                "http://localhost:8080/api/v1/agent-packs/x/download"
+            ));
+            assert!(
+                !is_allowed("http://localhost:9999/x"),
+                "the port is part of the origin"
+            );
         });
     }
 
@@ -948,7 +1041,10 @@ mod tests {
         // Shipping no default at all was why installing from axoniac needed an
         // environment variable.
         let origins = default_origins();
-        assert!(origins.iter().any(|o| o.contains("axoniac.com")), "{origins:?}");
+        assert!(
+            origins.iter().any(|o| o.contains("axoniac.com")),
+            "{origins:?}"
+        );
         // `packs.metalcraftai.com` serves *integration* packs and 404s every
         // agent-pack path, so it is not one of these. Configuring a host that cannot
         // answer only produces a tab that says "this host has nothing".
@@ -965,7 +1061,10 @@ mod tests {
         // `verified-only`, because anyone can publish there. That is the whole reason
         // the trust levels exist, and softening it for the default host would empty
         // them of meaning.
-        assert_eq!(cfg.get("axoniac").map(|r| r.trust), Some(Trust::VerifiedOnly));
+        assert_eq!(
+            cfg.get("axoniac").map(|r| r.trust),
+            Some(Trust::VerifiedOnly)
+        );
     }
 
     /// A host can put anything in a search result. What it cannot do is make this pod
@@ -981,16 +1080,23 @@ mod tests {
     fn references_parse_into_their_three_shapes() {
         assert_eq!(
             parse_reference("@amy_kitchen").unwrap(),
-            Reference::Bare { id: "amy_kitchen".into() }
+            Reference::Bare {
+                id: "amy_kitchen".into()
+            }
         );
         assert_eq!(
             parse_reference("amy_kitchen").unwrap(),
-            Reference::Bare { id: "amy_kitchen".into() },
+            Reference::Bare {
+                id: "amy_kitchen".into()
+            },
             "the @ is decoration, not syntax"
         );
         assert_eq!(
             parse_reference("axoniac:@amy_kitchen").unwrap(),
-            Reference::Qualified { registry: "axoniac".into(), id: "amy_kitchen".into() }
+            Reference::Qualified {
+                registry: "axoniac".into(),
+                id: "amy_kitchen".into()
+            }
         );
         assert_eq!(
             parse_reference("https://axoniac.com/x").unwrap(),
@@ -1018,10 +1124,16 @@ mod tests {
             "an operator who says so anyway is allowed to; they are the one being asked"
         );
 
-        let verified = Resolved { verified: true, ..unverified.clone() };
+        let verified = Resolved {
+            verified: true,
+            ..unverified.clone()
+        };
         assert!(trust_permits(&verified, false).is_ok());
 
-        let first_party = Resolved { trust: Trust::FirstParty, ..unverified };
+        let first_party = Resolved {
+            trust: Trust::FirstParty,
+            ..unverified
+        };
         assert!(
             trust_permits(&first_party, false).is_ok(),
             "a first-party host's packs are not gated on a verified flag it never sets"
@@ -1033,7 +1145,11 @@ mod tests {
     #[test]
     fn a_pack_id_that_could_leave_its_path_is_refused() {
         assert_eq!(pack_id("amy_kitchen").as_deref(), Ok("amy_kitchen"));
-        assert_eq!(pack_id("@amy_kitchen").as_deref(), Ok("amy_kitchen"), "the @ is sugar");
+        assert_eq!(
+            pack_id("@amy_kitchen").as_deref(),
+            Ok("amy_kitchen"),
+            "the @ is sugar"
+        );
         assert_eq!(pack_id(" mitch-reviews ").as_deref(), Ok("mitch-reviews"));
 
         for hostile in [
@@ -1075,7 +1191,10 @@ mod tests {
         });
         let hit = hit_from("axoniac", &row).expect("a row with a handle is a hit");
         assert_eq!(hit.reference, "axoniac:@amy_kitchen");
-        assert_eq!(hit.id, "amy_kitchen", "the handle, not the host's database key");
+        assert_eq!(
+            hit.id, "amy_kitchen",
+            "the handle, not the host's database key"
+        );
         assert_eq!(hit.version.as_deref(), Some("1.2.0"));
         assert!(hit.verified);
         assert_eq!(hit.tags, vec!["food", "home"]);
@@ -1086,7 +1205,10 @@ mod tests {
         let hit = hit_from("acme", &sparse).expect("id alone is enough");
         assert_eq!(hit.reference, "acme:@helpdesk");
         assert_eq!(hit.version, None);
-        assert!(!hit.verified, "a host that says nothing vouches for nothing");
+        assert!(
+            !hit.verified,
+            "a host that says nothing vouches for nothing"
+        );
 
         assert!(
             hit_from("acme", &serde_json::json!({ "name": "no id" })).is_none(),

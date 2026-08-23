@@ -56,7 +56,9 @@ async fn create_chat(body: &str) -> (StatusCode, serde_json::Value) {
         .await
         .unwrap();
     let status = res.status();
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
@@ -73,12 +75,18 @@ async fn an_explicit_persona_scopes_to_the_chat_not_the_agent() {
     write(&presets_dir.join("amy-kitchen.json"), PRESET);
     let personas_dir = data_dir.join("personas");
     write(&personas_dir.join("amy.json"), &persona_json("amy"));
-    write(&personas_dir.join("amy-shopper.json"), &persona_json("amy-shopper"));
+    write(
+        &personas_dir.join("amy-shopper.json"),
+        &persona_json("amy-shopper"),
+    );
 
     let preset = AgentPreset::load("amy-kitchen", &presets_dir).expect("load preset");
     let instance = AgentInstance::new(&preset, InstanceOrigin::Workshop);
     instance.save().expect("save instance");
-    assert_eq!(instance.persona, "amy", "an instance starts at the preset default");
+    assert_eq!(
+        instance.persona, "amy",
+        "an instance starts at the preset default"
+    );
 
     // The regression: continue this agent, but start the chat as another persona in
     // its roster.
@@ -87,7 +95,11 @@ async fn an_explicit_persona_scopes_to_the_chat_not_the_agent() {
         instance.id
     ))
     .await;
-    assert_eq!(status, StatusCode::OK, "an in-roster persona is allowed: {chat}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an in-roster persona is allowed: {chat}"
+    );
     assert_eq!(
         chat["persona_slug"], "amy-shopper",
         "the conversation runs as the persona that was asked for"
@@ -101,8 +113,7 @@ async fn an_explicit_persona_scopes_to_the_chat_not_the_agent() {
 
     // A second chat with nothing named still gets the agent's own persona, which is
     // the property the old behaviour destroyed.
-    let (status, plain) =
-        create_chat(&format!(r#"{{"instance_id":"{}"}}"#, instance.id)).await;
+    let (status, plain) = create_chat(&format!(r#"{{"instance_id":"{}"}}"#, instance.id)).await;
     assert_eq!(status, StatusCode::OK, "{plain}");
     assert_eq!(
         plain["persona_slug"], "amy",

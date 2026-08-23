@@ -58,26 +58,47 @@ fn good_files() -> BTreeMap<String, Vec<u8>> {
     let mut f = BTreeMap::new();
     f.insert(
         "agent_presets/amy-kitchen.json".into(),
-        preset("amy-kitchen", &[("amy", "default"), ("amy-shopper", "subagent")], &["metalcraft-calendar"]),
+        preset(
+            "amy-kitchen",
+            &[("amy", "default"), ("amy-shopper", "subagent")],
+            &["metalcraft-calendar"],
+        ),
     );
     f.insert(
         "agent_presets/amy-kitchen/memories.jsonl".into(),
         b"{\"kind\":\"Semantic\",\"content\":\"Amy braises at 2:1 mirepoix to leek.\",\"summary\":\"braise base\",\"entity\":\"braising\",\"importance\":7.0}\n{\"kind\":\"Procedural\",\"content\":\"Sear first.\",\"summary\":\"sear\"}\n".to_vec(),
     );
-    f.insert("personas/amy.json".into(), persona("amy", &["metalcraft-calendar"]));
-    f.insert("personas/amy-shopper.json".into(), persona("amy-shopper", &["metalcraft-calendar"]));
-    f.insert("skills/knife-skills.md".into(), b"# Knife skills\nPinch the blade.\n".to_vec());
+    f.insert(
+        "personas/amy.json".into(),
+        persona("amy", &["metalcraft-calendar"]),
+    );
+    f.insert(
+        "personas/amy-shopper.json".into(),
+        persona("amy-shopper", &["metalcraft-calendar"]),
+    );
+    f.insert(
+        "skills/knife-skills.md".into(),
+        b"# Knife skills\nPinch the blade.\n".to_vec(),
+    );
     f.insert(
         "integrations/metalcraft-calendar/integration.json".into(),
         pack_manifest("metalcraft-calendar"),
     );
     f.insert(
         "integrations/metalcraft-calendar/api_tools/mcal_list.json".into(),
-        api_tool("mcal_list", "GET", "https://calendar.metalcraftai.com/api/v1/calendars"),
+        api_tool(
+            "mcal_list",
+            "GET",
+            "https://calendar.metalcraftai.com/api/v1/calendars",
+        ),
     );
     f.insert(
         "integrations/metalcraft-calendar/api_tools/mcal_create.json".into(),
-        api_tool("mcal_create", "POST", "https://calendar.metalcraftai.com/api/v1/events"),
+        api_tool(
+            "mcal_create",
+            "POST",
+            "https://calendar.metalcraftai.com/api/v1/events",
+        ),
     );
     f
 }
@@ -116,7 +137,10 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     let parsed = Bundle::read(&archive).expect("read archive");
     assert_eq!(parsed.manifest.id, "amy-kitchen-agent");
     assert_eq!(parsed.preset_slug(), Some("amy-kitchen"));
-    assert!(parsed.manifest.content_sha256.is_some(), "the builder must pin its contents");
+    assert!(
+        parsed.manifest.content_sha256.is_some(),
+        "the builder must pin its contents"
+    );
 
     // Consent is derived from the tools, not from what the author claimed.
     assert_eq!(parsed.consent.domains, vec!["calendar.metalcraftai.com"]);
@@ -126,12 +150,20 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
         vec!["mcal_create"],
         "the dialog must be able to say this agent can write, not just read"
     );
-    let env: Vec<&str> = parsed.consent.requires_env.iter().map(|e| e.name.as_str()).collect();
+    let env: Vec<&str> = parsed
+        .consent
+        .requires_env
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
     assert_eq!(env, vec!["METALCRAFT_TOKEN"]);
 
     // ── tampering ───────────────────────────────────────────────────────────
     let mut tampered = good_files();
-    tampered.insert("personas/amy.json".into(), persona("amy-evil", &["metalcraft-calendar"]));
+    tampered.insert(
+        "personas/amy.json".into(),
+        persona("amy-evil", &["metalcraft-calendar"]),
+    );
     let mut m = good_manifest();
     m.content_sha256 = Some(bundle::content_hash(&good_files())); // hash of the *original*
     // Rebuild the zip by hand so `write` doesn't helpfully re-pin it.
@@ -164,7 +196,10 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
 
     // Containment: a persona reaching a pack its preset never declared.
     let mut escaping = good_files();
-    escaping.insert("personas/amy.json".into(), persona("amy", &["metalcraft-calendar", "secret-exfil"]));
+    escaping.insert(
+        "personas/amy.json".into(),
+        persona("amy", &["metalcraft-calendar", "secret-exfil"]),
+    );
     let err = build_and_read(good_manifest(), escaping).expect_err("containment must hold");
     assert!(err.contains("does not declare"), "{err}");
 
@@ -183,7 +218,10 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
 
     // Spec §10 V16 — a shipped flow naming a persona outside the preset's roster.
     let mut stray = good_files();
-    stray.insert("flows/brief.json".into(), flow_doc("brief", "stranger", true));
+    stray.insert(
+        "flows/brief.json".into(),
+        flow_doc("brief", "stranger", true),
+    );
     let err = build_and_read(good_manifest(), stray).expect_err("flow containment must hold");
     assert!(err.contains("names persona 'stranger'"), "{err}");
 
@@ -195,7 +233,10 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     assert_eq!(report.skills, vec!["knife-skills"]);
     assert_eq!(report.packs_stored, vec!["metalcraft-calendar"]);
     assert!(report.packs_deduplicated.is_empty());
-    assert_eq!(report.memories_indexed, 2, "the preset's memory base is built at install");
+    assert_eq!(
+        report.memories_indexed, 2,
+        "the preset's memory base is built at install"
+    );
     assert_eq!(
         report.missing_env,
         vec!["METALCRAFT_TOKEN"],
@@ -205,9 +246,15 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     // The preset now resolves through the normal layered lookup.
     let installed = agent_packs::find("amy-kitchen-agent").expect("installed");
     assert_eq!(installed.manifest.version, "1.4.0");
-    assert!(agent_packs::pack_dir("amy-kitchen-agent").join("agent_presets/amy-kitchen.json").is_file());
     assert!(
-        !agent_packs::pack_dir("amy-kitchen-agent").join("integrations").exists(),
+        agent_packs::pack_dir("amy-kitchen-agent")
+            .join("agent_presets/amy-kitchen.json")
+            .is_file()
+    );
+    assert!(
+        !agent_packs::pack_dir("amy-kitchen-agent")
+            .join("integrations")
+            .exists(),
         "vendored packs live in the content store, not inside the agent pack"
     );
 
@@ -224,7 +271,10 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     // an identity must never start background work.
     {
         let mut with_flow = good_files();
-        with_flow.insert("flows/sunday-prep.json".into(), flow_doc("sunday-prep", "amy", true));
+        with_flow.insert(
+            "flows/sunday-prep.json".into(),
+            flow_doc("sunday-prep", "amy", true),
+        );
         let mut m = good_manifest();
         m.version = "1.5.0".into();
         let archive = bundle::write(m, with_flow).expect("write flow pack");
@@ -232,12 +282,13 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
 
         assert_eq!(report.flows_installed_unscheduled, vec!["sunday-prep"]);
 
-        let saved = metalcraft_flows::load_flow(
-            &metalcraft_agent::paths::flows_dir(),
-            "sunday-prep",
-        )
-        .expect("the flow was written");
-        assert!(!saved.enabled, "install must never arm a flow's master switch");
+        let saved =
+            metalcraft_flows::load_flow(&metalcraft_agent::paths::flows_dir(), "sunday-prep")
+                .expect("the flow was written");
+        assert!(
+            !saved.enabled,
+            "install must never arm a flow's master switch"
+        );
         assert!(
             saved.schedules.iter().all(|s| !s.enabled),
             "install must never arm an individual schedule either"
@@ -293,7 +344,11 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     assert!(report2.packs_stored.is_empty());
 
     let counts = agent_packs::store::refcounts();
-    assert_eq!(counts.values().copied().max(), Some(2), "one entry, two referents");
+    assert_eq!(
+        counts.values().copied().max(),
+        Some(2),
+        "one entry, two referents"
+    );
 
     // ── downgrade ───────────────────────────────────────────────────────────
     let mut older = good_manifest();
@@ -305,11 +360,17 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     // ── uninstall ───────────────────────────────────────────────────────────
     let r = agent_packs::uninstall("mitch-reviews-agent", false).expect("uninstall");
     assert!(r.orphaned_agents.is_empty());
-    assert_eq!(r.packs_freed, 0, "the pack is still referenced by the other agent pack");
+    assert_eq!(
+        r.packs_freed, 0,
+        "the pack is still referenced by the other agent pack"
+    );
     assert!(agent_packs::find("mitch-reviews-agent").is_none());
 
     let r = agent_packs::uninstall("amy-kitchen-agent", false).expect("uninstall last");
-    assert_eq!(r.packs_freed, 1, "the last referent gone means the store entry is collectable");
+    assert_eq!(
+        r.packs_freed, 1,
+        "the last referent gone means the store entry is collectable"
+    );
     assert!(agent_packs::store::refcounts().is_empty());
 
     let _ = fs::remove_dir_all(&data_dir);
@@ -341,7 +402,10 @@ fn flow_doc(id: &str, persona: &str, enabled: bool) -> Vec<u8> {
     .unwrap()
 }
 
-fn build_and_read(m: AgentPackManifest, files: BTreeMap<String, Vec<u8>>) -> Result<Bundle, String> {
+fn build_and_read(
+    m: AgentPackManifest,
+    files: BTreeMap<String, Vec<u8>>,
+) -> Result<Bundle, String> {
     let bytes = bundle::write(m, files)?;
     Bundle::read(&bytes)
 }

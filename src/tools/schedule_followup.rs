@@ -22,7 +22,10 @@ pub struct ScheduleFollowupTool {
 
 impl ScheduleFollowupTool {
     pub fn new(binding: Option<IoBinding>, reschedule_depth: u32) -> Self {
-        Self { binding, reschedule_depth }
+        Self {
+            binding,
+            reschedule_depth,
+        }
     }
 }
 
@@ -87,19 +90,29 @@ impl metalcraft::Tool for ScheduleFollowupTool {
         let delay = args["delay"].as_str().filter(|s| !s.is_empty());
         let at = args["at"].as_str().filter(|s| !s.is_empty());
 
-        let run_at = scheduled_tasks::resolve_run_at(delay, at, Utc::now())
-            .map_err(|e| metalcraft::GraphError::ToolCallFailed {
+        let run_at = scheduled_tasks::resolve_run_at(delay, at, Utc::now()).map_err(|e| {
+            metalcraft::GraphError::ToolCallFailed {
                 tool: self.name().into(),
                 message: e,
-            })?;
+            }
+        })?;
 
         let armed = scheduled_tasks::add(NewTask {
             io_binding: self.binding.clone().unwrap_or(IoBinding::Unbound),
             run_at,
             task: task.to_string(),
-            persona: args["persona"].as_str().filter(|s| !s.is_empty()).map(String::from),
-            tool_set: args["tool_set"].as_str().filter(|s| !s.is_empty()).map(String::from),
-            pack: args["pack"].as_str().filter(|s| !s.is_empty()).map(String::from),
+            persona: args["persona"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+            tool_set: args["tool_set"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+            pack: args["pack"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(String::from),
             reschedule_depth: self.reschedule_depth + 1,
         })
         .map_err(|e| metalcraft::GraphError::ToolCallFailed {

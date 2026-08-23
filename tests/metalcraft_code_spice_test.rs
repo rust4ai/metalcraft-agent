@@ -89,14 +89,20 @@ fn init() {
 fn metalcraft_code_pack_wires_up() {
     init();
 
-    assert!(integrations::is_enabled(PACK_ID), "pack should be enabled after init()");
+    assert!(
+        integrations::is_enabled(PACK_ID),
+        "pack should be enabled after init()"
+    );
 
     let persona = Persona::load(PERSONA_SLUG, &paths::personas_dir())
         .expect("metalcraft-code-agent persona should resolve from the enabled pack");
     assert!(persona.integrations.iter().any(|p| p == PACK_ID));
     let resolved = persona.resolved_tool_names();
     for tool in EXPECTED_TOOLS {
-        assert!(resolved.iter().any(|t| t == tool), "missing expected tool `{tool}`");
+        assert!(
+            resolved.iter().any(|t| t == tool),
+            "missing expected tool `{tool}`"
+        );
     }
     assert!(resolved.iter().any(|t| t == "load_skill"));
     assert!(persona.skills.iter().any(|s| s == "metalcraft-code"));
@@ -106,22 +112,30 @@ fn metalcraft_code_pack_wires_up() {
         let (path, _origin) =
             integrations::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .unwrap_or_else(|| panic!("api tool `{tool}` should resolve"));
-        let cfg: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
-                .unwrap_or_else(|e| panic!("`{tool}` invalid JSON: {e}"));
+        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
+            .unwrap_or_else(|e| panic!("`{tool}` invalid JSON: {e}"));
         assert_eq!(cfg["name"], *tool);
         assert!(
-            cfg["url"].as_str().is_some_and(|u| u.contains("https://code.metalcraftai.com")),
+            cfg["url"]
+                .as_str()
+                .is_some_and(|u| u.contains("https://code.metalcraftai.com")),
             "`{tool}` should target the fixed code.metalcraftai.com base"
         );
         assert!(
-            cfg["headers"]["Authorization"].as_str().is_some_and(|h| h.contains("$METALCRAFT_TOKEN")),
+            cfg["headers"]["Authorization"]
+                .as_str()
+                .is_some_and(|h| h.contains("$METALCRAFT_TOKEN")),
             "`{tool}` should authenticate with $METALCRAFT_TOKEN"
         );
     }
 
     // Per-workspace tools address the workspace by {id}.
-    for tool in ["mcode_get_workspace", "mcode_clone", "mcode_exec", "mcode_git"] {
+    for tool in [
+        "mcode_get_workspace",
+        "mcode_clone",
+        "mcode_exec",
+        "mcode_git",
+    ] {
         let (p, _) =
             integrations::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("resolves");
@@ -136,7 +150,10 @@ fn metalcraft_code_pack_wires_up() {
     let pack = integrations::find_installed(PACK_ID).expect("pack installed");
     let readme = pack.readme().expect("README");
     assert!(readme.contains("METALCRAFT_TOKEN") && readme.contains("code.metalcraftai.com"));
-    assert_eq!(pack.item_slugs("api_tools", "json").len(), EXPECTED_TOOLS.len());
+    assert_eq!(
+        pack.item_slugs("api_tools", "json").len(),
+        EXPECTED_TOOLS.len()
+    );
 
     let recommended = integrations::recommended_env();
     assert!(

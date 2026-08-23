@@ -1,5 +1,5 @@
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
   "slug": "general-agent",
   "name": "General Agent",
   "tagline": "The default. Orchestrates, delegates, and knows its way around a codebase.",

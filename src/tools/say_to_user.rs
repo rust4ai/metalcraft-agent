@@ -66,7 +66,9 @@ impl metalcraft::Tool for SayToUserTool {
                 Ok(serde_json::json!({ "delivered": true }))
             }
             // No session sink (one-shot/flow): acknowledge without delivery.
-            None => Ok(serde_json::json!({ "delivered": false, "note": "no reply sink configured" })),
+            None => {
+                Ok(serde_json::json!({ "delivered": false, "note": "no reply sink configured" }))
+            }
         }
     }
 }

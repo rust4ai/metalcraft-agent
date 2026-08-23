@@ -5,7 +5,9 @@ pub struct EditFileTool;
 
 #[async_trait]
 impl metalcraft::Tool for EditFileTool {
-    fn name(&self) -> &str { "edit_file" }
+    fn name(&self) -> &str {
+        "edit_file"
+    }
     fn description(&self) -> &str {
         "Edit a file by replacing an exact string match. The old_string must appear exactly once in the file. Use this instead of write_file when modifying existing files."
     }
@@ -30,30 +32,43 @@ impl metalcraft::Tool for EditFileTool {
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let path_str = args["path"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "edit_file".into(),
-            message: "Missing required parameter: path".into(),
-        })?;
-        let old_string = args["old_string"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "edit_file".into(),
-            message: "Missing required parameter: old_string".into(),
-        })?;
-        let new_string = args["new_string"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "edit_file".into(),
-            message: "Missing required parameter: new_string".into(),
-        })?;
+        let path_str =
+            args["path"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "edit_file".into(),
+                    message: "Missing required parameter: path".into(),
+                })?;
+        let old_string =
+            args["old_string"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "edit_file".into(),
+                    message: "Missing required parameter: old_string".into(),
+                })?;
+        let new_string =
+            args["new_string"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "edit_file".into(),
+                    message: "Missing required parameter: new_string".into(),
+                })?;
 
         let path = Path::new(path_str);
-        let content = std::fs::read_to_string(path).map_err(|e| metalcraft::GraphError::ToolCallFailed {
-            tool: "edit_file".into(),
-            message: format!("Failed to read {}: {}", path_str, e),
-        })?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| metalcraft::GraphError::ToolCallFailed {
+                tool: "edit_file".into(),
+                message: format!("Failed to read {}: {}", path_str, e),
+            })?;
 
         let match_count = content.matches(old_string).count();
         if match_count == 0 {
             return Err(metalcraft::GraphError::ToolCallFailed {
                 tool: "edit_file".into(),
-                message: format!("old_string not found in {}. Make sure it matches exactly.", path_str),
+                message: format!(
+                    "old_string not found in {}. Make sure it matches exactly.",
+                    path_str
+                ),
             });
         }
         if match_count > 1 {

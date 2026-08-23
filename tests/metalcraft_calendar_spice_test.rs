@@ -62,8 +62,7 @@ static INIT: Once = Once::new();
 
 fn init() {
     INIT.call_once(|| {
-        let data_dir =
-            std::env::temp_dir().join(format!("mc-mcal-spice-{}", std::process::id()));
+        let data_dir = std::env::temp_dir().join(format!("mc-mcal-spice-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data_dir);
         // SAFETY: set before any other thread touches the environment or
         // paths::data_dir(); guarded by `Once` so it happens exactly once.
@@ -79,7 +78,10 @@ fn init() {
 fn metalcraft_calendar_pack_wires_up() {
     init();
 
-    assert!(integrations::is_enabled(PACK_ID), "pack should be enabled after init()");
+    assert!(
+        integrations::is_enabled(PACK_ID),
+        "pack should be enabled after init()"
+    );
 
     let persona = Persona::load(PERSONA_SLUG, &paths::personas_dir())
         .expect("metalcraft-calendar-agent persona should resolve from the enabled pack");
@@ -105,7 +107,10 @@ fn metalcraft_calendar_pack_wires_up() {
         let raw = std::fs::read_to_string(&path).expect("read api tool config");
         let cfg: serde_json::Value = serde_json::from_str(&raw)
             .unwrap_or_else(|e| panic!("api tool `{tool}` is not valid JSON: {e}"));
-        assert_eq!(cfg["name"], *tool, "api tool `{tool}` name should match filename");
+        assert_eq!(
+            cfg["name"], *tool,
+            "api tool `{tool}` name should match filename"
+        );
         assert!(
             cfg["url"]
                 .as_str()
@@ -121,24 +126,43 @@ fn metalcraft_calendar_pack_wires_up() {
     }
 
     // Write tools that carry a body map params into it.
-    for tool in ["mcal_create_calendar", "mcal_create_event", "mcal_update_event", "mcal_add_guests"] {
+    for tool in [
+        "mcal_create_calendar",
+        "mcal_create_event",
+        "mcal_update_event",
+        "mcal_add_guests",
+    ] {
         let (p, _) =
             integrations::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("write tool resolves");
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-        assert_eq!(cfg["body_mapping"], "params", "`{tool}` should map params into the body");
+        assert_eq!(
+            cfg["body_mapping"], "params",
+            "`{tool}` should map params into the body"
+        );
     }
 
     // Slug-scoped tools must carry the {calendar} path placeholder.
-    for tool in ["mcal_list_events", "mcal_get_event", "mcal_create_event", "mcal_sync", "mcal_add_guests", "mcal_remove_guest", "mcal_add_meeting", "mcal_remove_meeting"] {
+    for tool in [
+        "mcal_list_events",
+        "mcal_get_event",
+        "mcal_create_event",
+        "mcal_sync",
+        "mcal_add_guests",
+        "mcal_remove_guest",
+        "mcal_add_meeting",
+        "mcal_remove_meeting",
+    ] {
         let (p, _) =
             integrations::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("slug tool resolves");
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
         assert!(
-            cfg["url"].as_str().is_some_and(|u| u.contains("{calendar}")),
+            cfg["url"]
+                .as_str()
+                .is_some_and(|u| u.contains("{calendar}")),
             "`{tool}` should address the calendar by {{calendar}} slug"
         );
     }
@@ -149,9 +173,13 @@ fn metalcraft_calendar_pack_wires_up() {
         readme.contains("METALCRAFT_TOKEN") && readme.contains("calendar.metalcraftai.com"),
         "README should explain the token and the fixed calendar.metalcraftai.com base"
     );
-    assert_eq!(pack.item_slugs("api_tools", "json").len(), EXPECTED_TOOLS.len());
+    assert_eq!(
+        pack.item_slugs("api_tools", "json").len(),
+        EXPECTED_TOOLS.len()
+    );
     assert!(
-        pack.item_slugs("personas", "json").is_empty() && pack.item_slugs("skills", "md").is_empty(),
+        pack.item_slugs("personas", "json").is_empty()
+            && pack.item_slugs("skills", "md").is_empty(),
         "an integration carries tools and nothing else; its persona and skill are seeded \
          on the pod and curated by a preset"
     );
@@ -166,12 +194,8 @@ fn metalcraft_calendar_pack_wires_up() {
         "the calendar persona should be seeded on the pod"
     );
     assert!(
-        integrations::resolve_file(
-            &paths::skills_dir(),
-            "skills",
-            "metalcraft-calendar.md",
-        )
-        .is_some(),
+        integrations::resolve_file(&paths::skills_dir(), "skills", "metalcraft-calendar.md",)
+            .is_some(),
         "the calendar skill should be seeded on the pod"
     );
 

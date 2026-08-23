@@ -71,8 +71,14 @@ impl metalcraft::Tool for GatewaySendMessageTool {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| crate::tools::missing_param(self.name(), "content"))?;
-        let channel_slug = args.get("channel").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty());
-        let from = args.get("from").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty());
+        let channel_slug = args
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty());
+        let from = args
+            .get("from")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty());
 
         // Delivery kind sent to the gateway (None → a generic text send routed to
         // the account's default integration), and the label recorded for the
@@ -115,7 +121,8 @@ fn record_outbound(
     from: Option<&str>,
     result: &Result<serde_json::Value, String>,
 ) {
-    let channel = crate::channels::get_channel(channel_slug.unwrap_or(crate::channels::DEFAULT_SLUG));
+    let channel =
+        crate::channels::get_channel(channel_slug.unwrap_or(crate::channels::DEFAULT_SLUG));
     let (outcome, detail) = match result {
         Ok(_) => ("sent", None),
         Err(e) => ("send_failed", Some(e.clone())),

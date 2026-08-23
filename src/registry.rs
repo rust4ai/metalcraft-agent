@@ -24,7 +24,11 @@ pub fn flows_base_url() -> String {
 /// download endpoint. A flow is a single self-contained JSON document, so unlike a
 /// pack there's no ZIP to extract — this returns the parsed flow ready to save.
 pub async fn fetch_flow(slug: &str) -> Result<metalcraft_flows::SavedFlow, String> {
-    let url = format!("{}/api/v1/flows/{}/download", flows_base_url().trim_end_matches('/'), slug);
+    let url = format!(
+        "{}/api/v1/flows/{}/download",
+        flows_base_url().trim_end_matches('/'),
+        slug
+    );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -36,14 +40,19 @@ pub async fn fetch_flow(slug: &str) -> Result<metalcraft_flows::SavedFlow, Strin
         .map_err(|e| format!("flows registry request failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!("flows registry returned {status} for flow '{slug}'"));
+        return Err(format!(
+            "flows registry returned {status} for flow '{slug}'"
+        ));
     }
     if let Some(len) = resp.content_length() {
         if len as usize > MAX_DOWNLOAD_BYTES {
             return Err(format!("flow '{slug}' download is too large"));
         }
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("reading registry response: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("reading registry response: {e}"))?;
     if bytes.len() > MAX_DOWNLOAD_BYTES {
         return Err(format!("flow '{slug}' download is too large"));
     }
@@ -58,7 +67,11 @@ pub async fn resolve_pack_version(
     slug: &str,
     range: Option<&str>,
 ) -> Result<(String, String), String> {
-    let url = format!("{}/api/v1/packs/{}/resolve", base_url().trim_end_matches('/'), slug);
+    let url = format!(
+        "{}/api/v1/packs/{}/resolve",
+        base_url().trim_end_matches('/'),
+        slug
+    );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -67,7 +80,10 @@ pub async fn resolve_pack_version(
     if let Some(r) = range {
         req = req.query(&[("range", r)]);
     }
-    let resp = req.send().await.map_err(|e| format!("registry request failed: {e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("registry request failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!(
@@ -75,8 +91,10 @@ pub async fn resolve_pack_version(
             range.map(|r| format!(" for range {r}")).unwrap_or_default()
         ));
     }
-    let body: serde_json::Value =
-        resp.json().await.map_err(|e| format!("reading resolve response: {e}"))?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("reading resolve response: {e}"))?;
     let version = body
         .get("version")
         .and_then(|v| v.as_str())
@@ -94,24 +112,39 @@ pub async fn resolve_pack_version(
 /// (`GET /flows/{slug}/version`). `content_sha256` may be absent on legacy rows that
 /// predate version hashing — returned as `None` then.
 pub async fn flow_version(slug: &str) -> Result<(String, Option<String>), String> {
-    let url = format!("{}/api/v1/flows/{}/version", flows_base_url().trim_end_matches('/'), slug);
+    let url = format!(
+        "{}/api/v1/flows/{}/version",
+        flows_base_url().trim_end_matches('/'),
+        slug
+    );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = client.get(&url).send().await.map_err(|e| format!("flows registry request failed: {e}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("flows registry request failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!("flows registry returned {status} for flow '{slug}'"));
+        return Err(format!(
+            "flows registry returned {status} for flow '{slug}'"
+        ));
     }
-    let body: serde_json::Value =
-        resp.json().await.map_err(|e| format!("reading version response: {e}"))?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("reading version response: {e}"))?;
     let version = body
         .get("version")
         .and_then(|v| v.as_str())
         .ok_or("version response missing version")?
         .to_string();
-    let content_sha256 = body.get("content_sha256").and_then(|v| v.as_str()).map(str::to_string);
+    let content_sha256 = body
+        .get("content_sha256")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     Ok((version, content_sha256))
 }
 
@@ -120,7 +153,11 @@ pub async fn flow_version(slug: &str) -> Result<(String, Option<String>), String
 /// what was locked. Returns the raw document bytes (not parsed), so the caller can
 /// verify the content hash before trusting them.
 pub async fn fetch_flow_bytes(slug: &str, version: Option<&str>) -> Result<Vec<u8>, String> {
-    let mut url = format!("{}/api/v1/flows/{}/download", flows_base_url().trim_end_matches('/'), slug);
+    let mut url = format!(
+        "{}/api/v1/flows/{}/download",
+        flows_base_url().trim_end_matches('/'),
+        slug
+    );
     if let Some(v) = version {
         url.push_str(&format!("?version={}", v.replace('+', "%2B")));
     }
@@ -128,17 +165,26 @@ pub async fn fetch_flow_bytes(slug: &str, version: Option<&str>) -> Result<Vec<u
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = client.get(&url).send().await.map_err(|e| format!("flows registry request failed: {e}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("flows registry request failed: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!("flows registry returned {status} for flow '{slug}'"));
+        return Err(format!(
+            "flows registry returned {status} for flow '{slug}'"
+        ));
     }
     if let Some(len) = resp.content_length() {
         if len as usize > MAX_DOWNLOAD_BYTES {
             return Err(format!("flow '{slug}' download is too large"));
         }
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("reading registry response: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("reading registry response: {e}"))?;
     if bytes.len() > MAX_DOWNLOAD_BYTES {
         return Err(format!("flow '{slug}' download is too large"));
     }
@@ -186,7 +232,9 @@ pub async fn resolve_tools(
     if !status.is_success() {
         return Err(format!("registry tool resolve failed: {status}"));
     }
-    resp.json().await.map_err(|e| format!("reading resolve response: {e}"))
+    resp.json()
+        .await
+        .map_err(|e| format!("reading resolve response: {e}"))
 }
 
 /// Download the ZIP for pack `slug` from the registry's public download endpoint.
@@ -195,7 +243,11 @@ pub async fn resolve_tools(
 /// (`?version=`) instead of the latest — used to satisfy a flow's pinned/ranged
 /// pack requirement.
 pub async fn fetch_zip(slug: &str, version: Option<&str>) -> Result<Vec<u8>, String> {
-    let mut url = format!("{}/api/v1/packs/{}/download", base_url().trim_end_matches('/'), slug);
+    let mut url = format!(
+        "{}/api/v1/packs/{}/download",
+        base_url().trim_end_matches('/'),
+        slug
+    );
     if let Some(v) = version {
         // Concrete semver only reaches here; `+` (build metadata) is the sole
         // char needing escaping in a query value.
@@ -220,7 +272,10 @@ pub async fn fetch_zip(slug: &str, version: Option<&str>) -> Result<Vec<u8>, Str
             return Err(format!("pack '{slug}' download is too large"));
         }
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("reading registry response: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("reading registry response: {e}"))?;
     if bytes.len() > MAX_DOWNLOAD_BYTES {
         return Err(format!("pack '{slug}' download is too large"));
     }

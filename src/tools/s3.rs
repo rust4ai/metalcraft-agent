@@ -46,8 +46,7 @@ const DEFAULT_REGION: &str = "us-east-1";
 const SERVICE: &str = "s3";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// SHA-256 of the empty string — the payload hash for bodyless requests.
-const EMPTY_PAYLOAD_HASH: &str =
-    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const EMPTY_PAYLOAD_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 /// Cap on how large a get_object result we'll inline as text (no `dest_path`).
 const MAX_INLINE_TEXT: usize = 100_000;
 
@@ -123,7 +122,7 @@ struct SignInputs<'a> {
     /// `(lowercased name, value)`, in any order — sorted internally.
     signed_headers: &'a [(String, String)],
     payload_hash: &'a str,
-    amz_date: &'a str,  // YYYYMMDDTHHMMSSZ
+    amz_date: &'a str,   // YYYYMMDDTHHMMSSZ
     date_stamp: &'a str, // YYYYMMDD
 }
 
@@ -162,7 +161,10 @@ fn sigv4_authorization(inp: &SignInputs) -> (String, String) {
         sha256_hex(canonical_request.as_bytes()),
     );
 
-    let k_date = hmac_sha256(format!("AWS4{}", inp.secret_key).as_bytes(), inp.date_stamp.as_bytes());
+    let k_date = hmac_sha256(
+        format!("AWS4{}", inp.secret_key).as_bytes(),
+        inp.date_stamp.as_bytes(),
+    );
     let k_region = hmac_sha256(&k_date, inp.region.as_bytes());
     let k_service = hmac_sha256(&k_region, SERVICE.as_bytes());
     let k_signing = hmac_sha256(&k_service, b"aws4_request");
@@ -215,19 +217,36 @@ impl S3 {
     fn from_env(tool: &str) -> metalcraft::Result<Self> {
         let access_key = crate::key_store::lookup("S3_ACCESS_KEY_ID")
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| err(tool, "S3_ACCESS_KEY_ID is not set (add it in the workshop's keys, or export it)"))?;
+            .ok_or_else(|| {
+                err(
+                    tool,
+                    "S3_ACCESS_KEY_ID is not set (add it in the workshop's keys, or export it)",
+                )
+            })?;
         let secret_key = crate::key_store::lookup("S3_SECRET_ACCESS_KEY")
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| err(tool, "S3_SECRET_ACCESS_KEY is not set (add it in the workshop's keys, or export it)"))?;
+            .ok_or_else(|| {
+                err(
+                    tool,
+                    "S3_SECRET_ACCESS_KEY is not set (add it in the workshop's keys, or export it)",
+                )
+            })?;
         let region = crate::key_store::lookup("S3_REGION")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_REGION.to_string());
         // Explicit endpoint (any S3-compatible provider) or the AWS default.
-        let (scheme, host) = match crate::key_store::lookup("S3_ENDPOINT").filter(|s| !s.is_empty()) {
+        let (scheme, host) = match crate::key_store::lookup("S3_ENDPOINT").filter(|s| !s.is_empty())
+        {
             Some(ep) => parse_endpoint(&ep),
             None => ("https".to_string(), format!("s3.{region}.amazonaws.com")),
         };
-        Ok(Self { access_key, secret_key, region, host, scheme })
+        Ok(Self {
+            access_key,
+            secret_key,
+            region,
+            host,
+            scheme,
+        })
     }
 
     /// Sign and send one request. `bucket`/`key` build the path-style URI; an
@@ -364,7 +383,9 @@ fn extract_all_blocks<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
     let mut rest = xml;
     while let Some(s) = rest.find(&open) {
         let after = s + open.len();
-        let Some(e_rel) = rest[after..].find(&close) else { break };
+        let Some(e_rel) = rest[after..].find(&close) else {
+            break;
+        };
         let e = after + e_rel;
         out.push(&rest[after..e]);
         rest = &rest[e + close.len()..];
@@ -389,9 +410,12 @@ fn unescape_xml(s: &str) -> String {
 /// result must live inside it (symlink escapes are rejected too).
 fn resolve_read_path(tool: &str, path_str: &str) -> metalcraft::Result<PathBuf> {
     let root = crate::paths::upload_root();
-    let canon_root = root
-        .canonicalize()
-        .map_err(|e| err(tool, format!("upload root {} is not accessible: {e}", root.display())))?;
+    let canon_root = root.canonicalize().map_err(|e| {
+        err(
+            tool,
+            format!("upload root {} is not accessible: {e}", root.display()),
+        )
+    })?;
     let joined = join_under(&root, path_str);
     let canon = joined
         .canonicalize()
@@ -399,7 +423,10 @@ fn resolve_read_path(tool: &str, path_str: &str) -> metalcraft::Result<PathBuf> 
     if !canon.starts_with(&canon_root) {
         return Err(err(
             tool,
-            format!("refusing to read '{path_str}': resolves outside the upload root {}", canon_root.display()),
+            format!(
+                "refusing to read '{path_str}': resolves outside the upload root {}",
+                canon_root.display()
+            ),
         ));
     }
     Ok(canon)
@@ -410,12 +437,18 @@ fn resolve_read_path(tool: &str, path_str: &str) -> metalcraft::Result<PathBuf> 
 /// form must live inside the root.
 fn resolve_write_path(tool: &str, path_str: &str) -> metalcraft::Result<PathBuf> {
     let root = crate::paths::upload_root();
-    let canon_root = root
-        .canonicalize()
-        .map_err(|e| err(tool, format!("upload root {} is not accessible: {e}", root.display())))?;
+    let canon_root = root.canonicalize().map_err(|e| {
+        err(
+            tool,
+            format!("upload root {} is not accessible: {e}", root.display()),
+        )
+    })?;
     let joined = join_under(&root, path_str);
     if joined.components().any(|c| c == Component::ParentDir) {
-        return Err(err(tool, format!("refusing to write '{path_str}': path traversal ('..') is not allowed")));
+        return Err(err(
+            tool,
+            format!("refusing to write '{path_str}': path traversal ('..') is not allowed"),
+        ));
     }
     let parent = joined
         .parent()
@@ -428,7 +461,10 @@ fn resolve_write_path(tool: &str, path_str: &str) -> metalcraft::Result<PathBuf>
     if !canon_parent.starts_with(&canon_root) {
         return Err(err(
             tool,
-            format!("refusing to write '{path_str}': resolves outside the upload root {}", canon_root.display()),
+            format!(
+                "refusing to write '{path_str}': resolves outside the upload root {}",
+                canon_root.display()
+            ),
         ));
     }
     let file_name = joined
@@ -439,10 +475,18 @@ fn resolve_write_path(tool: &str, path_str: &str) -> metalcraft::Result<PathBuf>
 
 fn join_under(root: &Path, path_str: &str) -> PathBuf {
     let p = Path::new(path_str);
-    if p.is_absolute() { p.to_path_buf() } else { root.join(p) }
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(p)
+    }
 }
 
-fn require_str<'a>(tool: &str, args: &'a serde_json::Value, key: &str) -> metalcraft::Result<&'a str> {
+fn require_str<'a>(
+    tool: &str,
+    args: &'a serde_json::Value,
+    key: &str,
+) -> metalcraft::Result<&'a str> {
     args.get(key)
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
@@ -458,7 +502,9 @@ pub struct S3ListObjectsTool;
 
 #[async_trait]
 impl metalcraft::Tool for S3ListObjectsTool {
-    fn name(&self) -> &str { "s3_list_objects" }
+    fn name(&self) -> &str {
+        "s3_list_objects"
+    }
     fn description(&self) -> &str {
         "List objects (files) in an S3 bucket. Requires `bucket`. Optional `prefix` to list only keys under a folder-like path (e.g. 'reports/'), and `max_keys` (default 1000, max 1000). Returns an array of {key, size, last_modified, etag} plus `is_truncated` and a `next_continuation_token` you can pass back as `continuation_token` to page through more than max_keys results."
     }
@@ -480,17 +526,27 @@ impl metalcraft::Tool for S3ListObjectsTool {
         let s3 = S3::from_env(tool)?;
 
         let mut query: Vec<(String, String)> = vec![("list-type".into(), "2".into())];
-        if let Some(prefix) = args.get("prefix").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(prefix) = args
+            .get("prefix")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             query.push(("prefix".into(), prefix.to_string()));
         }
-        if let Some(token) = args.get("continuation_token").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(token) = args
+            .get("continuation_token")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             query.push(("continuation-token".into(), token.to_string()));
         }
         if let Some(max) = args.get("max_keys").and_then(|v| v.as_u64()) {
             query.push(("max-keys".into(), max.min(1000).to_string()));
         }
 
-        let resp = s3.send(tool, "GET", bucket, "", &query, &[], Vec::new()).await?;
+        let resp = s3
+            .send(tool, "GET", bucket, "", &query, &[], Vec::new())
+            .await?;
         if !(200..300).contains(&resp.status) {
             return Err(s3_error(tool, resp.status, &resp.body));
         }
@@ -523,7 +579,9 @@ pub struct S3GetObjectTool;
 
 #[async_trait]
 impl metalcraft::Tool for S3GetObjectTool {
-    fn name(&self) -> &str { "s3_get_object" }
+    fn name(&self) -> &str {
+        "s3_get_object"
+    }
     fn description(&self) -> &str {
         "Download an object (file) from S3. Requires `bucket` and `key`. If `dest_path` is given, the bytes are written to that local file (path is relative to the agent's upload directory; absolute paths must stay inside it) and the result reports the byte count. If `dest_path` is omitted, the content is returned inline as text (UTF-8 only, up to ~100 KB) — use `dest_path` for binary or large files."
     }
@@ -544,12 +602,18 @@ impl metalcraft::Tool for S3GetObjectTool {
         let key = require_str(tool, &args, "key")?;
         let s3 = S3::from_env(tool)?;
 
-        let resp = s3.send(tool, "GET", bucket, key, &[], &[], Vec::new()).await?;
+        let resp = s3
+            .send(tool, "GET", bucket, key, &[], &[], Vec::new())
+            .await?;
         if !(200..300).contains(&resp.status) {
             return Err(s3_error(tool, resp.status, &resp.body));
         }
 
-        match args.get("dest_path").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        match args
+            .get("dest_path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             Some(dest) => {
                 let path = resolve_write_path(tool, dest)?;
                 std::fs::write(&path, &resp.body)
@@ -595,7 +659,9 @@ pub struct S3PutObjectTool;
 
 #[async_trait]
 impl metalcraft::Tool for S3PutObjectTool {
-    fn name(&self) -> &str { "s3_put_object" }
+    fn name(&self) -> &str {
+        "s3_put_object"
+    }
     fn description(&self) -> &str {
         "Upload (write) an object to S3, creating or overwriting it. Requires `bucket` and `key`. Provide exactly one source: `content` (inline text) or `file_path` (a local file within the agent's upload directory). Optional `content_type` (e.g. 'text/plain', 'application/pdf'; defaults to a sensible value) and `acl` ('private' default, or 'public-read' to make the object publicly downloadable). Overwrites silently if the key already exists."
     }
@@ -619,22 +685,35 @@ impl metalcraft::Tool for S3PutObjectTool {
         let key = require_str(tool, &args, "key")?;
         let s3 = S3::from_env(tool)?;
 
-        let content = args.get("content").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-        let file_path = args.get("file_path").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+        let content = args
+            .get("content")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let file_path = args
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
 
         let (body, default_ct): (Vec<u8>, &str) = match (content, file_path) {
             (Some(_), Some(_)) => {
-                return Err(err(tool, "provide either `content` or `file_path`, not both"));
+                return Err(err(
+                    tool,
+                    "provide either `content` or `file_path`, not both",
+                ));
             }
             (Some(text), None) => (text.as_bytes().to_vec(), "text/plain; charset=utf-8"),
             (None, Some(path)) => {
                 let resolved = resolve_read_path(tool, path)?;
-                let bytes = std::fs::read(&resolved)
-                    .map_err(|e| err(tool, format!("failed to read {}: {e}", resolved.display())))?;
+                let bytes = std::fs::read(&resolved).map_err(|e| {
+                    err(tool, format!("failed to read {}: {e}", resolved.display()))
+                })?;
                 (bytes, "application/octet-stream")
             }
             (None, None) => {
-                return Err(err(tool, "missing source: provide `content` (text) or `file_path` (a local file)"));
+                return Err(err(
+                    tool,
+                    "missing source: provide `content` (text) or `file_path` (a local file)",
+                ));
             }
         };
 
@@ -645,7 +724,11 @@ impl metalcraft::Tool for S3PutObjectTool {
             .unwrap_or(default_ct)
             .to_string();
         let mut extra = vec![("content-type".to_string(), content_type)];
-        if let Some(acl) = args.get("acl").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(acl) = args
+            .get("acl")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             extra.push(("x-amz-acl".to_string(), acl.to_string()));
         }
 
@@ -673,7 +756,9 @@ pub struct S3DeleteObjectTool;
 
 #[async_trait]
 impl metalcraft::Tool for S3DeleteObjectTool {
-    fn name(&self) -> &str { "s3_delete_object" }
+    fn name(&self) -> &str {
+        "s3_delete_object"
+    }
     fn description(&self) -> &str {
         "Delete an object (file) from S3. Requires `bucket` and `key`. This is irreversible — confirm the exact bucket and key with the user before deleting. S3 delete is idempotent: deleting a non-existent key still returns success."
     }
@@ -693,7 +778,9 @@ impl metalcraft::Tool for S3DeleteObjectTool {
         let key = require_str(tool, &args, "key")?;
         let s3 = S3::from_env(tool)?;
 
-        let resp = s3.send(tool, "DELETE", bucket, key, &[], &[], Vec::new()).await?;
+        let resp = s3
+            .send(tool, "DELETE", bucket, key, &[], &[], Vec::new())
+            .await?;
         if !(200..300).contains(&resp.status) {
             return Err(s3_error(tool, resp.status, &resp.body));
         }
@@ -707,7 +794,9 @@ pub struct S3ListBucketsTool;
 
 #[async_trait]
 impl metalcraft::Tool for S3ListBucketsTool {
-    fn name(&self) -> &str { "s3_list_buckets" }
+    fn name(&self) -> &str {
+        "s3_list_buckets"
+    }
     fn description(&self) -> &str {
         "List all buckets in the account for the configured endpoint/region. The cheapest way to confirm the S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_REGION credentials (and S3_ENDPOINT) work before doing file operations. Takes no parameters. Returns an array of {name, creation_date}."
     }
@@ -750,7 +839,10 @@ mod tests {
 
     #[test]
     fn uri_encode_keeps_unreserved_and_slash() {
-        assert_eq!(uri_encode("reports/q1 2026.pdf", true), "reports/q1%202026.pdf");
+        assert_eq!(
+            uri_encode("reports/q1 2026.pdf", true),
+            "reports/q1%202026.pdf"
+        );
         assert_eq!(uri_encode("a/b", false), "a%2Fb");
         assert_eq!(uri_encode("AZaz09-_.~", false), "AZaz09-_.~");
     }
@@ -766,9 +858,18 @@ mod tests {
 
     #[test]
     fn parse_endpoint_scheme_and_host() {
-        assert_eq!(parse_endpoint("s3.example.com"), ("https".into(), "s3.example.com".into()));
-        assert_eq!(parse_endpoint("https://nyc3.digitaloceanspaces.com/"), ("https".into(), "nyc3.digitaloceanspaces.com".into()));
-        assert_eq!(parse_endpoint("http://localhost:9000"), ("http".into(), "localhost:9000".into()));
+        assert_eq!(
+            parse_endpoint("s3.example.com"),
+            ("https".into(), "s3.example.com".into())
+        );
+        assert_eq!(
+            parse_endpoint("https://nyc3.digitaloceanspaces.com/"),
+            ("https".into(), "nyc3.digitaloceanspaces.com".into())
+        );
+        assert_eq!(
+            parse_endpoint("http://localhost:9000"),
+            ("http".into(), "localhost:9000".into())
+        );
     }
 
     /// AWS's documented **S3 "GET Object" SigV4 example** (service = `s3`,
@@ -780,7 +881,10 @@ mod tests {
     fn sigv4_matches_aws_s3_get_object_vector() {
         let payload = EMPTY_PAYLOAD_HASH;
         let signed = vec![
-            ("host".to_string(), "examplebucket.s3.amazonaws.com".to_string()),
+            (
+                "host".to_string(),
+                "examplebucket.s3.amazonaws.com".to_string(),
+            ),
             ("range".to_string(), "bytes=0-9".to_string()),
             ("x-amz-content-sha256".to_string(), payload.to_string()),
             ("x-amz-date".to_string(), "20130524T000000Z".to_string()),
@@ -799,9 +903,7 @@ mod tests {
         });
         assert_eq!(signed_headers, "host;range;x-amz-content-sha256;x-amz-date");
         assert!(
-            auth.contains(
-                "Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"
-            ),
+            auth.contains("Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"),
             "unexpected credential scope: {auth}"
         );
         assert!(

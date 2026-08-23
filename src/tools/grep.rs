@@ -7,7 +7,9 @@ pub struct GrepTool;
 
 #[async_trait]
 impl metalcraft::Tool for GrepTool {
-    fn name(&self) -> &str { "grep" }
+    fn name(&self) -> &str {
+        "grep"
+    }
     fn description(&self) -> &str {
         "Search file contents for a pattern (substring or regex). Returns matching lines with file paths and line numbers. Searches recursively in directories."
     }
@@ -32,14 +34,20 @@ impl metalcraft::Tool for GrepTool {
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let pattern = args["pattern"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "grep".into(),
-            message: "Missing required parameter: pattern".into(),
-        })?;
-        let path_str = args["path"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "grep".into(),
-            message: "Missing required parameter: path".into(),
-        })?;
+        let pattern =
+            args["pattern"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "grep".into(),
+                    message: "Missing required parameter: pattern".into(),
+                })?;
+        let path_str =
+            args["path"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "grep".into(),
+                    message: "Missing required parameter: path".into(),
+                })?;
         let include = args["include"].as_str();
 
         let path = Path::new(path_str);

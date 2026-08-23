@@ -96,7 +96,11 @@ pub fn redact(input: &str) -> Redaction {
     }
     text = out;
 
-    Redaction { content: text, count, kinds }
+    Redaction {
+        content: text,
+        count,
+        kinds,
+    }
 }
 
 fn push_kind(kinds: &mut Vec<String>, kind: &str) {
@@ -140,9 +144,17 @@ fn is_key_char(c: char) -> bool {
 
 fn is_secret_name(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
-    ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY", "credential"]
-        .iter()
-        .any(|needle| n.contains(&needle.to_ascii_uppercase()))
+    [
+        "KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "APIKEY",
+        "credential",
+    ]
+    .iter()
+    .any(|needle| n.contains(&needle.to_ascii_uppercase()))
 }
 
 /// Strip surrounding punctuation so `"sk-abc..."` or `(sk-abc...)` still match,
@@ -150,7 +162,10 @@ fn is_secret_name(name: &str) -> bool {
 fn split_affixes(raw: &str) -> (&str, &str, &str) {
     let is_affix = |c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '=';
     let start = raw.find(|c: char| !is_affix(c)).unwrap_or(raw.len());
-    let end = raw.rfind(|c: char| !is_affix(c)).map(|i| i + raw[i..].chars().next().unwrap().len_utf8()).unwrap_or(start);
+    let end = raw
+        .rfind(|c: char| !is_affix(c))
+        .map(|i| i + raw[i..].chars().next().unwrap().len_utf8())
+        .unwrap_or(start);
     (&raw[start..end], &raw[..start], &raw[end..])
 }
 
@@ -167,7 +182,12 @@ fn redact_pem(input: &str) -> (String, usize) {
     while let Some(start) = rest.find(BEGIN) {
         out.push_str(&rest[..start]);
         let after = &rest[start..];
-        match after.find(END).and_then(|e| after[e..].find("-----").map(|d| e + d + 5).and_then(|p| after[p..].find("-----").map(|q| p + q + 5))) {
+        match after.find(END).and_then(|e| {
+            after[e..]
+                .find("-----")
+                .map(|d| e + d + 5)
+                .and_then(|p| after[p..].find("-----").map(|q| p + q + 5))
+        }) {
             Some(block_end) => {
                 out.push_str("[REDACTED:private-key]");
                 rest = &after[block_end..];
@@ -264,7 +284,8 @@ mod tests {
 
     #[test]
     fn pem_block_is_removed_whole() {
-        let pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\nkqhkiG9w0BAQ\n-----END PRIVATE KEY-----";
+        let pem =
+            "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\nkqhkiG9w0BAQ\n-----END PRIVATE KEY-----";
         let r = redact(&format!("here it is:\n{pem}\nthanks"));
         assert_eq!(r.count, 1);
         assert!(r.content.contains("[REDACTED:private-key]"));

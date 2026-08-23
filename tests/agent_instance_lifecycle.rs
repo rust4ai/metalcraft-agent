@@ -9,7 +9,7 @@
 use metalcraft_agent::agent_instance::{AgentInstance, InstanceOrigin};
 use metalcraft_agent::agent_preset::AgentPreset;
 use metalcraft_agent::memory::types::{MemoryKind, Source};
-use metalcraft_agent::memory::{self, instance, RememberRequest};
+use metalcraft_agent::memory::{self, RememberRequest, instance};
 use std::fs;
 
 /// Deleting an agent must take its memory with it, and must not leave it answering
@@ -75,14 +75,26 @@ async fn deleting_and_reaping_agents() {
 
     let report = metalcraft_agent::agent_instance::reap_ephemeral(&[idle_but_in_use.clone()]);
 
-    assert_eq!(report.reaped, vec![idle_unnamed.clone()], "only the idle unnamed one");
+    assert_eq!(
+        report.reaped,
+        vec![idle_unnamed.clone()],
+        "only the idle unnamed one"
+    );
     assert!(report.failed.is_empty(), "{:?}", report.failed);
 
-    let left: Vec<String> =
-        metalcraft_agent::agent_instance::list().into_iter().map(|i| i.id).collect();
+    let left: Vec<String> = metalcraft_agent::agent_instance::list()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
     assert!(!left.contains(&idle_unnamed));
-    assert!(left.contains(&idle_named), "naming an agent is what keeps it");
-    assert!(left.contains(&fresh_unnamed), "a recently used agent is not idle");
+    assert!(
+        left.contains(&idle_named),
+        "naming an agent is what keeps it"
+    );
+    assert!(
+        left.contains(&fresh_unnamed),
+        "a recently used agent is not idle"
+    );
     assert!(
         left.contains(&idle_but_in_use),
         "an agent a conversation still points at is kept — deleting it strands the transcript"

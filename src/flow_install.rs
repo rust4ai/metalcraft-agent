@@ -108,12 +108,17 @@ async fn enrich_requires_from_tools(requires: &mut metalcraft_flows::Requires) {
     let mut have: std::collections::BTreeSet<String> =
         requires.packs.iter().map(|p| p.id.clone()).collect();
     for providers in map.values() {
-        let Some(chosen) = providers.iter().find(|p| p.verified).or_else(|| providers.first())
+        let Some(chosen) = providers
+            .iter()
+            .find(|p| p.verified)
+            .or_else(|| providers.first())
         else {
             continue;
         };
         if have.insert(chosen.slug.clone()) {
-            requires.packs.push(metalcraft_flows::PackRequirement::new(&chosen.slug));
+            requires
+                .packs
+                .push(metalcraft_flows::PackRequirement::new(&chosen.slug));
         }
     }
     requires.packs.sort_by(|a, b| a.id.cmp(&b.id));
@@ -160,27 +165,28 @@ pub fn dependency_report(flow: &metalcraft_flows::SavedFlow) -> DependencyReport
     // Version/hash conflicts against enabled packs. Hashing every enabled pack is
     // only worth it when a requirement actually pins a hash.
     let need_hash = requires.packs.iter().any(|p| p.content_sha256.is_some());
-    let available: Vec<metalcraft_flows::AvailablePack> = crate::integrations::installed_integrations()
-        .into_iter()
-        .map(|pack| metalcraft_flows::AvailablePack {
-            content_sha256: if need_hash {
-                crate::integrations::installed_content_sha256(&pack.manifest.id)
-            } else {
-                None
-            },
-            id: pack.manifest.id.clone(),
-            version: pack.manifest.version.clone(),
-        })
-        .collect();
+    let available: Vec<metalcraft_flows::AvailablePack> =
+        crate::integrations::installed_integrations()
+            .into_iter()
+            .map(|pack| metalcraft_flows::AvailablePack {
+                content_sha256: if need_hash {
+                    crate::integrations::installed_content_sha256(&pack.manifest.id)
+                } else {
+                    None
+                },
+                id: pack.manifest.id.clone(),
+                version: pack.manifest.version.clone(),
+            })
+            .collect();
     let version_conflicts = metalcraft_flows::check_requirements(&requires, &available)
         .into_iter()
         .filter_map(|u| match u {
             Unmet::VersionConflict { id, need, have, .. } => {
                 Some(format!("{id}: need {need}, have {have}"))
             }
-            Unmet::HashMismatch { id, .. } => {
-                Some(format!("{id}: installed content hash does not match the pinned hash"))
-            }
+            Unmet::HashMismatch { id, .. } => Some(format!(
+                "{id}: installed content hash does not match the pinned hash"
+            )),
             // Missing packs are reported separately in `missing_packs`.
             Unmet::MissingPack { .. } | Unmet::MissingTool { .. } => None,
         })
@@ -276,12 +282,13 @@ fn requirement_satisfied(
 pub async fn install_pack_requirement(
     pr: &metalcraft_flows::PackRequirement,
 ) -> PackInstallOutcome {
-    let outcome = |status: &str, version: Option<String>, detail: Option<String>| PackInstallOutcome {
-        pack: pr.id.clone(),
-        version,
-        status: status.to_string(),
-        detail,
-    };
+    let outcome =
+        |status: &str, version: Option<String>, detail: Option<String>| PackInstallOutcome {
+            pack: pr.id.clone(),
+            version,
+            status: status.to_string(),
+            detail,
+        };
 
     // Built-in packs are app-managed and can't be pulled from the registry.
     if crate::seed::is_embedded_integration(&pr.id) {
@@ -292,9 +299,17 @@ pub async fn install_pack_requirement(
             if let Err(e) = crate::integrations::set_enabled(&pr.id, true) {
                 return outcome("failed", None, Some(e));
             }
-            return outcome("installed", Some(installed.manifest.version), Some("enabled built-in pack".into()));
+            return outcome(
+                "installed",
+                Some(installed.manifest.version),
+                Some("enabled built-in pack".into()),
+            );
         }
-        return outcome("skipped", None, Some("built-in pack is not installed on this agent".into()));
+        return outcome(
+            "skipped",
+            None,
+            Some("built-in pack is not installed on this agent".into()),
+        );
     }
 
     if let Some(installed) = crate::integrations::find_installed(&pr.id) {
@@ -316,7 +331,9 @@ pub async fn install_pack_requirement(
             return outcome(
                 "failed",
                 Some(version),
-                Some(format!("resolved content hash {resolved_hash} does not match the pinned {pin}")),
+                Some(format!(
+                    "resolved content hash {resolved_hash} does not match the pinned {pin}"
+                )),
             );
         }
         Some(pin) => pin.clone(),
@@ -365,7 +382,11 @@ pub async fn install_flow_from_registry(slug: &str) -> Result<InstallResult, Str
 
     let errors = metalcraft_flows::validate(&flow);
     if !errors.is_empty() {
-        let msg = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
+        let msg = errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
         return Err(format!("flow failed validation: {msg}"));
     }
 
@@ -448,7 +469,10 @@ mod tests {
             { "id": "c", "node_type": "prompt", "data": { "prompt": "hi" } },
             { "id": "d", "node_type": "sub_agent", "data": { "task": "y", "pack": "linear" } }
         ]));
-        assert_eq!(required_packs(&flow), vec!["linear".to_string(), "slack".to_string()]);
+        assert_eq!(
+            required_packs(&flow),
+            vec!["linear".to_string(), "slack".to_string()]
+        );
     }
 
     #[test]

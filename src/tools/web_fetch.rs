@@ -9,7 +9,9 @@ pub struct WebFetchTool;
 
 #[async_trait]
 impl metalcraft::Tool for WebFetchTool {
-    fn name(&self) -> &str { "web_fetch" }
+    fn name(&self) -> &str {
+        "web_fetch"
+    }
     fn description(&self) -> &str {
         "Fetch content from a URL and return it as markdown text. Works for public web pages. \
          For GitHub repos, prefer using raw.githubusercontent.com URLs or the bash tool with curl/gh CLI. \
@@ -32,10 +34,12 @@ impl metalcraft::Tool for WebFetchTool {
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let url = args["url"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "web_fetch".into(),
-            message: "Missing required parameter: url".into(),
-        })?;
+        let url = args["url"]
+            .as_str()
+            .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                tool: "web_fetch".into(),
+                message: "Missing required parameter: url".into(),
+            })?;
 
         let timeout = args["timeout_secs"]
             .as_u64()
@@ -52,12 +56,15 @@ impl metalcraft::Tool for WebFetchTool {
                 message: format!("Failed to create HTTP client: {}", e),
             })?;
 
-        let response = client.get(url).send().await.map_err(|e| {
-            metalcraft::GraphError::ToolCallFailed {
-                tool: "web_fetch".into(),
-                message: format!("Request failed: {}", e),
-            }
-        })?;
+        let response =
+            client
+                .get(url)
+                .send()
+                .await
+                .map_err(|e| metalcraft::GraphError::ToolCallFailed {
+                    tool: "web_fetch".into(),
+                    message: format!("Request failed: {}", e),
+                })?;
 
         let status = response.status();
         let final_url = response.url().to_string();
@@ -76,12 +83,13 @@ impl metalcraft::Tool for WebFetchTool {
             .unwrap_or("")
             .to_string();
 
-        let body = response.text().await.map_err(|e| {
-            metalcraft::GraphError::ToolCallFailed {
+        let body = response
+            .text()
+            .await
+            .map_err(|e| metalcraft::GraphError::ToolCallFailed {
                 tool: "web_fetch".into(),
                 message: format!("Failed to read response body: {}", e),
-            }
-        })?;
+            })?;
 
         let markdown = if content_type.contains("text/html") {
             html_to_markdown(&body)
@@ -123,7 +131,8 @@ fn strip_tags_fallback(html: &str) -> String {
         }
     }
     // Collapse whitespace
-    let lines: Vec<&str> = result.lines()
+    let lines: Vec<&str> = result
+        .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .collect();

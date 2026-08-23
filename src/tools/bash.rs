@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use tokio::process::Command;
 use std::time::Duration;
+use tokio::process::Command;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const MAX_TIMEOUT_SECS: u64 = 300;
@@ -9,7 +9,9 @@ pub struct BashTool;
 
 #[async_trait]
 impl metalcraft::Tool for BashTool {
-    fn name(&self) -> &str { "bash" }
+    fn name(&self) -> &str {
+        "bash"
+    }
     fn description(&self) -> &str {
         "Execute a bash command and return its output. Commands run in the working directory. Use timeout_secs to set max execution time (default 60s, max 300s)."
     }
@@ -30,10 +32,13 @@ impl metalcraft::Tool for BashTool {
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let command = args["command"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "bash".into(),
-            message: "Missing required parameter: command".into(),
-        })?;
+        let command =
+            args["command"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "bash".into(),
+                    message: "Missing required parameter: command".into(),
+                })?;
 
         let timeout = args["timeout_secs"]
             .as_u64()
@@ -42,10 +47,7 @@ impl metalcraft::Tool for BashTool {
 
         let result = tokio::time::timeout(
             Duration::from_secs(timeout),
-            Command::new("bash")
-                .arg("-c")
-                .arg(command)
-                .output(),
+            Command::new("bash").arg("-c").arg(command).output(),
         )
         .await;
 

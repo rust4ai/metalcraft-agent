@@ -49,7 +49,9 @@ impl metalcraft::Tool for DiagnosticsReadTool {
             .ok_or_else(|| missing_param("diagnostics_read", "id"))?;
         match diagnostics_browse::read_diagnostics_session(id) {
             Some(session) => Ok(serde_json::to_value(session).unwrap_or(serde_json::Value::Null)),
-            None => Ok(serde_json::json!({ "error": format!("diagnostics session '{id}' not found") })),
+            None => {
+                Ok(serde_json::json!({ "error": format!("diagnostics session '{id}' not found") }))
+            }
         }
     }
 }

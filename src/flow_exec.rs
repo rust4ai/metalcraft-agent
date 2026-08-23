@@ -11,25 +11,24 @@
 //! later phases.
 
 use metalcraft_flows::{
-    evaluate,
-    next_by_handle,
+    BRANCH_ERROR_HANDLE, CoreNodeType, FlowNode, FlowNodeType, Operator, SavedFlow, Variables,
+    evaluate, next_by_handle,
     nodes::{
         ApprovalData, BranchData, BranchOutput, ConditionalData, EndData, EntryData, HttpData,
         PromptData, SetVariableData, SubAgentData, ToolData, WaitData,
     },
-    resolve_template, BRANCH_ERROR_HANDLE, CoreNodeType, FlowNode, FlowNodeType, Operator,
-    SavedFlow, Variables,
+    resolve_template,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use metalcraft::{
-    create_react_agent_with_options, AgentMessage, AgentOptions, AgentState, Executor, RunOutcome,
-    Tool, ToolChoice,
+    AgentMessage, AgentOptions, AgentState, Executor, RunOutcome, Tool, ToolChoice,
+    create_react_agent_with_options,
 };
 
 use crate::flow_runs::{FlowRun, PauseInfo};
@@ -165,14 +164,21 @@ impl<'a> FlowExecutor<'a> {
 
         // Seed variables from typed inputs, if any.
         let variables = match serde_json::from_value::<EntryData>(entry.data.clone()) {
-            Ok(EntryData { inputs: Some(inputs), .. }) => {
+            Ok(EntryData {
+                inputs: Some(inputs),
+                ..
+            }) => {
                 let (vars, missing) = Variables::seed_from_inputs(&inputs, args);
                 if !missing.is_empty() {
                     return Err(format!("missing required inputs: {}", missing.join(", ")));
                 }
                 vars
             }
-            _ => Variables::from_value(if args.is_object() { args.clone() } else { Value::Object(Default::default()) }),
+            _ => Variables::from_value(if args.is_object() {
+                args.clone()
+            } else {
+                Value::Object(Default::default())
+            }),
         };
 
         let step_budget = step_budget_for(&flow);
@@ -279,7 +285,12 @@ impl<'a> FlowExecutor<'a> {
                 .iter()
                 .find(|n| n.id == current)
                 .cloned()
-                .ok_or_else(|| format!("flow '{}' references unknown node '{current}'", self.flow.id))?;
+                .ok_or_else(|| {
+                    format!(
+                        "flow '{}' references unknown node '{current}'",
+                        self.flow.id
+                    )
+                })?;
 
             let node_type = node.node_type.as_wire().to_string();
             let route = self.run_node(&node).await;
@@ -302,7 +313,10 @@ impl<'a> FlowExecutor<'a> {
                     // when an `error` edge exists and the run continues to a
                     // handler node rather than aborting.
                     let detail = if handle.as_deref() == Some("error") {
-                        self.variables.get("_last").and_then(|v| v.as_str()).map(str::to_string)
+                        self.variables
+                            .get("_last")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
                     } else {
                         None
                     };
@@ -390,7 +404,10 @@ impl<'a> FlowExecutor<'a> {
             updated_at: now,
         };
         if let Err(e) = crate::flow_runs::save_run(&dir, &run) {
-            eprintln!("flow run: failed to persist paused run '{}': {e}", self.run_id);
+            eprintln!(
+                "flow run: failed to persist paused run '{}': {e}",
+                self.run_id
+            );
         }
     }
 
@@ -417,7 +434,13 @@ impl<'a> FlowExecutor<'a> {
     /// Append a step to the trace and mirror it into the diagnostics session as a
     /// `flow_step` event, so the session viewer shows the node-by-node run even
     /// when no LLM call happened.
-    fn record_step(&mut self, node_id: &str, node_type: &str, outcome: String, detail: Option<String>) {
+    fn record_step(
+        &mut self,
+        node_id: &str,
+        node_type: &str,
+        outcome: String,
+        detail: Option<String>,
+    ) {
         if let Some(l) = &self.logger {
             l.log_config_change(
                 "flow_step",
@@ -467,9 +490,10 @@ impl<'a> FlowExecutor<'a> {
                 other.as_str(),
                 node.id
             )),
-            FlowNodeType::Custom(custom) => {
-                Err(format!("custom node type '{custom}' is not executable (node '{}')", node.id))
-            }
+            FlowNodeType::Custom(custom) => Err(format!(
+                "custom node type '{custom}' is not executable (node '{}')",
+                node.id
+            )),
         }
     }
 
@@ -485,7 +509,10 @@ impl<'a> FlowExecutor<'a> {
             };
             self.variables.get(&path).cloned().unwrap_or(Value::Null)
         } else {
-            interpolate_value(data.value.as_ref().unwrap_or(&Value::Null), self.variables.as_value())
+            interpolate_value(
+                data.value.as_ref().unwrap_or(&Value::Null),
+                self.variables.as_value(),
+            )
         };
         self.variables.set(&data.variable, value.clone());
         self.variables.set_last(value);
@@ -495,8 +522,9 @@ impl<'a> FlowExecutor<'a> {
     fn run_conditional(&mut self, node: &FlowNode) -> Result<Route, String> {
         let data: ConditionalData = parse_data(node)?;
         for cond in &data.conditions {
-            let op = Operator::from_wire(&cond.operator)
-                .ok_or_else(|| format!("unknown operator '{}' in node '{}'", cond.operator, node.id))?;
+            let op = Operator::from_wire(&cond.operator).ok_or_else(|| {
+                format!("unknown operator '{}' in node '{}'", cond.operator, node.id)
+            })?;
             if evaluate(op, self.variables.get(&cond.variable), cond.value.as_ref()) {
                 return Ok(Route::Handle(Some(cond.handle.clone())));
             }
@@ -536,7 +564,10 @@ impl<'a> FlowExecutor<'a> {
                 .ok_or_else(|| format!("wait node '{}': invalid duration '{dur}'", node.id))?;
             (Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339()
         } else {
-            return Err(format!("wait node '{}' needs `duration` or `until`", node.id));
+            return Err(format!(
+                "wait node '{}' needs `duration` or `until`",
+                node.id
+            ));
         };
         Ok(Route::Pause(PauseSpec {
             reason: "wait".into(),
@@ -607,7 +638,8 @@ impl<'a> FlowExecutor<'a> {
                 Ok(Route::Handle(Some("error".into())))
             }
             Ok(RunOutcome::Failed { node: n, error, .. }) => {
-                self.variables.set_last(Value::String(format!("{n}: {error}")));
+                self.variables
+                    .set_last(Value::String(format!("{n}: {error}")));
                 Ok(Route::Handle(Some("error".into())))
             }
             Err(e) => {
@@ -620,7 +652,9 @@ impl<'a> FlowExecutor<'a> {
     async fn run_tool(&mut self, node: &FlowNode) -> Result<Route, String> {
         let data: ToolData = parse_data(node)?;
         let args = interpolate_value(
-            data.args.as_ref().unwrap_or(&Value::Object(Default::default())),
+            data.args
+                .as_ref()
+                .unwrap_or(&Value::Object(Default::default())),
             self.variables.as_value(),
         );
         let registry = crate::tools::create_registry_for(std::slice::from_ref(&data.tool_name));
@@ -716,13 +750,18 @@ impl<'a> FlowExecutor<'a> {
 
         match tool.call(call_args).await {
             Ok(result) => {
-                let is_err = result.get("error").and_then(|v| v.as_bool()).unwrap_or(false);
+                let is_err = result
+                    .get("error")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let answer = result.get("result").cloned().unwrap_or(Value::Null);
                 if let Some(var) = &data.output_var {
                     self.variables.set(var, answer.clone());
                 }
                 self.variables.set_last(answer);
-                Ok(Route::Handle(Some(if is_err { "error" } else { "ok" }.into())))
+                Ok(Route::Handle(Some(
+                    if is_err { "error" } else { "ok" }.into(),
+                )))
             }
             Err(e) => {
                 self.variables.set_last(Value::String(e.to_string()));
@@ -741,13 +780,19 @@ impl<'a> FlowExecutor<'a> {
             return Err(format!("branch node '{}' declares no outputs", node.id));
         }
         let query = resolve_template(&data.query, self.variables.as_value());
-        let model_name = data.model.clone().unwrap_or_else(|| self.model_name.clone());
+        let model_name = data
+            .model
+            .clone()
+            .unwrap_or_else(|| self.model_name.clone());
 
         // System prompt + persona tools (or a minimal default with no persona).
         let (system_prompt, persona_tools) = match data.persona.as_deref() {
             Some(slug) => {
                 let persona = Persona::load(slug, &self.context.personas_dir).map_err(|e| {
-                    format!("branch node '{}': failed to load persona '{slug}': {e}", node.id)
+                    format!(
+                        "branch node '{}': failed to load persona '{slug}': {e}",
+                        node.id
+                    )
                 })?;
                 (
                     persona.build_system_prompt(&self.context.skills_dir, &self.cwd),
@@ -843,8 +888,9 @@ impl<'a> FlowExecutor<'a> {
         // malformed payload (a scalar handle selected without its value, or an
         // object payload missing a required field) is a protocol fault — routed
         // like any other failure rather than smuggled downstream as success.
-        let selection = selection
-            .and_then(|(handle, args)| validate_branch_payload(handle, args, &wrapped, &data.outputs));
+        let selection = selection.and_then(|(handle, args)| {
+            validate_branch_payload(handle, args, &wrapped, &data.outputs)
+        });
 
         match selection {
             Ok((handle, payload)) => {
@@ -1040,7 +1086,11 @@ pub async fn run_flow_v2_as(
     if !errors.is_empty() {
         return Err(format!(
             "invalid flow: {}",
-            errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
+            errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
         ));
     }
 
@@ -1050,10 +1100,8 @@ pub async fn run_flow_v2_as(
     // the edit. Unbound flows skip this entirely: they are pre-preset flows and
     // there is no roster to contain them to.
     if let Some(slug) = crate::flow_bindings::get(&flow.id).preset
-        && let Ok(preset) = crate::agent_preset::AgentPreset::load(
-            &slug,
-            &crate::paths::agent_presets_dir(),
-        )
+        && let Ok(preset) =
+            crate::agent_preset::AgentPreset::load(&slug, &crate::paths::agent_presets_dir())
     {
         crate::flow_bindings::check_personas(&flow, &preset)?;
     }
@@ -1067,7 +1115,12 @@ pub async fn run_flow_v2_as(
     // showed "coding-agent" even though every prompt node ran as morning-briefer.)
     let effective_persona = entry_node(&flow)
         .ok()
-        .and_then(|e| e.data.get("persona").and_then(|v| v.as_str()).map(str::to_string))
+        .and_then(|e| {
+            e.data
+                .get("persona")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
         .or_else(|| persona_override.map(str::to_string))
         .unwrap_or_else(crate::runtime::configured_default_persona);
 
@@ -1098,8 +1151,16 @@ pub async fn run_flow_v2_as(
         }
     };
 
-    let exec = FlowExecutor::new(context, flow, cwd, &effective_persona, model_name, args, logger)?
-        .with_instance(instance_id);
+    let exec = FlowExecutor::new(
+        context,
+        flow,
+        cwd,
+        &effective_persona,
+        model_name,
+        args,
+        logger,
+    )?
+    .with_instance(instance_id);
     exec.run().await
 }
 
@@ -1193,9 +1254,11 @@ fn interpolate_value(v: &Value, vars: &Value) -> Value {
             None => Value::String(resolve_template(s, vars)),
         },
         Value::Array(a) => Value::Array(a.iter().map(|x| interpolate_value(x, vars)).collect()),
-        Value::Object(o) => {
-            Value::Object(o.iter().map(|(k, x)| (k.clone(), interpolate_value(x, vars))).collect())
-        }
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, x)| (k.clone(), interpolate_value(x, vars)))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -1339,10 +1402,7 @@ pub fn lint_flow(flow: &SavedFlow) -> Vec<String> {
                 | CoreNodeType::Http
                 | CoreNodeType::SubAgent,
             ) => {
-                if has_any_out(&n.id)
-                    && !has_edge(&n.id, Some("error"))
-                    && !has_edge(&n.id, None)
-                {
+                if has_any_out(&n.id) && !has_edge(&n.id, Some("error")) && !has_edge(&n.id, None) {
                     warnings.push(format!(
                         "node '{}' ({}) has no 'error' edge (and no unlabeled fallback): a failure here will fail the whole run",
                         n.id,
@@ -1381,7 +1441,9 @@ pub fn lint_flow(flow: &SavedFlow) -> Vec<String> {
     {
         let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
         for e in &def.edges {
-            adj.entry(e.source.as_str()).or_default().push(e.target.as_str());
+            adj.entry(e.source.as_str())
+                .or_default()
+                .push(e.target.as_str());
         }
         let mut seen = HashSet::new();
         let mut q = VecDeque::from([entry.id.as_str()]);
@@ -1397,15 +1459,20 @@ pub fn lint_flow(flow: &SavedFlow) -> Vec<String> {
         }
         for n in &def.nodes {
             if !seen.contains(n.id.as_str()) {
-                warnings.push(format!("node '{}' is unreachable from the entry node", n.id));
+                warnings.push(format!(
+                    "node '{}' is unreachable from the entry node",
+                    n.id
+                ));
             }
         }
     }
 
     // 3. `{{var}}` and conditional `variable` references to names that are never
     //    produced (entry inputs, any node's output_var/var, or reserved keys).
-    let mut known: HashSet<String> =
-        ["_last", "_inputs", "_run"].iter().map(|s| s.to_string()).collect();
+    let mut known: HashSet<String> = ["_last", "_inputs", "_run"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     for n in &def.nodes {
         for key in ["output_var", "variable", "var"] {
             if let Some(v) = n.data.get(key).and_then(|v| v.as_str()) {
@@ -1431,7 +1498,9 @@ pub fn lint_flow(flow: &SavedFlow) -> Vec<String> {
     for cap in extract_template_refs(&data_str) {
         let r = root(&cap);
         if !r.is_empty() && !known.contains(&r) && seen_refs.insert(format!("t:{r}")) {
-            warnings.push(format!("template reference '{{{{{cap}}}}}' has no known source variable"));
+            warnings.push(format!(
+                "template reference '{{{{{cap}}}}}' has no known source variable"
+            ));
         }
     }
     for n in &def.nodes {
@@ -1439,7 +1508,10 @@ pub fn lint_flow(flow: &SavedFlow) -> Vec<String> {
             for c in conds {
                 if let Some(var) = c.get("variable").and_then(|v| v.as_str()) {
                     let r = root(var);
-                    if !r.is_empty() && !known.contains(&r) && seen_refs.insert(format!("c:{}:{r}", n.id)) {
+                    if !r.is_empty()
+                        && !known.contains(&r)
+                        && seen_refs.insert(format!("c:{}:{r}", n.id))
+                    {
                         warnings.push(format!(
                             "node '{}' condition reads variable '{}' which no upstream node produces",
                             n.id, var
@@ -1528,11 +1600,19 @@ mod tests {
         let flow = saved(
             vec![
                 node("entry", "entry", json!({ "schedule_type": "manual" })),
-                node("seed", "set_variable", json!({ "variable": "temp", "value": 18 })),
-                node("check", "conditional", json!({
-                    "conditions": [ { "handle": "hot", "variable": "_last", "operator": "gt", "value": 50 } ],
-                    "default_handle": "cold"
-                })),
+                node(
+                    "seed",
+                    "set_variable",
+                    json!({ "variable": "temp", "value": 18 }),
+                ),
+                node(
+                    "check",
+                    "conditional",
+                    json!({
+                        "conditions": [ { "handle": "hot", "variable": "_last", "operator": "gt", "value": 50 } ],
+                        "default_handle": "cold"
+                    }),
+                ),
                 node("hot", "end", json!({ "status": "hot" })),
                 node("cold", "end", json!({ "status": "cold" })),
             ],
@@ -1557,10 +1637,14 @@ mod tests {
     async fn entry_inputs_seed_state_and_missing_required_errors() {
         let flow = saved(
             vec![
-                node("entry", "entry", json!({
-                    "schedule_type": "manual",
-                    "inputs": { "city": { "type": "string", "required": true } }
-                })),
+                node(
+                    "entry",
+                    "entry",
+                    json!({
+                        "schedule_type": "manual",
+                        "inputs": { "city": { "type": "string", "required": true } }
+                    }),
+                ),
                 node("done", "end", json!({})),
             ],
             vec![edge("e0", "entry", "done", None)],
@@ -1587,7 +1671,10 @@ mod tests {
     fn v2_dispatch_detection() {
         // A legacy v1 entry+prompt flow stays on the legacy runner.
         let v1 = saved(
-            vec![node("e", "entry", json!({})), node("p", "prompt", json!({ "prompt": "hi" }))],
+            vec![
+                node("e", "entry", json!({})),
+                node("p", "prompt", json!({ "prompt": "hi" })),
+            ],
             vec![edge("x", "e", "p", None)],
         );
         let mut v1 = v1;
@@ -1617,7 +1704,11 @@ mod tests {
         let flow = saved(
             vec![
                 node("entry", "entry", json!({ "schedule_type": "manual" })),
-                node("call", "http", json!({ "method": "GET", "url": "ftp://nope/x" })),
+                node(
+                    "call",
+                    "http",
+                    json!({ "method": "GET", "url": "ftp://nope/x" }),
+                ),
                 node("ok", "end", json!({ "status": "ok" })),
                 node("err", "end", json!({ "status": "err" })),
             ],
@@ -1632,7 +1723,10 @@ mod tests {
         // The terminal status reflects the "err" end node's label, not "completed".
         assert_eq!(summary.status, "err");
         assert!(
-            summary.variables["_last"].as_str().unwrap_or("").contains("scheme"),
+            summary.variables["_last"]
+                .as_str()
+                .unwrap_or("")
+                .contains("scheme"),
             "_last = {}",
             summary.variables["_last"]
         );
@@ -1653,8 +1747,16 @@ mod tests {
         let flow = saved(
             vec![
                 node("entry", "entry", json!({ "schedule_type": "manual" })),
-                node("obj", "set_variable", json!({ "variable": "payload", "value": { "id": 7 } })),
-                node("pick", "set_variable", json!({ "variable": "the_id", "from": "id" })),
+                node(
+                    "obj",
+                    "set_variable",
+                    json!({ "variable": "payload", "value": { "id": 7 } }),
+                ),
+                node(
+                    "pick",
+                    "set_variable",
+                    json!({ "variable": "the_id", "from": "id" }),
+                ),
                 node("done", "end", json!({})),
             ],
             vec![
@@ -1675,7 +1777,11 @@ mod tests {
         let flow = saved(
             vec![
                 node("entry", "entry", json!({ "schedule_type": "manual" })),
-                node("seed", "set_variable", json!({ "variable": "x", "value": 1 })),
+                node(
+                    "seed",
+                    "set_variable",
+                    json!({ "variable": "x", "value": 1 }),
+                ),
                 node("done", "end", json!({})),
             ],
             vec![
@@ -1685,7 +1791,12 @@ mod tests {
         );
         let summary = run_pure(flow, json!({})).await;
         assert_eq!(summary.status, "completed");
-        assert_eq!(summary.steps.len(), 3, "should run entry+seed+done, not halt: {:?}", summary.steps);
+        assert_eq!(
+            summary.steps.len(),
+            3,
+            "should run entry+seed+done, not halt: {:?}",
+            summary.steps
+        );
         assert_eq!(summary.steps.last().unwrap().node_id, "done");
     }
 
@@ -1697,7 +1808,11 @@ mod tests {
         let flow = saved(
             vec![
                 node("entry", "entry", json!({ "schedule_type": "manual" })),
-                node("t", "tool", json!({ "tool_name": "definitely_not_a_real_tool", "args": {} })),
+                node(
+                    "t",
+                    "tool",
+                    json!({ "tool_name": "definitely_not_a_real_tool", "args": {} }),
+                ),
                 node("done", "end", json!({})),
             ],
             vec![
@@ -1713,20 +1828,35 @@ mod tests {
     #[test]
     fn extract_json_handles_fences_and_prose() {
         assert_eq!(extract_json(r#"{"a":1}"#), Some(json!({"a":1})));
-        assert_eq!(extract_json("```json\n{\"a\":1}\n```"), Some(json!({"a":1})));
-        assert_eq!(extract_json("Here you go: {\"a\": 1} — done"), Some(json!({"a":1})));
+        assert_eq!(
+            extract_json("```json\n{\"a\":1}\n```"),
+            Some(json!({"a":1}))
+        );
+        assert_eq!(
+            extract_json("Here you go: {\"a\": 1} — done"),
+            Some(json!({"a":1}))
+        );
         assert_eq!(extract_json("```\n[1,2,3]\n```"), Some(json!([1, 2, 3])));
         assert_eq!(extract_json("no json at all"), None);
         // Braces inside string literals don't break depth tracking.
-        assert_eq!(extract_json(r#"prefix {"msg":"a } b"} suffix"#), Some(json!({"msg":"a } b"})));
+        assert_eq!(
+            extract_json(r#"prefix {"msg":"a } b"} suffix"#),
+            Some(json!({"msg":"a } b"}))
+        );
     }
 
     #[test]
     fn interpolate_preserves_type_for_whole_ref() {
         let vars = json!({ "n": 5, "name": "ada", "obj": { "a": 1 } });
         assert_eq!(interpolate_value(&json!("{{n}}"), &vars), json!(5)); // number, not "5"
-        assert_eq!(interpolate_value(&json!("count is {{n}}"), &vars), json!("count is 5"));
-        assert_eq!(interpolate_value(&json!("{{obj}}"), &vars), json!({ "a": 1 }));
+        assert_eq!(
+            interpolate_value(&json!("count is {{n}}"), &vars),
+            json!("count is 5")
+        );
+        assert_eq!(
+            interpolate_value(&json!("{{obj}}"), &vars),
+            json!({ "a": 1 })
+        );
         assert_eq!(
             interpolate_value(&json!({ "count": "{{n}}", "who": "{{name}}" }), &vars),
             json!({ "count": 5, "who": "ada" })
@@ -1737,11 +1867,18 @@ mod tests {
     #[test]
     fn step_budget_reads_entry_max_steps() {
         let f = saved(
-            vec![node("entry", "entry", json!({ "schedule_type": "manual", "max_steps": 7 }))],
+            vec![node(
+                "entry",
+                "entry",
+                json!({ "schedule_type": "manual", "max_steps": 7 }),
+            )],
             vec![],
         );
         assert_eq!(step_budget_for(&f), 7);
-        let f2 = saved(vec![node("entry", "entry", json!({ "schedule_type": "manual" }))], vec![]);
+        let f2 = saved(
+            vec![node("entry", "entry", json!({ "schedule_type": "manual" }))],
+            vec![],
+        );
         assert_eq!(step_budget_for(&f2), DEFAULT_STEP_BUDGET);
     }
 
@@ -1749,8 +1886,16 @@ mod tests {
     fn lint_flags_unwired_error_unreachable_and_dangling_ref() {
         let flow = saved(
             vec![
-                node("entry", "entry", json!({ "schedule_type": "manual", "inputs": { "topic": { "type": "string" } } })),
-                node("p", "prompt", json!({ "prompt": "do {{topic}} and {{missing}}" })),
+                node(
+                    "entry",
+                    "entry",
+                    json!({ "schedule_type": "manual", "inputs": { "topic": { "type": "string" } } }),
+                ),
+                node(
+                    "p",
+                    "prompt",
+                    json!({ "prompt": "do {{topic}} and {{missing}}" }),
+                ),
                 node("done", "end", json!({})),
                 node("orphan", "prompt", json!({ "prompt": "never runs" })),
             ],
@@ -1760,20 +1905,42 @@ mod tests {
             ],
         );
         let w = lint_flow(&flow);
-        assert!(w.iter().any(|x| x.contains("no 'error' edge")), "want error warning: {w:?}");
-        assert!(w.iter().any(|x| x.contains("unreachable")), "want unreachable: {w:?}");
-        assert!(w.iter().any(|x| x.contains("missing")), "want dangling ref: {w:?}");
+        assert!(
+            w.iter().any(|x| x.contains("no 'error' edge")),
+            "want error warning: {w:?}"
+        );
+        assert!(
+            w.iter().any(|x| x.contains("unreachable")),
+            "want unreachable: {w:?}"
+        );
+        assert!(
+            w.iter().any(|x| x.contains("missing")),
+            "want dangling ref: {w:?}"
+        );
         // `topic` is a declared input, so it must NOT be flagged.
-        assert!(!w.iter().any(|x| x.contains("{{topic}}")), "topic is known: {w:?}");
+        assert!(
+            !w.iter().any(|x| x.contains("{{topic}}")),
+            "topic is known: {w:?}"
+        );
     }
 
     // ----- branch error-rail helpers (offline) -----
 
     fn out(handle: &str, schema: Option<Value>) -> BranchOutput {
-        BranchOutput { handle: handle.into(), description: None, schema, var: None }
+        BranchOutput {
+            handle: handle.into(),
+            description: None,
+            schema,
+            var: None,
+        }
     }
     fn tool_call(name: &str, args: Value) -> AgentMessage {
-        AgentMessage::ToolCall { id: "1".into(), call_id: None, name: name.into(), args }
+        AgentMessage::ToolCall {
+            id: "1".into(),
+            call_id: None,
+            name: name.into(),
+            args,
+        }
     }
 
     #[test]
@@ -1783,17 +1950,26 @@ mod tests {
             missing_required_field(Some(&schema), &json!({ "temp": 1 })),
             Some("city".to_string())
         );
-        assert_eq!(missing_required_field(Some(&schema), &json!({ "city": "Madrid" })), None);
+        assert_eq!(
+            missing_required_field(Some(&schema), &json!({ "city": "Madrid" })),
+            None
+        );
         // No schema / no `required` array → nothing to check.
         assert_eq!(missing_required_field(None, &json!({})), None);
-        assert_eq!(missing_required_field(Some(&json!({ "type": "string" })), &json!("x")), None);
+        assert_eq!(
+            missing_required_field(Some(&json!({ "type": "string" })), &json!("x")),
+            None
+        );
     }
 
     #[test]
     fn validate_branch_payload_unwraps_scalar_and_validates_objects() {
         let outputs = vec![
             out("temp", Some(json!({ "type": "integer" }))),
-            out("ticket", Some(json!({ "type": "object", "required": ["id"] }))),
+            out(
+                "ticket",
+                Some(json!({ "type": "object", "required": ["id"] })),
+            ),
         ];
         let wrapped = HashMap::from([("temp".to_string(), true), ("ticket".to_string(), false)]);
 
@@ -1803,13 +1979,17 @@ mod tests {
             Ok(("temp".to_string(), json!(72)))
         );
         // Wrapped scalar selected without its value → protocol error.
-        assert!(validate_branch_payload("temp".into(), json!({}), &wrapped, &outputs)
-            .unwrap_err()
-            .contains("without its required value"));
+        assert!(
+            validate_branch_payload("temp".into(), json!({}), &wrapped, &outputs)
+                .unwrap_err()
+                .contains("without its required value")
+        );
         // Object payload missing a required field → protocol error.
-        assert!(validate_branch_payload("ticket".into(), json!({ "note": "x" }), &wrapped, &outputs)
-            .unwrap_err()
-            .contains("missing required field 'id'"));
+        assert!(
+            validate_branch_payload("ticket".into(), json!({ "note": "x" }), &wrapped, &outputs)
+                .unwrap_err()
+                .contains("missing required field 'id'")
+        );
         // Well-formed object passes through verbatim.
         assert_eq!(
             validate_branch_payload("ticket".into(), json!({ "id": "T-1" }), &wrapped, &outputs),
@@ -1821,8 +2001,12 @@ mod tests {
     fn find_last_handle_call_picks_terminal_selection() {
         let handles = vec!["hot".to_string(), "cold".to_string()];
         let mut state = AgentState::new("classify");
-        state.messages.push(tool_call("weather", json!({ "city": "Madrid" }))); // a work tool
-        state.messages.push(tool_call("cold", json!({ "value": 18 }))); // the terminal handle
+        state
+            .messages
+            .push(tool_call("weather", json!({ "city": "Madrid" }))); // a work tool
+        state
+            .messages
+            .push(tool_call("cold", json!({ "value": 18 }))); // the terminal handle
         assert_eq!(
             find_last_handle_call(&state, &handles),
             Some(("cold".to_string(), json!({ "value": 18 })))
@@ -1841,10 +2025,14 @@ mod tests {
         let flow = saved(
             vec![
                 node("entry", "entry", json!({ "schedule_type": "manual" })),
-                node("b", "branch", json!({
-                    "query": "classify",
-                    "outputs": [ { "handle": "hot" }, { "handle": "cold" } ]
-                })),
+                node(
+                    "b",
+                    "branch",
+                    json!({
+                        "query": "classify",
+                        "outputs": [ { "handle": "hot" }, { "handle": "cold" } ]
+                    }),
+                ),
                 node("h", "end", json!({ "status": "hot" })),
                 node("c", "end", json!({ "status": "cold" })),
             ],
@@ -1856,17 +2044,22 @@ mod tests {
         );
         let w = lint_flow(&flow);
         assert!(
-            w.iter().any(|x| x.contains("(branch) has no 'error' edge or default_handle")),
+            w.iter()
+                .any(|x| x.contains("(branch) has no 'error' edge or default_handle")),
             "want branch error-rail warning: {w:?}"
         );
 
         // Wiring an `error` edge silences it.
         let mut wired = flow.clone();
-        wired.flow.nodes.push(node("err", "end", json!({ "status": "err" })));
+        wired
+            .flow
+            .nodes
+            .push(node("err", "end", json!({ "status": "err" })));
         wired.flow.edges.push(edge("e3", "b", "err", Some("error")));
         let w2 = lint_flow(&wired);
         assert!(
-            !w2.iter().any(|x| x.contains("(branch) has no 'error' edge")),
+            !w2.iter()
+                .any(|x| x.contains("(branch) has no 'error' edge")),
             "error edge should silence the warning: {w2:?}"
         );
     }

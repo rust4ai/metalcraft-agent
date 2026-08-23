@@ -53,18 +53,39 @@ pub fn parse_inbound(payload: &serde_json::Value) -> Option<InboundMessage> {
     }
     let data = payload.get("data")?;
     // Skip our own outbound sends if the gateway ever fans those out.
-    if data.get("attributes").and_then(|a| a.get("direction")).and_then(|d| d.as_str()) == Some("outbound") {
+    if data
+        .get("attributes")
+        .and_then(|a| a.get("direction"))
+        .and_then(|d| d.as_str())
+        == Some("outbound")
+    {
         return None;
     }
-    let body = data.get("body").and_then(|b| b.as_str()).filter(|s| !s.is_empty())?;
-    let from = data.get("from_id").and_then(|f| f.as_str()).filter(|s| !s.is_empty())?;
-    let to = data.get("to_id").and_then(|t| t.as_str()).unwrap_or_default();
+    let body = data
+        .get("body")
+        .and_then(|b| b.as_str())
+        .filter(|s| !s.is_empty())?;
+    let from = data
+        .get("from_id")
+        .and_then(|f| f.as_str())
+        .filter(|s| !s.is_empty())?;
+    let to = data
+        .get("to_id")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default();
     Some(InboundMessage {
         from: from.to_string(),
         to: to.to_string(),
-        source_id: data.get("source_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string),
+        source_id: data
+            .get("source_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         body: body.to_string(),
-        external_id: data.get("external_id").and_then(|v| v.as_str()).map(str::to_string),
+        external_id: data
+            .get("external_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         gateway_message_id: data
             .get("gateway_message_id")
             .and_then(|v| v.as_str())
@@ -133,11 +154,17 @@ mod tests {
         let m = parse_inbound(&payload).unwrap();
         assert_eq!(m.from, "+15551112222");
         assert_eq!(m.to, "+14155238886");
-        assert_eq!(m.source_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(
+            m.source_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
         assert_eq!(m.body, "hello");
         assert_eq!(m.external_id.as_deref(), Some("SM123"));
         // The gateway's dedup key must survive parsing (the cross-repo contract).
-        assert_eq!(m.gateway_message_id.as_deref(), Some("11111111-2222-3333-4444-555555555555"));
+        assert_eq!(
+            m.gateway_message_id.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
         assert_eq!(m.from_name.as_deref(), Some("Alice"));
 
         // Absent gateway_message_id (older gateway / non-gateway source) ⇒ None,
@@ -150,7 +177,10 @@ mod tests {
 
         // Wrong event type, missing body, and outbound echo all yield None.
         assert!(parse_inbound(&serde_json::json!({"event":"log.created","data":{}})).is_none());
-        assert!(parse_inbound(&serde_json::json!({"event":"message.created","data":{"from_id":"+1"}})).is_none());
+        assert!(
+            parse_inbound(&serde_json::json!({"event":"message.created","data":{"from_id":"+1"}}))
+                .is_none()
+        );
         let outbound = serde_json::json!({
             "event": "message.created",
             "data": { "from_id": "+1", "body": "x", "attributes": { "direction": "outbound" } }

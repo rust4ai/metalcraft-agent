@@ -7,7 +7,9 @@ pub struct FindFilesTool;
 
 #[async_trait]
 impl metalcraft::Tool for FindFilesTool {
-    fn name(&self) -> &str { "find_files" }
+    fn name(&self) -> &str {
+        "find_files"
+    }
     fn description(&self) -> &str {
         "Find files by name pattern (substring match). Searches recursively. Returns file paths."
     }
@@ -28,14 +30,20 @@ impl metalcraft::Tool for FindFilesTool {
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let pattern = args["pattern"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "find_files".into(),
-            message: "Missing required parameter: pattern".into(),
-        })?;
-        let path_str = args["path"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "find_files".into(),
-            message: "Missing required parameter: path".into(),
-        })?;
+        let pattern =
+            args["pattern"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "find_files".into(),
+                    message: "Missing required parameter: pattern".into(),
+                })?;
+        let path_str =
+            args["path"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "find_files".into(),
+                    message: "Missing required parameter: path".into(),
+                })?;
 
         let path = Path::new(path_str);
         if !path.is_dir() {

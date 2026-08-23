@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use metalcraft::{create_react_agent, AgentState, Executor, RunOutcome};
+use metalcraft::{AgentState, Executor, RunOutcome, create_react_agent};
 use rig::client::CompletionClient;
 
 pub struct SubAgentTool {
@@ -40,7 +40,9 @@ impl SubAgentTool {
 
 #[async_trait]
 impl metalcraft::Tool for SubAgentTool {
-    fn name(&self) -> &str { "sub_agent" }
+    fn name(&self) -> &str {
+        "sub_agent"
+    }
 
     fn description(&self) -> &str {
         "Spawn a sub-agent to handle an independent subtask. Sub-agents run autonomously \
@@ -86,10 +88,12 @@ impl metalcraft::Tool for SubAgentTool {
     }
 
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let task = args["task"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "sub_agent".into(),
-            message: "Missing required parameter: task".into(),
-        })?;
+        let task = args["task"]
+            .as_str()
+            .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                tool: "sub_agent".into(),
+                message: "Missing required parameter: task".into(),
+            })?;
 
         // Two ways to scope the sub-agent:
         //   1. `persona` — run AS a named persona: its resolved tools (incl.
@@ -174,8 +178,13 @@ impl metalcraft::Tool for SubAgentTool {
 
             let mut tool_names: Vec<String> = match tool_set {
                 "full" | "all" => vec![
-                    "read_file", "write_file", "edit_file", "bash",
-                    "list_files", "grep", "find_files",
+                    "read_file",
+                    "write_file",
+                    "edit_file",
+                    "bash",
+                    "list_files",
+                    "grep",
+                    "find_files",
                 ],
                 _ => vec!["read_file", "list_files", "grep", "find_files"],
             }
@@ -259,30 +268,22 @@ impl metalcraft::Tool for SubAgentTool {
                     "turns": turn_count,
                 }))
             }
-            Ok(Ok(RunOutcome::Interrupted { reason, .. })) => {
-                Ok(serde_json::json!({
-                    "result": format!("Sub-agent interrupted: {reason}"),
-                    "error": true,
-                }))
-            }
-            Ok(Ok(RunOutcome::Failed { node, error, .. })) => {
-                Ok(serde_json::json!({
-                    "result": format!("Sub-agent failed at {node}: {error}"),
-                    "error": true,
-                }))
-            }
-            Ok(Err(e)) => {
-                Ok(serde_json::json!({
-                    "result": format!("Sub-agent error: {e}"),
-                    "error": true,
-                }))
-            }
-            Err(_) => {
-                Ok(serde_json::json!({
-                    "result": "Sub-agent timed out after 120 seconds",
-                    "error": true,
-                }))
-            }
+            Ok(Ok(RunOutcome::Interrupted { reason, .. })) => Ok(serde_json::json!({
+                "result": format!("Sub-agent interrupted: {reason}"),
+                "error": true,
+            })),
+            Ok(Ok(RunOutcome::Failed { node, error, .. })) => Ok(serde_json::json!({
+                "result": format!("Sub-agent failed at {node}: {error}"),
+                "error": true,
+            })),
+            Ok(Err(e)) => Ok(serde_json::json!({
+                "result": format!("Sub-agent error: {e}"),
+                "error": true,
+            })),
+            Err(_) => Ok(serde_json::json!({
+                "result": "Sub-agent timed out after 120 seconds",
+                "error": true,
+            })),
         }
     }
 }

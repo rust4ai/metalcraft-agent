@@ -10,7 +10,11 @@ use std::fs;
 fn injected_env_token_beats_stale_keys_json() {
     let dir = std::env::temp_dir().join(format!("mc-agent-envtok-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("keys.json"), r#"{"METALCRAFT_TOKEN":"mck_stale_stored"}"#).unwrap();
+    fs::write(
+        dir.join("keys.json"),
+        r#"{"METALCRAFT_TOKEN":"mck_stale_stored"}"#,
+    )
+    .unwrap();
 
     // SAFETY: single-threaded test binary; set the data dir before the first
     // paths::data_dir() call (cached via OnceCell) so lookup reads our keys.json.

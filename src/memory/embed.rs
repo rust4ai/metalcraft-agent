@@ -120,7 +120,10 @@ impl Embedder for OpenAiEmbedder {
             .await
             .map_err(|e| format!("embeddings request failed: {e}"))?;
         if embeddings.len() != n {
-            return Err(format!("embeddings endpoint returned {} vectors for {n} inputs", embeddings.len()));
+            return Err(format!(
+                "embeddings endpoint returned {} vectors for {n} inputs",
+                embeddings.len()
+            ));
         }
         // rig hands back f64; we store f32. At cosine-similarity precision the
         // difference is far below anything that changes a ranking, and it halves
@@ -233,7 +236,9 @@ impl Embeddings {
                 BREAKER_COOLDOWN.as_secs()
             );
         } else {
-            log::debug!("memory: embedding attempt failed ({context}: {err}), {n}/{FAILURES_TO_TRIP}");
+            log::debug!(
+                "memory: embedding attempt failed ({context}: {err}), {n}/{FAILURES_TO_TRIP}"
+            );
         }
     }
 
@@ -258,7 +263,10 @@ impl Embeddings {
                 None
             }
             Err(_) => {
-                self.record_failure("query", &format!("timed out after {}ms", timeout.as_millis()));
+                self.record_failure(
+                    "query",
+                    &format!("timed out after {}ms", timeout.as_millis()),
+                );
                 None
             }
         }
@@ -322,8 +330,14 @@ mod tests {
     #[tokio::test]
     async fn null_embedder_is_deterministic_and_shaped_right() {
         let e = NullEmbedder::new(64);
-        let a = e.embed(vec!["the gateway proxies embeddings".into()]).await.unwrap();
-        let b = e.embed(vec!["the gateway proxies embeddings".into()]).await.unwrap();
+        let a = e
+            .embed(vec!["the gateway proxies embeddings".into()])
+            .await
+            .unwrap();
+        let b = e
+            .embed(vec!["the gateway proxies embeddings".into()])
+            .await
+            .unwrap();
         assert_eq!(a[0].len(), 64);
         assert_eq!(a, b, "same input must give the same vector");
     }
@@ -341,7 +355,10 @@ mod tests {
             .unwrap();
         let close = super::super::vectors::cosine(&v[0], &v[1]);
         let far = super::super::vectors::cosine(&v[0], &v[2]);
-        assert!(close > far, "overlapping text should score higher ({close} vs {far})");
+        assert!(
+            close > far,
+            "overlapping text should score higher ({close} vs {far})"
+        );
     }
 
     #[tokio::test]
@@ -395,7 +412,11 @@ mod tests {
         e.record_failure("test", "boom");
         e.record_failure("test", "boom");
         assert_eq!(e.availability(), Availability::Ready);
-        assert!(e.embed_query("hello world", Duration::from_secs(1)).await.is_some());
+        assert!(
+            e.embed_query("hello world", Duration::from_secs(1))
+                .await
+                .is_some()
+        );
         assert_eq!(e.consecutive_failures.load(Ordering::Relaxed), 0);
         assert_eq!(e.availability(), Availability::Ready);
     }
@@ -403,11 +424,19 @@ mod tests {
     #[tokio::test]
     async fn a_previously_working_endpoint_degrades_rather_than_reading_unavailable() {
         let e = Embeddings::new(Arc::new(NullEmbedder::new(8)));
-        assert!(e.embed_query("warm it up", Duration::from_secs(1)).await.is_some());
+        assert!(
+            e.embed_query("warm it up", Duration::from_secs(1))
+                .await
+                .is_some()
+        );
         for _ in 0..FAILURES_TO_TRIP {
             e.record_failure("test", "boom");
         }
-        assert_eq!(e.availability(), Availability::Degraded, "it worked before, so this is transient");
+        assert_eq!(
+            e.availability(),
+            Availability::Degraded,
+            "it worked before, so this is transient"
+        );
     }
 
     #[tokio::test]
@@ -433,7 +462,11 @@ mod tests {
             }
         }
         let e = Embeddings::new(Arc::new(Slow));
-        assert!(e.embed_query("x", Duration::from_millis(20)).await.is_none());
+        assert!(
+            e.embed_query("x", Duration::from_millis(20))
+                .await
+                .is_none()
+        );
         assert_eq!(e.consecutive_failures.load(Ordering::Relaxed), 1);
     }
 

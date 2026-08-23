@@ -73,18 +73,44 @@ fn a_locally_authored_agent_exports_and_reinstalls() {
 
     // A pod with a hand-authored agent: a preset, two personas, a skill, and one
     // integration in the legacy location.
-    write("agent_presets/amy-kitchen.json",
-          &preset("amy-kitchen", &[("amy", "default"), ("amy-shopper", "subagent")], &["metalcraft-calendar"]));
-    write("agent_presets/amy-kitchen/memories.jsonl",
-          b"{\"kind\":\"Semantic\",\"content\":\"Amy braises at 2:1.\",\"summary\":\"ratio\"}\n");
-    write("personas/amy.json", &persona("amy", &["metalcraft-calendar"]));
-    write("personas/amy-shopper.json", &persona("amy-shopper", &["metalcraft-calendar"]));
+    write(
+        "agent_presets/amy-kitchen.json",
+        &preset(
+            "amy-kitchen",
+            &[("amy", "default"), ("amy-shopper", "subagent")],
+            &["metalcraft-calendar"],
+        ),
+    );
+    write(
+        "agent_presets/amy-kitchen/memories.jsonl",
+        b"{\"kind\":\"Semantic\",\"content\":\"Amy braises at 2:1.\",\"summary\":\"ratio\"}\n",
+    );
+    write(
+        "personas/amy.json",
+        &persona("amy", &["metalcraft-calendar"]),
+    );
+    write(
+        "personas/amy-shopper.json",
+        &persona("amy-shopper", &["metalcraft-calendar"]),
+    );
     write("skills/knife-skills.md", b"# Knife skills\n");
-    write("integrations/metalcraft-calendar/integration.json", &pack_manifest("metalcraft-calendar"));
-    write("integrations/metalcraft-calendar/api_tools/mcal_list.json",
-          &api_tool("mcal_list", "GET", "https://calendar.metalcraftai.com/api/v1/calendars"));
+    write(
+        "integrations/metalcraft-calendar/integration.json",
+        &pack_manifest("metalcraft-calendar"),
+    );
+    write(
+        "integrations/metalcraft-calendar/api_tools/mcal_list.json",
+        &api_tool(
+            "mcal_list",
+            "GET",
+            "https://calendar.metalcraftai.com/api/v1/calendars",
+        ),
+    );
     // An old pack that still carries a persona: the export must not smuggle it back in.
-    write("integrations/metalcraft-calendar/personas/legacy.json", &persona("legacy", &[]));
+    write(
+        "integrations/metalcraft-calendar/personas/legacy.json",
+        &persona("legacy", &[]),
+    );
 
     let bytes = agent_packs::export("amy-kitchen", "2.0.0").expect("export");
 
@@ -92,21 +118,37 @@ fn a_locally_authored_agent_exports_and_reinstalls() {
     assert_eq!(parsed.manifest.id, "amy-kitchen-agent");
     assert_eq!(parsed.manifest.version, "2.0.0");
     assert_eq!(parsed.manifest.presets, vec!["amy-kitchen"]);
-    assert!(parsed.files.contains_key("personas/amy-shopper.json"), "the roster travels with it");
-    assert!(parsed.files.contains_key("skills/knife-skills.md"));
-    assert!(parsed.files.contains_key("agent_presets/amy-kitchen/memories.jsonl"));
     assert!(
-        !parsed.files.keys().any(|k| k.contains("integrations/metalcraft-calendar/personas/")),
+        parsed.files.contains_key("personas/amy-shopper.json"),
+        "the roster travels with it"
+    );
+    assert!(parsed.files.contains_key("skills/knife-skills.md"));
+    assert!(
+        parsed
+            .files
+            .contains_key("agent_presets/amy-kitchen/memories.jsonl")
+    );
+    assert!(
+        !parsed
+            .files
+            .keys()
+            .any(|k| k.contains("integrations/metalcraft-calendar/personas/")),
         "a legacy pack's personas must not ride along; presets curate personas now"
     );
     // Each vendored pack is pinned by content, so tampering is caught downstream.
-    assert!(parsed.manifest.provides.integrations[0].content_sha256.is_some());
+    assert!(
+        parsed.manifest.provides.integrations[0]
+            .content_sha256
+            .is_some()
+    );
     assert_eq!(parsed.consent.domains, vec!["calendar.metalcraftai.com"]);
 
     // Exporting something the pod can't satisfy fails loudly, here, rather than
     // producing an archive that breaks on someone else's machine.
-    write("agent_presets/broken.json",
-          &preset("broken", &[("nobody", "default")], &["nonexistent-pack"]));
+    write(
+        "agent_presets/broken.json",
+        &preset("broken", &[("nobody", "default")], &["nonexistent-pack"]),
+    );
     let err = agent_packs::export("broken", "0.1.0").expect_err("must refuse");
     assert!(err.contains("persona 'nobody'"), "{err}");
     assert!(err.contains("nonexistent-pack"), "{err}");

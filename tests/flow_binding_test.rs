@@ -74,12 +74,15 @@ fn binding_arming_and_disarming_a_flow() {
     let brief = flow("brief", &["amy-chef", "amy-shopper"]);
 
     // ── an unbound flow is the default agent, which is what it always was ─────
-    assert_eq!(flow_bindings::preset_for("brief"), agent_preset::DEFAULT_PRESET);
+    assert_eq!(
+        flow_bindings::preset_for("brief"),
+        agent_preset::DEFAULT_PRESET
+    );
     assert!(!flow_bindings::get("brief").preset.is_some());
 
     // ── containment is checked at bind time, not at 3am ───────────────────────
-    let err = flow_bindings::bind_preset(&brief, "mitch")
-        .expect_err("mitch cannot reach amy's personas");
+    let err =
+        flow_bindings::bind_preset(&brief, "mitch").expect_err("mitch cannot reach amy's personas");
     assert!(err.contains("amy-chef"), "{err}");
     assert!(err.contains("roster"), "{err}");
     assert_eq!(
@@ -94,21 +97,34 @@ fn binding_arming_and_disarming_a_flow() {
     // ── arming is what creates the agent ──────────────────────────────────────
     assert!(flow_bindings::instance_for("brief", "morning").is_none());
     let morning = flow_bindings::arm(&brief, "morning", None).expect("arm morning");
-    assert!(morning.persistent, "a scheduled agent must outlive a TTL reap");
+    assert!(
+        morning.persistent,
+        "a scheduled agent must outlive a TTL reap"
+    );
     assert_eq!(morning.agent_preset, "amy");
-    assert_eq!(morning.persona, "amy-chef", "starts at the preset's default");
+    assert_eq!(
+        morning.persona, "amy-chef",
+        "starts at the preset's default"
+    );
     assert!(
         matches!(&morning.origin, agent_instance::InstanceOrigin::Flow { flow_id } if flow_id == "brief"),
         "{:?}",
         morning.origin
     );
-    assert!(morning.name.contains("Morning"), "named after the schedule: {}", morning.name);
+    assert!(
+        morning.name.contains("Morning"),
+        "named after the schedule: {}",
+        morning.name
+    );
     agent_instance::load(&morning.id).expect("the instance was persisted, not just returned");
 
     // ── a second schedule on the same flow shares the agent ───────────────────
     // The 18:00 run should remember the 08:00 one; two agents would not.
     let evening = flow_bindings::arm(&brief, "evening", None).expect("arm evening");
-    assert_eq!(evening.id, morning.id, "schedules of one flow share an agent by default");
+    assert_eq!(
+        evening.id, morning.id,
+        "schedules of one flow share an agent by default"
+    );
 
     // ── arming an unknown schedule is an error, not a silent no-op ────────────
     let err = flow_bindings::arm(&brief, "midnight", None).expect_err("no such schedule");
@@ -141,7 +157,10 @@ fn binding_arming_and_disarming_a_flow() {
 
     // ── rebinding to the default keeps armed schedules ────────────────────────
     flow_bindings::unbind("brief").unwrap();
-    assert_eq!(flow_bindings::preset_for("brief"), agent_preset::DEFAULT_PRESET);
+    assert_eq!(
+        flow_bindings::preset_for("brief"),
+        agent_preset::DEFAULT_PRESET
+    );
     assert_eq!(
         flow_bindings::instance_for("brief", "morning"),
         Some(morning.id.clone()),

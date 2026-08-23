@@ -10,7 +10,10 @@ use serde_json::{Value, json};
 use super::{export, find, install, list, uninstall};
 
 fn fail(tool: &str, message: impl Into<String>) -> metalcraft::GraphError {
-    metalcraft::GraphError::ToolCallFailed { tool: tool.into(), message: message.into() }
+    metalcraft::GraphError::ToolCallFailed {
+        tool: tool.into(),
+        message: message.into(),
+    }
 }
 
 pub const TOOL_NAMES: &[&str] = &[
@@ -76,8 +79,11 @@ impl metalcraft::Tool for AgentPackReadTool {
         })
     }
     async fn call(&self, args: Value) -> metalcraft::Result<Value> {
-        let id = args["id"].as_str().ok_or_else(|| crate::tools::missing_param("agentpack_read", "id"))?;
-        let pack = find(id).ok_or_else(|| fail("agentpack_read", format!("'{id}' is not installed")))?;
+        let id = args["id"]
+            .as_str()
+            .ok_or_else(|| crate::tools::missing_param("agentpack_read", "id"))?;
+        let pack =
+            find(id).ok_or_else(|| fail("agentpack_read", format!("'{id}' is not installed")))?;
         Ok(json!({
             "id": pack.id,
             "manifest": pack.manifest,
@@ -119,8 +125,8 @@ impl metalcraft::Tool for AgentPackInstallTool {
         let bytes = std::fs::read(path)
             .map_err(|e| fail("agentpack_install", format!("reading {path}: {e}")))?;
         let report = install(&bytes, "bundle").map_err(|e| fail("agentpack_install", e))?;
-        let mut out = serde_json::to_value(&report)
-            .map_err(|e| fail("agentpack_install", e.to_string()))?;
+        let mut out =
+            serde_json::to_value(&report).map_err(|e| fail("agentpack_install", e.to_string()))?;
         if !report.missing_env.is_empty() {
             out["note"] = json!(format!(
                 "Installed, but these credentials are not set yet: {}. Tools that need them \
@@ -166,8 +172,8 @@ impl metalcraft::Tool for AgentPackUpdateTool {
         let bytes = std::fs::read(path)
             .map_err(|e| fail("agentpack_update", format!("reading {path}: {e}")))?;
         let report = super::update(&bytes, "bundle").map_err(|e| fail("agentpack_update", e))?;
-        let mut out = serde_json::to_value(&report)
-            .map_err(|e| fail("agentpack_update", e.to_string()))?;
+        let mut out =
+            serde_json::to_value(&report).map_err(|e| fail("agentpack_update", e.to_string()))?;
 
         // The two edge cases are the whole reason this tool is separate from
         // install, so they get said in words rather than left in a struct.
@@ -270,8 +276,12 @@ impl metalcraft::Tool for AgentPackExportTool {
         if let Some(parent) = std::path::Path::new(out).parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| fail("agentpack_export", format!("creating {}: {e}", parent.display())))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                fail(
+                    "agentpack_export",
+                    format!("creating {}: {e}", parent.display()),
+                )
+            })?;
         }
         std::fs::write(out, &bytes)
             .map_err(|e| fail("agentpack_export", format!("writing {out}: {e}")))?;
@@ -319,18 +329,32 @@ mod tests {
     fn writes_are_approval_gated_and_reads_are_not() {
         use crate::approval::{OperationKind, PermissionLevel};
         let args = json!({});
-        for t in
-            ["agentpack_install", "agentpack_update", "agentpack_uninstall", "agentpack_export"]
-        {
-            assert_eq!(OperationKind::classify(t, &args), OperationKind::AgentPackWrite, "{t}");
+        for t in [
+            "agentpack_install",
+            "agentpack_update",
+            "agentpack_uninstall",
+            "agentpack_export",
+        ] {
+            assert_eq!(
+                OperationKind::classify(t, &args),
+                OperationKind::AgentPackWrite,
+                "{t}"
+            );
         }
         assert_eq!(
             OperationKind::AgentPackWrite.default_permission(),
             PermissionLevel::RequiresApproval
         );
         for t in ["agentpack_list", "agentpack_read"] {
-            assert_eq!(OperationKind::classify(t, &args), OperationKind::MetaRead, "{t}");
-            assert_eq!(OperationKind::MetaRead.default_permission(), PermissionLevel::AutoApprove);
+            assert_eq!(
+                OperationKind::classify(t, &args),
+                OperationKind::MetaRead,
+                "{t}"
+            );
+            assert_eq!(
+                OperationKind::MetaRead.default_permission(),
+                PermissionLevel::AutoApprove
+            );
         }
     }
 
@@ -340,11 +364,18 @@ mod tests {
             (AgentPackReadTool.parameters_schema(), vec!["id"]),
             (AgentPackInstallTool.parameters_schema(), vec!["path"]),
             (AgentPackUninstallTool.parameters_schema(), vec!["id"]),
-            (AgentPackExportTool.parameters_schema(), vec!["preset", "out"]),
+            (
+                AgentPackExportTool.parameters_schema(),
+                vec!["preset", "out"],
+            ),
         ] {
             assert_eq!(schema["type"], "object");
-            let got: Vec<&str> =
-                schema["required"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+            let got: Vec<&str> = schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
             assert_eq!(got, required);
         }
     }

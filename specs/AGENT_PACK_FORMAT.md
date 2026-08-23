@@ -136,19 +136,22 @@ The two places a v1 name survives are **`Persona.integrations`** and
 aliases. Those documents live on people's pods rather than inside archives, so breaking
 them would break working installs for a word.
 
-### 3.4 Two documents, two version numbers
+### 3.4 Both documents carry the same version number
 
 `agent_pack.json` and `agent_presets/<slug>.json` each carry a `manifest_version`, and
-they are **independent**. The archive manifest is at **2**; the preset document is at
-**1** and did not change when the archive layout did, because nothing about a preset
-changed — spec 1 → 2 moved vendored dependencies and renamed a field on the *manifest*.
+**both are 2**. Nothing about the preset format changed at 2 — spec 1 → 2 moved vendored
+dependencies and renamed a manifest field. The number moved so that the two documents
+inside one archive stop disagreeing, because a spec-2 pack containing a document
+numbered 1 reads as a mistake often enough to become one.
 
-So a valid spec-2 pack contains an `agent_pack.json` with `"manifest_version": 2` and an
-`agent_presets/<slug>.json` with `"manifest_version": 1`. That looks like a mistake and
-is not one; implementors have shipped it that way on both sides (`metalcraft-agent`'s
-`MANIFEST_VERSION = 2` for archives against `AgentPreset`'s `default = 1`, and
-`axoniac-prime`'s seeder writing each). Bumping the preset to 2 would assert a format
-change that never happened, and would invalidate every preset already on disk.
+**A preset at version 1, or with no `manifest_version` at all, MUST still be accepted.**
+That is every preset written before this change, on every pod, and refusing them would
+break working installs to align a number. Implementors upgrade on write, not on read: a
+preset is renumbered the first time something saves it, so a pod that never edits a
+preset never rewrites its files.
+
+A preset numbered **higher** than the reader understands MUST be rejected — that one was
+written by something newer, and guessing at it is how a roster silently loses a persona.
 
 ### 3.1 Identifiers
 
@@ -188,8 +191,7 @@ absent, the archive is unpinned: an implementor MAY accept it (local development
 
 ```jsonc
 {
-  "manifest_version": 1,                  // the preset document's own version — not the
-                                          // archive spec version. See §3.4.
+  "manifest_version": 2,                  // §3.4 — 1 and absent are still accepted
   "slug": "amy-kitchen",
   "name": "Amy's Kitchen Agent",
   "tagline": "…",
@@ -381,6 +383,7 @@ experience this rule exists to prevent.
 | V8 | `presets.len() == 1` (§3.2) | reject |
 | V9 | The declared preset file exists in the archive and parses | reject |
 | V10 | Preset passes §4.2 | reject |
+| V10a | Preset `manifest_version` ≤ 2, or absent (§3.4) | reject if higher |
 | V11 | Every persona in the callable roster exists at `personas/<slug>.json` | reject, naming it |
 | V12 | Every persona's `integrations[]` ⊆ the preset's `integrations` | reject, naming both |
 | V13 | Every skill the preset declares **and every skill its roster personas load** exists at `skills/<slug>.md` | reject, naming it |

@@ -58,7 +58,9 @@ pub struct PromptExtras {
 impl PromptExtras {
     /// Build the extras for a real turn, reading the live memory profile.
     pub async fn load() -> Self {
-        Self { memory_profile: crate::memory::profile_block().await }
+        Self {
+            memory_profile: crate::memory::profile_block().await,
+        }
     }
 }
 
@@ -91,7 +93,9 @@ impl Persona {
             crate::integrations::list_files_layered(personas_dir, "personas", "json")
                 .into_iter()
                 .filter_map(|(path, _origin)| {
-                    path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
                 })
                 .collect();
 
@@ -114,8 +118,7 @@ impl Persona {
         if !file.exists() {
             return Err(format!("Persona '{}' not found", slug));
         }
-        std::fs::remove_file(&file)
-            .map_err(|e| format!("Failed to delete {}: {e}", file.display()))
+        std::fs::remove_file(&file).map_err(|e| format!("Failed to delete {}: {e}", file.display()))
     }
 
     /// List persona summaries (slug + name + description) from the local dir
@@ -147,7 +150,9 @@ impl Persona {
     pub fn resolved_tool_names(&self) -> Vec<String> {
         let mut names = self.tools.clone();
         for id in &self.integrations {
-            for tool in crate::tools::http_api::HttpApiTool::installed_tool_names_for_integration(id) {
+            for tool in
+                crate::tools::http_api::HttpApiTool::installed_tool_names_for_integration(id)
+            {
                 if !names.contains(&tool) {
                     names.push(tool);
                 }
@@ -287,7 +292,6 @@ impl Persona {
         }
         out
     }
-
 }
 
 /// Bulleted list of enabled integrations as `id (name): description`
@@ -345,8 +349,7 @@ fn load_skill_description(name: &str, skills_dir: &Path) -> String {
         Ok(c) => c,
         Err(_) => return "Specialized guidance".to_string(),
     };
-    parse_frontmatter_description(&content)
-        .unwrap_or_else(|| "Specialized guidance".to_string())
+    parse_frontmatter_description(&content).unwrap_or_else(|| "Specialized guidance".to_string())
 }
 
 /// Extract `description` from YAML frontmatter (between `---` delimiters).
@@ -408,7 +411,10 @@ mod tests {
 
     #[test]
     fn template_uses_detects_padded_var() {
-        assert!(template_uses("a {{ available_personas }} b", "available_personas"));
+        assert!(template_uses(
+            "a {{ available_personas }} b",
+            "available_personas"
+        ));
         assert!(template_uses("{{cwd}}", "cwd"));
         assert!(!template_uses("{{cwdx}}", "cwd"));
         assert!(!template_uses("no placeholders here", "cwd"));

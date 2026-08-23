@@ -44,14 +44,29 @@ fn recommends_env_from_installed_packs_with_attribution() {
     let names: Vec<&str> = recs.iter().map(|(n, _)| n.as_str()).collect();
     // Sorted by key name.
     assert_eq!(names, vec!["A_ONLY_KEY", "SHARED_KEY"]);
-    assert_eq!(recs[0].1, vec!["packa"], "a key only one pack wants names only that pack");
+    assert_eq!(
+        recs[0].1,
+        vec!["packa"],
+        "a key only one pack wants names only that pack"
+    );
     let shared = recs.iter().find(|(n, _)| n == "SHARED_KEY").unwrap();
-    assert_eq!(shared.1, vec!["packa", "packb"], "a shared key names both, sorted");
+    assert_eq!(
+        shared.1,
+        vec!["packa", "packb"],
+        "a shared key names both, sorted"
+    );
 
     // A stale `enabled: false` from before the flag was retired must not suppress it.
-    write(&data_dir.join("integrations.json"), r#"{"packa":{"enabled":false}}"#);
+    write(
+        &data_dir.join("integrations.json"),
+        r#"{"packa":{"enabled":false}}"#,
+    );
     let recs = metalcraft_agent::integrations::recommended_env();
-    assert_eq!(recs.len(), 2, "a stale disabled flag must not hide a pack's key needs");
+    assert_eq!(
+        recs.len(),
+        2,
+        "a stale disabled flag must not hide a pack's key needs"
+    );
 
     // `configured` source: a stored key resolves, a missing one does not.
     write(

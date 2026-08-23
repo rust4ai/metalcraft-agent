@@ -38,8 +38,12 @@ const READ_TOOLS: &[&str] = &[
     "mnote_links",
 ];
 
-const WRITE_TOOLS: &[&str] =
-    &["mnote_create_note", "mnote_update_note", "mnote_delete_note", "mnote_create_category"];
+const WRITE_TOOLS: &[&str] = &[
+    "mnote_create_note",
+    "mnote_update_note",
+    "mnote_delete_note",
+    "mnote_create_category",
+];
 
 static INIT: Once = Once::new();
 
@@ -60,14 +64,20 @@ fn init() {
 fn metalcraft_notes_pack_wires_up() {
     init();
 
-    assert!(integrations::is_enabled(PACK_ID), "pack should be enabled after init()");
+    assert!(
+        integrations::is_enabled(PACK_ID),
+        "pack should be enabled after init()"
+    );
 
     let persona = Persona::load(PERSONA_SLUG, &paths::personas_dir())
         .expect("metalcraft-notes-agent persona should resolve from the enabled pack");
     assert!(persona.integrations.iter().any(|p| p == PACK_ID));
     let resolved = persona.resolved_tool_names();
     for tool in EXPECTED_TOOLS {
-        assert!(resolved.iter().any(|t| t == tool), "missing expected tool `{tool}`");
+        assert!(
+            resolved.iter().any(|t| t == tool),
+            "missing expected tool `{tool}`"
+        );
     }
     assert!(resolved.iter().any(|t| t == "load_skill"));
     assert!(persona.skills.iter().any(|s| s == "metalcraft-notes"));
@@ -77,22 +87,30 @@ fn metalcraft_notes_pack_wires_up() {
         let (path, _origin) =
             integrations::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .unwrap_or_else(|| panic!("api tool `{tool}` should resolve"));
-        let cfg: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
-                .unwrap_or_else(|e| panic!("`{tool}` invalid JSON: {e}"));
+        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
+            .unwrap_or_else(|e| panic!("`{tool}` invalid JSON: {e}"));
         assert_eq!(cfg["name"], *tool);
         assert!(
-            cfg["url"].as_str().is_some_and(|u| u.contains("https://notes.metalcraftai.com/api/v1")),
+            cfg["url"]
+                .as_str()
+                .is_some_and(|u| u.contains("https://notes.metalcraftai.com/api/v1")),
             "`{tool}` should target the fixed notes.metalcraftai.com/api/v1 base"
         );
         assert!(
-            cfg["headers"]["Authorization"].as_str().is_some_and(|h| h.contains("$METALCRAFT_TOKEN")),
+            cfg["headers"]["Authorization"]
+                .as_str()
+                .is_some_and(|h| h.contains("$METALCRAFT_TOKEN")),
             "`{tool}` should authenticate with $METALCRAFT_TOKEN"
         );
     }
 
     // Per-note tools address the note by {slug}.
-    for tool in ["mnote_get_note", "mnote_update_note", "mnote_delete_note", "mnote_links"] {
+    for tool in [
+        "mnote_get_note",
+        "mnote_update_note",
+        "mnote_delete_note",
+        "mnote_links",
+    ] {
         let (p, _) =
             integrations::resolve_file(&api_tools_dir, "api_tools", &format!("{tool}.json"))
                 .expect("resolves");
@@ -107,7 +125,10 @@ fn metalcraft_notes_pack_wires_up() {
     let pack = integrations::find_installed(PACK_ID).expect("pack installed");
     let readme = pack.readme().expect("README");
     assert!(readme.contains("METALCRAFT_TOKEN") && readme.contains("notes.metalcraftai.com"));
-    assert_eq!(pack.item_slugs("api_tools", "json").len(), EXPECTED_TOOLS.len());
+    assert_eq!(
+        pack.item_slugs("api_tools", "json").len(),
+        EXPECTED_TOOLS.len()
+    );
 
     // ── The pack must TEACH wikilinks, not merely expose the endpoint ──────────────
     //
@@ -126,7 +147,10 @@ fn metalcraft_notes_pack_wires_up() {
     for tool in ["mnote_create_note", "mnote_update_note"] {
         let cfg: serde_json::Value = serde_json::from_str(&tool_json(tool)).unwrap();
         let desc = cfg["description"].as_str().unwrap();
-        assert!(desc.contains("[[slug]]"), "`{tool}` must teach the [[slug]] link syntax");
+        assert!(
+            desc.contains("[[slug]]"),
+            "`{tool}` must teach the [[slug]] link syntax"
+        );
         assert!(
             desc.contains('|') && desc.to_lowercase().contains("break"),
             "`{tool}` must warn that a pipe in the display text voids the link"
@@ -145,12 +169,9 @@ fn metalcraft_notes_pack_wires_up() {
     // integration is tools and nothing else now, and a preset is what curates the
     // persona and skill that go with it.
     let skill_src = {
-        let (p, _) = integrations::resolve_file(
-            &paths::skills_dir(),
-            "skills",
-            "metalcraft-notes.md",
-        )
-        .expect("the metalcraft-notes skill is seeded on the pod");
+        let (p, _) =
+            integrations::resolve_file(&paths::skills_dir(), "skills", "metalcraft-notes.md")
+                .expect("the metalcraft-notes skill is seeded on the pod");
         std::fs::read_to_string(p).unwrap()
     };
     // Assert the load-bearing FACTS, not just that the string "[[slug]]" appears somewhere

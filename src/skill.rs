@@ -36,8 +36,7 @@ pub struct Skill {
 /// List every skill (local dir + enabled packs), sorted by slug. A local skill
 /// shadows a pack skill of the same slug.
 pub fn list_skill_summaries() -> Vec<SkillSummary> {
-    let layered =
-        crate::integrations::list_files_layered(&paths::skills_dir(), "skills", "md");
+    let layered = crate::integrations::list_files_layered(&paths::skills_dir(), "skills", "md");
     let mut summaries: Vec<SkillSummary> = layered
         .into_iter()
         .filter_map(|(path, origin)| {

@@ -51,37 +51,93 @@ fn legacy_integrations_become_agent_packs() {
     // A pod as it looks before agent packs exist.
     //
     // 1. A pack that carries its own persona and skill — the common case.
-    write(&data_dir, "integrations/metalcraft-calendar/integration.json",
-          &pack_json("metalcraft-calendar", "Metalcraft Calendar"));
-    write(&data_dir, "integrations/metalcraft-calendar/api_tools/mcal_list.json",
-          &api_tool("mcal_list", "GET", "https://calendar.metalcraftai.com/api/v1/calendars"));
-    write(&data_dir, "integrations/metalcraft-calendar/api_tools/mcal_create.json",
-          &api_tool("mcal_create", "POST", "https://calendar.metalcraftai.com/api/v1/events"));
-    write(&data_dir, "integrations/metalcraft-calendar/personas/calendar-agent.json",
-          &persona("Calendar Agent", &["metalcraft-calendar"], &["scheduling"]));
-    write(&data_dir, "integrations/metalcraft-calendar/skills/scheduling.md",
-          b"# Scheduling\nCheck mcal_now first.\n");
-    write(&data_dir, "integrations/metalcraft-calendar/README.md", b"# Calendar\n");
+    write(
+        &data_dir,
+        "integrations/metalcraft-calendar/integration.json",
+        &pack_json("metalcraft-calendar", "Metalcraft Calendar"),
+    );
+    write(
+        &data_dir,
+        "integrations/metalcraft-calendar/api_tools/mcal_list.json",
+        &api_tool(
+            "mcal_list",
+            "GET",
+            "https://calendar.metalcraftai.com/api/v1/calendars",
+        ),
+    );
+    write(
+        &data_dir,
+        "integrations/metalcraft-calendar/api_tools/mcal_create.json",
+        &api_tool(
+            "mcal_create",
+            "POST",
+            "https://calendar.metalcraftai.com/api/v1/events",
+        ),
+    );
+    write(
+        &data_dir,
+        "integrations/metalcraft-calendar/personas/calendar-agent.json",
+        &persona("Calendar Agent", &["metalcraft-calendar"], &["scheduling"]),
+    );
+    write(
+        &data_dir,
+        "integrations/metalcraft-calendar/skills/scheduling.md",
+        b"# Scheduling\nCheck mcal_now first.\n",
+    );
+    write(
+        &data_dir,
+        "integrations/metalcraft-calendar/README.md",
+        b"# Calendar\n",
+    );
 
     // 2. A pack with tools but no persona of its own.
-    write(&data_dir, "integrations/github/integration.json", &pack_json("github", "GitHub"));
-    write(&data_dir, "integrations/github/api_tools/gh_user.json",
-          &api_tool("gh_user", "GET", "https://api.github.com/user"));
+    write(
+        &data_dir,
+        "integrations/github/integration.json",
+        &pack_json("github", "GitHub"),
+    );
+    write(
+        &data_dir,
+        "integrations/github/api_tools/gh_user.json",
+        &api_tool("gh_user", "GET", "https://api.github.com/user"),
+    );
 
     // 3. A pack whose persona reaches a *second* pack — containment says both must
     //    be vendored, or the wrapper would not install.
-    write(&data_dir, "integrations/notes/integration.json", &pack_json("notes", "Notes"));
-    write(&data_dir, "integrations/notes/api_tools/note_list.json",
-          &api_tool("note_list", "GET", "https://notes.metalcraftai.com/api/v1/notes"));
-    write(&data_dir, "integrations/notes/personas/note-taker.json",
-          &persona("Note Taker", &["notes", "metalcraft-calendar"], &[]));
+    write(
+        &data_dir,
+        "integrations/notes/integration.json",
+        &pack_json("notes", "Notes"),
+    );
+    write(
+        &data_dir,
+        "integrations/notes/api_tools/note_list.json",
+        &api_tool(
+            "note_list",
+            "GET",
+            "https://notes.metalcraftai.com/api/v1/notes",
+        ),
+    );
+    write(
+        &data_dir,
+        "integrations/notes/personas/note-taker.json",
+        &persona("Note Taker", &["notes", "metalcraft-calendar"], &[]),
+    );
 
     // ── dry run writes nothing ──────────────────────────────────────────────
     let dry = migrate::run(true);
     assert!(dry.dry_run);
-    assert_eq!(dry.migrated.len(), 3, "all three should be wrappable: {:?}", dry.failed);
+    assert_eq!(
+        dry.migrated.len(),
+        3,
+        "all three should be wrappable: {:?}",
+        dry.failed
+    );
     assert!(dry.failed.is_empty(), "{:?}", dry.failed);
-    assert!(agent_packs::list().is_empty(), "a dry run must not install anything");
+    assert!(
+        agent_packs::list().is_empty(),
+        "a dry run must not install anything"
+    );
 
     // ── the real thing ──────────────────────────────────────────────────────
     let report = migrate::run(false);
@@ -91,12 +147,20 @@ fn legacy_integrations_become_agent_packs() {
     let installed: Vec<String> = agent_packs::list().into_iter().map(|p| p.id).collect();
     assert_eq!(
         installed,
-        vec!["github-legacy", "metalcraft-calendar-legacy", "notes-legacy"],
+        vec![
+            "github-legacy",
+            "metalcraft-calendar-legacy",
+            "notes-legacy"
+        ],
         "each legacy pack gets a wrapper named after it"
     );
 
     // The calendar pack's own persona and skill were promoted out of it.
-    let cal = report.migrated.iter().find(|m| m.integration_pack == "metalcraft-calendar").unwrap();
+    let cal = report
+        .migrated
+        .iter()
+        .find(|m| m.integration_pack == "metalcraft-calendar")
+        .unwrap();
     assert_eq!(cal.personas, vec!["calendar-agent"]);
     assert_eq!(cal.skills, vec!["scheduling"]);
     assert!(!cal.persona_synthesized);
@@ -110,14 +174,23 @@ fn legacy_integrations_become_agent_packs() {
 
     // A pack with no persona gets one synthesized, named after the pack so it can
     // never collide with another wrapper's.
-    let gh = report.migrated.iter().find(|m| m.integration_pack == "github").unwrap();
+    let gh = report
+        .migrated
+        .iter()
+        .find(|m| m.integration_pack == "github")
+        .unwrap();
     assert!(gh.persona_synthesized);
     assert_eq!(gh.personas, vec!["github-agent"]);
 
     // Containment: the notes wrapper vendored the calendar pack its persona reaches.
     let pack = agent_packs::find("notes-legacy").unwrap();
-    let mut vendored: Vec<&str> =
-        pack.manifest.provides.integrations.iter().map(|p| p.id.as_str()).collect();
+    let mut vendored: Vec<&str> = pack
+        .manifest
+        .provides
+        .integrations
+        .iter()
+        .map(|p| p.id.as_str())
+        .collect();
     vendored.sort();
     assert_eq!(vendored, vec!["metalcraft-calendar", "notes"]);
     // …and the consent summary spans both, derived from the tools themselves.
@@ -152,29 +225,55 @@ fn legacy_integrations_become_agent_packs() {
     )
     .expect("a migrated preset must resolve like any other");
     assert_eq!(loaded.default_persona, "note-taker");
-    assert!(loaded.integrations.contains(&"metalcraft-calendar".to_string()));
+    assert!(
+        loaded
+            .integrations
+            .contains(&"metalcraft-calendar".to_string())
+    );
 
     // ── one unwrappable pack must not block the rest ────────────────────────
     // A persona reaching for a pack that isn't installed can't satisfy containment,
     // so its wrapper is impossible. That pack is reported and left alone; the others
     // stay migrated.
-    write(&data_dir, "integrations/broken/integration.json", &pack_json("broken", "Broken"));
-    write(&data_dir, "integrations/broken/api_tools/b_get.json",
-          &api_tool("b_get", "GET", "https://example.com/x"));
-    write(&data_dir, "integrations/broken/personas/needy.json",
-          &persona("Needy", &["broken", "not-installed"], &[]));
+    write(
+        &data_dir,
+        "integrations/broken/integration.json",
+        &pack_json("broken", "Broken"),
+    );
+    write(
+        &data_dir,
+        "integrations/broken/api_tools/b_get.json",
+        &api_tool("b_get", "GET", "https://example.com/x"),
+    );
+    write(
+        &data_dir,
+        "integrations/broken/personas/needy.json",
+        &persona("Needy", &["broken", "not-installed"], &[]),
+    );
 
     let mixed = migrate::run(false);
-    assert_eq!(mixed.migrated.len(), 0, "the three good ones were already done");
+    assert_eq!(
+        mixed.migrated.len(),
+        0,
+        "the three good ones were already done"
+    );
     assert_eq!(mixed.already_migrated.len(), 3);
     assert_eq!(mixed.failed.len(), 1);
     assert_eq!(mixed.failed[0].0, "broken");
-    assert!(mixed.failed[0].1.contains("not-installed"), "{}", mixed.failed[0].1);
+    assert!(
+        mixed.failed[0].1.contains("not-installed"),
+        "{}",
+        mixed.failed[0].1
+    );
     assert!(
         agent_packs::find("broken-legacy").is_none(),
         "a pack that could not be wrapped must leave nothing behind"
     );
-    assert_eq!(agent_packs::list().len(), 3, "the successful wrappers are untouched");
+    assert_eq!(
+        agent_packs::list().len(),
+        3,
+        "the successful wrappers are untouched"
+    );
 
     let _ = fs::remove_dir_all(&data_dir);
 }

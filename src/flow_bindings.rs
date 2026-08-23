@@ -73,7 +73,9 @@ pub fn get(flow_id: &str) -> FlowBinding {
 /// The preset a flow runs as. Unbound flows fall back to the default agent, which is
 /// what every flow written before presets existed effectively was.
 pub fn preset_for(flow_id: &str) -> String {
-    get(flow_id).preset.unwrap_or_else(|| DEFAULT_PRESET.to_string())
+    get(flow_id)
+        .preset
+        .unwrap_or_else(|| DEFAULT_PRESET.to_string())
 }
 
 /// Bind a flow to a preset, rejecting the binding if the flow names personas the
@@ -212,7 +214,10 @@ pub fn arm(
     check_personas(flow, &preset)?;
 
     if !flow.schedules.iter().any(|s| s.id == schedule_id) {
-        return Err(format!("flow '{}' has no schedule '{schedule_id}'", flow.id));
+        return Err(format!(
+            "flow '{}' has no schedule '{schedule_id}'",
+            flow.id
+        ));
     }
 
     let mut b = load();
@@ -232,10 +237,20 @@ pub fn arm(
             }
             existing
         }
-        None => match binding.instances.values().next().and_then(|id| crate::agent_instance::load(id).ok()) {
+        None => match binding
+            .instances
+            .values()
+            .next()
+            .and_then(|id| crate::agent_instance::load(id).ok())
+        {
             Some(existing) => existing,
             None => {
-                let mut i = AgentInstance::new(&preset, InstanceOrigin::Flow { flow_id: flow.id.clone() });
+                let mut i = AgentInstance::new(
+                    &preset,
+                    InstanceOrigin::Flow {
+                        flow_id: flow.id.clone(),
+                    },
+                );
                 let label = flow
                     .schedules
                     .iter()
@@ -250,7 +265,9 @@ pub fn arm(
         },
     };
 
-    binding.instances.insert(schedule_id.to_string(), resolved.id.clone());
+    binding
+        .instances
+        .insert(schedule_id.to_string(), resolved.id.clone());
     if binding.preset.is_none() {
         binding.preset = Some(preset_slug);
     }

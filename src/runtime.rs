@@ -1,6 +1,6 @@
 use metalcraft::{
-    create_react_agent_with_options, AgentMessage, AgentOptions, AgentState, Executor, GraphError,
-    LlmCallHook, LlmResponseHook, RunOutcome, StepGuard, ToolChoice,
+    AgentMessage, AgentOptions, AgentState, Executor, GraphError, LlmCallHook, LlmResponseHook,
+    RunOutcome, StepGuard, ToolChoice, create_react_agent_with_options,
 };
 
 use crate::context::{self, CompactionConfig};
@@ -60,7 +60,11 @@ pub fn configured_default_model() -> String {
 /// A flow's prompt nodes that declare their own `persona` always override this;
 /// it is only the fallback for nodes that don't.
 pub fn configured_default_persona() -> String {
-    for key in ["METALCRAFT_PERSONA", "METALCRAFT_DEFAULT_PERSONA", "STARKBOT_PERSONA"] {
+    for key in [
+        "METALCRAFT_PERSONA",
+        "METALCRAFT_DEFAULT_PERSONA",
+        "STARKBOT_PERSONA",
+    ] {
         if let Ok(v) = std::env::var(key) {
             let v = v.trim();
             if !v.is_empty() {
@@ -378,7 +382,11 @@ mod capture_tests {
             AgentMessage::Assistant("a".into()),
         ];
         let (_, _, tools) = extract(messages, 0);
-        assert_eq!(tools, vec!["read_file", "bash"], "order preserved, no duplicates");
+        assert_eq!(
+            tools,
+            vec!["read_file", "bash"],
+            "order preserved, no duplicates"
+        );
     }
 
     #[test]
@@ -489,8 +497,16 @@ fn is_metalcraft_gateway(base: &str) -> bool {
     // ecosystem host, and reading the part before the `@` is how it would look like one.
     let host_port = authority.rsplit('@').next().unwrap_or_default();
     let host = match host_port.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or_default().to_ascii_lowercase(),
-        None => host_port.split(':').next().unwrap_or_default().to_ascii_lowercase(),
+        Some(v6) => v6
+            .split(']')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+        None => host_port
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
     };
     match scheme.to_ascii_lowercase().as_str() {
         "https" => host == "metalcraftai.com" || host.ends_with(".metalcraftai.com"),
@@ -626,7 +642,8 @@ where
             resolved_tools.push(terminal.clone());
         }
     }
-    let registry = crate::tools::create_registry_for_with_config(&resolved_tools, Some(&tool_config));
+    let registry =
+        crate::tools::create_registry_for_with_config(&resolved_tools, Some(&tool_config));
     let client = build_openai_client(&context.api_key)?;
     let model = client.completion_model(model_name);
     let compaction_model = make_compaction_model(&client, model_name);
@@ -692,7 +709,9 @@ pub async fn run_one_shot_task(
     // Let the guard know which of this persona's tools are status polls, so
     // repeatedly checking an async job isn't mistaken for a runaway loop.
     let guard_config = guard::GuardConfig {
-        poll_tools: crate::tools::http_api::HttpApiTool::poll_tool_names(&persona.resolved_tool_names()),
+        poll_tools: crate::tools::http_api::HttpApiTool::poll_tool_names(
+            &persona.resolved_tool_names(),
+        ),
         ..guard::GuardConfig::default()
     };
     let step_guard = guard::build_agent_guard(guard_config, request.diagnostics.clone());
@@ -756,16 +775,18 @@ impl ErrorCode {
     /// A message safe to show an end user (Workshop bubble, WhatsApp reply).
     pub fn user_message(&self) -> String {
         match self {
-            ErrorCode::InsufficientCredits =>
+            ErrorCode::InsufficientCredits => {
                 "You're out of Metalcraft inference credits. Top up or check your plan at \
-                 https://id.metalcraftai.com/account.",
-            ErrorCode::NotPremium =>
+                 https://id.metalcraftai.com/account."
+            }
+            ErrorCode::NotPremium => {
                 "Metalcraft inference needs an active premium subscription. Check your plan at \
-                 https://id.metalcraftai.com/account.",
-            ErrorCode::UpstreamUnavailable =>
-                "The AI service is temporarily unavailable — please try again in a moment.",
-            ErrorCode::Internal =>
-                "Something went wrong handling that message. Please try again.",
+                 https://id.metalcraftai.com/account."
+            }
+            ErrorCode::UpstreamUnavailable => {
+                "The AI service is temporarily unavailable — please try again in a moment."
+            }
+            ErrorCode::Internal => "Something went wrong handling that message. Please try again.",
         }
         .to_string()
     }
@@ -788,7 +809,11 @@ pub struct ChatError {
 /// for pre-`code` inference and non-gateway providers.
 pub fn classify_turn_error(raw: &str) -> ChatError {
     let code = classify_code(raw);
-    ChatError { user_message: code.user_message(), retryable: code.retryable(), code }
+    ChatError {
+        user_message: code.user_message(),
+        retryable: code.retryable(),
+        code,
+    }
 }
 
 fn classify_code(raw: &str) -> ErrorCode {
@@ -846,7 +871,7 @@ fn classify_code(raw: &str) -> ErrorCode {
 
 #[cfg(test)]
 mod inference_tests {
-    use super::{classify_turn_error, resolve_inference_key, ErrorCode};
+    use super::{ErrorCode, classify_turn_error, resolve_inference_key};
 
     /// The pod already holds an ecosystem credential the gateway accepts, so being
     /// asked to paste a second one was asking twice for the same thing. What this must
@@ -863,10 +888,22 @@ mod inference_tests {
         let gw = Some("https://inference.metalcraftai.com/v1");
         let tok = Some("mck_live_abc");
 
-        assert_eq!(key(Some("sk-real"), gw, tok).as_deref(), Some("sk-real"), "an explicit key wins");
-        assert_eq!(key(None, gw, tok).as_deref(), Some("mck_live_abc"), "otherwise the pod's own token");
+        assert_eq!(
+            key(Some("sk-real"), gw, tok).as_deref(),
+            Some("sk-real"),
+            "an explicit key wins"
+        );
+        assert_eq!(
+            key(None, gw, tok).as_deref(),
+            Some("mck_live_abc"),
+            "otherwise the pod's own token"
+        );
         assert_eq!(key(None, gw, None), None, "nothing to fall back to");
-        assert_eq!(key(None, None, tok), None, "plain OpenAI is not ours to authenticate");
+        assert_eq!(
+            key(None, None, tok),
+            None,
+            "plain OpenAI is not ours to authenticate"
+        );
 
         for elsewhere in [
             "https://api.openai.com/v1",
@@ -886,7 +923,10 @@ mod inference_tests {
 
         // A developer running the gateway locally is doing it deliberately, and the
         // token does not leave the machine.
-        assert_eq!(key(None, Some("http://localhost:8080/v1"), tok).as_deref(), Some("mck_live_abc"));
+        assert_eq!(
+            key(None, Some("http://localhost:8080/v1"), tok).as_deref(),
+            Some("mck_live_abc")
+        );
     }
 
     fn code(s: &str) -> ErrorCode {
@@ -896,29 +936,51 @@ mod inference_tests {
     #[test]
     fn detects_structured_codes() {
         assert_eq!(
-            code(r#"agent: ProviderError: {"error":"insufficient credits — top up or upgrade","code":"insufficient_credits"}"#),
+            code(
+                r#"agent: ProviderError: {"error":"insufficient credits — top up or upgrade","code":"insufficient_credits"}"#
+            ),
             ErrorCode::InsufficientCredits
         );
         assert_eq!(
-            code(r#"ProviderError: {"error":"inference requires a premium subscription","code":"not_premium"}"#),
+            code(
+                r#"ProviderError: {"error":"inference requires a premium subscription","code":"not_premium"}"#
+            ),
             ErrorCode::NotPremium
         );
     }
 
     #[test]
     fn detects_legacy_phrasings() {
-        assert_eq!(code("HTTP status 402: insufficient credits: available 0"), ErrorCode::InsufficientCredits);
-        assert_eq!(code("inference requires a premium subscription"), ErrorCode::NotPremium);
+        assert_eq!(
+            code("HTTP status 402: insufficient credits: available 0"),
+            ErrorCode::InsufficientCredits
+        );
+        assert_eq!(
+            code("inference requires a premium subscription"),
+            ErrorCode::NotPremium
+        );
         // Bare 402 with no discriminator falls back to credits.
-        assert_eq!(code("ProviderError { status: 402, ... }"), ErrorCode::InsufficientCredits);
+        assert_eq!(
+            code("ProviderError { status: 402, ... }"),
+            ErrorCode::InsufficientCredits
+        );
     }
 
     #[test]
     fn transient_and_unknown() {
-        assert_eq!(code("openai 502: bad gateway"), ErrorCode::UpstreamUnavailable);
-        assert_eq!(code("connection reset by peer"), ErrorCode::UpstreamUnavailable);
+        assert_eq!(
+            code("openai 502: bad gateway"),
+            ErrorCode::UpstreamUnavailable
+        );
+        assert_eq!(
+            code("connection reset by peer"),
+            ErrorCode::UpstreamUnavailable
+        );
         // Unrelated errors are Internal (raw text stays in diagnostics only).
-        assert_eq!(code("400 bad request: model not found"), ErrorCode::Internal);
+        assert_eq!(
+            code("400 bad request: model not found"),
+            ErrorCode::Internal
+        );
     }
 
     #[test]

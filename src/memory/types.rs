@@ -153,7 +153,11 @@ pub struct Memory {
 /// Normalized sha256 of a memory's content — whitespace-collapsed and
 /// lowercased, so trivially-reformatted duplicates collide.
 pub fn content_hash(content: &str) -> String {
-    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let normalized = content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
     let digest = Sha256::digest(normalized.as_bytes());
     hex::encode(digest)
 }
@@ -196,7 +200,11 @@ impl Memory {
     /// The text a recall block should show: the summary when the dream has
     /// written one, else the raw content.
     pub fn display_text(&self) -> &str {
-        if self.summary.trim().is_empty() { &self.content } else { &self.summary }
+        if self.summary.trim().is_empty() {
+            &self.content
+        } else {
+            &self.summary
+        }
     }
 
     /// The text the search index covers.
@@ -285,13 +293,39 @@ fn one() -> f32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Event {
-    Upsert { seq: u64, at: DateTime<Utc>, memory: Box<Memory> },
-    Link { seq: u64, at: DateTime<Utc>, link: Link },
-    Unlink { seq: u64, at: DateTime<Utc>, src: String, dst: String, kind: LinkKind },
+    Upsert {
+        seq: u64,
+        at: DateTime<Utc>,
+        memory: Box<Memory>,
+    },
+    Link {
+        seq: u64,
+        at: DateTime<Utc>,
+        link: Link,
+    },
+    Unlink {
+        seq: u64,
+        at: DateTime<Utc>,
+        src: String,
+        dst: String,
+        kind: LinkKind,
+    },
     /// Batched access bookkeeping from a recall.
-    Touch { seq: u64, at: DateTime<Utc>, ids: Vec<String> },
-    Archive { seq: u64, at: DateTime<Utc>, id: String },
-    Purge { seq: u64, at: DateTime<Utc>, id: String },
+    Touch {
+        seq: u64,
+        at: DateTime<Utc>,
+        ids: Vec<String>,
+    },
+    Archive {
+        seq: u64,
+        at: DateTime<Utc>,
+        id: String,
+    },
+    Purge {
+        seq: u64,
+        at: DateTime<Utc>,
+        id: String,
+    },
 }
 
 impl Event {
@@ -365,8 +399,13 @@ mod tests {
     #[test]
     fn link_kind_round_trips() {
         for k in [
-            LinkKind::RelatesTo, LinkKind::Supersedes, LinkKind::Contradicts,
-            LinkKind::CausedBy, LinkKind::PartOf, LinkKind::DerivedFrom, LinkKind::AboutEntity,
+            LinkKind::RelatesTo,
+            LinkKind::Supersedes,
+            LinkKind::Contradicts,
+            LinkKind::CausedBy,
+            LinkKind::PartOf,
+            LinkKind::DerivedFrom,
+            LinkKind::AboutEntity,
         ] {
             assert_eq!(LinkKind::parse(k.as_str()), Some(k));
         }
@@ -399,9 +438,17 @@ mod tests {
     #[test]
     fn events_expose_their_seq() {
         let m = Memory::new(MemoryKind::Semantic, "x", Source::Tool);
-        let e = Event::Upsert { seq: 7, at: Utc::now(), memory: Box::new(m) };
+        let e = Event::Upsert {
+            seq: 7,
+            at: Utc::now(),
+            memory: Box::new(m),
+        };
         assert_eq!(e.seq(), 7);
-        let t = Event::Touch { seq: 9, at: Utc::now(), ids: vec![] };
+        let t = Event::Touch {
+            seq: 9,
+            at: Utc::now(),
+            ids: vec![],
+        };
         assert_eq!(t.seq(), 9);
     }
 }

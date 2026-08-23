@@ -17,10 +17,9 @@ fn seed_dir() -> PathBuf {
 }
 
 fn read_json(path: &Path) -> serde_json::Value {
-    let raw = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
+    let raw =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
 }
 
 /// `slug -> (packs it declares, skills it loads)` for every persona the binary ships —
@@ -30,10 +29,16 @@ fn seeded_personas() -> HashMap<String, (Vec<String>, Vec<String>)> {
     let mut out = HashMap::new();
     let mut dirs = vec![seed_dir().join("personas")];
     if let Ok(packs) = std::fs::read_dir(seed_dir().join("integrations")) {
-        dirs.extend(packs.filter_map(|e| e.ok()).map(|e| e.path().join("personas")));
+        dirs.extend(
+            packs
+                .filter_map(|e| e.ok())
+                .map(|e| e.path().join("personas")),
+        );
     }
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
@@ -44,7 +49,11 @@ fn seeded_personas() -> HashMap<String, (Vec<String>, Vec<String>)> {
             let strs = |key: &str| -> Vec<String> {
                 v.get(key)
                     .and_then(|x| x.as_array())
-                    .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| s.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default()
             };
             out.insert(slug, (strs("packs"), strs("skills")));
@@ -60,10 +69,16 @@ fn seeded_skills() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut dirs = vec![seed_dir().join("skills")];
     if let Ok(packs) = std::fs::read_dir(seed_dir().join("integrations")) {
-        dirs.extend(packs.filter_map(|e| e.ok()).map(|e| e.path().join("skills")));
+        dirs.extend(
+            packs
+                .filter_map(|e| e.ok())
+                .map(|e| e.path().join("skills")),
+        );
     }
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.filter_map(|e| e.ok()) {
             if e.path().extension().and_then(|x| x.to_str()) == Some("md")
                 && let Some(stem) = e.path().file_stem().and_then(|s| s.to_str())
@@ -77,7 +92,9 @@ fn seeded_skills() -> Vec<String> {
 
 fn seeded_packs() -> Vec<String> {
     let dir = seed_dir().join("integrations");
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
     entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().join("integration.json").is_file())
@@ -95,7 +112,9 @@ fn every_seeded_preset_is_installable() {
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
-    for entry in std::fs::read_dir(&presets_dir).expect("seed/agent_presets").filter_map(|e| e.ok())
+    for entry in std::fs::read_dir(&presets_dir)
+        .expect("seed/agent_presets")
+        .filter_map(|e| e.ok())
     {
         let path = entry.path();
         if path.extension().and_then(|x| x.to_str()) != Some("json") {
@@ -158,7 +177,10 @@ fn every_seeded_preset_is_installable() {
         }
     }
 
-    assert!(checked > 0, "no seeded presets found — the seed tree moved?");
+    assert!(
+        checked > 0,
+        "no seeded presets found — the seed tree moved?"
+    );
     assert!(
         problems.is_empty(),
         "seeded presets that would fail to install:\n  - {}",
@@ -175,7 +197,9 @@ fn seeded_personas_only_reference_skills_that_exist() {
     for (slug, (_, persona_skills)) in seeded_personas() {
         for s in persona_skills {
             if !skills.contains(&s) {
-                problems.push(format!("persona '{slug}' loads skill '{s}', which does not exist"));
+                problems.push(format!(
+                    "persona '{slug}' loads skill '{s}', which does not exist"
+                ));
             }
         }
     }
@@ -185,7 +209,9 @@ fn seeded_personas_only_reference_skills_that_exist() {
 #[test]
 fn seeded_integrations_have_valid_manifests() {
     let dir = seed_dir().join("integrations");
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
     let mut checked = 0;
     for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
         let manifest = e.path().join("integration.json");
@@ -200,7 +226,10 @@ fn seeded_integrations_have_valid_manifests() {
             e.file_name().to_str().unwrap(),
             "integration.json id must match its directory name"
         );
-        assert!(!v["version"].as_str().unwrap_or_default().is_empty(), "{id} has no version");
+        assert!(
+            !v["version"].as_str().unwrap_or_default().is_empty(),
+            "{id} has no version"
+        );
     }
     assert!(checked > 0, "no seeded integrations found");
 }

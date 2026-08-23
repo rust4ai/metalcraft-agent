@@ -42,7 +42,10 @@ async fn base_and_delta_compose_into_one_agent_memory() {
     // Loading twice must hand back the *same* index — twenty agents, one copy.
     let first = instance::load_base("amy-kitchen", "1.4.0").expect("load base");
     let second = instance::load_base("amy-kitchen", "1.4.0").expect("load base again");
-    assert!(Arc::ptr_eq(&first, &second), "base layers must be shared, not re-read per instance");
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "base layers must be shared, not re-read per instance"
+    );
     assert_eq!(first.read().await.len(), 3);
 
     assert!(
@@ -52,14 +55,28 @@ async fn base_and_delta_compose_into_one_agent_memory() {
 
     // ── an instance is a delta over that base ───────────────────────────────
     let mem = instance::handle_for("inst_a", Some(("amy-kitchen", "1.4.0"))).expect("handle");
-    assert_eq!(mem.visible_count().await, 3, "a new agent already knows what it shipped with");
-    assert!(mem.delta.read().await.is_empty(), "and has learned nothing yet — O(1) creation");
+    assert_eq!(
+        mem.visible_count().await,
+        3,
+        "a new agent already knows what it shipped with"
+    );
+    assert!(
+        mem.delta.read().await.is_empty(),
+        "and has learned nothing yet — O(1) creation"
+    );
 
     // Two agents of the same preset share the base but not the delta.
     let other = instance::handle_for("inst_b", Some(("amy-kitchen", "1.4.0"))).expect("handle b");
-    mem.delta.write().await.insert_memory(learned("Andrew hates cilantro.", "cilantro"));
+    mem.delta
+        .write()
+        .await
+        .insert_memory(learned("Andrew hates cilantro.", "cilantro"));
     assert_eq!(mem.visible_count().await, 4);
-    assert_eq!(other.visible_count().await, 3, "one agent's learning must not leak into another");
+    assert_eq!(
+        other.visible_count().await,
+        3,
+        "one agent's learning must not leak into another"
+    );
 
     // ── forgetting ──────────────────────────────────────────────────────────
     let base_id = first.read().await.iter().next().unwrap().id.clone();
@@ -76,13 +93,19 @@ async fn base_and_delta_compose_into_one_agent_memory() {
         "a shipped memory is tombstoned — the shared base is never mutated"
     );
     assert!(!mem.is_visible(&base_id).await);
-    assert!(other.is_visible(&base_id).await, "the other agent still sees it");
+    assert!(
+        other.is_visible(&base_id).await,
+        "the other agent still sees it"
+    );
     assert_eq!(first.read().await.len(), 3, "the base itself is untouched");
 
     // The tombstone is durable: a fresh handle after eviction still honours it.
     instance::evict("inst_a");
     let reloaded = instance::handle_for("inst_a", Some(("amy-kitchen", "1.4.0"))).expect("reload");
-    assert!(!reloaded.is_visible(&base_id).await, "a forgotten memory must stay forgotten");
+    assert!(
+        !reloaded.is_visible(&base_id).await,
+        "a forgotten memory must stay forgotten"
+    );
 
     // ── layered recall ──────────────────────────────────────────────────────
     let mut delta = MemoryIndex::new();
@@ -90,11 +113,20 @@ async fn base_and_delta_compose_into_one_agent_memory() {
     let base_idx = first.read().await;
     let tombs: HashSet<String> = HashSet::new();
 
-    let opts = RecallOptions { limit: 10, ..Default::default() };
+    let opts = RecallOptions {
+        limit: 10,
+        ..Default::default()
+    };
     let hits = recall::search_layers(&delta, Some(&base_idx), &tombs, "braising", None, &opts);
     let summaries: Vec<&str> = hits.iter().map(|h| h.memory.display_text()).collect();
-    assert!(summaries.contains(&"sunday braising"), "learned memories surface: {summaries:?}");
-    assert!(summaries.contains(&"braise base ratio"), "shipped memories surface: {summaries:?}");
+    assert!(
+        summaries.contains(&"sunday braising"),
+        "learned memories surface: {summaries:?}"
+    );
+    assert!(
+        summaries.contains(&"braise base ratio"),
+        "shipped memories surface: {summaries:?}"
+    );
 
     // A tombstoned base memory must not come back through recall.
     let braise_id = base_idx
@@ -128,13 +160,26 @@ async fn base_and_delta_compose_into_one_agent_memory() {
     let mut small_delta = MemoryIndex::new();
     small_delta.insert_memory(learned("Andrew braises on Sundays.", "sunday braising"));
 
-    let budgeted = RecallOptions { limit: 20, token_budget: Some(60), ..Default::default() };
-    let hits =
-        recall::search_layers(&small_delta, Some(&fat_base), &tombs, "braising", None, &budgeted);
+    let budgeted = RecallOptions {
+        limit: 20,
+        token_budget: Some(60),
+        ..Default::default()
+    };
+    let hits = recall::search_layers(
+        &small_delta,
+        Some(&fat_base),
+        &tombs,
+        "braising",
+        None,
+        &budgeted,
+    );
     assert!(
-        hits.iter().any(|h| h.memory.display_text() == "sunday braising"),
+        hits.iter()
+            .any(|h| h.memory.display_text() == "sunday braising"),
         "a large shipped corpus must not crowd out what this agent learned: {:?}",
-        hits.iter().map(|h| h.memory.display_text()).collect::<Vec<_>>()
+        hits.iter()
+            .map(|h| h.memory.display_text())
+            .collect::<Vec<_>>()
     );
 
     // A pack asking for an unreasonable share is clamped, not obeyed.
@@ -144,10 +189,17 @@ async fn base_and_delta_compose_into_one_agent_memory() {
         learned_share: 0.0,
         ..Default::default()
     };
-    let hits =
-        recall::search_layers(&small_delta, Some(&fat_base), &tombs, "braising", None, &greedy);
+    let hits = recall::search_layers(
+        &small_delta,
+        Some(&fat_base),
+        &tombs,
+        "braising",
+        None,
+        &greedy,
+    );
     assert!(
-        hits.iter().any(|h| h.memory.display_text() == "sunday braising"),
+        hits.iter()
+            .any(|h| h.memory.display_text() == "sunday braising"),
         "learned_share must be clamped to a floor so a preset cannot silence the operator"
     );
 
@@ -157,7 +209,11 @@ async fn base_and_delta_compose_into_one_agent_memory() {
         instance::handle_for(&format!("inst_lru_{i}"), None).expect("handle");
     }
     let resident = instance::resident_instances();
-    assert!(resident.len() <= 8, "resident set must stay bounded, got {}", resident.len());
+    assert!(
+        resident.len() <= 8,
+        "resident set must stay bounded, got {}",
+        resident.len()
+    );
     assert!(
         resident.iter().any(|k| k == "inst_lru_11"),
         "the most recent instance must still be resident"
@@ -178,5 +234,8 @@ async fn an_instance_with_no_base_is_valid() {
         tombstones: Arc::new(RwLock::new(HashSet::new())),
     };
     assert_eq!(mem.visible_count().await, 0);
-    assert!(mem.forget("nope").await.is_err(), "forgetting nothing is an error, not a crash");
+    assert!(
+        mem.forget("nope").await.is_err(),
+        "forgetting nothing is an error, not a crash"
+    );
 }

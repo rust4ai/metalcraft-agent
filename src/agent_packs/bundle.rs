@@ -53,7 +53,9 @@ impl Bundle {
         let mut total: u64 = 0;
 
         for i in 0..zip.len() {
-            let mut entry = zip.by_index(i).map_err(|e| format!("reading zip entry: {e}"))?;
+            let mut entry = zip
+                .by_index(i)
+                .map_err(|e| format!("reading zip entry: {e}"))?;
             if entry.is_dir() {
                 continue;
             }
@@ -69,8 +71,7 @@ impl Bundle {
             // inflate without limit: `?path=` and `?url=` both reach here having
             // bypassed any HTTP body cap.
             let remaining = MAX_BUNDLE_BYTES.saturating_sub(total);
-            let mut buf =
-                Vec::with_capacity(entry.size().min(remaining).min(1 << 20) as usize);
+            let mut buf = Vec::with_capacity(entry.size().min(remaining).min(1 << 20) as usize);
             // One byte past the budget, so an over-long entry is detected rather than
             // silently truncated into something that then fails its hash check.
             std::io::Read::take(&mut entry, remaining + 1)
@@ -114,7 +115,11 @@ impl Bundle {
         }
 
         let consent = derive_consent(&collect_packs(&files));
-        let bundle = Bundle { manifest, files, consent };
+        let bundle = Bundle {
+            manifest,
+            files,
+            consent,
+        };
         bundle.validate()?;
         Ok(bundle)
     }
@@ -141,7 +146,9 @@ impl Bundle {
         for slug in &self.manifest.presets {
             let path = format!("agent_presets/{slug}.json");
             let Some(raw) = self.files.get(&path) else {
-                problems.push(format!("preset '{slug}' is declared but missing from the archive"));
+                problems.push(format!(
+                    "preset '{slug}' is declared but missing from the archive"
+                ));
                 continue;
             };
             let preset: crate::agent_preset::AgentPreset = match serde_json::from_slice(raw) {
@@ -232,8 +239,14 @@ impl Bundle {
             // Seed memories are capped so a corpus stays reviewable and its base
             // stays cheap to build. A pod warns rather than refusing: the operator
             // already has the bytes, and a smaller agent beats a failed install.
-            if let Some(raw) = self.files.get(&format!("agent_presets/{slug}/memories.jsonl")) {
-                let count = String::from_utf8_lossy(raw).lines().filter(|l| !l.trim().is_empty()).count();
+            if let Some(raw) = self
+                .files
+                .get(&format!("agent_presets/{slug}/memories.jsonl"))
+            {
+                let count = String::from_utf8_lossy(raw)
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .count();
                 if count > MAX_SEED_MEMORIES {
                     log::warn!(
                         "agent pack '{}': preset '{slug}' ships {count} seed memories, above the \
@@ -249,7 +262,10 @@ impl Bundle {
         let packs = collect_pack_files(&self.files);
         for r in &self.manifest.provides.integrations {
             let Some(files) = packs.get(&r.id) else {
-                problems.push(format!("manifest lists integration '{}', which is absent", r.id));
+                problems.push(format!(
+                    "manifest lists integration '{}', which is absent",
+                    r.id
+                ));
                 continue;
             };
             if let Some(expected) = &r.content_sha256 {
@@ -268,7 +284,10 @@ impl Bundle {
         if problems.is_empty() {
             Ok(())
         } else {
-            Err(format!("invalid agent pack:\n  - {}", problems.join("\n  - ")))
+            Err(format!(
+                "invalid agent pack:\n  - {}",
+                problems.join("\n  - ")
+            ))
         }
     }
 
@@ -297,7 +316,12 @@ pub fn flow_personas(flow: &serde_json::Value) -> Vec<String> {
     };
 
     push(flow.get("persona"));
-    for s in flow.get("schedules").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+    for s in flow
+        .get("schedules")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
         push(s.get("persona"));
     }
     let nodes = flow
@@ -324,8 +348,12 @@ fn collect_packs(
 ) -> BTreeMap<String, (Vec<u8>, Vec<(String, Vec<u8>)>)> {
     let mut out: BTreeMap<String, (Vec<u8>, Vec<(String, Vec<u8>)>)> = BTreeMap::new();
     for (path, bytes) in files {
-        let Some(rest) = path.strip_prefix("integrations/") else { continue };
-        let Some((id, tail)) = rest.split_once('/') else { continue };
+        let Some(rest) = path.strip_prefix("integrations/") else {
+            continue;
+        };
+        let Some((id, tail)) = rest.split_once('/') else {
+            continue;
+        };
         let entry = out.entry(id.to_string()).or_default();
         if tail == "integration.json" {
             entry.0 = bytes.clone();
@@ -342,9 +370,15 @@ pub fn collect_pack_files(
 ) -> BTreeMap<String, BTreeMap<String, Vec<u8>>> {
     let mut out: BTreeMap<String, BTreeMap<String, Vec<u8>>> = BTreeMap::new();
     for (path, bytes) in files {
-        let Some(rest) = path.strip_prefix("integrations/") else { continue };
-        let Some((id, tail)) = rest.split_once('/') else { continue };
-        out.entry(id.to_string()).or_default().insert(tail.to_string(), bytes.clone());
+        let Some(rest) = path.strip_prefix("integrations/") else {
+            continue;
+        };
+        let Some((id, tail)) = rest.split_once('/') else {
+            continue;
+        };
+        out.entry(id.to_string())
+            .or_default()
+            .insert(tail.to_string(), bytes.clone());
     }
     out
 }
@@ -374,13 +408,17 @@ pub fn write(
             .map_err(|e| format!("serializing agent_pack.json: {e}"))?;
         zip.start_file("agent_pack.json", opts)
             .map_err(|e| format!("writing agent_pack.json: {e}"))?;
-        zip.write_all(&manifest_json).map_err(|e| format!("writing agent_pack.json: {e}"))?;
+        zip.write_all(&manifest_json)
+            .map_err(|e| format!("writing agent_pack.json: {e}"))?;
 
         for (path, bytes) in &files {
-            zip.start_file(path.as_str(), opts).map_err(|e| format!("writing {path}: {e}"))?;
-            zip.write_all(bytes).map_err(|e| format!("writing {path}: {e}"))?;
+            zip.start_file(path.as_str(), opts)
+                .map_err(|e| format!("writing {path}: {e}"))?;
+            zip.write_all(bytes)
+                .map_err(|e| format!("writing {path}: {e}"))?;
         }
-        zip.finish().map_err(|e| format!("finalizing archive: {e}"))?;
+        zip.finish()
+            .map_err(|e| format!("finalizing archive: {e}"))?;
     }
     Ok(buf)
 }
@@ -390,15 +428,20 @@ fn is_safe_path(raw: &str) -> bool {
     if raw.starts_with('/') || raw.is_empty() {
         return false;
     }
-    !PathBuf::from(raw)
-        .components()
-        .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+    !PathBuf::from(raw).components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    })
 }
 
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
-        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
 #[cfg(test)]
@@ -418,7 +461,10 @@ mod tests {
     fn ids_are_constrained() {
         assert!(valid_id("amy-kitchen-agent"));
         assert!(valid_id("pack_1"));
-        assert!(!valid_id("Amy"), "uppercase would collide on case-insensitive filesystems");
+        assert!(
+            !valid_id("Amy"),
+            "uppercase would collide on case-insensitive filesystems"
+        );
         assert!(!valid_id("../x"));
         assert!(!valid_id(""));
     }

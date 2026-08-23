@@ -74,7 +74,11 @@ pub fn replay(path: &Path) -> (Vec<Event>, usize) {
 /// sizes involved, and only called on demand).
 pub fn count(path: &Path) -> u64 {
     match File::open(path) {
-        Ok(f) => BufReader::new(f).lines().map_while(Result::ok).filter(|l| !l.trim().is_empty()).count() as u64,
+        Ok(f) => BufReader::new(f)
+            .lines()
+            .map_while(Result::ok)
+            .filter(|l| !l.trim().is_empty())
+            .count() as u64,
         Err(_) => 0,
     }
 }
@@ -86,7 +90,10 @@ pub fn read_snapshot(path: &Path) -> Option<Snapshot> {
     match serde_json::from_str::<Snapshot>(&raw) {
         Ok(s) => Some(s),
         Err(e) => {
-            log::warn!("memory: snapshot at {} is corrupt ({e}); rebuilding from log", path.display());
+            log::warn!(
+                "memory: snapshot at {} is corrupt ({e}); rebuilding from log",
+                path.display()
+            );
             None
         }
     }
@@ -149,7 +156,10 @@ mod tests {
         let (events, skipped) = replay(&p);
         assert_eq!(skipped, 0);
         assert_eq!(events.len(), 3);
-        assert_eq!(events.iter().map(|e| e.seq()).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(
+            events.iter().map(|e| e.seq()).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -161,7 +171,8 @@ mod tests {
         append(&p, &upsert(2, "also good")).unwrap();
         // Simulate a crash mid-append: a partial JSON line with no newline.
         let mut f = OpenOptions::new().append(true).open(&p).unwrap();
-        f.write_all(br#"{"op":"upsert","seq":3,"at":"2026-08-18T00:00:0"#).unwrap();
+        f.write_all(br#"{"op":"upsert","seq":3,"at":"2026-08-18T00:00:0"#)
+            .unwrap();
         drop(f);
 
         let (events, skipped) = replay(&p);
@@ -203,7 +214,11 @@ mod tests {
             written_at: Utc::now(),
             embed_model: Some("text-embedding-3-small".into()),
             embed_dims: Some(384),
-            memories: vec![Memory::new(MemoryKind::Preference, "prefers rust", Source::User)],
+            memories: vec![Memory::new(
+                MemoryKind::Preference,
+                "prefers rust",
+                Source::User,
+            )],
             links: vec![],
         };
         write_snapshot(&p, &snap).unwrap();

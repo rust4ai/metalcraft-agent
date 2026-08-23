@@ -59,8 +59,14 @@ fn presets_resolve_and_instances_group_conversations() {
     let amy = AgentPreset::load("amy-kitchen", &presets_dir).expect("load amy");
     assert_eq!(amy.default_persona, "amy");
     assert_eq!(amy.callable_personas(), vec!["amy", "amy-shopper"]);
-    assert!(amy.allows_persona("amy-critic"), "internal is reachable, not offered");
-    assert!(!amy.allows_persona("orchestrator-agent"), "outside the roster");
+    assert!(
+        amy.allows_persona("amy-critic"),
+        "internal is reachable, not offered"
+    );
+    assert!(
+        !amy.allows_persona("orchestrator-agent"),
+        "outside the roster"
+    );
 
     let slugs = AgentPreset::list_available(&presets_dir);
     assert!(slugs.contains(&"amy-kitchen".to_string()));
@@ -93,7 +99,10 @@ fn presets_resolve_and_instances_group_conversations() {
     let err = AgentPreset::load("shared", &presets_dir)
         .expect_err("two packs providing one slug must not silently resolve");
     assert!(err.contains("ambiguous"), "{err}");
-    assert!(err.contains("packa/shared") && err.contains("packb/shared"), "names both: {err}");
+    assert!(
+        err.contains("packa/shared") && err.contains("packb/shared"),
+        "names both: {err}"
+    );
 
     // A user-local copy wins outright — it is the operator's own file.
     write(&presets_dir.join("shared.json"), PACK_PRESET);
@@ -119,9 +128,20 @@ fn presets_resolve_and_instances_group_conversations() {
     // an idle conversation reset would otherwise destroy.
     let first = agent_instance::for_channel("sms-amy", "amy-kitchen").expect("bind channel");
     let second = agent_instance::for_channel("sms-amy", "amy-kitchen").expect("rebind channel");
-    assert_eq!(first.id, second.id, "a channel must not mint a new agent per conversation");
-    assert!(first.persistent, "channel agents are persistent by construction");
-    assert_eq!(first.origin, InstanceOrigin::Gateway { channel: "sms-amy".into() });
+    assert_eq!(
+        first.id, second.id,
+        "a channel must not mint a new agent per conversation"
+    );
+    assert!(
+        first.persistent,
+        "channel agents are persistent by construction"
+    );
+    assert_eq!(
+        first.origin,
+        InstanceOrigin::Gateway {
+            channel: "sms-amy".into()
+        }
+    );
 
     assert!(agent_instance::list().len() >= 2);
 
@@ -139,7 +159,9 @@ fn presets_resolve_and_instances_group_conversations() {
     let doc: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(chats_dir.join("legacy-1.json")).unwrap())
             .unwrap();
-    let bound = doc["instance_id"].as_str().expect("chat must now name its agent");
+    let bound = doc["instance_id"]
+        .as_str()
+        .expect("chat must now name its agent");
     let inst = agent_instance::load(bound).expect("backfilled instance exists");
     assert!(inst.persistent, "existing history is not disposable");
     assert_eq!(inst.persona, "orchestrator-agent");
@@ -147,7 +169,10 @@ fn presets_resolve_and_instances_group_conversations() {
         inst.agent_preset, "general-agent",
         "binds to the preset whose default persona it used"
     );
-    assert_eq!(inst.created_at, "2026-01-01T00:00:00Z", "keeps the chat's own age");
+    assert_eq!(
+        inst.created_at, "2026-01-01T00:00:00Z",
+        "keeps the chat's own age"
+    );
 
     // Idempotent: a second run must not mint a duplicate agent.
     let again = agent_instance::backfill_from_chats(&chats_dir).expect("backfill again");
@@ -157,7 +182,10 @@ fn presets_resolve_and_instances_group_conversations() {
     // ── delete keeps transcripts ─────────────────────────────────────────────
     agent_instance::delete(&chat.id).expect("delete");
     assert!(agent_instance::load(&chat.id).is_err());
-    assert!(chats_dir.join("legacy-1.json").exists(), "deleting an agent must not delete chats");
+    assert!(
+        chats_dir.join("legacy-1.json").exists(),
+        "deleting an agent must not delete chats"
+    );
 
     let _ = fs::remove_dir_all(&data_dir);
 }

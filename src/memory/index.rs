@@ -135,7 +135,8 @@ impl MemoryIndex {
             self.hashes.remove(&old.content_hash);
         }
         self.index(&memory);
-        self.hashes.insert(memory.content_hash.clone(), memory.id.clone());
+        self.hashes
+            .insert(memory.content_hash.clone(), memory.id.clone());
         self.memories.insert(memory.id.clone(), memory);
     }
 
@@ -147,7 +148,10 @@ impl MemoryIndex {
             *freq.entry(t).or_insert(0) += 1;
         }
         for (term, tf) in freq {
-            self.inverted.entry(term).or_default().push((m.id.clone(), tf));
+            self.inverted
+                .entry(term)
+                .or_default()
+                .push((m.id.clone(), tf));
         }
     }
 
@@ -171,8 +175,14 @@ impl MemoryIndex {
         if dup {
             return;
         }
-        self.out_links.entry(link.src.clone()).or_default().push(link.clone());
-        self.in_links.entry(link.dst.clone()).or_default().push(link);
+        self.out_links
+            .entry(link.src.clone())
+            .or_default()
+            .push(link.clone());
+        self.in_links
+            .entry(link.dst.clone())
+            .or_default()
+            .push(link);
     }
 
     pub fn remove_link(&mut self, src: &str, dst: &str, kind: LinkKind) {
@@ -251,8 +261,15 @@ impl MemoryIndex {
             .values()
             .filter(|m| m.is_live() && !self.vectors.contains_key(&m.id))
             .collect();
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
-        out.into_iter().take(limit).map(|m| (m.id.clone(), m.indexable())).collect()
+        out.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        out.into_iter()
+            .take(limit)
+            .map(|m| (m.id.clone(), m.indexable()))
+            .collect()
     }
 
     /// Brute-force cosine search over resident vectors.
@@ -279,11 +296,17 @@ impl MemoryIndex {
                     return None;
                 }
                 let score = super::vectors::cosine(query, v);
-                (score > 0.0).then(|| Hit { id: id.clone(), score })
+                (score > 0.0).then(|| Hit {
+                    id: id.clone(),
+                    score,
+                })
             })
             .collect();
         hits.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.id.cmp(&b.id))
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
         });
         hits.truncate(limit);
         hits
@@ -299,20 +322,32 @@ impl MemoryIndex {
         let seed_set: std::collections::HashSet<&str> = seeds.iter().map(|s| s.as_str()).collect();
         let mut scores: HashMap<String, f32> = HashMap::new();
         for seed in seeds {
-            for l in self.links_from(seed).iter().chain(self.links_to(seed).iter()) {
+            for l in self
+                .links_from(seed)
+                .iter()
+                .chain(self.links_to(seed).iter())
+            {
                 let other = if l.src == *seed { &l.dst } else { &l.src };
                 if seed_set.contains(other.as_str()) {
                     continue;
                 }
                 match self.memories.get(other) {
-                    Some(m) if m.is_live() => *scores.entry(other.clone()).or_insert(0.0) += l.weight,
+                    Some(m) if m.is_live() => {
+                        *scores.entry(other.clone()).or_insert(0.0) += l.weight
+                    }
                     _ => {}
                 }
             }
         }
-        let mut hits: Vec<Hit> = scores.into_iter().map(|(id, score)| Hit { id, score }).collect();
+        let mut hits: Vec<Hit> = scores
+            .into_iter()
+            .map(|(id, score)| Hit { id, score })
+            .collect();
         hits.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.id.cmp(&b.id))
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
         });
         hits.truncate(limit);
         hits
@@ -368,14 +403,18 @@ impl MemoryIndex {
 
         let mut scores: HashMap<&str, f32> = HashMap::new();
         for term in &terms {
-            let Some(postings) = self.inverted.get(term) else { continue };
+            let Some(postings) = self.inverted.get(term) else {
+                continue;
+            };
             // df counts postings including archived docs. The skew is tiny and
             // uniform across terms, and recomputing an exact live df per query
             // would cost a full scan per term for no ranking benefit.
             let df = postings.len() as f32;
             let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
             for (id, tf) in postings {
-                let Some(m) = self.memories.get(id) else { continue };
+                let Some(m) = self.memories.get(id) else {
+                    continue;
+                };
                 if !m.is_live() {
                     continue;
                 }
@@ -393,9 +432,17 @@ impl MemoryIndex {
 
         let mut hits: Vec<Hit> = scores
             .into_iter()
-            .map(|(id, score)| Hit { id: id.to_string(), score })
+            .map(|(id, score)| Hit {
+                id: id.to_string(),
+                score,
+            })
             .collect();
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.id.cmp(&b.id)));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         hits.truncate(limit);
         hits
     }
@@ -430,7 +477,12 @@ impl MemoryIndex {
     pub fn stats(&self, log_events: u64) -> Stats {
         let mut by_kind: Vec<(String, usize)> = MemoryKind::ALL
             .iter()
-            .map(|k| (k.as_str().to_string(), self.memories.values().filter(|m| m.kind == *k).count()))
+            .map(|k| {
+                (
+                    k.as_str().to_string(),
+                    self.memories.values().filter(|m| m.kind == *k).count(),
+                )
+            })
             .filter(|(_, n)| *n > 0)
             .collect();
         by_kind.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
@@ -440,14 +492,30 @@ impl MemoryIndex {
             .values()
             .map(|m| m.content.len() + m.summary.len() + 256)
             .sum::<usize>()
-            + self.inverted.iter().map(|(t, p)| t.len() + p.len() * 48).sum::<usize>()
-            + self.vectors.values().map(|v| v.len() * 4 + 48).sum::<usize>();
+            + self
+                .inverted
+                .iter()
+                .map(|(t, p)| t.len() + p.len() * 48)
+                .sum::<usize>()
+            + self
+                .vectors
+                .values()
+                .map(|v| v.len() * 4 + 48)
+                .sum::<usize>();
 
         Stats {
             total: self.memories.len(),
             live: self.memories.values().filter(|m| m.is_live()).count(),
-            archived: self.memories.values().filter(|m| m.archived_at.is_some()).count(),
-            superseded: self.memories.values().filter(|m| m.superseded_by.is_some()).count(),
+            archived: self
+                .memories
+                .values()
+                .filter(|m| m.archived_at.is_some())
+                .count(),
+            superseded: self
+                .memories
+                .values()
+                .filter(|m| m.superseded_by.is_some())
+                .count(),
             pinned: self.memories.values().filter(|m| m.pinned).count(),
             by_kind,
             links: self.out_links.values().map(|v| v.len()).sum(),
@@ -497,14 +565,26 @@ mod tests {
     #[test]
     fn search_ranks_the_better_match_first() {
         let mut idx = MemoryIndex::new();
-        idx.insert_memory(mem("rust is the language we use for pod services", MemoryKind::Semantic));
-        idx.insert_memory(mem("rust rust rust everywhere in this codebase", MemoryKind::Semantic));
-        idx.insert_memory(mem("completely unrelated note about weather", MemoryKind::Semantic));
+        idx.insert_memory(mem(
+            "rust is the language we use for pod services",
+            MemoryKind::Semantic,
+        ));
+        idx.insert_memory(mem(
+            "rust rust rust everywhere in this codebase",
+            MemoryKind::Semantic,
+        ));
+        idx.insert_memory(mem(
+            "completely unrelated note about weather",
+            MemoryKind::Semantic,
+        ));
 
         let hits = idx.search("rust", 10, None);
         assert_eq!(hits.len(), 2, "the unrelated memory must not match");
         let top = idx.get(&hits[0].id).unwrap();
-        assert!(top.content.starts_with("rust rust rust"), "term frequency should win");
+        assert!(
+            top.content.starts_with("rust rust rust"),
+            "term frequency should win"
+        );
     }
 
     #[test]
@@ -541,7 +621,10 @@ mod tests {
         assert!(idx.search("anything", 5, None).is_empty());
         idx.insert_memory(mem("something", MemoryKind::Semantic));
         assert!(idx.search("", 5, None).is_empty());
-        assert!(idx.search("the and but", 5, None).is_empty(), "all-stop-word query");
+        assert!(
+            idx.search("the and but", 5, None).is_empty(),
+            "all-stop-word query"
+        );
     }
 
     #[test]
@@ -555,7 +638,10 @@ mod tests {
         m.content_hash = crate::memory::types::content_hash(&m.content);
         idx.insert_memory(m);
 
-        assert!(idx.search("zebras", 5, None).is_empty(), "stale term must not match");
+        assert!(
+            idx.search("zebras", 5, None).is_empty(),
+            "stale term must not match"
+        );
         assert_eq!(idx.search("giraffes", 5, None).len(), 1);
         assert_eq!(idx.len(), 1, "replacement must not duplicate");
     }
@@ -569,8 +655,11 @@ mod tests {
         idx.insert_memory(a);
         idx.insert_memory(b);
         idx.insert_link(Link {
-            src: aid.clone(), dst: bid.clone(), kind: LinkKind::RelatesTo,
-            weight: 1.0, created_by: "test".into(),
+            src: aid.clone(),
+            dst: bid.clone(),
+            kind: LinkKind::RelatesTo,
+            weight: 1.0,
+            created_by: "test".into(),
         });
         assert_eq!(idx.links_from(&aid).len(), 1);
         assert_eq!(idx.links_to(&bid).len(), 1);
@@ -578,7 +667,10 @@ mod tests {
         idx.purge(&bid);
         assert!(idx.get(&bid).is_none());
         assert_eq!(idx.search("okapi", 5, None).len(), 1);
-        assert!(idx.links_from(&aid).is_empty(), "dangling edge must be swept");
+        assert!(
+            idx.links_from(&aid).is_empty(),
+            "dangling edge must be swept"
+        );
     }
 
     #[test]
@@ -590,8 +682,11 @@ mod tests {
         idx.insert_memory(a);
         idx.insert_memory(b);
         let link = Link {
-            src: aid.clone(), dst: bid.clone(), kind: LinkKind::RelatesTo,
-            weight: 1.0, created_by: "test".into(),
+            src: aid.clone(),
+            dst: bid.clone(),
+            kind: LinkKind::RelatesTo,
+            weight: 1.0,
+            created_by: "test".into(),
         };
         idx.insert_link(link.clone());
         idx.insert_link(link);
@@ -607,7 +702,12 @@ mod tests {
         idx.insert_memory(m);
         assert_eq!(idx.by_hash(&hash).map(|m| m.id.clone()), Some(id));
         // Reformatted duplicate hashes the same.
-        assert!(idx.by_hash(&crate::memory::types::content_hash("The   Gateway\nproxies embeddings")).is_some());
+        assert!(
+            idx.by_hash(&crate::memory::types::content_hash(
+                "The   Gateway\nproxies embeddings"
+            ))
+            .is_some()
+        );
     }
 
     #[test]
@@ -619,7 +719,11 @@ mod tests {
         idx.insert_memory(a);
         idx.insert_memory(b);
         idx.insert_link(Link {
-            src: aid, dst: bid, kind: LinkKind::RelatesTo, weight: 1.0, created_by: "test".into(),
+            src: aid,
+            dst: bid,
+            kind: LinkKind::RelatesTo,
+            weight: 1.0,
+            created_by: "test".into(),
         });
         idx.seq = 11;
 
@@ -627,7 +731,11 @@ mod tests {
         let rebuilt = MemoryIndex::from_snapshot(snap);
         assert_eq!(rebuilt.len(), 2);
         assert_eq!(rebuilt.seq, 11);
-        assert_eq!(rebuilt.search("pangolins", 5, None).len(), 2, "index rebuilds from snapshot");
+        assert_eq!(
+            rebuilt.search("pangolins", 5, None).len(),
+            2,
+            "index rebuilds from snapshot"
+        );
         assert_eq!(rebuilt.stats(0).links, 1);
     }
 
@@ -635,7 +743,11 @@ mod tests {
     fn apply_is_idempotent_for_upsert() {
         let mut idx = MemoryIndex::new();
         let m = mem("idempotent content", MemoryKind::Semantic);
-        let ev = Event::Upsert { seq: 1, at: Utc::now(), memory: Box::new(m) };
+        let ev = Event::Upsert {
+            seq: 1,
+            at: Utc::now(),
+            memory: Box::new(m),
+        };
         idx.apply(ev.clone());
         idx.apply(ev);
         assert_eq!(idx.len(), 1);
@@ -647,9 +759,17 @@ mod tests {
         let mut idx = MemoryIndex::new();
         let m = mem("soon to be archived quokka", MemoryKind::Episodic);
         let id = m.id.clone();
-        idx.apply(Event::Upsert { seq: 1, at: Utc::now(), memory: Box::new(m) });
+        idx.apply(Event::Upsert {
+            seq: 1,
+            at: Utc::now(),
+            memory: Box::new(m),
+        });
         assert_eq!(idx.search("quokka", 5, None).len(), 1);
-        idx.apply(Event::Archive { seq: 2, at: Utc::now(), id: id.clone() });
+        idx.apply(Event::Archive {
+            seq: 2,
+            at: Utc::now(),
+            id: id.clone(),
+        });
         assert!(idx.search("quokka", 5, None).is_empty());
         assert!(idx.get(&id).is_some(), "archive is soft — the record stays");
     }

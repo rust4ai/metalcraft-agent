@@ -68,7 +68,9 @@ impl DaemonConfig {
         let once = env_flag("STARKBOT_ONCE", false);
         let auto_approve = env_flag("STARKBOT_AUTO_APPROVE", false);
 
-        let workshop_api_key = std::env::var("WORKSHOP_API_KEY").ok().filter(|s| !s.is_empty());
+        let workshop_api_key = std::env::var("WORKSHOP_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
         let workshop_api_oidc = env_flag("WORKSHOP_API_ENABLED", false);
         let workshop_api_port = std::env::var("WORKSHOP_API_PORT")
             .ok()
@@ -146,7 +148,11 @@ fn maybe_autoenable_ecosystem_packs() {
     if let Some(parent) = marker.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let body = format!("{}\n{}\n", chrono::Utc::now().to_rfc3339(), enabled.join("\n"));
+    let body = format!(
+        "{}\n{}\n",
+        chrono::Utc::now().to_rfc3339(),
+        enabled.join("\n")
+    );
     match std::fs::write(&marker, body) {
         Ok(()) => log::info!(
             "auto-enabled {} Metalcraft ecosystem pack(s) on first boot: [{}]",
@@ -273,150 +279,176 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
             let runnable = flows::load_enabled_flows(&flows_dir);
             for flow in runnable {
                 let flow_id = flow.saved.id.clone();
-              for trigger in &flow.triggers {
-                let key = (flow_id.clone(), trigger.schedule_id.clone());
-                let due = is_due(last_started.get(&key), &trigger.schedule, trigger.timezone.as_deref());
-                if !due {
-                    continue;
-                }
-                last_started.insert(key, Local::now());
-
-                // Per-schedule persona override, falling back to the daemon default.
-                let default_persona = trigger.persona.as_deref().unwrap_or(persona_slug.as_str());
-
-                log::info!(
-                    "Running flow '{}' ({}) [schedule '{}']",
-                    flow.saved.id,
-                    flow.saved.name,
-                    trigger.schedule_id
-                );
-
-                if crate::flow_exec::is_v2_flow(&flow.saved) {
-                    // v2 flows run on the stateful state-machine executor.
-                    let inputs = trigger.inputs.clone().unwrap_or_else(|| serde_json::json!({}));
-                    let instance_id = crate::flow_bindings::instance_for(
-                        &flow.saved.id,
-                        &trigger.schedule_id,
+                for trigger in &flow.triggers {
+                    let key = (flow_id.clone(), trigger.schedule_id.clone());
+                    let due = is_due(
+                        last_started.get(&key),
+                        &trigger.schedule,
+                        trigger.timezone.as_deref(),
                     );
-                    match crate::flow_exec::run_flow_v2_as(
-                        &context,
-                        flow.saved.clone(),
-                        &cwd,
-                        Some(default_persona),
-                        &model_name,
-                        &inputs,
-                        instance_id,
-                    )
-                    .await
-                    {
-                        Ok(summary) => log::info!(
-                            "Flow '{}' finished: {} ({} steps)",
-                            flow.saved.id,
-                            summary.status,
-                            summary.steps.len()
-                        ),
-                        Err(e) => log::error!("Flow '{}' failed: {}", flow.saved.id, e),
+                    if !due {
+                        continue;
                     }
-                    continue;
-                }
+                    last_started.insert(key, Local::now());
 
-                // Flag any missing packs/personas before running so the daemon log shows
-                // why a scheduled flow may misbehave (v2 flows surface this in their run
-                // record; the legacy prompt path only has the log).
-                for w in crate::flow_install::runtime_warnings(&flow.saved) {
-                    log::warn!("Flow '{}': {w}", flow.saved.id);
-                }
+                    // Per-schedule persona override, falling back to the daemon default.
+                    let default_persona =
+                        trigger.persona.as_deref().unwrap_or(persona_slug.as_str());
 
-                match flows::collect_reachable_prompts(&flow.saved) {
-                    Ok(prompts) => {
-                        if prompts.is_empty() {
-                            log::warn!("Flow '{}' has no reachable prompt nodes", flow.saved.id);
-                        }
-                        for (index, prompt) in prompts.iter().enumerate() {
-                            // Per-prompt/flow persona wins; otherwise fall back to the
-                            // schedule's persona (or the daemon default).
-                            let effective_persona = prompt.persona.as_deref().unwrap_or(default_persona);
-                            log::info!(
-                                "Flow '{}' prompt {}/{} (persona: {})",
+                    log::info!(
+                        "Running flow '{}' ({}) [schedule '{}']",
+                        flow.saved.id,
+                        flow.saved.name,
+                        trigger.schedule_id
+                    );
+
+                    if crate::flow_exec::is_v2_flow(&flow.saved) {
+                        // v2 flows run on the stateful state-machine executor.
+                        let inputs = trigger
+                            .inputs
+                            .clone()
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        let instance_id = crate::flow_bindings::instance_for(
+                            &flow.saved.id,
+                            &trigger.schedule_id,
+                        );
+                        match crate::flow_exec::run_flow_v2_as(
+                            &context,
+                            flow.saved.clone(),
+                            &cwd,
+                            Some(default_persona),
+                            &model_name,
+                            &inputs,
+                            instance_id,
+                        )
+                        .await
+                        {
+                            Ok(summary) => log::info!(
+                                "Flow '{}' finished: {} ({} steps)",
                                 flow.saved.id,
-                                index + 1,
-                                prompts.len(),
-                                effective_persona
-                            );
+                                summary.status,
+                                summary.steps.len()
+                            ),
+                            Err(e) => log::error!("Flow '{}' failed: {}", flow.saved.id, e),
+                        }
+                        continue;
+                    }
 
-                            // A v1 flow's schedule can still be armed; if it is, its
-                            // prompts run as that agent and remember across firings
-                            // like a v2 flow's do. Resolved before the logger so the
-                            // session records which agent produced it.
-                            let instance_id = crate::flow_bindings::instance_for(
-                                &flow.saved.id,
-                                &trigger.schedule_id,
-                            );
-                            let logger = DiagnosticsLogger::new().ok().map(Arc::new);
-                            if let Some(ref diagnostics) = logger {
-                                if let Ok(persona) = Persona::load(effective_persona, &context.personas_dir) {
-                                    let system_prompt = persona.build_system_prompt(&context.skills_dir, &cwd);
-                                    diagnostics.log_session_info(SessionInfo {
-                                        persona_name: &persona.name,
-                                        persona_slug: effective_persona,
-                                        model_name: &model_name,
-                                        cwd: &cwd,
-                                        system_prompt: &system_prompt,
-                                        tools: &persona.tools,
-                                        skills: &persona.skills,
-                                        auto_approve: matches!(
-                                            approval_mode,
-                                            ApprovalMode::AutoApprove
-                                        ),
-                                        flow_id: Some(&flow.saved.id),
-                                        instance_id: instance_id.as_deref(),
-                                    });
-                                }
+                    // Flag any missing packs/personas before running so the daemon log shows
+                    // why a scheduled flow may misbehave (v2 flows surface this in their run
+                    // record; the legacy prompt path only has the log).
+                    for w in crate::flow_install::runtime_warnings(&flow.saved) {
+                        log::warn!("Flow '{}': {w}", flow.saved.id);
+                    }
+
+                    match flows::collect_reachable_prompts(&flow.saved) {
+                        Ok(prompts) => {
+                            if prompts.is_empty() {
+                                log::warn!(
+                                    "Flow '{}' has no reachable prompt nodes",
+                                    flow.saved.id
+                                );
                             }
+                            for (index, prompt) in prompts.iter().enumerate() {
+                                // Per-prompt/flow persona wins; otherwise fall back to the
+                                // schedule's persona (or the daemon default).
+                                let effective_persona =
+                                    prompt.persona.as_deref().unwrap_or(default_persona);
+                                log::info!(
+                                    "Flow '{}' prompt {}/{} (persona: {})",
+                                    flow.saved.id,
+                                    index + 1,
+                                    prompts.len(),
+                                    effective_persona
+                                );
 
-                            let outcome = runtime::run_one_shot_task(
-                                &context,
-                                RunOneShotRequest {
-                                    persona_slug: effective_persona,
-                                    cwd: &cwd,
-                                    model_name: &model_name,
-                                    task: &prompt.prompt,
-                                    approval_mode: approval_mode.clone(),
-                                    diagnostics: logger,
-                                    instance_id: instance_id.clone(),
-                                    preset_personas: None,
-                                },
-                            )
-                            .await;
+                                // A v1 flow's schedule can still be armed; if it is, its
+                                // prompts run as that agent and remember across firings
+                                // like a v2 flow's do. Resolved before the logger so the
+                                // session records which agent produced it.
+                                let instance_id = crate::flow_bindings::instance_for(
+                                    &flow.saved.id,
+                                    &trigger.schedule_id,
+                                );
+                                let logger = DiagnosticsLogger::new().ok().map(Arc::new);
+                                if let Some(ref diagnostics) = logger {
+                                    if let Ok(persona) =
+                                        Persona::load(effective_persona, &context.personas_dir)
+                                    {
+                                        let system_prompt =
+                                            persona.build_system_prompt(&context.skills_dir, &cwd);
+                                        diagnostics.log_session_info(SessionInfo {
+                                            persona_name: &persona.name,
+                                            persona_slug: effective_persona,
+                                            model_name: &model_name,
+                                            cwd: &cwd,
+                                            system_prompt: &system_prompt,
+                                            tools: &persona.tools,
+                                            skills: &persona.skills,
+                                            auto_approve: matches!(
+                                                approval_mode,
+                                                ApprovalMode::AutoApprove
+                                            ),
+                                            flow_id: Some(&flow.saved.id),
+                                            instance_id: instance_id.as_deref(),
+                                        });
+                                    }
+                                }
 
-                            match outcome {
-                                Ok(metalcraft::RunOutcome::Completed(state)) => {
-                                    log::info!(
-                                        "Flow '{}' prompt completed: {}",
-                                        flow.saved.id,
-                                        state.final_answer().unwrap_or("(no answer)")
-                                    );
-                                }
-                                Ok(metalcraft::RunOutcome::Interrupted { reason, .. }) => {
-                                    log::warn!("Flow '{}' prompt interrupted: {}", flow.saved.id, reason);
-                                    break;
-                                }
-                                Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
-                                    log::error!("Flow '{}' prompt failed at {node}: {error}", flow.saved.id);
-                                    break;
-                                }
-                                Err(err) => {
-                                    log::error!("Flow '{}' prompt failed: {}", flow.saved.id, err);
-                                    break;
+                                let outcome = runtime::run_one_shot_task(
+                                    &context,
+                                    RunOneShotRequest {
+                                        persona_slug: effective_persona,
+                                        cwd: &cwd,
+                                        model_name: &model_name,
+                                        task: &prompt.prompt,
+                                        approval_mode: approval_mode.clone(),
+                                        diagnostics: logger,
+                                        instance_id: instance_id.clone(),
+                                        preset_personas: None,
+                                    },
+                                )
+                                .await;
+
+                                match outcome {
+                                    Ok(metalcraft::RunOutcome::Completed(state)) => {
+                                        log::info!(
+                                            "Flow '{}' prompt completed: {}",
+                                            flow.saved.id,
+                                            state.final_answer().unwrap_or("(no answer)")
+                                        );
+                                    }
+                                    Ok(metalcraft::RunOutcome::Interrupted { reason, .. }) => {
+                                        log::warn!(
+                                            "Flow '{}' prompt interrupted: {}",
+                                            flow.saved.id,
+                                            reason
+                                        );
+                                        break;
+                                    }
+                                    Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
+                                        log::error!(
+                                            "Flow '{}' prompt failed at {node}: {error}",
+                                            flow.saved.id
+                                        );
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        log::error!(
+                                            "Flow '{}' prompt failed: {}",
+                                            flow.saved.id,
+                                            err
+                                        );
+                                        break;
+                                    }
                                 }
                             }
                         }
+                        Err(err) => {
+                            log::error!("Flow '{}' is not runnable: {}", flow.saved.id, err);
+                        }
                     }
-                    Err(err) => {
-                        log::error!("Flow '{}' is not runnable: {}", flow.saved.id, err);
-                    }
-                }
-              } // for trigger in &flow.triggers
+                } // for trigger in &flow.triggers
             }
 
             // Auto-resume any paused run whose wake time has arrived: `wait`
@@ -454,7 +486,11 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                 if !due {
                     continue;
                 }
-                let handle = if pause.reason == "wait" { "after" } else { "timeout" };
+                let handle = if pause.reason == "wait" {
+                    "after"
+                } else {
+                    "timeout"
+                };
                 log::info!(
                     "Auto-resuming flow run '{}' (flow '{}', {} → {handle})",
                     run.id,
@@ -614,7 +650,10 @@ async fn run_due_scheduled_tasks(
                         scheduled_tasks::mark(&task.id, TaskStatus::Done);
                     }
                     Ok(other) => {
-                        log::warn!("Scheduled follow-up {} did not complete: {other:?}", task.id);
+                        log::warn!(
+                            "Scheduled follow-up {} did not complete: {other:?}",
+                            task.id
+                        );
                         scheduled_tasks::mark(&task.id, TaskStatus::Failed);
                     }
                     Err(e) => {
@@ -629,7 +668,10 @@ async fn run_due_scheduled_tasks(
 
 fn env_flag(key: &str, default: bool) -> bool {
     match std::env::var(key) {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
         Err(_) => default,
     }
 }
@@ -637,11 +679,19 @@ fn env_flag(key: &str, default: bool) -> bool {
 /// Whether a schedule is due to fire, given when it last started. `tz` is the
 /// IANA timezone a `Cron` trigger is evaluated in; `None` (or an unparseable
 /// name) falls back to the host's local time.
-fn is_due(last_started: Option<&DateTime<Local>>, schedule: &FlowSchedule, tz: Option<&str>) -> bool {
+fn is_due(
+    last_started: Option<&DateTime<Local>>,
+    schedule: &FlowSchedule,
+    tz: Option<&str>,
+) -> bool {
     match schedule {
         FlowSchedule::Manual => false,
-        FlowSchedule::EveryMinutes(minutes) => elapsed_due(last_started, Duration::from_secs(minutes * 60)),
-        FlowSchedule::EveryHours(hours) => elapsed_due(last_started, Duration::from_secs(hours * 60 * 60)),
+        FlowSchedule::EveryMinutes(minutes) => {
+            elapsed_due(last_started, Duration::from_secs(minutes * 60))
+        }
+        FlowSchedule::EveryHours(hours) => {
+            elapsed_due(last_started, Duration::from_secs(hours * 60 * 60))
+        }
         FlowSchedule::Cron(expr) => {
             let schedule = match cron::Schedule::from_str(expr) {
                 Ok(s) => s,
@@ -658,14 +708,20 @@ fn is_due(last_started: Option<&DateTime<Local>>, schedule: &FlowSchedule, tz: O
                     let after = last_started
                         .map(|t| t.with_timezone(&zone))
                         .unwrap_or(now - chrono::TimeDelta::seconds(1));
-                    schedule.after(&after).next().map_or(false, |next| next <= now)
+                    schedule
+                        .after(&after)
+                        .next()
+                        .map_or(false, |next| next <= now)
                 }
                 None => {
                     let now = Local::now();
                     let after = last_started
                         .copied()
                         .unwrap_or(now - chrono::TimeDelta::seconds(1));
-                    schedule.after(&after).next().map_or(false, |next| next <= now)
+                    schedule
+                        .after(&after)
+                        .next()
+                        .map_or(false, |next| next <= now)
                 }
             }
         }

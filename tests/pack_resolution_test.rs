@@ -49,7 +49,10 @@ fn persona_resolves_from_an_installed_pack() {
         &pack_root.join("integration.json"),
         r#"{"id":"testpack","name":"Test Pack","description":"t","version":"1.0.0"}"#,
     );
-    write(&pack_root.join("personas").join("pack-persona.json"), PACK_PERSONA);
+    write(
+        &pack_root.join("personas").join("pack-persona.json"),
+        PACK_PERSONA,
+    );
 
     // 1. The pack is installed, so its persona resolves — no flag to flip first.
     let persona = Persona::load("pack-persona", &local_personas)
@@ -58,7 +61,10 @@ fn persona_resolves_from_an_installed_pack() {
 
     // 2. A stale `enabled: false` from before the flag was retired must not hide it.
     //    Upgraded pods carry these, and honouring them would resurrect the bug.
-    write(&data_dir.join("integrations.json"), r#"{"testpack":{"enabled":false}}"#);
+    write(
+        &data_dir.join("integrations.json"),
+        r#"{"testpack":{"enabled":false}}"#,
+    );
     let persona = Persona::load("pack-persona", &local_personas)
         .expect("a stale disabled flag must not affect resolution");
     assert_eq!(persona.name, "Pack Persona");

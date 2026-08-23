@@ -24,8 +24,8 @@
 use std::collections::HashMap;
 use std::process::ExitCode;
 
-use reqwest::multipart::{Form, Part};
 use reqwest::Client;
+use reqwest::multipart::{Form, Part};
 
 struct Args {
     app: String,
@@ -89,7 +89,12 @@ fn parse_args() -> Args {
 
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
 
-async fn count_notes(client: &Client, base: &str, mount: &str, token: &str) -> Result<usize, DynErr> {
+async fn count_notes(
+    client: &Client,
+    base: &str,
+    mount: &str,
+    token: &str,
+) -> Result<usize, DynErr> {
     let url = format!("{base}{mount}/api/v1/notes");
     let resp = client.get(&url).bearer_auth(token).send().await?;
     let status = resp.status();
@@ -101,7 +106,12 @@ async fn count_notes(client: &Client, base: &str, mount: &str, token: &str) -> R
     Ok(arr.as_array().map(|a| a.len()).unwrap_or(0))
 }
 
-async fn export_zip(client: &Client, base: &str, mount: &str, token: &str) -> Result<Vec<u8>, DynErr> {
+async fn export_zip(
+    client: &Client,
+    base: &str,
+    mount: &str,
+    token: &str,
+) -> Result<Vec<u8>, DynErr> {
     let url = format!("{base}{mount}/api/v1/export");
     let resp = client.get(&url).bearer_auth(token).send().await?;
     let status = resp.status();
@@ -124,7 +134,12 @@ async fn import_zip(
         .file_name("export.zip")
         .mime_str("application/zip")?;
     let form = Form::new().part("file", part);
-    let resp = client.post(&url).bearer_auth(token).multipart(form).send().await?;
+    let resp = client
+        .post(&url)
+        .bearer_auth(token)
+        .multipart(form)
+        .send()
+        .await?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -144,7 +159,10 @@ async fn run(args: Args) -> Result<(), DynErr> {
         .build()?;
 
     let source_count = count_notes(&client, &args.from, &args.from_mount, &args.from_token).await?;
-    println!("source: {source_count} note(s) at {}{}", args.from, args.from_mount);
+    println!(
+        "source: {source_count} note(s) at {}{}",
+        args.from, args.from_mount
+    );
 
     let zip = export_zip(&client, &args.from, &args.from_mount, &args.from_token).await?;
     println!("exported: {} bytes", zip.len());
@@ -176,7 +194,10 @@ async fn run(args: Args) -> Result<(), DynErr> {
     // target ⇒ after == source_count).
     let mut ok = true;
     if after - before != imported {
-        eprintln!("WARN: target grew by {} but import reported {imported}", after - before);
+        eprintln!(
+            "WARN: target grew by {} but import reported {imported}",
+            after - before
+        );
         ok = false;
     }
     if imported < source_count {

@@ -180,7 +180,9 @@ pub fn derive_consent(
             serde_json::from_slice::<metalcraft_packs::IntegrationManifest>(manifest_bytes)
         {
             for key in &manifest.requires_env {
-                let e = env.entry(key.clone()).or_insert_with(|| (BTreeSet::new(), true));
+                let e = env
+                    .entry(key.clone())
+                    .or_insert_with(|| (BTreeSet::new(), true));
                 e.0.insert(pack_id.clone());
             }
             for t in &manifest.native_tools {
@@ -264,9 +266,7 @@ fn env_refs(value: &str) -> Vec<String> {
         if bytes[i] == b'$' {
             let start = i + 1;
             let mut end = start;
-            while end < bytes.len()
-                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-            {
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
                 end += 1;
             }
             if end > start {
@@ -284,7 +284,11 @@ fn env_refs(value: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn pack(id: &str, requires: &[&str], tools: &[(&str, &str, &str)]) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
+    fn pack(
+        id: &str,
+        requires: &[&str],
+        tools: &[(&str, &str, &str)],
+    ) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
         let manifest = serde_json::json!({
             "id": id, "name": id, "description": "t", "version": "1.0.0",
             "requires_env": requires,
@@ -311,18 +315,33 @@ mod tests {
                 "calendar",
                 &["METALCRAFT_TOKEN"],
                 &[
-                    ("mcal_list", "GET", "https://calendar.metalcraftai.com/api/v1/calendars"),
-                    ("mcal_create", "POST", "https://calendar.metalcraftai.com/api/v1/events"),
+                    (
+                        "mcal_list",
+                        "GET",
+                        "https://calendar.metalcraftai.com/api/v1/calendars",
+                    ),
+                    (
+                        "mcal_create",
+                        "POST",
+                        "https://calendar.metalcraftai.com/api/v1/events",
+                    ),
                 ],
             ),
         );
         packs.insert(
             "instacart".to_string(),
-            pack("instacart", &[], &[("ic_order", "POST", "https://api.instacart.com/v2/orders")]),
+            pack(
+                "instacart",
+                &[],
+                &[("ic_order", "POST", "https://api.instacart.com/v2/orders")],
+            ),
         );
 
         let c = derive_consent(&packs);
-        assert_eq!(c.domains, vec!["api.instacart.com", "calendar.metalcraftai.com"]);
+        assert_eq!(
+            c.domains,
+            vec!["api.instacart.com", "calendar.metalcraftai.com"]
+        );
         assert_eq!(c.tools, vec!["ic_order", "mcal_create", "mcal_list"]);
         assert_eq!(
             c.mutating_tools,
@@ -333,7 +352,11 @@ mod tests {
         // The manifest's declared key AND the `$ACME_TOKEN` hiding in a header.
         let names: Vec<&str> = c.requires_env.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["ACME_TOKEN", "METALCRAFT_TOKEN"]);
-        let acme = c.requires_env.iter().find(|e| e.name == "ACME_TOKEN").unwrap();
+        let acme = c
+            .requires_env
+            .iter()
+            .find(|e| e.name == "ACME_TOKEN")
+            .unwrap();
         assert_eq!(
             acme.needed_by,
             vec!["calendar", "instacart"],
@@ -343,9 +366,19 @@ mod tests {
 
     #[test]
     fn hosts_are_extracted_and_placeholders_ignored() {
-        assert_eq!(host_of("https://api.github.com/repos/x"), Some("api.github.com".into()));
-        assert_eq!(host_of("http://user:pw@example.com:8080/x"), Some("example.com".into()));
-        assert_eq!(host_of("https://{region}.example.com/x"), None, "a templated host is not a promise");
+        assert_eq!(
+            host_of("https://api.github.com/repos/x"),
+            Some("api.github.com".into())
+        );
+        assert_eq!(
+            host_of("http://user:pw@example.com:8080/x"),
+            Some("example.com".into())
+        );
+        assert_eq!(
+            host_of("https://{region}.example.com/x"),
+            None,
+            "a templated host is not a promise"
+        );
         assert_eq!(host_of(""), None);
     }
 

@@ -125,7 +125,8 @@ impl AgentInstance {
         // tmp + rename, the atomic-write idiom used by key_store and scheduled_tasks:
         // an interrupted write must never truncate a good file.
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("failed to write {}: {e}", tmp.display()))?;
+        std::fs::write(&tmp, json)
+            .map_err(|e| format!("failed to write {}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, &path)
             .map_err(|e| format!("failed to finalize {}: {e}", path.display()))
     }
@@ -145,8 +146,8 @@ pub fn instance_dir(id: &str) -> PathBuf {
 
 pub fn load(id: &str) -> Result<AgentInstance, String> {
     let path = instance_dir(id).join("instance.json");
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| format!("agent instance '{id}' not found"))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|_| format!("agent instance '{id}' not found"))?;
     serde_json::from_str(&content).map_err(|e| format!("failed to parse {}: {e}", path.display()))
 }
 
@@ -198,7 +199,10 @@ pub fn delete(id: &str) -> Result<(), String> {
     {
         // The record is what makes the agent exist; orphaned memory is waste, not a
         // failure. Warn rather than refuse a delete the user asked for.
-        log::warn!("agent instance '{id}': could not remove {}: {e}", mem.display());
+        log::warn!(
+            "agent instance '{id}': could not remove {}: {e}",
+            mem.display()
+        );
     }
     std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to delete {}: {e}", dir.display()))
 }
@@ -265,10 +269,12 @@ pub fn reap_ephemeral(live_instance_ids: &[String]) -> ReapReport {
 /// This is what gives a channel continuity across idle resets: the conversation ends,
 /// the agent does not.
 pub fn for_channel(channel: &str, preset_slug: &str) -> Result<AgentInstance, String> {
-    if let Some(found) = list()
-        .into_iter()
-        .find(|i| i.origin == InstanceOrigin::Gateway { channel: channel.to_string() })
-    {
+    if let Some(found) = list().into_iter().find(|i| {
+        i.origin
+            == InstanceOrigin::Gateway {
+                channel: channel.to_string(),
+            }
+    }) {
         // The existing agent wins even if the channel has since been pointed at a
         // different preset — its memories are the continuity the channel exists to
         // have, and silently swapping them out is not a re-point, it is amnesia. Say
@@ -283,10 +289,13 @@ pub fn for_channel(channel: &str, preset_slug: &str) -> Result<AgentInstance, St
         }
         return Ok(found);
     }
-    let preset =
-        crate::agent_preset::AgentPreset::load(preset_slug, &paths::agent_presets_dir())?;
-    let mut instance =
-        AgentInstance::new(&preset, InstanceOrigin::Gateway { channel: channel.to_string() });
+    let preset = crate::agent_preset::AgentPreset::load(preset_slug, &paths::agent_presets_dir())?;
+    let mut instance = AgentInstance::new(
+        &preset,
+        InstanceOrigin::Gateway {
+            channel: channel.to_string(),
+        },
+    );
     instance.name = format!("{} — {channel}", preset.name);
     instance.save()?;
     Ok(instance)
@@ -312,7 +321,9 @@ pub fn backfill_from_chats(chats_dir: &Path) -> Result<BackfillReport, String> {
         if path.extension().and_then(|x| x.to_str()) != Some("json") {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&content) else {
             report.skipped += 1;
             continue;
@@ -322,7 +333,10 @@ pub fn backfill_from_chats(chats_dir: &Path) -> Result<BackfillReport, String> {
             continue;
         }
 
-        let persona = doc.get("persona_slug").and_then(|v| v.as_str()).unwrap_or_default();
+        let persona = doc
+            .get("persona_slug")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         // Prefer a preset that actually declares this persona; fall back to the default.
         let preset_slug = summaries
             .iter()
@@ -397,24 +411,35 @@ mod tests {
         assert!(!AgentInstance::new(&preset(), InstanceOrigin::Workshop).persistent);
         assert!(!AgentInstance::new(&preset(), InstanceOrigin::Cli).persistent);
         assert!(
-            AgentInstance::new(&preset(), InstanceOrigin::Gateway { channel: "sms".into() })
-                .persistent,
+            AgentInstance::new(
+                &preset(),
+                InstanceOrigin::Gateway {
+                    channel: "sms".into()
+                }
+            )
+            .persistent,
             "a channel-bound agent must survive reaping — it is the continuity"
         );
         assert!(
-            AgentInstance::new(&preset(), InstanceOrigin::Flow { flow_id: "brief".into() })
-                .persistent
+            AgentInstance::new(
+                &preset(),
+                InstanceOrigin::Flow {
+                    flow_id: "brief".into()
+                }
+            )
+            .persistent
         );
     }
 
     #[test]
     fn origin_round_trips_through_json() {
-        let o = InstanceOrigin::Gateway { channel: "sms-amy".into() };
+        let o = InstanceOrigin::Gateway {
+            channel: "sms-amy".into(),
+        };
         let json = serde_json::to_string(&o).unwrap();
         assert_eq!(serde_json::from_str::<InstanceOrigin>(&json).unwrap(), o);
         // An old record with no origin still loads.
-        let legacy: InstanceOrigin =
-            serde_json::from_str(r#"{"kind":"workshop"}"#).unwrap();
+        let legacy: InstanceOrigin = serde_json::from_str(r#"{"kind":"workshop"}"#).unwrap();
         assert_eq!(legacy, InstanceOrigin::Workshop);
     }
 

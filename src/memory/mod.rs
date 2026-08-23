@@ -26,8 +26,8 @@
 pub mod capture;
 pub mod embed;
 pub mod index;
-pub mod instance;
 pub mod inject;
+pub mod instance;
 pub mod recall;
 pub mod redact;
 pub mod tools;
@@ -67,7 +67,10 @@ static EMBED_QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /// anything else (including unset) leaves it enabled.
 pub fn enabled() -> bool {
     match std::env::var("MEMORY_ENABLED") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
         Err(_) => true,
     }
 }
@@ -187,7 +190,10 @@ fn load_from_disk() -> MemoryIndex {
             let n = s.memories.len();
             stored_embedding = Some((s.embed_model.clone(), s.embed_dims));
             let idx = MemoryIndex::from_snapshot(s);
-            log::info!("memory: loaded snapshot with {n} memories (seq {})", idx.seq);
+            log::info!(
+                "memory: loaded snapshot with {n} memories (seq {})",
+                idx.seq
+            );
             idx
         }
         None => MemoryIndex::new(),
@@ -201,7 +207,9 @@ fn load_from_disk() -> MemoryIndex {
         idx.apply(e);
     }
     if replayed > 0 || skipped > 0 {
-        log::info!("memory: replayed {replayed} log event(s), skipped {skipped} unreadable line(s)");
+        log::info!(
+            "memory: replayed {replayed} log event(s), skipped {skipped} unreadable line(s)"
+        );
     }
     if skipped > 0 {
         log::warn!(
@@ -212,7 +220,10 @@ fn load_from_disk() -> MemoryIndex {
 
     let (stored_vectors, torn) = vectors::load(&vectors_path);
     if torn > 0 {
-        log::warn!("memory: a truncated record at the end of {} was skipped", vectors_path.display());
+        log::warn!(
+            "memory: a truncated record at the end of {} was skipped",
+            vectors_path.display()
+        );
     }
 
     // Vectors are only comparable to vectors from the same model at the same
@@ -235,12 +246,19 @@ fn load_from_disk() -> MemoryIndex {
             stored_vectors.len()
         );
     } else {
-        let wrong_size = stored_vectors.values().filter(|v| v.len() != want_dims).count();
+        let wrong_size = stored_vectors
+            .values()
+            .filter(|v| v.len() != want_dims)
+            .count();
         if wrong_size > 0 {
-            log::warn!("memory: {wrong_size} stored vector(s) have the wrong dimensionality and were dropped");
+            log::warn!(
+                "memory: {wrong_size} stored vector(s) have the wrong dimensionality and were dropped"
+            );
         }
-        let kept: std::collections::HashMap<String, Vec<f32>> =
-            stored_vectors.into_iter().filter(|(_, v)| v.len() == want_dims).collect();
+        let kept: std::collections::HashMap<String, Vec<f32>> = stored_vectors
+            .into_iter()
+            .filter(|(_, v)| v.len() == want_dims)
+            .collect();
         let loaded = idx.load_vectors(kept);
         if loaded > 0 {
             log::info!("memory: attached {loaded} embedding(s)");
@@ -320,7 +338,11 @@ pub async fn remember(req: RememberRequest) -> Result<Remembered, String> {
 
     let scrubbed = redact::redact(&req.content);
     if scrubbed.count > 0 {
-        log::info!("memory: redacted {} secret(s) ({}) before storing", scrubbed.count, scrubbed.kinds.join(", "));
+        log::info!(
+            "memory: redacted {} secret(s) ({}) before storing",
+            scrubbed.count,
+            scrubbed.kinds.join(", ")
+        );
     }
 
     if let Some(instance_id) = req.instance_id.clone() {
@@ -346,7 +368,11 @@ pub async fn remember(req: RememberRequest) -> Result<Remembered, String> {
             memory: Box::new(updated.clone()),
         };
         commit(&mut idx, event, true)?;
-        return Ok(Remembered { memory: updated, deduplicated: true, redactions: scrubbed.count });
+        return Ok(Remembered {
+            memory: updated,
+            deduplicated: true,
+            redactions: scrubbed.count,
+        });
     }
 
     if idx.len() >= max_memories() {
@@ -374,7 +400,11 @@ pub async fn remember(req: RememberRequest) -> Result<Remembered, String> {
         Source::Seeded => 1.0,
     };
 
-    let event = Event::Upsert { seq: idx.seq + 1, at: Utc::now(), memory: Box::new(memory.clone()) };
+    let event = Event::Upsert {
+        seq: idx.seq + 1,
+        at: Utc::now(),
+        memory: Box::new(memory.clone()),
+    };
     // An explicit write is `fsync`ed: "remember this" must survive a crash, which
     // bulk machine-generated captures do not need to.
     commit(&mut idx, event, true)?;
@@ -386,12 +416,18 @@ pub async fn remember(req: RememberRequest) -> Result<Remembered, String> {
         let text = memory.indexable();
         tokio::spawn(async move {
             if let Err(e) = embed_one(&id, &text).await {
-                log::debug!("memory: deferred embedding for {id} failed ({e}); backfill will retry");
+                log::debug!(
+                    "memory: deferred embedding for {id} failed ({e}); backfill will retry"
+                );
             }
         });
     }
 
-    Ok(Remembered { memory, deduplicated: false, redactions: scrubbed.count })
+    Ok(Remembered {
+        memory,
+        deduplicated: false,
+        redactions: scrubbed.count,
+    })
 }
 
 /// Append an event to the log, then apply it to the index.
@@ -414,7 +450,11 @@ fn commit_to(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
     }
-    let write = if durable { wal::append_durable } else { wal::append };
+    let write = if durable {
+        wal::append_durable
+    } else {
+        wal::append
+    };
     write(path, &event).map_err(|e| format!("failed to write memory log: {e}"))?;
     idx.apply(event);
     Ok(())
@@ -524,7 +564,11 @@ pub async fn recall(query: &str, opts: RecallOptions) -> Vec<Scored> {
     let mut idx = handle.write().await;
     let touched = idx.touch(&ids);
     if !touched.is_empty() {
-        let event = Event::Touch { seq: idx.seq + 1, at: Utc::now(), ids: touched };
+        let event = Event::Touch {
+            seq: idx.seq + 1,
+            at: Utc::now(),
+            ids: touched,
+        };
         if let Err(e) = commit(&mut idx, event, false) {
             // Losing a Touch costs a slightly stale decay input, nothing more.
             log::debug!("memory: could not record access ({e})");
@@ -538,7 +582,11 @@ pub async fn get(id: &str) -> Option<(Memory, Vec<Link>, Vec<Link>)> {
     let handle = handle();
     let idx = handle.read().await;
     let memory = idx.get(id)?.clone();
-    Some((memory, idx.links_from(id).to_vec(), idx.links_to(id).to_vec()))
+    Some((
+        memory,
+        idx.links_from(id).to_vec(),
+        idx.links_to(id).to_vec(),
+    ))
 }
 
 /// Archive (soft) or purge (hard) a memory.
@@ -553,9 +601,17 @@ pub async fn forget(id: &str, purge: bool) -> Result<(), String> {
         return Err(format!("no memory with id '{id}'"));
     }
     let event = if purge {
-        Event::Purge { seq: idx.seq + 1, at: Utc::now(), id: id.to_string() }
+        Event::Purge {
+            seq: idx.seq + 1,
+            at: Utc::now(),
+            id: id.to_string(),
+        }
     } else {
-        Event::Archive { seq: idx.seq + 1, at: Utc::now(), id: id.to_string() }
+        Event::Archive {
+            seq: idx.seq + 1,
+            at: Utc::now(),
+            id: id.to_string(),
+        }
     };
     commit(&mut idx, event, true)
 }
@@ -575,7 +631,13 @@ pub async fn link(src: &str, dst: &str, kind: LinkKind, created_by: &str) -> Res
     let event = Event::Link {
         seq: idx.seq + 1,
         at: Utc::now(),
-        link: Link { src: src.to_string(), dst: dst.to_string(), kind, weight: 1.0, created_by: created_by.to_string() },
+        link: Link {
+            src: src.to_string(),
+            dst: dst.to_string(),
+            kind,
+            weight: 1.0,
+            created_by: created_by.to_string(),
+        },
     };
     commit(&mut idx, event, true)
 }
@@ -595,7 +657,10 @@ pub fn recall_enabled() -> bool {
         return false;
     }
     match std::env::var("MEMORY_RECALL") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
         Err(_) => true,
     }
 }
@@ -640,8 +705,7 @@ pub async fn profile_block() -> String {
         .iter()
         .filter(|m| {
             m.is_live()
-                && (m.pinned
-                    || matches!(m.kind, MemoryKind::Preference | MemoryKind::Procedural))
+                && (m.pinned || matches!(m.kind, MemoryKind::Preference | MemoryKind::Procedural))
         })
         .collect();
     // Pinned first, then by importance, then newest — a stable total order, so
@@ -649,7 +713,11 @@ pub async fn profile_block() -> String {
     candidates.sort_by(|a, b| {
         b.pinned
             .cmp(&a.pinned)
-            .then_with(|| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                b.importance
+                    .partial_cmp(&a.importance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| b.created_at.cmp(&a.created_at))
             .then_with(|| a.id.cmp(&b.id))
     });
@@ -686,7 +754,10 @@ pub async fn compact() -> Result<u64, String> {
     // detectable rather than silently mixing incomparable embeddings.
     let (model, dims) = match embeddings() {
         Some(e) => (Some(e.model().to_string()), Some(e.dims())),
-        None => (Some(embed::configured_model()), Some(embed::configured_dims())),
+        None => (
+            Some(embed::configured_model()),
+            Some(embed::configured_dims()),
+        ),
     };
 
     let snapshot = idx.snapshot(model, dims);
@@ -704,7 +775,6 @@ pub async fn compact() -> Result<u64, String> {
     );
     Ok(folded)
 }
-
 
 /// Resolve the preset base an instance should read, from its record.
 ///
@@ -769,7 +839,6 @@ pub fn attach_base(instance_id: &str, preset: &str, version: &str) -> Result<usi
     Ok(count)
 }
 
-
 /// Write into one agent's own delta.
 ///
 /// Deliberately simpler than the global path: no ceiling check (an instance is bounded
@@ -802,7 +871,11 @@ async fn remember_into_instance(
             memory: Box::new(updated.clone()),
         };
         commit_to(&instance_wal(instance_id), &mut delta, event, true)?;
-        return Ok(Remembered { memory: updated, deduplicated: true, redactions: scrubbed.count });
+        return Ok(Remembered {
+            memory: updated,
+            deduplicated: true,
+            redactions: scrubbed.count,
+        });
     }
 
     // Already *shipped* with it? Say so rather than writing a near-duplicate the
@@ -835,17 +908,23 @@ async fn remember_into_instance(
         Source::Dream => 0.9,
     };
 
-    let event =
-        Event::Upsert { seq: delta.seq + 1, at: Utc::now(), memory: Box::new(memory.clone()) };
+    let event = Event::Upsert {
+        seq: delta.seq + 1,
+        at: Utc::now(),
+        memory: Box::new(memory.clone()),
+    };
     commit_to(&instance_wal(instance_id), &mut delta, event, true)?;
 
-    Ok(Remembered { memory, deduplicated: false, redactions: scrubbed.count })
+    Ok(Remembered {
+        memory,
+        deduplicated: false,
+        redactions: scrubbed.count,
+    })
 }
 
 fn instance_wal(instance_id: &str) -> std::path::PathBuf {
     crate::paths::memory_instance_dir(instance_id).join("wal.jsonl")
 }
-
 
 /// What one agent knows, split by where it came from.
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
@@ -903,14 +982,21 @@ pub async fn instance_view(instance_id: &str, sample_limit: usize) -> InstanceMe
     let mut shipped = 0usize;
     if let Some(base) = &mem.base {
         let base = base.read().await;
-        for m in base.iter().filter(|m| m.is_live() && !tombs.contains(&m.id)) {
+        for m in base
+            .iter()
+            .filter(|m| m.is_live() && !tombs.contains(&m.id))
+        {
             shipped += 1;
             sample.push(sample_of(m, "shipped"));
         }
     }
 
     // Most important first — a sample should show what the agent leans on.
-    sample.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+    sample.sort_by(|a, b| {
+        b.importance
+            .partial_cmp(&a.importance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     sample.truncate(sample_limit);
 
     InstanceMemoryView {
@@ -935,7 +1021,6 @@ fn sample_of(m: &Memory, origin: &'static str) -> MemorySample {
     }
 }
 
-
 /// Read one memory from an agent's own layers — delta first, then its shipped base,
 /// and never anything a tombstone hides.
 pub async fn instance_get(instance_id: &str, id: &str) -> Option<Memory> {
@@ -955,10 +1040,7 @@ pub async fn instance_get(instance_id: &str, id: &str) -> Option<Memory> {
 
 /// Forget inside one agent's memory. Its own memories are purged; a shipped memory
 /// is tombstoned, because that copy is shared with every other agent of the preset.
-pub async fn instance_forget(
-    instance_id: &str,
-    id: &str,
-) -> Result<instance::Forgotten, String> {
+pub async fn instance_forget(instance_id: &str, id: &str) -> Result<instance::Forgotten, String> {
     let base_ref = base_for_instance(instance_id);
     let base_arg = base_ref.as_ref().map(|(p, v)| (p.as_str(), v.as_str()));
     let mem = instance::handle_for(instance_id, base_arg)?;

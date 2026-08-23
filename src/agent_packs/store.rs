@@ -38,9 +38,8 @@ pub fn entry_dir(sha: &str) -> PathBuf {
 /// Idempotent: an entry that already exists is left alone, which is what makes a
 /// second agent pack vendoring the same bytes free.
 pub fn put(files: &BTreeMap<String, Vec<u8>>) -> Result<String, String> {
-    let sha = metalcraft_packs::canonical_sha256(
-        files.iter().map(|(p, c)| (p.as_str(), c.as_slice())),
-    );
+    let sha =
+        metalcraft_packs::canonical_sha256(files.iter().map(|(p, c)| (p.as_str(), c.as_slice())));
     let dir = entry_dir(&sha);
     if dir.join("integration.json").is_file() {
         return Ok(sha);
@@ -51,15 +50,16 @@ pub fn put(files: &BTreeMap<String, Vec<u8>>) -> Result<String, String> {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("creating {}: {e}", parent.display()))?;
         }
-        std::fs::write(&target, bytes)
-            .map_err(|e| format!("writing {}: {e}", target.display()))?;
+        std::fs::write(&target, bytes).map_err(|e| format!("writing {}: {e}", target.display()))?;
     }
     Ok(sha)
 }
 
 /// Where an agent pack records which store entries it uses.
 fn refs_file(agent_pack_id: &str) -> PathBuf {
-    paths::agent_packs_dir().join(agent_pack_id).join("integrations.json")
+    paths::agent_packs_dir()
+        .join(agent_pack_id)
+        .join("integrations.json")
 }
 
 pub fn write_refs(agent_pack_id: &str, refs: &IntegrationRefs) -> Result<(), String> {
@@ -68,8 +68,8 @@ pub fn write_refs(agent_pack_id: &str, refs: &IntegrationRefs) -> Result<(), Str
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(refs)
-        .map_err(|e| format!("serializing pack refs: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(refs).map_err(|e| format!("serializing pack refs: {e}"))?;
     // tmp + rename, like every other durable write here. A torn refs file reads back
     // as *no* refs (`read_refs` swallows parse errors), which would make this pack's
     // vendored integrations vanish from its resolution *and* make them look
@@ -113,9 +113,7 @@ pub fn resolve(pack_id: &str) -> Option<PathBuf> {
         // resolution silently walked a directory that wasn't there, so the agent's
         // tools vanished with no diagnostic at all.
         if !dir.join("integration.json").is_file() {
-            log::warn!(
-                "agent packs: '{pack_id}' references store entry {sha}, which is missing"
-            );
+            log::warn!("agent packs: '{pack_id}' references store entry {sha}, which is missing");
             continue;
         }
         let version = std::fs::read_to_string(dir.join("integration.json"))
@@ -139,7 +137,9 @@ pub fn gc() -> usize {
     };
     let mut removed = 0;
     for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
-        let Some(sha) = e.file_name().to_str().map(String::from) else { continue };
+        let Some(sha) = e.file_name().to_str().map(String::from) else {
+            continue;
+        };
         if live.contains(&sha) {
             continue;
         }
@@ -168,7 +168,10 @@ fn version_ge(a: &str, b: &str) -> bool {
     };
     let (a, b) = (parse(a), parse(b));
     for i in 0..a.len().max(b.len()) {
-        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        let (x, y) = (
+            a.get(i).copied().unwrap_or(0),
+            b.get(i).copied().unwrap_or(0),
+        );
         if x != y {
             return x > y;
         }
@@ -186,7 +189,10 @@ mod tests {
         assert!(version_ge("1.2", "1.2.0"), "equal padded versions are >=");
         assert!(!version_ge("0.9.0", "1.0.0"));
         assert!(version_ge("2.0.0", "1.99.99"));
-        assert!(version_ge("1.0.0-beta", "1.0.0"), "prerelease suffixes are ignored, not parsed");
+        assert!(
+            version_ge("1.0.0-beta", "1.0.0"),
+            "prerelease suffixes are ignored, not parsed"
+        );
     }
 
     #[test]
@@ -196,12 +202,15 @@ mod tests {
         let mut b = BTreeMap::new();
         b.insert("integration.json".to_string(), b"{\"id\":\"x\"}".to_vec());
 
-        let ha = metalcraft_packs::canonical_sha256(a.iter().map(|(p, c)| (p.as_str(), c.as_slice())));
-        let hb = metalcraft_packs::canonical_sha256(b.iter().map(|(p, c)| (p.as_str(), c.as_slice())));
+        let ha =
+            metalcraft_packs::canonical_sha256(a.iter().map(|(p, c)| (p.as_str(), c.as_slice())));
+        let hb =
+            metalcraft_packs::canonical_sha256(b.iter().map(|(p, c)| (p.as_str(), c.as_slice())));
         assert_eq!(ha, hb, "the same bytes must dedupe to one store entry");
 
         b.insert("extra".to_string(), b"x".to_vec());
-        let hc = metalcraft_packs::canonical_sha256(b.iter().map(|(p, c)| (p.as_str(), c.as_slice())));
+        let hc =
+            metalcraft_packs::canonical_sha256(b.iter().map(|(p, c)| (p.as_str(), c.as_slice())));
         assert_ne!(ha, hc);
     }
 }

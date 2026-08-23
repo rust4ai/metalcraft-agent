@@ -53,11 +53,21 @@ fn creds(tool: &str) -> metalcraft::Result<Creds> {
         .ok_or_else(|| err(tool, "IMAP_USER is not set (your full email address)"))?;
     let password = crate::key_store::lookup("IMAP_PASSWORD")
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| err(tool, "IMAP_PASSWORD is not set (use an App Password for Gmail)"))?;
+        .ok_or_else(|| {
+            err(
+                tool,
+                "IMAP_PASSWORD is not set (use an App Password for Gmail)",
+            )
+        })?;
     let port = crate::key_store::lookup("IMAP_PORT")
         .and_then(|s| s.trim().parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
-    Ok(Creds { host, port, user, password })
+    Ok(Creds {
+        host,
+        port,
+        user,
+        password,
+    })
 }
 
 /// Connect over implicit TLS and log in. Returns a logged-in session; the caller
@@ -125,7 +135,11 @@ fn fetch_header_rows(
     if uids.is_empty() {
         return Ok(Vec::new());
     }
-    let seq = uids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
+    let seq = uids
+        .iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     let fetches = session
         .uid_fetch(&seq, "(UID INTERNALDATE RFC822.HEADER)")
         .map_err(|e| format!("UID FETCH: {e}"))?;
@@ -158,7 +172,9 @@ pub struct EmailListMailboxesTool;
 
 #[async_trait]
 impl metalcraft::Tool for EmailListMailboxesTool {
-    fn name(&self) -> &str { "email_list_mailboxes" }
+    fn name(&self) -> &str {
+        "email_list_mailboxes"
+    }
     fn description(&self) -> &str {
         "List the mailboxes (folders) available on the IMAP account, e.g. 'INBOX', '[Gmail]/Sent Mail'. The cheapest way to confirm the IMAP_HOST/IMAP_USER/IMAP_PASSWORD credentials work before reading mail. Read-only. Takes no parameters. Returns an array of mailbox names."
     }
@@ -192,7 +208,9 @@ pub struct EmailSearchTool;
 
 #[async_trait]
 impl metalcraft::Tool for EmailSearchTool {
-    fn name(&self) -> &str { "email_search" }
+    fn name(&self) -> &str {
+        "email_search"
+    }
     fn description(&self) -> &str {
         "Search a mailbox and return matching message headers (read-only), newest first: { uid, from_addr, from_name, subject, date }. Combine any of `from`, `subject`, `text` (full-text/body), and `since` (only mail on/after this date; format 'DD-Mon-YYYY' e.g. '01-Jul-2026'); all given criteria must match (AND). `mailbox` defaults to 'INBOX'. `limit` caps results (default 25, most recent). The returned `uid` is what email_get_message needs to read a full message. Fetches headers only, so it's light."
     }
@@ -212,31 +230,63 @@ impl metalcraft::Tool for EmailSearchTool {
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
         let tool = self.name();
         let c = creds(tool)?;
-        let mailbox = args.get("mailbox").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
-            .unwrap_or(DEFAULT_MAILBOX).to_string();
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(25).max(1) as usize;
+        let mailbox = args
+            .get("mailbox")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_MAILBOX)
+            .to_string();
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(25)
+            .max(1) as usize;
 
         // Assemble IMAP search criteria; ALL is the neutral base if none given.
         let mut criteria: Vec<String> = Vec::new();
-        if let Some(v) = args.get("from").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(v) = args
+            .get("from")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             criteria.push(format!("FROM {}", imap_quote(v)));
         }
-        if let Some(v) = args.get("subject").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(v) = args
+            .get("subject")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             criteria.push(format!("SUBJECT {}", imap_quote(v)));
         }
-        if let Some(v) = args.get("text").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(v) = args
+            .get("text")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             criteria.push(format!("TEXT {}", imap_quote(v)));
         }
-        if let Some(v) = args.get("since").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(v) = args
+            .get("since")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             // Date is a bare IMAP token (not quoted), e.g. SINCE 01-Jul-2026.
             criteria.push(format!("SINCE {v}"));
         }
-        let query = if criteria.is_empty() { "ALL".to_string() } else { criteria.join(" ") };
+        let query = if criteria.is_empty() {
+            "ALL".to_string()
+        } else {
+            criteria.join(" ")
+        };
 
         let res = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
             let mut session = connect(&c)?;
-            session.examine(&mailbox).map_err(|e| format!("EXAMINE {mailbox}: {e}"))?;
-            let found = session.uid_search(&query).map_err(|e| format!("UID SEARCH ({query}): {e}"))?;
+            session
+                .examine(&mailbox)
+                .map_err(|e| format!("EXAMINE {mailbox}: {e}"))?;
+            let found = session
+                .uid_search(&query)
+                .map_err(|e| format!("UID SEARCH ({query}): {e}"))?;
             let uids = top_uids(found, limit);
             let rows = fetch_header_rows(&mut session, &mailbox, &uids)?;
             session.logout().ok();
@@ -268,7 +318,9 @@ pub struct EmailListRecentTool;
 
 #[async_trait]
 impl metalcraft::Tool for EmailListRecentTool {
-    fn name(&self) -> &str { "email_list_recent" }
+    fn name(&self) -> &str {
+        "email_list_recent"
+    }
     fn description(&self) -> &str {
         "List the most recent messages in a mailbox (read-only), newest first: { uid, from_addr, from_name, subject, date }. `mailbox` defaults to 'INBOX'. `hours` limits to mail received in the last N hours (default 24). `limit` caps how many are returned (default 50, most recent). Headers only — use email_get_message with a uid to read a full message."
     }
@@ -285,10 +337,22 @@ impl metalcraft::Tool for EmailListRecentTool {
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
         let tool = self.name();
         let c = creds(tool)?;
-        let mailbox = args.get("mailbox").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
-            .unwrap_or(DEFAULT_MAILBOX).to_string();
-        let hours = args.get("hours").and_then(|v| v.as_i64()).unwrap_or(24).max(1);
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).max(1) as usize;
+        let mailbox = args
+            .get("mailbox")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_MAILBOX)
+            .to_string();
+        let hours = args
+            .get("hours")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(24)
+            .max(1);
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .max(1) as usize;
         let cutoff = Utc::now() - chrono::Duration::hours(hours);
         // IMAP SINCE is date-granular; refine to the exact window after fetch.
         let since = cutoff.format("%d-%b-%Y").to_string();
@@ -296,7 +360,9 @@ impl metalcraft::Tool for EmailListRecentTool {
 
         let res = tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, String> {
             let mut session = connect(&c)?;
-            session.examine(&mailbox).map_err(|e| format!("EXAMINE {mailbox}: {e}"))?;
+            session
+                .examine(&mailbox)
+                .map_err(|e| format!("EXAMINE {mailbox}: {e}"))?;
             let found = session
                 .uid_search(format!("SINCE {since}"))
                 .map_err(|e| format!("UID SEARCH: {e}"))?;
@@ -307,7 +373,8 @@ impl metalcraft::Tool for EmailListRecentTool {
             let refined = rows
                 .into_iter()
                 .filter(|r| {
-                    r["date"].as_str()
+                    r["date"]
+                        .as_str()
                         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                         .map(|d| d.with_timezone(&Utc) >= cutoff)
                         .unwrap_or(true)
@@ -318,7 +385,9 @@ impl metalcraft::Tool for EmailListRecentTool {
         .await
         .map_err(|e| err(tool, format!("task join error: {e}")))?
         .map_err(|e| err(tool, e))?;
-        Ok(serde_json::json!({ "count": res.len(), "mailbox": mailbox_out, "hours": hours, "messages": res }))
+        Ok(
+            serde_json::json!({ "count": res.len(), "mailbox": mailbox_out, "hours": hours, "messages": res }),
+        )
     }
 }
 
@@ -330,7 +399,9 @@ pub struct EmailGetMessageTool;
 
 #[async_trait]
 impl metalcraft::Tool for EmailGetMessageTool {
-    fn name(&self) -> &str { "email_get_message" }
+    fn name(&self) -> &str {
+        "email_get_message"
+    }
     fn description(&self) -> &str {
         "Fetch one full message by its `uid` in a mailbox (read-only): { uid, message_id, from_addr, from_name, to, subject, date, body_text, snippet }. Get the uid from email_search or email_list_recent. `mailbox` defaults to 'INBOX'. Returns the plain-text body (HTML-only mails may have an empty body_text)."
     }
@@ -346,34 +417,58 @@ impl metalcraft::Tool for EmailGetMessageTool {
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
         let tool = self.name();
-        let uid = args.get("uid").and_then(|v| v.as_u64())
+        let uid = args
+            .get("uid")
+            .and_then(|v| v.as_u64())
             .ok_or_else(|| err(tool, "missing required integer `uid`"))? as u32;
-        let mailbox = args.get("mailbox").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
-            .unwrap_or(DEFAULT_MAILBOX).to_string();
+        let mailbox = args
+            .get("mailbox")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_MAILBOX)
+            .to_string();
         let c = creds(tool)?;
 
         let res = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
             let mut session = connect(&c)?;
-            session.examine(&mailbox).map_err(|e| format!("EXAMINE {mailbox}: {e}"))?;
+            session
+                .examine(&mailbox)
+                .map_err(|e| format!("EXAMINE {mailbox}: {e}"))?;
             let fetches = session
                 .uid_fetch(uid.to_string(), "(UID INTERNALDATE RFC822)")
                 .map_err(|e| format!("UID FETCH: {e}"))?;
-            let f = fetches.iter().next().ok_or_else(|| format!("no message with uid {uid} in {mailbox}"))?;
+            let f = fetches
+                .iter()
+                .next()
+                .ok_or_else(|| format!("no message with uid {uid} in {mailbox}"))?;
             let internal = f.internal_date().map(|d| d.with_timezone(&Utc));
             let raw = f.body().ok_or_else(|| "message had no body".to_string())?;
-            let parsed = MessageParser::default().parse(raw)
+            let parsed = MessageParser::default()
+                .parse(raw)
                 .ok_or_else(|| "failed to parse message".to_string())?;
 
             let from = parsed.from().and_then(|a| a.first());
-            let to: Vec<String> = parsed.to()
-                .map(|addrs| addrs.iter().filter_map(|a| a.address().map(str::to_string)).collect())
+            let to: Vec<String> = parsed
+                .to()
+                .map(|addrs| {
+                    addrs
+                        .iter()
+                        .filter_map(|a| a.address().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let sent_at = parsed.date()
+            let sent_at = parsed
+                .date()
                 .and_then(|d| DateTime::<Utc>::from_timestamp(d.to_timestamp(), 0))
                 .or(internal);
             let body_text = parsed.body_text(0).map(|c| c.into_owned());
             let snippet = body_text.as_deref().map(|b| {
-                b.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(SNIPPET_CHARS).collect::<String>()
+                b.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(SNIPPET_CHARS)
+                    .collect::<String>()
             });
             let out = serde_json::json!({
                 "uid": uid,

@@ -235,8 +235,10 @@ pub fn search_layers(
             let mut out = take_within(learned, learned_budget, opts.limit);
             // Whatever the learned layer didn't spend is available to the base —
             // a new agent with nothing learned yet should still recall its knowledge.
-            let spent: usize =
-                out.iter().map(|s| estimate_tokens(s.memory.display_text())).sum();
+            let spent: usize = out
+                .iter()
+                .map(|s| estimate_tokens(s.memory.display_text()))
+                .sum();
             let remaining = budget.saturating_sub(spent);
             let room = opts.limit.max(1).saturating_sub(out.len());
             out.extend(take_within(shipped, remaining, room));
@@ -382,8 +384,14 @@ mod tests {
 
     #[test]
     fn text_mode_finds_keyword_matches() {
-        let idx = idx_with(vec![mem("the gateway proxies embeddings"), mem("unrelated weather note")]);
-        let opts = RecallOptions { mode: Mode::Text, ..Default::default() };
+        let idx = idx_with(vec![
+            mem("the gateway proxies embeddings"),
+            mem("unrelated weather note"),
+        ]);
+        let opts = RecallOptions {
+            mode: Mode::Text,
+            ..Default::default()
+        };
         let out = search_index(&idx, "gateway embeddings", None, &opts);
         assert_eq!(out.len(), 1);
         assert!(out[0].memory.content.contains("gateway"));
@@ -402,11 +410,24 @@ mod tests {
         idx.set_vector(&target_id, vec![1.0, 0.0, 0.0]);
         idx.set_vector(&other_id, vec![0.0, 1.0, 0.0]);
 
-        let opts = RecallOptions { mode: Mode::Vector, ..Default::default() };
-        let out = search_index(&idx, "no shared words whatsoever", Some(&[0.9, 0.1, 0.0]), &opts);
+        let opts = RecallOptions {
+            mode: Mode::Vector,
+            ..Default::default()
+        };
+        let out = search_index(
+            &idx,
+            "no shared words whatsoever",
+            Some(&[0.9, 0.1, 0.0]),
+            &opts,
+        );
         assert_eq!(out.len(), 2, "both have vectors, both score > 0");
-        assert_eq!(out[0].memory.id, target_id, "the nearer vector must rank first");
-        assert!(out[0].signals.vector_similarity.unwrap() > out[1].signals.vector_similarity.unwrap());
+        assert_eq!(
+            out[0].memory.id, target_id,
+            "the nearer vector must rank first"
+        );
+        assert!(
+            out[0].signals.vector_similarity.unwrap() > out[1].signals.vector_similarity.unwrap()
+        );
     }
 
     #[test]
@@ -421,10 +442,20 @@ mod tests {
         idx.set_vector(&both_id, vec![1.0, 0.0]);
         idx.set_vector(&text_only_id, vec![0.0, 1.0]);
 
-        let opts = RecallOptions { mode: Mode::Hybrid, ..Default::default() };
+        let opts = RecallOptions {
+            mode: Mode::Hybrid,
+            ..Default::default()
+        };
         let out = search_index(&idx, "rust ownership", Some(&[1.0, 0.0]), &opts);
-        assert_eq!(out[0].memory.id, both_id, "found by two retrievers, so it wins");
-        assert_eq!(out[0].signals.text_rank, Some(1), "even though text ranked it second");
+        assert_eq!(
+            out[0].memory.id, both_id,
+            "found by two retrievers, so it wins"
+        );
+        assert_eq!(
+            out[0].signals.text_rank,
+            Some(1),
+            "even though text ranked it second"
+        );
         assert_eq!(out[0].signals.vector_rank, Some(0));
         assert_eq!(out[1].memory.id, text_only_id);
     }
@@ -444,11 +475,17 @@ mod tests {
             created_by: "test".into(),
         });
 
-        let opts = RecallOptions { mode: Mode::Hybrid, ..Default::default() };
+        let opts = RecallOptions {
+            mode: Mode::Hybrid,
+            ..Default::default()
+        };
         let out = search_index(&idx, "caddy tls", None, &opts);
         let ids: Vec<&str> = out.iter().map(|s| s.memory.id.as_str()).collect();
         assert!(ids.contains(&hit_id.as_str()));
-        assert!(ids.contains(&neighbour_id.as_str()), "a linked neighbour is recalled with its seed");
+        assert!(
+            ids.contains(&neighbour_id.as_str()),
+            "a linked neighbour is recalled with its seed"
+        );
         let n = out.iter().find(|s| s.memory.id == neighbour_id).unwrap();
         assert_eq!(n.signals.graph_rank, Some(0));
         assert_eq!(n.signals.text_rank, None, "it matched no keywords at all");
@@ -462,10 +499,16 @@ mod tests {
         let neighbour_id = neighbour.id.clone();
         let mut idx = idx_with(vec![hit, neighbour]);
         idx.insert_link(Link {
-            src: hit_id, dst: neighbour_id.clone(), kind: LinkKind::RelatesTo,
-            weight: 1.0, created_by: "test".into(),
+            src: hit_id,
+            dst: neighbour_id.clone(),
+            kind: LinkKind::RelatesTo,
+            weight: 1.0,
+            created_by: "test".into(),
         });
-        let opts = RecallOptions { mode: Mode::Text, ..Default::default() };
+        let opts = RecallOptions {
+            mode: Mode::Text,
+            ..Default::default()
+        };
         let out = search_index(&idx, "caddy tls", None, &opts);
         assert_eq!(out.len(), 1, "text mode is exactly BM25, nothing else");
     }
@@ -481,9 +524,15 @@ mod tests {
         let pinned_id = pinned.id.clone();
 
         let idx = idx_with(vec![plain, pinned]);
-        let opts = RecallOptions { mode: Mode::Text, ..Default::default() };
+        let opts = RecallOptions {
+            mode: Mode::Text,
+            ..Default::default()
+        };
         let out = search_index(&idx, "deployment notes pod", None, &opts);
-        assert_eq!(out[0].memory.id, pinned_id, "pinned outranks equivalent unpinned");
+        assert_eq!(
+            out[0].memory.id, pinned_id,
+            "pinned outranks equivalent unpinned"
+        );
         assert!(out.iter().any(|s| s.memory.id == plain_id));
     }
 
@@ -515,7 +564,10 @@ mod tests {
         weak.importance = 10.0;
 
         let idx = idx_with(vec![strong, weak]);
-        let opts = RecallOptions { mode: Mode::Text, ..Default::default() };
+        let opts = RecallOptions {
+            mode: Mode::Text,
+            ..Default::default()
+        };
         let out = search_index(&idx, "ingress controller configuration", None, &opts);
         assert_eq!(out[0].memory.id, strong_id);
     }
@@ -533,7 +585,10 @@ mod tests {
         let mut idx = idx_with(vec![archived, merged, live]);
         // Even with vectors attached, they must not come back.
         idx.set_vector(&archived_id, vec![1.0, 0.0]);
-        let opts = RecallOptions { mode: Mode::Hybrid, ..Default::default() };
+        let opts = RecallOptions {
+            mode: Mode::Hybrid,
+            ..Default::default()
+        };
         let out = search_index(&idx, "pelicans", Some(&[1.0, 0.0]), &opts);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].memory.id, live_id);
@@ -557,23 +612,45 @@ mod tests {
 
     #[test]
     fn the_top_result_is_returned_even_if_it_alone_blows_the_budget() {
-        let idx = idx_with(vec![mem(&format!("enormous single memory {}", "x".repeat(4000)))]);
-        let opts = RecallOptions { mode: Mode::Text, token_budget: Some(10), ..Default::default() };
+        let idx = idx_with(vec![mem(&format!(
+            "enormous single memory {}",
+            "x".repeat(4000)
+        ))]);
+        let opts = RecallOptions {
+            mode: Mode::Text,
+            token_budget: Some(10),
+            ..Default::default()
+        };
         let out = search_index(&idx, "enormous memory", None, &opts);
-        assert_eq!(out.len(), 1, "returning nothing would be worse than overspending");
+        assert_eq!(
+            out.len(),
+            1,
+            "returning nothing would be worse than overspending"
+        );
     }
 
     #[test]
     fn limit_is_respected() {
-        let idx = idx_with((0..10).map(|i| mem(&format!("limited item number {i}"))).collect());
-        let opts = RecallOptions { mode: Mode::Text, limit: 3, ..Default::default() };
+        let idx = idx_with(
+            (0..10)
+                .map(|i| mem(&format!("limited item number {i}")))
+                .collect(),
+        );
+        let opts = RecallOptions {
+            mode: Mode::Text,
+            limit: 3,
+            ..Default::default()
+        };
         assert_eq!(search_index(&idx, "limited item", None, &opts).len(), 3);
     }
 
     #[test]
     fn hybrid_without_a_query_vector_degrades_to_text_plus_graph() {
         let idx = idx_with(vec![mem("degraded mode still finds keywords")]);
-        let opts = RecallOptions { mode: Mode::Hybrid, ..Default::default() };
+        let opts = RecallOptions {
+            mode: Mode::Hybrid,
+            ..Default::default()
+        };
         let out = search_index(&idx, "degraded keywords", None, &opts);
         assert_eq!(out.len(), 1, "no embedding available is not an error");
         assert_eq!(out[0].signals.vector_rank, None);
@@ -590,16 +667,29 @@ mod tests {
 
     #[test]
     fn signals_describe_their_provenance() {
-        let s = Signals { text_rank: Some(0), vector_rank: Some(2), graph_rank: None, vector_similarity: Some(0.9) };
+        let s = Signals {
+            text_rank: Some(0),
+            vector_rank: Some(2),
+            graph_rank: None,
+            vector_similarity: Some(0.9),
+        };
         assert_eq!(s.describe(), "text#1,vector#3");
         assert_eq!(Signals::default().describe(), "");
     }
 
     #[test]
     fn kind_filter_applies_to_both_retrievers() {
-        let pref = Memory::new(MemoryKind::Preference, "prefers dark mode always", Source::User);
+        let pref = Memory::new(
+            MemoryKind::Preference,
+            "prefers dark mode always",
+            Source::User,
+        );
         let pref_id = pref.id.clone();
-        let fact = Memory::new(MemoryKind::Semantic, "dark mode is implemented in css", Source::Tool);
+        let fact = Memory::new(
+            MemoryKind::Semantic,
+            "dark mode is implemented in css",
+            Source::Tool,
+        );
         let fact_id = fact.id.clone();
         let mut idx = idx_with(vec![pref, fact]);
         idx.set_vector(&pref_id, vec![1.0, 0.0]);

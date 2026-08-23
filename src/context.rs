@@ -107,9 +107,9 @@ pub fn compact(state: &mut AgentState, summary: String, keep_recent: usize) {
     }
     let recent = state.messages.split_off(split);
     state.messages.clear();
-    state
-        .messages
-        .push(AgentMessage::Assistant(format!("[Summary of earlier conversation]: {summary}")));
+    state.messages.push(AgentMessage::Assistant(format!(
+        "[Summary of earlier conversation]: {summary}"
+    )));
     state.messages.extend(recent);
 }
 
@@ -193,7 +193,10 @@ async fn summarize_messages<M: CompletionModel + 'static>(
         .build();
 
     let summary = agent
-        .chat(&format!("Summarize this conversation:\n\n{transcript}"), &mut Vec::<RigMessage>::new())
+        .chat(
+            &format!("Summarize this conversation:\n\n{transcript}"),
+            &mut Vec::<RigMessage>::new(),
+        )
         .await
         .map_err(|e| format!("Compaction LLM call failed: {e}"))?;
 
@@ -242,15 +245,18 @@ mod tests {
         // Boundary at len-keep_recent would land on a ToolResult; safe_split must
         // walk earlier so the kept window starts on the preceding ToolCall.
         let messages = vec![
-            AgentMessage::User("hi".into()),       // 0
+            AgentMessage::User("hi".into()),           // 0
             AgentMessage::Assistant("working".into()), // 1
-            tool_call("read"),                     // 2
-            tool_result("read", "contents"),       // 3  <- naive boundary (keep_recent=2) starts here
+            tool_call("read"),                         // 2
+            tool_result("read", "contents"), // 3  <- naive boundary (keep_recent=2) starts here
             AgentMessage::Assistant("done".into()), // 4
         ];
         // Naive split = 5 - 2 = 3 (a ToolResult). safe_split walks back to 2.
         assert_eq!(safe_split(&messages, 2), 2);
-        assert!(!matches!(messages[safe_split(&messages, 2)], AgentMessage::ToolResult { .. }));
+        assert!(!matches!(
+            messages[safe_split(&messages, 2)],
+            AgentMessage::ToolResult { .. }
+        ));
     }
 
     #[test]
@@ -259,16 +265,22 @@ mod tests {
         // after it, or the tool call loses its paired reasoning item and the
         // Responses API rejects the next request.
         let messages = vec![
-            AgentMessage::User("hi".into()),                        // 0
-            AgentMessage::Reasoning { id: "rs_1".into(), encrypted: "enc".into() }, // 1
-            tool_call("read"),                                      // 2
-            tool_result("read", "contents"),                       // 3  <- naive boundary (keep_recent=2)
-            AgentMessage::Assistant("done".into()),                // 4
+            AgentMessage::User("hi".into()), // 0
+            AgentMessage::Reasoning {
+                id: "rs_1".into(),
+                encrypted: "enc".into(),
+            }, // 1
+            tool_call("read"),               // 2
+            tool_result("read", "contents"), // 3  <- naive boundary (keep_recent=2)
+            AgentMessage::Assistant("done".into()), // 4
         ];
         // Naive split = 3 (ToolResult) -> walk to 2 (ToolCall) -> pull in the
         // preceding reasoning at 1.
         assert_eq!(safe_split(&messages, 2), 1);
-        assert!(matches!(messages[safe_split(&messages, 2)], AgentMessage::Reasoning { .. }));
+        assert!(matches!(
+            messages[safe_split(&messages, 2)],
+            AgentMessage::Reasoning { .. }
+        ));
     }
 
     #[test]
@@ -276,12 +288,15 @@ mod tests {
         // Reasoning followed by two parallel tool calls: walking back from a
         // mid-batch boundary must pass both calls and still land on the reasoning.
         let messages = vec![
-            AgentMessage::User("hi".into()),                        // 0
-            AgentMessage::Reasoning { id: "rs_1".into(), encrypted: "enc".into() }, // 1
-            tool_call("read"),                                      // 2
-            tool_call("grep"),                                      // 3
-            tool_result("read", "a"),                               // 4
-            tool_result("grep", "b"),                               // 5  <- naive boundary (keep_recent=1)
+            AgentMessage::User("hi".into()), // 0
+            AgentMessage::Reasoning {
+                id: "rs_1".into(),
+                encrypted: "enc".into(),
+            }, // 1
+            tool_call("read"),               // 2
+            tool_call("grep"),               // 3
+            tool_result("read", "a"),        // 4
+            tool_result("grep", "b"),        // 5  <- naive boundary (keep_recent=1)
         ];
         assert_eq!(safe_split(&messages, 1), 1);
     }
@@ -298,7 +313,9 @@ mod tests {
 
         // 1 summary + last 2 messages.
         assert_eq!(state.messages.len(), 3);
-        assert!(matches!(&state.messages[0], AgentMessage::Assistant(t) if t.starts_with("[Summary of earlier conversation]")));
+        assert!(
+            matches!(&state.messages[0], AgentMessage::Assistant(t) if t.starts_with("[Summary of earlier conversation]"))
+        );
         assert!(matches!(&state.messages[1], AgentMessage::Assistant(t) if t == "a2"));
         assert!(matches!(&state.messages[2], AgentMessage::User(t) if t == "third"));
     }

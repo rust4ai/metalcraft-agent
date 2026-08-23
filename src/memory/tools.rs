@@ -17,8 +17,13 @@ use super::types::{Memory, MemoryKind, Source};
 use super::{RememberRequest, forget, get, recall, remember, stats};
 
 /// Every tool name this module contributes, for registry wiring.
-pub const TOOL_NAMES: &[&str] =
-    &["mem_remember", "mem_search", "mem_get", "mem_forget", "mem_stats"];
+pub const TOOL_NAMES: &[&str] = &[
+    "mem_remember",
+    "mem_search",
+    "mem_get",
+    "mem_forget",
+    "mem_stats",
+];
 
 /// The compact projection of a memory used in list results — full content is
 /// only returned by `mem_get`, so a broad search can't flood the context.
@@ -153,7 +158,10 @@ impl metalcraft::Tool for MemRememberTool {
         let mut req = RememberRequest::new(kind, content, Source::Tool);
         // An agent that recalls from its own memory must write there too.
         req.instance_id = self.instance_id.clone();
-        req.entity = args["entity"].as_str().map(str::to_string).filter(|s| !s.trim().is_empty());
+        req.entity = args["entity"]
+            .as_str()
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty());
         req.importance = args["importance"].as_f64().map(|v| v as f32);
         req.pinned = args["pinned"].as_bool().unwrap_or(false);
 
@@ -229,7 +237,10 @@ impl metalcraft::Tool for MemSearchTool {
             .as_str()
             .ok_or_else(|| crate::tools::missing_param("mem_search", "query"))?;
         let limit = args["limit"].as_u64().unwrap_or(10).clamp(1, 50) as usize;
-        let mode = args["mode"].as_str().and_then(Mode::parse).unwrap_or(Mode::Hybrid);
+        let mode = args["mode"]
+            .as_str()
+            .and_then(Mode::parse)
+            .unwrap_or(Mode::Hybrid);
         let opts = RecallOptions {
             mode,
             limit,
@@ -298,7 +309,9 @@ impl metalcraft::Tool for MemGetTool {
             .as_str()
             .ok_or_else(|| crate::tools::missing_param("mem_get", "id"))?;
         let scoped = match &self.instance_id {
-            Some(inst) => super::instance_get(inst, id).await.map(|m| (m, Vec::new(), Vec::new())),
+            Some(inst) => super::instance_get(inst, id)
+                .await
+                .map(|m| (m, Vec::new(), Vec::new())),
             None => None,
         };
         match match scoped {
@@ -311,10 +324,16 @@ impl metalcraft::Tool for MemGetTool {
             Some((m, out_links, in_links)) => {
                 let mut v = full(&m);
                 v["links_out"] = json!(
-                    out_links.iter().map(|l| json!({"kind": l.kind.as_str(), "to": l.dst})).collect::<Vec<_>>()
+                    out_links
+                        .iter()
+                        .map(|l| json!({"kind": l.kind.as_str(), "to": l.dst}))
+                        .collect::<Vec<_>>()
                 );
                 v["links_in"] = json!(
-                    in_links.iter().map(|l| json!({"kind": l.kind.as_str(), "from": l.src})).collect::<Vec<_>>()
+                    in_links
+                        .iter()
+                        .map(|l| json!({"kind": l.kind.as_str(), "from": l.src}))
+                        .collect::<Vec<_>>()
                 );
                 Ok(v)
             }
@@ -504,13 +523,19 @@ mod tests {
             forget.name(),
             stats.name(),
         ];
-        assert_eq!(built, TOOL_NAMES, "TOOL_NAMES must match the registered tools exactly");
+        assert_eq!(
+            built, TOOL_NAMES,
+            "TOOL_NAMES must match the registered tools exactly"
+        );
     }
 
     #[test]
     fn schemas_are_objects_and_mark_their_required_params() {
         for (schema, required) in [
-            (MemRememberTool::new(None).parameters_schema(), vec!["content"]),
+            (
+                MemRememberTool::new(None).parameters_schema(),
+                vec!["content"],
+            ),
             (MemSearchTool::new(None).parameters_schema(), vec!["query"]),
             (MemGetTool::new(None).parameters_schema(), vec!["id"]),
             (MemForgetTool::new(None).parameters_schema(), vec!["id"]),
@@ -525,7 +550,10 @@ mod tests {
             assert_eq!(got, required);
         }
         // mem_stats takes no parameters at all.
-        assert_eq!(MemStatsTool::new(None).parameters_schema()["type"], "object");
+        assert_eq!(
+            MemStatsTool::new(None).parameters_schema()["type"],
+            "object"
+        );
     }
 
     #[test]

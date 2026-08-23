@@ -12,8 +12,12 @@ fn estimate_tokens_empty() {
 #[test]
 fn estimate_tokens_with_history() {
     let mut state = AgentState::new("hello world");
-    state.messages.push(AgentMessage::Assistant("This is a response with some content.".into()));
-    state.messages.push(AgentMessage::User("Follow up question here.".into()));
+    state.messages.push(AgentMessage::Assistant(
+        "This is a response with some content.".into(),
+    ));
+    state
+        .messages
+        .push(AgentMessage::User("Follow up question here.".into()));
     let tokens = context::estimate_tokens(&state);
     // Total chars: 11 + 37 + 24 = 72, / 4 = 18
     assert!(tokens > 10 && tokens < 30);
@@ -22,11 +26,17 @@ fn estimate_tokens_with_history() {
 #[test]
 fn compact_replaces_old_messages() {
     let mut state = AgentState::new("message 1");
-    state.messages.push(AgentMessage::Assistant("response 1".into()));
+    state
+        .messages
+        .push(AgentMessage::Assistant("response 1".into()));
     state.messages.push(AgentMessage::User("message 2".into()));
-    state.messages.push(AgentMessage::Assistant("response 2".into()));
+    state
+        .messages
+        .push(AgentMessage::Assistant("response 2".into()));
     state.messages.push(AgentMessage::User("message 3".into()));
-    state.messages.push(AgentMessage::Assistant("response 3".into()));
+    state
+        .messages
+        .push(AgentMessage::Assistant("response 3".into()));
 
     assert_eq!(state.messages.len(), 6);
 
@@ -73,12 +83,14 @@ fn compact_noop_when_few_messages() {
 fn compact_preserves_tool_calls_in_recent() {
     let mut state = AgentState::new("do something");
     state.messages.push(AgentMessage::ToolCall {
-        call_id: None, id: "1".into(),
+        call_id: None,
+        id: "1".into(),
         name: "read_file".into(),
         args: serde_json::json!({"path": "foo.rs"}),
     });
     state.messages.push(AgentMessage::ToolResult {
-        call_id: None, id: "1".into(),
+        call_id: None,
+        id: "1".into(),
         name: "read_file".into(),
         result: "file contents".into(),
     });

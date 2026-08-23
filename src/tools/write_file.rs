@@ -5,7 +5,9 @@ pub struct WriteFileTool;
 
 #[async_trait]
 impl metalcraft::Tool for WriteFileTool {
-    fn name(&self) -> &str { "write_file" }
+    fn name(&self) -> &str {
+        "write_file"
+    }
     fn description(&self) -> &str {
         "Write content to a file. Creates the file and parent directories if they don't exist. Overwrites existing content."
     }
@@ -26,20 +28,28 @@ impl metalcraft::Tool for WriteFileTool {
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let path_str = args["path"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "write_file".into(),
-            message: "Missing required parameter: path".into(),
-        })?;
-        let content = args["content"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "write_file".into(),
-            message: "Missing required parameter: content".into(),
-        })?;
+        let path_str =
+            args["path"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "write_file".into(),
+                    message: "Missing required parameter: path".into(),
+                })?;
+        let content =
+            args["content"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "write_file".into(),
+                    message: "Missing required parameter: content".into(),
+                })?;
 
         let path = Path::new(path_str);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| metalcraft::GraphError::ToolCallFailed {
-                tool: "write_file".into(),
-                message: format!("Failed to create directories for {}: {}", path_str, e),
+            std::fs::create_dir_all(parent).map_err(|e| {
+                metalcraft::GraphError::ToolCallFailed {
+                    tool: "write_file".into(),
+                    message: format!("Failed to create directories for {}: {}", path_str, e),
+                }
             })?;
         }
 

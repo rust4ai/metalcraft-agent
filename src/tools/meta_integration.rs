@@ -101,7 +101,8 @@ impl metalcraft::Tool for IntegrationReadTool {
         summary["personas"] = serde_json::json!(integration.item_slugs("personas", "json"));
         summary["skills"] = serde_json::json!(integration.item_slugs("skills", "md"));
         summary["tools"] = serde_json::json!(integration.item_slugs("api_tools", "json"));
-        summary["flow_templates"] = serde_json::json!(integration.item_slugs("flow_templates", "json"));
+        summary["flow_templates"] =
+            serde_json::json!(integration.item_slugs("flow_templates", "json"));
         summary["readme"] = match integration.readme() {
             Some(text) => serde_json::Value::String(text),
             None => serde_json::Value::Null,

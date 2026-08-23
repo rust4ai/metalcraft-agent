@@ -1,7 +1,7 @@
+use crate::{diff_preview, ui};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode};
 use metalcraft::BeforeToolCallAction;
-use crate::{diff_preview, ui};
 use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
@@ -50,10 +50,7 @@ impl OperationKind {
             "list_files" => Self::ListFiles,
             "grep" | "find_files" => Self::Search,
             "write_file" => {
-                let path = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 if !path.is_empty() && Path::new(path).exists() {
                     Self::OverwriteFile
                 } else {
@@ -70,7 +67,9 @@ impl OperationKind {
             // approval — harmless in practice, because automatic capture does not
             // go through a tool.
             "mem_search" | "mem_get" | "mem_stats" => Self::ReadFile,
-            "discord_send_message" | "discord_edit_message" | "discord_add_reaction" => Self::DiscordAction,
+            "discord_send_message" | "discord_edit_message" | "discord_add_reaction" => {
+                Self::DiscordAction
+            }
             "discord_get_messages" | "discord_get_channel_info" => Self::ReadFile,
             // Discord admin pack (bot-token REST tools). The chat tools above are
             // matched by their exact names first; everything else prefixed
@@ -159,16 +158,32 @@ impl OperationKind {
             n if n.starts_with("mpack_") => Self::ReadFile,
             // Meta tools — managing the project's own personas/skills/flows.
             // Read-only ones auto-approve; mutating ones require approval.
-            "persona_list" | "persona_read" | "skill_list" | "skill_read" | "flow_list"
-            | "flow_read" | "flow_validate" | "flow_templates_list" | "flow_template_read"
-            | "diagnostics_list" | "diagnostics_read" | "integration_list" | "integration_read" => Self::MetaRead,
-            "persona_write" | "persona_delete" | "skill_write" | "skill_delete" | "flow_write"
-            | "flow_set_schedules" | "flow_install" | "flow_install_dependencies"
+            "persona_list"
+            | "persona_read"
+            | "skill_list"
+            | "skill_read"
+            | "flow_list"
+            | "flow_read"
+            | "flow_validate"
+            | "flow_templates_list"
+            | "flow_template_read"
+            | "diagnostics_list"
+            | "diagnostics_read"
+            | "integration_list"
+            | "integration_read" => Self::MetaRead,
+            "persona_write"
+            | "persona_delete"
+            | "skill_write"
+            | "skill_delete"
+            | "flow_write"
+            | "flow_set_schedules"
+            | "flow_install"
+            | "flow_install_dependencies"
             | "flow_delete" => Self::MetaWrite,
-            "agentpack_install" | "agentpack_update" | "agentpack_uninstall"
-            | "agentpack_export" => {
-                Self::AgentPackWrite
-            }
+            "agentpack_install"
+            | "agentpack_update"
+            | "agentpack_uninstall"
+            | "agentpack_export" => Self::AgentPackWrite,
             "agentpack_list" | "agentpack_read" => Self::MetaRead,
             // flow_run spawns agent runs that may use any tool — treat it like
             // a sub-agent (requires approval).
@@ -181,7 +196,9 @@ impl OperationKind {
     /// Default permission policy for each operation kind.
     pub fn default_permission(&self) -> PermissionLevel {
         match self {
-            Self::ReadFile | Self::ListFiles | Self::Search | Self::LoadSkill => PermissionLevel::AutoApprove,
+            Self::ReadFile | Self::ListFiles | Self::Search | Self::LoadSkill => {
+                PermissionLevel::AutoApprove
+            }
             Self::MetaRead => PermissionLevel::AutoApprove,
             Self::MetaWrite => PermissionLevel::RequiresApproval,
             Self::AgentPackWrite => PermissionLevel::RequiresApproval,
@@ -260,7 +277,9 @@ pub fn build_hook(mode: ApprovalMode) -> Option<metalcraft::BeforeToolCallHook> 
                             if approved_paths.lock().unwrap().contains(p) {
                                 eprintln!(
                                     "  {}",
-                                    ui::dim(format!("↳ auto-approved {p} (remembered this session)"))
+                                    ui::dim(format!(
+                                        "↳ auto-approved {p} (remembered this session)"
+                                    ))
                                 );
                                 return BeforeToolCallAction::Proceed;
                             }
@@ -652,43 +671,103 @@ mod tests {
     #[test]
     fn test_classify_read_operations() {
         let args = serde_json::json!({});
-        assert_eq!(OperationKind::classify("read_file", &args), OperationKind::ReadFile);
-        assert_eq!(OperationKind::classify("list_files", &args), OperationKind::ListFiles);
-        assert_eq!(OperationKind::classify("grep", &args), OperationKind::Search);
-        assert_eq!(OperationKind::classify("find_files", &args), OperationKind::Search);
+        assert_eq!(
+            OperationKind::classify("read_file", &args),
+            OperationKind::ReadFile
+        );
+        assert_eq!(
+            OperationKind::classify("list_files", &args),
+            OperationKind::ListFiles
+        );
+        assert_eq!(
+            OperationKind::classify("grep", &args),
+            OperationKind::Search
+        );
+        assert_eq!(
+            OperationKind::classify("find_files", &args),
+            OperationKind::Search
+        );
     }
 
     #[test]
     fn test_classify_write_new_file() {
         let args = serde_json::json!({"path": "/tmp/nonexistent_metalcraft_test_file_xyz.txt"});
-        assert_eq!(OperationKind::classify("write_file", &args), OperationKind::WriteNewFile);
+        assert_eq!(
+            OperationKind::classify("write_file", &args),
+            OperationKind::WriteNewFile
+        );
     }
 
     #[test]
     fn test_classify_other_tools() {
         let args = serde_json::json!({});
-        assert_eq!(OperationKind::classify("edit_file", &args), OperationKind::EditFile);
-        assert_eq!(OperationKind::classify("bash", &args), OperationKind::Execute);
-        assert_eq!(OperationKind::classify("web_fetch", &args), OperationKind::NetworkFetch);
-        assert_eq!(OperationKind::classify("sub_agent", &args), OperationKind::SubAgent);
-        assert_eq!(OperationKind::classify("load_skill", &args), OperationKind::LoadSkill);
+        assert_eq!(
+            OperationKind::classify("edit_file", &args),
+            OperationKind::EditFile
+        );
+        assert_eq!(
+            OperationKind::classify("bash", &args),
+            OperationKind::Execute
+        );
+        assert_eq!(
+            OperationKind::classify("web_fetch", &args),
+            OperationKind::NetworkFetch
+        );
+        assert_eq!(
+            OperationKind::classify("sub_agent", &args),
+            OperationKind::SubAgent
+        );
+        assert_eq!(
+            OperationKind::classify("load_skill", &args),
+            OperationKind::LoadSkill
+        );
     }
 
     #[test]
     fn test_classify_meta_tools() {
         let args = serde_json::json!({});
         // Read-only meta tools auto-approve.
-        for t in ["persona_list", "persona_read", "skill_read", "flow_list", "flow_validate", "diagnostics_read"] {
-            assert_eq!(OperationKind::classify(t, &args), OperationKind::MetaRead, "{t}");
-            assert_eq!(OperationKind::MetaRead.default_permission(), PermissionLevel::AutoApprove);
+        for t in [
+            "persona_list",
+            "persona_read",
+            "skill_read",
+            "flow_list",
+            "flow_validate",
+            "diagnostics_read",
+        ] {
+            assert_eq!(
+                OperationKind::classify(t, &args),
+                OperationKind::MetaRead,
+                "{t}"
+            );
+            assert_eq!(
+                OperationKind::MetaRead.default_permission(),
+                PermissionLevel::AutoApprove
+            );
         }
         // Mutating meta tools require approval.
-        for t in ["persona_write", "persona_delete", "skill_write", "flow_write", "flow_delete"] {
-            assert_eq!(OperationKind::classify(t, &args), OperationKind::MetaWrite, "{t}");
-            assert_eq!(OperationKind::MetaWrite.default_permission(), PermissionLevel::RequiresApproval);
+        for t in [
+            "persona_write",
+            "persona_delete",
+            "skill_write",
+            "flow_write",
+            "flow_delete",
+        ] {
+            assert_eq!(
+                OperationKind::classify(t, &args),
+                OperationKind::MetaWrite,
+                "{t}"
+            );
+            assert_eq!(
+                OperationKind::MetaWrite.default_permission(),
+                PermissionLevel::RequiresApproval
+            );
         }
         // flow_run spawns agent work — gated like a sub-agent.
-        assert_eq!(OperationKind::classify("flow_run", &args), OperationKind::SubAgent);
+        assert_eq!(
+            OperationKind::classify("flow_run", &args),
+            OperationKind::SubAgent
+        );
     }
 
     #[test]
@@ -703,8 +782,15 @@ mod tests {
             "discord_get_audit_log",
             "discord_search_members",
         ] {
-            assert_eq!(OperationKind::classify(t, &args), OperationKind::ReadFile, "{t}");
-            assert_eq!(OperationKind::ReadFile.default_permission(), PermissionLevel::AutoApprove);
+            assert_eq!(
+                OperationKind::classify(t, &args),
+                OperationKind::ReadFile,
+                "{t}"
+            );
+            assert_eq!(
+                OperationKind::ReadFile.default_permission(),
+                PermissionLevel::AutoApprove
+            );
         }
         // Mutating admin actions are gated like a DiscordAction.
         for t in [
@@ -717,12 +803,25 @@ mod tests {
             "discord_bulk_delete_messages",
             "discord_edit_channel_permissions",
         ] {
-            assert_eq!(OperationKind::classify(t, &args), OperationKind::DiscordAction, "{t}");
-            assert_eq!(OperationKind::DiscordAction.default_permission(), PermissionLevel::RequiresApproval);
+            assert_eq!(
+                OperationKind::classify(t, &args),
+                OperationKind::DiscordAction,
+                "{t}"
+            );
+            assert_eq!(
+                OperationKind::DiscordAction.default_permission(),
+                PermissionLevel::RequiresApproval
+            );
         }
         // The existing chat tools keep their exact-match classification.
-        assert_eq!(OperationKind::classify("discord_send_message", &args), OperationKind::DiscordAction);
-        assert_eq!(OperationKind::classify("discord_get_messages", &args), OperationKind::ReadFile);
+        assert_eq!(
+            OperationKind::classify("discord_send_message", &args),
+            OperationKind::DiscordAction
+        );
+        assert_eq!(
+            OperationKind::classify("discord_get_messages", &args),
+            OperationKind::ReadFile
+        );
     }
 
     #[test]
@@ -736,31 +835,76 @@ mod tests {
             "calcom_list_bookings",
             "calcom_get_booking",
         ] {
-            assert_eq!(OperationKind::classify(t, &args), OperationKind::ReadFile, "{t}");
-            assert_eq!(OperationKind::ReadFile.default_permission(), PermissionLevel::AutoApprove);
+            assert_eq!(
+                OperationKind::classify(t, &args),
+                OperationKind::ReadFile,
+                "{t}"
+            );
+            assert_eq!(
+                OperationKind::ReadFile.default_permission(),
+                PermissionLevel::AutoApprove
+            );
         }
         // Booking mutations require approval (they send emails / create events).
-        for t in ["calcom_create_booking", "calcom_cancel_booking", "calcom_reschedule_booking"] {
-            assert_eq!(OperationKind::classify(t, &args), OperationKind::Execute, "{t}");
-            assert_eq!(OperationKind::Execute.default_permission(), PermissionLevel::RequiresApproval);
+        for t in [
+            "calcom_create_booking",
+            "calcom_cancel_booking",
+            "calcom_reschedule_booking",
+        ] {
+            assert_eq!(
+                OperationKind::classify(t, &args),
+                OperationKind::Execute,
+                "{t}"
+            );
+            assert_eq!(
+                OperationKind::Execute.default_permission(),
+                PermissionLevel::RequiresApproval
+            );
         }
     }
 
     #[test]
     fn test_default_permissions() {
-        assert_eq!(OperationKind::ReadFile.default_permission(), PermissionLevel::AutoApprove);
-        assert_eq!(OperationKind::ListFiles.default_permission(), PermissionLevel::AutoApprove);
-        assert_eq!(OperationKind::Search.default_permission(), PermissionLevel::AutoApprove);
-        assert_eq!(OperationKind::WriteNewFile.default_permission(), PermissionLevel::AutoApprove);
-        assert_eq!(OperationKind::OverwriteFile.default_permission(), PermissionLevel::RequiresApproval);
-        assert_eq!(OperationKind::EditFile.default_permission(), PermissionLevel::RequiresApproval);
-        assert_eq!(OperationKind::Execute.default_permission(), PermissionLevel::RequiresApproval);
+        assert_eq!(
+            OperationKind::ReadFile.default_permission(),
+            PermissionLevel::AutoApprove
+        );
+        assert_eq!(
+            OperationKind::ListFiles.default_permission(),
+            PermissionLevel::AutoApprove
+        );
+        assert_eq!(
+            OperationKind::Search.default_permission(),
+            PermissionLevel::AutoApprove
+        );
+        assert_eq!(
+            OperationKind::WriteNewFile.default_permission(),
+            PermissionLevel::AutoApprove
+        );
+        assert_eq!(
+            OperationKind::OverwriteFile.default_permission(),
+            PermissionLevel::RequiresApproval
+        );
+        assert_eq!(
+            OperationKind::EditFile.default_permission(),
+            PermissionLevel::RequiresApproval
+        );
+        assert_eq!(
+            OperationKind::Execute.default_permission(),
+            PermissionLevel::RequiresApproval
+        );
     }
 
     #[test]
     fn test_unknown_tool_defaults_to_execute() {
         let args = serde_json::json!({});
-        assert_eq!(OperationKind::classify("unknown_tool", &args), OperationKind::Execute);
-        assert_eq!(OperationKind::Execute.default_permission(), PermissionLevel::RequiresApproval);
+        assert_eq!(
+            OperationKind::classify("unknown_tool", &args),
+            OperationKind::Execute
+        );
+        assert_eq!(
+            OperationKind::Execute.default_permission(),
+            PermissionLevel::RequiresApproval
+        );
     }
 }

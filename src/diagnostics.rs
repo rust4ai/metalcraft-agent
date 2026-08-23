@@ -84,11 +84,8 @@ impl DiagnosticsLogger {
     /// Log the full agent state after a step.
     pub fn log_turn(&self, state: &AgentState) {
         let turn = self.turn_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let messages: Vec<serde_json::Value> = state
-            .messages
-            .iter()
-            .map(serialize_message)
-            .collect();
+        let messages: Vec<serde_json::Value> =
+            state.messages.iter().map(serialize_message).collect();
 
         let turn_data = json!({
             "turn": turn,
@@ -174,14 +171,24 @@ fn serialize_message(msg: &AgentMessage) -> serde_json::Value {
             "role": "assistant",
             "content": text,
         }),
-        AgentMessage::ToolCall { id, call_id, name, args } => json!({
+        AgentMessage::ToolCall {
+            id,
+            call_id,
+            name,
+            args,
+        } => json!({
             "role": "tool_call",
             "id": id,
             "call_id": call_id,
             "name": name,
             "args": args,
         }),
-        AgentMessage::ToolResult { id, call_id, name, result } => json!({
+        AgentMessage::ToolResult {
+            id,
+            call_id,
+            name,
+            result,
+        } => json!({
             "role": "tool_result",
             "id": id,
             "call_id": call_id,

@@ -1,12 +1,12 @@
 use metalcraft::{AgentState, LlmCallHook, RunOutcome};
+use metalcraft_agent::agent_preset::{AgentPreset, DEFAULT_PRESET};
 use metalcraft_agent::approval::ApprovalMode;
 use metalcraft_agent::cli;
 use metalcraft_agent::context;
 use metalcraft_agent::diagnostics::{DiagnosticsLogger, SessionInfo};
 use metalcraft_agent::guard;
-use metalcraft_agent::agent_preset::{AgentPreset, DEFAULT_PRESET};
 use metalcraft_agent::persona::Persona;
-use metalcraft_agent::runtime::{self, AgentRuntimeContext, AVAILABLE_MODELS, DEFAULT_MODEL};
+use metalcraft_agent::runtime::{self, AVAILABLE_MODELS, AgentRuntimeContext, DEFAULT_MODEL};
 use metalcraft_agent::ui;
 use metalcraft_agent::workshop_api::{self, WorkshopApiConfig};
 use rig::client::CompletionClient;
@@ -35,8 +35,8 @@ fn resolve_cd_target(input: &str, current: &Path) -> Result<PathBuf, String> {
         current.join(expanded)
     };
 
-    let canonical = std::fs::canonicalize(&candidate)
-        .map_err(|e| format!("{}: {}", candidate.display(), e))?;
+    let canonical =
+        std::fs::canonicalize(&candidate).map_err(|e| format!("{}: {}", candidate.display(), e))?;
 
     if !canonical.is_dir() {
         return Err(format!("{} is not a directory", canonical.display()));
@@ -63,19 +63,33 @@ fn build_prompt_str(persona_slug: &str, cwd: &str) -> String {
 }
 
 fn print_usage(personas_dir: &std::path::Path) {
-    eprintln!("{} {}", ui::error("Usage:"), ui::command("metalcraft-agent [--auto-approve] [--preset <slug>] [--persona <slug>] [task]"));
+    eprintln!(
+        "{} {}",
+        ui::error("Usage:"),
+        ui::command(
+            "metalcraft-agent [--auto-approve] [--preset <slug>] [--persona <slug>] [task]"
+        )
+    );
     eprintln!();
     eprintln!("  If [task] is given, run once and exit.");
     eprintln!("  If [task] is omitted, enter interactive mode.");
-    eprintln!("  --preset <slug>   Agent preset to run as (default: general-agent; also METALCRAFT_PRESET).");
-    eprintln!("  --persona <slug>  Persona to use; overrides the preset's default (also METALCRAFT_PERSONA).");
+    eprintln!(
+        "  --preset <slug>   Agent preset to run as (default: general-agent; also METALCRAFT_PRESET)."
+    );
+    eprintln!(
+        "  --persona <slug>  Persona to use; overrides the preset's default (also METALCRAFT_PERSONA)."
+    );
     eprintln!("  --auto-approve    Skip approval prompts for all tools.");
     eprintln!("  --migrate-agent-packs [--dry-run]");
     eprintln!("                    Wrap legacy integration packs into agent packs, then exit.");
     eprintln!();
     let available = Persona::list_available(personas_dir);
     if available.is_empty() {
-        eprintln!("{} {}", ui::warning("No personas found in"), ui::path(personas_dir.display().to_string()));
+        eprintln!(
+            "{} {}",
+            ui::warning("No personas found in"),
+            ui::path(personas_dir.display().to_string())
+        );
     } else {
         eprintln!("{}", ui::heading("Available personas:"));
         for slug in &available {
@@ -88,12 +102,24 @@ fn print_usage(personas_dir: &std::path::Path) {
     }
 }
 
-fn print_persona_banner(persona: &Persona, persona_slug: &str, model_name: &str, cwd: &str, auto_approve: bool) {
-    println!("{}", ui::heading("╭─────────────────────────────────────────────╮"));
+fn print_persona_banner(
+    persona: &Persona,
+    persona_slug: &str,
+    model_name: &str,
+    cwd: &str,
+    auto_approve: bool,
+) {
+    println!(
+        "{}",
+        ui::heading("╭─────────────────────────────────────────────╮")
+    );
     println!("│  {} {:<33}│", ui::label("Persona:"), persona.name);
     println!("│  {} {:<33}│", ui::label("Slug:"), persona_slug);
     println!("│  {} {:<33}│", ui::label("Model:"), model_name);
-    println!("{}", ui::heading("╰─────────────────────────────────────────────╯"));
+    println!(
+        "{}",
+        ui::heading("╰─────────────────────────────────────────────╯")
+    );
     println!("  {}", persona.description);
     println!("  {} {}", ui::label("Cwd:"), ui::path(display_cwd(cwd)));
     println!("  {} {}", ui::label("Tools:"), persona.tools.join(", "));
@@ -103,7 +129,11 @@ fn print_persona_banner(persona: &Persona, persona_slug: &str, model_name: &str,
     if auto_approve {
         println!("  {} {}", ui::label("Mode:"), ui::success("auto-approve"));
     } else {
-        println!("  {} {}", ui::label("Mode:"), ui::dim("interactive (read-only tools auto-approved)"));
+        println!(
+            "  {} {}",
+            ui::label("Mode:"),
+            ui::dim("interactive (read-only tools auto-approved)")
+        );
     }
     println!();
 }
@@ -155,14 +185,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             (Some(k), _) => k,
             (None, true) => String::new(),
             (None, false) => {
-                eprintln!("{} --api requires an API key (--api <KEY> or WORKSHOP_API_KEY) or WORKSHOP_API_ENABLED=1 for OIDC-only", ui::error("Error:"));
+                eprintln!(
+                    "{} --api requires an API key (--api <KEY> or WORKSHOP_API_KEY) or WORKSHOP_API_ENABLED=1 for OIDC-only",
+                    ui::error("Error:")
+                );
                 std::process::exit(1);
             }
         };
 
         let api_port: u16 = invocation
             .api_port
-            .or_else(|| std::env::var("WORKSHOP_API_PORT").ok().and_then(|p| p.parse().ok()))
+            .or_else(|| {
+                std::env::var("WORKSHOP_API_PORT")
+                    .ok()
+                    .and_then(|p| p.parse().ok())
+            })
             .unwrap_or(3002);
 
         workshop_api::start(WorkshopApiConfig {
@@ -202,8 +239,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .or_else(|| std::env::var("METALCRAFT_PRESET").ok());
     let presets_dir = metalcraft_agent::paths::agent_presets_dir();
-    let active_preset =
-        AgentPreset::load(preset_slug_owned.as_deref().unwrap_or(DEFAULT_PRESET), &presets_dir).ok();
+    let active_preset = AgentPreset::load(
+        preset_slug_owned.as_deref().unwrap_or(DEFAULT_PRESET),
+        &presets_dir,
+    )
+    .ok();
 
     // Persona resolution: explicit `--persona/-p` wins, then METALCRAFT_PERSONA, then
     // the active preset's default persona, then the Orchestrator — the agent that
@@ -230,13 +270,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
 
-    let mut model_name = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+    let mut model_name =
+        std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     let available_models = AVAILABLE_MODELS.to_vec();
 
     let is_headless = !atty::is(atty::Stream::Stdin);
     let approval_mode = if auto_approve || is_headless {
         if is_headless && !auto_approve {
-            eprintln!("{} {}", ui::warning("Notice:"), "no TTY detected, auto-approving all tools");
+            eprintln!(
+                "{} {}",
+                ui::warning("Notice:"),
+                "no TTY detected, auto-approving all tools"
+            );
         }
         ApprovalMode::AutoApprove
     } else {
@@ -261,7 +306,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 flow_id: None,
                 instance_id: None,
             });
-            println!("  {} {}\n", ui::label("Session:"), ui::path(logger.session_dir().display().to_string()));
+            println!(
+                "  {} {}\n",
+                ui::label("Session:"),
+                ui::path(logger.session_dir().display().to_string())
+            );
             Arc::new(logger)
         }
         Err(e) => {
@@ -298,7 +347,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
     // One session-long step guard (loop/error-spiral tracker), reused across
     // persona/model switches so its history survives them.
-    let step_guard = guard::build_agent_guard(guard::GuardConfig::default(), Some(diagnostics.clone()));
+    let step_guard =
+        guard::build_agent_guard(guard::GuardConfig::default(), Some(diagnostics.clone()));
     let mut current_persona_slug = persona_slug.to_string();
 
     if let Some(task) = one_shot_task {
@@ -336,14 +386,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if is_headless {
-        eprintln!("{} no TTY and no task provided. Use: metalcraft-agent \"<task>\" (optionally --persona <slug>)", ui::error("Error:"));
+        eprintln!(
+            "{} no TTY and no task provided. Use: metalcraft-agent \"<task>\" (optionally --persona <slug>)",
+            ui::error("Error:")
+        );
         std::process::exit(1);
     }
 
     println!(
         "{} {}\n",
         ui::heading("Interactive mode."),
-        ui::dim("Commands: /quit, /clear, /tokens, /cd [path], /persona [list|set <name>], /model [list|use <name>]")
+        ui::dim(
+            "Commands: /quit, /clear, /tokens, /cd [path], /persona [list|set <name>], /model [list|use <name>]"
+        )
     );
 
     let mut rl = DefaultEditor::new()?;
@@ -353,7 +408,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let line = match rl.readline(&prompt_str) {
             Ok(line) => line,
-            Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => {
+            Err(
+                rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof,
+            ) => {
                 println!("\n{}", ui::dim("Bye."));
                 break;
             }
@@ -378,13 +435,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if input == "/tokens" {
             match &state {
-                Some(s) => println!("{} ~{} tokens, {} messages\n", ui::label("Context:"), context::estimate_tokens(s), s.messages.len()),
+                Some(s) => println!(
+                    "{} ~{} tokens, {} messages\n",
+                    ui::label("Context:"),
+                    context::estimate_tokens(s),
+                    s.messages.len()
+                ),
                 None => println!("{}\n", ui::dim("No conversation yet.")),
             }
             continue;
         }
         if input == "/cd" {
-            println!("{} {}\n", ui::label("Working directory:"), ui::path(display_cwd(&cwd)));
+            println!(
+                "{} {}\n",
+                ui::label("Working directory:"),
+                ui::path(display_cwd(&cwd))
+            );
             continue;
         }
         if let Some(target) = input.strip_prefix("/cd ") {
@@ -396,7 +462,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                     cwd = new_path.display().to_string();
-                    let current_persona = Persona::load(&current_persona_slug, &runtime_context.personas_dir).unwrap();
+                    let current_persona =
+                        Persona::load(&current_persona_slug, &runtime_context.personas_dir)
+                            .unwrap();
                     match runtime::build_agent_runtime(
                         &runtime_context,
                         &current_persona,
@@ -416,7 +484,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(built) => {
                             turn_runner = runtime::TurnRunner::new(built);
                             prompt_str = build_prompt_str(&current_persona_slug, &cwd);
-                            println!("{} {}\n", ui::success("Working directory:"), ui::path(display_cwd(&cwd)));
+                            println!(
+                                "{} {}\n",
+                                ui::success("Working directory:"),
+                                ui::path(display_cwd(&cwd))
+                            );
                         }
                         Err(e) => {
                             eprintln!("{} {}\n", ui::error("/cd: failed to rebuild agent:"), e);
@@ -436,7 +508,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  {}\n", p.name);
                     println!("{}", ui::heading("Personas it can call:"));
                     for slug in p.callable_personas() {
-                        let marker = if slug == p.default_persona { " (default)" } else { "" };
+                        let marker = if slug == p.default_persona {
+                            " (default)"
+                        } else {
+                            ""
+                        };
                         println!("  {}{}", ui::accent(&slug), marker);
                     }
                 }
@@ -445,20 +521,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!();
             println!("{}", ui::heading("Available agents:"));
             for summary in AgentPreset::list_summaries(&presets_dir) {
-                println!("  {:<20} {}", ui::accent(&summary.slug), summary.description);
+                println!(
+                    "  {:<20} {}",
+                    ui::accent(&summary.slug),
+                    summary.description
+                );
             }
             println!();
-            println!("{}", ui::label("Switching agents starts a fresh session — restart with --preset <slug>."));
+            println!(
+                "{}",
+                ui::label(
+                    "Switching agents starts a fresh session — restart with --preset <slug>."
+                )
+            );
             println!();
             continue;
         }
 
         if input == "/persona" || input == "/persona list" {
-            println!("{} {}\n", ui::label("Current persona:"), ui::accent(&current_persona_slug));
+            println!(
+                "{} {}\n",
+                ui::label("Current persona:"),
+                ui::accent(&current_persona_slug)
+            );
             println!("{}", ui::heading("Available personas:"));
             let available = Persona::list_available(&runtime_context.personas_dir);
             for slug in &available {
-                let marker = if *slug == current_persona_slug { format!(" {}", ui::success("<-- active")) } else { String::new() };
+                let marker = if *slug == current_persona_slug {
+                    format!(" {}", ui::success("<-- active"))
+                } else {
+                    String::new()
+                };
                 if let Ok(p) = Persona::load(slug, &runtime_context.personas_dir) {
                     println!("  {:<24} {}{}", ui::accent(slug), p.description, marker);
                 } else {
@@ -495,30 +588,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             prompt_str = build_prompt_str(&current_persona_slug, &cwd);
                             state = None;
                             println!();
-                            print_persona_banner(&new_persona, new_slug, &model_name, &cwd, auto_approve);
-                            diagnostics.log_config_change("persona_switch", serde_json::json!({
-                                "new_persona": new_slug,
-                                "model": &model_name,
-                            }));
-                            println!("{}\n", ui::dim("Conversation cleared (new persona context)."));
+                            print_persona_banner(
+                                &new_persona,
+                                new_slug,
+                                &model_name,
+                                &cwd,
+                                auto_approve,
+                            );
+                            diagnostics.log_config_change(
+                                "persona_switch",
+                                serde_json::json!({
+                                    "new_persona": new_slug,
+                                    "model": &model_name,
+                                }),
+                            );
+                            println!(
+                                "{}\n",
+                                ui::dim("Conversation cleared (new persona context).")
+                            );
                         }
                         Err(e) => {
-                            eprintln!("{} '{}': {}\n", ui::error("Failed to build agent for"), new_slug, e);
+                            eprintln!(
+                                "{} '{}': {}\n",
+                                ui::error("Failed to build agent for"),
+                                new_slug,
+                                e
+                            );
                         }
                     }
                 }
                 Err(e) => {
                     eprintln!("{}\n", ui::error(e));
-                    println!("{} {:?}\n", ui::label("Available:"), Persona::list_available(&runtime_context.personas_dir));
+                    println!(
+                        "{} {:?}\n",
+                        ui::label("Available:"),
+                        Persona::list_available(&runtime_context.personas_dir)
+                    );
                 }
             }
             continue;
         }
         if input == "/model" || input == "/model list" {
-            println!("{} {}\n", ui::label("Current model:"), ui::accent(&model_name));
+            println!(
+                "{} {}\n",
+                ui::label("Current model:"),
+                ui::accent(&model_name)
+            );
             println!("{}", ui::heading("Available models:"));
             for m in &available_models {
-                let marker = if *m == model_name { format!(" {}", ui::success("<-- active")) } else { String::new() };
+                let marker = if *m == model_name {
+                    format!(" {}", ui::success("<-- active"))
+                } else {
+                    String::new()
+                };
                 println!("  {}{}", ui::accent(m), marker);
             }
             println!("\n{}", ui::dim("Use: /model use <name>"));
@@ -528,10 +650,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(new_model) = input.strip_prefix("/model use ") {
             let new_model = new_model.trim();
             if !available_models.contains(&new_model) {
-                eprintln!("{} '{}' . {}\n", ui::error("Unknown model"), new_model, ui::dim(format!("Available: {}", available_models.join(", "))));
+                eprintln!(
+                    "{} '{}' . {}\n",
+                    ui::error("Unknown model"),
+                    new_model,
+                    ui::dim(format!("Available: {}", available_models.join(", ")))
+                );
                 continue;
             }
-            let current_persona = Persona::load(&current_persona_slug, &runtime_context.personas_dir).unwrap();
+            let current_persona =
+                Persona::load(&current_persona_slug, &runtime_context.personas_dir).unwrap();
             match runtime::build_agent_runtime(
                 &runtime_context,
                 &current_persona,
@@ -553,15 +681,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     model_name = new_model.to_string();
                     state = None;
                     println!();
-                    print_persona_banner(&current_persona, &current_persona_slug, &model_name, &cwd, auto_approve);
-                    diagnostics.log_config_change("model_switch", serde_json::json!({
-                        "new_model": new_model,
-                        "persona": &current_persona_slug,
-                    }));
+                    print_persona_banner(
+                        &current_persona,
+                        &current_persona_slug,
+                        &model_name,
+                        &cwd,
+                        auto_approve,
+                    );
+                    diagnostics.log_config_change(
+                        "model_switch",
+                        serde_json::json!({
+                            "new_model": new_model,
+                            "persona": &current_persona_slug,
+                        }),
+                    );
                     println!("{}\n", ui::dim("Conversation cleared (new model context)."));
                 }
                 Err(e) => {
-                    eprintln!("{} '{}': {}\n", ui::error("Failed to switch to model"), new_model, e);
+                    eprintln!(
+                        "{} '{}': {}\n",
+                        ui::error("Failed to switch to model"),
+                        new_model,
+                        e
+                    );
                 }
             }
             continue;
@@ -583,14 +725,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match outcome {
             Ok(RunOutcome::Completed(completed_state)) => {
-                println!("\n{}", completed_state.final_answer().unwrap_or("(no answer)"));
+                println!(
+                    "\n{}",
+                    completed_state.final_answer().unwrap_or("(no answer)")
+                );
                 state = Some(completed_state);
             }
-            Ok(RunOutcome::Interrupted { state: s, reason, .. }) => {
+            Ok(RunOutcome::Interrupted {
+                state: s, reason, ..
+            }) => {
                 println!("\n{} {reason}", ui::warning("Interrupted:"));
                 state = Some(s);
             }
-            Ok(RunOutcome::Failed { state: s, node, error }) => {
+            Ok(RunOutcome::Failed {
+                state: s,
+                node,
+                error,
+            }) => {
                 eprintln!("\n{} {node}: {error}", ui::error("Failed:"));
                 // Keep the partial state so the next REPL turn can continue.
                 state = Some(s);

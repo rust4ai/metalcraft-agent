@@ -11,8 +11,8 @@
 use async_trait::async_trait;
 use metalcraft_agent::flow_exec::{FlowExecutor, FlowRunSummary};
 use metalcraft_agent::runtime::{AgentRuntimeContext, DEFAULT_MODEL};
-use metalcraft_flows::{validate, SavedFlow};
-use serde_json::{json, Value};
+use metalcraft_flows::{SavedFlow, validate};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// A deterministic stand-in for a weather API: always returns the fixed temp it
@@ -81,18 +81,30 @@ fn madrid_flow() -> SavedFlow {
       }
     }"##;
     let flow: SavedFlow = serde_json::from_str(raw).expect("flow parses");
-    assert!(validate(&flow).is_empty(), "flow validates: {:?}", validate(&flow));
+    assert!(
+        validate(&flow).is_empty(),
+        "flow validates: {:?}",
+        validate(&flow)
+    );
     flow
 }
 
 async fn run_madrid(ctx: &AgentRuntimeContext, temperature_f: i64) -> FlowRunSummary {
     let mock: Arc<dyn metalcraft::Tool> = Arc::new(MockWeatherTool { temperature_f });
-    FlowExecutor::new(ctx, madrid_flow(), ".", "coding-agent", DEFAULT_MODEL, &json!({}), None)
-        .expect("construct executor")
-        .with_extra_tools(vec![mock])
-        .run()
-        .await
-        .expect("run flow")
+    FlowExecutor::new(
+        ctx,
+        madrid_flow(),
+        ".",
+        "coding-agent",
+        DEFAULT_MODEL,
+        &json!({}),
+        None,
+    )
+    .expect("construct executor")
+    .with_extra_tools(vec![mock])
+    .run()
+    .await
+    .expect("run flow")
 }
 
 fn terminal_node(summary: &FlowRunSummary) -> &str {
@@ -107,7 +119,10 @@ fn terminal_node(summary: &FlowRunSummary) -> &str {
 async fn madrid_branch_routes_by_reported_temperature() {
     // Load .env so a key stored there is honored, matching from_environment().
     dotenvy::dotenv().ok();
-    if std::env::var("OPENAI_API_KEY").map(|k| k.is_empty()).unwrap_or(true) {
+    if std::env::var("OPENAI_API_KEY")
+        .map(|k| k.is_empty())
+        .unwrap_or(true)
+    {
         eprintln!("skipping madrid_branch_routes_by_reported_temperature: OPENAI_API_KEY not set");
         return;
     }
@@ -171,25 +186,39 @@ fn unanswerable_flow() -> SavedFlow {
       }
     }"##;
     let flow: SavedFlow = serde_json::from_str(raw).expect("flow parses");
-    assert!(validate(&flow).is_empty(), "flow validates: {:?}", validate(&flow));
+    assert!(
+        validate(&flow).is_empty(),
+        "flow validates: {:?}",
+        validate(&flow)
+    );
     flow
 }
 
 #[tokio::test]
 async fn branch_routes_error_rail_when_unanswerable() {
     dotenvy::dotenv().ok();
-    if std::env::var("OPENAI_API_KEY").map(|k| k.is_empty()).unwrap_or(true) {
+    if std::env::var("OPENAI_API_KEY")
+        .map(|k| k.is_empty())
+        .unwrap_or(true)
+    {
         eprintln!("skipping branch_routes_error_rail_when_unanswerable: OPENAI_API_KEY not set");
         return;
     }
     let ctx = AgentRuntimeContext::from_environment().expect("runtime context");
 
-    let summary =
-        FlowExecutor::new(&ctx, unanswerable_flow(), ".", "coding-agent", DEFAULT_MODEL, &json!({}), None)
-            .expect("construct executor")
-            .run()
-            .await
-            .expect("run flow");
+    let summary = FlowExecutor::new(
+        &ctx,
+        unanswerable_flow(),
+        ".",
+        "coding-agent",
+        DEFAULT_MODEL,
+        &json!({}),
+        None,
+    )
+    .expect("construct executor")
+    .run()
+    .await
+    .expect("run flow");
 
     // The run reaches the error terminal — it must NOT reach say_temp, and must
     // NOT report a non-error terminal as if the branch succeeded.
@@ -197,7 +226,11 @@ async fn branch_routes_error_rail_when_unanswerable() {
         terminal_node(&summary),
         "handle_err",
         "expected error rail; _last={}, trace={:?}",
-        summary.variables.get("_last").cloned().unwrap_or(Value::Null),
+        summary
+            .variables
+            .get("_last")
+            .cloned()
+            .unwrap_or(Value::Null),
         summary.steps
     );
 }

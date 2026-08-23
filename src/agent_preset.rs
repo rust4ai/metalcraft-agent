@@ -70,7 +70,7 @@ pub struct MemoriesRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AgentPreset {
-    #[serde(default = "one")]
+    #[serde(default = "legacy_manifest_version")]
     pub manifest_version: u32,
     pub slug: String,
     pub name: String,
@@ -102,7 +102,19 @@ pub struct AgentPreset {
     pub version: Option<String>,
 }
 
-fn one() -> u32 {
+/// The version this agent writes into every preset it saves.
+///
+/// Aligned with the archive manifest's version (`agent_packs::manifest::MANIFEST_VERSION`)
+/// so a spec-2 pack does not contain a document numbered 1 — which read as a mistake
+/// often enough to be one. Nothing about the preset *format* changed at 2; the number
+/// moved so the two documents stop disagreeing.
+pub const PRESET_MANIFEST_VERSION: u32 = 2;
+
+/// What a preset with no `manifest_version` is: written before the field existed, which
+/// is every preset on every pod today. Reading them keeps working — the version is
+/// upgraded when the preset is next saved, not when it is read, so nothing rewrites a
+/// user's files behind their back.
+fn legacy_manifest_version() -> u32 {
     1
 }
 
@@ -146,7 +158,9 @@ impl AgentPreset {
             .unwrap_or_else(|| format!("Agent preset '{slug}' not found"))),
             _ => {
                 // A user-local copy always wins outright; it is the operator's own file.
-                let local = providers.iter().find(|(_, origin)| origin.pack_id().is_none());
+                let local = providers
+                    .iter()
+                    .find(|(_, origin)| origin.pack_id().is_none());
                 if let Some((path, _)) = local {
                     return Self::read(path);
                 }
@@ -189,7 +203,12 @@ impl AgentPreset {
         for pack in crate::integrations::installed_integrations() {
             let candidate = pack.root.join("agent_presets").join(filename);
             if candidate.is_file() {
-                out.push((candidate, IntegrationOrigin::Pack { id: pack.manifest.id.clone() }));
+                out.push((
+                    candidate,
+                    IntegrationOrigin::Pack {
+                        id: pack.manifest.id.clone(),
+                    },
+                ));
             }
         }
         out
@@ -211,8 +230,17 @@ impl AgentPreset {
 
     /// Structural checks that do not need the filesystem.
     pub fn validate(&self) -> Result<(), String> {
+        if self.manifest_version > PRESET_MANIFEST_VERSION {
+            return Err(format!(
+                "Agent preset '{}' is manifest_version {}; this agent understands up to {}",
+                self.slug, self.manifest_version, PRESET_MANIFEST_VERSION
+            ));
+        }
         if self.default_persona.trim().is_empty() {
-            return Err(format!("Agent preset '{}' has no default_persona", self.slug));
+            return Err(format!(
+                "Agent preset '{}' has no default_persona",
+                self.slug
+            ));
         }
         let defaults = self
             .personas
@@ -225,7 +253,8 @@ impl AgentPreset {
                 self.slug
             ));
         }
-        if !self.personas.is_empty() && !self.personas.iter().any(|p| p.slug == self.default_persona)
+        if !self.personas.is_empty()
+            && !self.personas.iter().any(|p| p.slug == self.default_persona)
         {
             return Err(format!(
                 "Agent preset '{}' names default_persona '{}', which is not in its roster",
@@ -257,7 +286,9 @@ impl AgentPreset {
             crate::integrations::list_files_layered(presets_dir, "agent_presets", "json")
                 .into_iter()
                 .filter_map(|(path, _)| {
-                    path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
                 })
                 .collect();
         slugs.sort();
@@ -291,7 +322,12 @@ impl AgentPreset {
         std::fs::create_dir_all(presets_dir)
             .map_err(|e| format!("Failed to create {}: {e}", presets_dir.display()))?;
         let path = presets_dir.join(format!("{}.json", self.slug));
-        let json = serde_json::to_string_pretty(self)
+        // Whatever came in, what goes out is current. A pre-2 preset is upgraded the
+        // first time something saves it rather than by a migration pass, so a pod that
+        // never edits a preset never rewrites it.
+        let mut current = self.clone();
+        current.manifest_version = PRESET_MANIFEST_VERSION;
+        let json = serde_json::to_string_pretty(&current)
             .map_err(|e| format!("Failed to serialize preset: {e}"))?;
         std::fs::write(&path, json).map_err(|e| format!("Failed to write {}: {e}", path.display()))
     }
@@ -299,7 +335,9 @@ impl AgentPreset {
     pub fn delete(slug: &str, presets_dir: &Path) -> Result<(), String> {
         let path = presets_dir.join(format!("{slug}.json"));
         if !path.is_file() {
-            return Err(format!("Agent preset '{slug}' is not user-owned (nothing to delete)"));
+            return Err(format!(
+                "Agent preset '{slug}' is not user-owned (nothing to delete)"
+            ));
         }
         std::fs::remove_file(&path).map_err(|e| format!("Failed to delete {}: {e}", path.display()))
     }
@@ -319,6 +357,50 @@ pub fn resolve_default_persona(preset_slug: Option<&str>, presets_dir: &Path) ->
             }
             crate::runtime::DEFAULT_PERSONA.to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    fn preset(json: &str) -> AgentPreset {
+        serde_json::from_str(json).expect("preset")
+    }
+
+    #[test]
+    fn a_preset_with_no_version_reads_as_the_legacy_one() {
+        // Every preset on every pod predates the field. Refusing them would break
+        // working installs to align a number.
+        let p = preset(r#"{"slug":"a","name":"A","default_persona":"x"}"#);
+        assert_eq!(p.manifest_version, 1);
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn a_version_1_preset_still_validates() {
+        let p = preset(r#"{"manifest_version":1,"slug":"a","name":"A","default_persona":"x"}"#);
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn a_preset_from_a_newer_agent_is_refused_rather_than_guessed_at() {
+        let p = preset(r#"{"manifest_version":99,"slug":"a","name":"A","default_persona":"x"}"#);
+        let err = p.validate().unwrap_err();
+        assert!(err.contains("understands up to"), "{err}");
+    }
+
+    #[test]
+    fn saving_upgrades_a_legacy_preset_to_the_current_version() {
+        let dir = std::env::temp_dir().join(format!("preset-version-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = preset(r#"{"manifest_version":1,"slug":"a","name":"A","default_persona":"x"}"#);
+        p.save(&dir).expect("save");
+        let written = AgentPreset::load("a", &dir).expect("load");
+        assert_eq!(written.manifest_version, PRESET_MANIFEST_VERSION);
+        // …and the in-memory value the caller holds is untouched.
+        assert_eq!(p.manifest_version, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -347,7 +429,10 @@ mod tests {
                 {"slug":"z","role":"internal"}]}"#,
         );
         assert_eq!(p.callable_personas(), vec!["x", "y"]);
-        assert!(p.allows_persona("z"), "internal is reachable, just not offered");
+        assert!(
+            p.allows_persona("z"),
+            "internal is reachable, just not offered"
+        );
         assert!(!p.allows_persona("w"));
     }
 

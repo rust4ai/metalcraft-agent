@@ -181,7 +181,10 @@ impl HttpApiTool {
                 }
                 let placeholder = format!("{{{key}}}");
                 if url.contains(&placeholder) {
-                    let val_str = value.as_str().map(|s| s.to_string()).unwrap_or_else(|| value.to_string());
+                    let val_str = value
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| value.to_string());
                     url = url.replace(&placeholder, &val_str);
                 }
             }
@@ -293,7 +296,10 @@ impl HttpApiTool {
                     if let Some(obj) = args.as_object() {
                         for (key, value) in obj {
                             let placeholder = format!("{{{key}}}");
-                            let val_str = value.as_str().map(|s| s.to_string()).unwrap_or_else(|| value.to_string());
+                            let val_str = value
+                                .as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| value.to_string());
                             result = result.replace(&placeholder, &val_str);
                         }
                     }
@@ -310,7 +316,11 @@ impl HttpApiTool {
     /// `"payload.structured_data.params.prompt"`), creating intermediate JSON
     /// objects as needed. If an intermediate segment exists but is not an
     /// object, it is overwritten with one. An empty path is a no-op.
-    fn insert_at_path(root: &mut serde_json::Map<String, serde_json::Value>, path: &str, value: serde_json::Value) {
+    fn insert_at_path(
+        root: &mut serde_json::Map<String, serde_json::Value>,
+        path: &str,
+        value: serde_json::Value,
+    ) {
         let mut segments = path.split('.').filter(|s| !s.is_empty()).peekable();
         let Some(first) = segments.next() else {
             return;
@@ -352,24 +362,36 @@ impl HttpApiTool {
     /// part; every other arg becomes a text field. Do **not** set a manual
     /// `Content-Type` header on a multipart tool — reqwest supplies the
     /// `multipart/form-data; boundary=…` value itself.
-    fn build_multipart(&self, args: &serde_json::Value) -> metalcraft::Result<reqwest::multipart::Form> {
+    fn build_multipart(
+        &self,
+        args: &serde_json::Value,
+    ) -> metalcraft::Result<reqwest::multipart::Form> {
         let mp = self.config.multipart.as_ref().ok_or_else(|| {
-            make_error(&self.config.name, "body_mapping=\"multipart\" requires a `multipart` config block")
+            make_error(
+                &self.config.name,
+                "body_mapping=\"multipart\" requires a `multipart` config block",
+            )
         })?;
         let obj = args.as_object().ok_or_else(|| {
             make_error(&self.config.name, "multipart tool expects object arguments")
         })?;
-        let path_str = obj.get(&mp.file_param).and_then(|v| v.as_str()).ok_or_else(|| {
-            make_error(
-                &self.config.name,
-                format!("missing required file path argument `{}`", mp.file_param),
-            )
-        })?;
+        let path_str = obj
+            .get(&mp.file_param)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                make_error(
+                    &self.config.name,
+                    format!("missing required file path argument `{}`", mp.file_param),
+                )
+            })?;
 
         let resolved = Self::resolve_within_upload_root(path_str)
             .map_err(|e| make_error(&self.config.name, e))?;
         let bytes = std::fs::read(&resolved).map_err(|e| {
-            make_error(&self.config.name, format!("failed to read {}: {e}", resolved.display()))
+            make_error(
+                &self.config.name,
+                format!("failed to read {}: {e}", resolved.display()),
+            )
         })?;
         let file_name = resolved
             .file_name()
@@ -383,7 +405,10 @@ impl HttpApiTool {
             if k == &mp.file_param {
                 continue;
             }
-            let val = v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+            let val = v
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| v.to_string());
             form = form.text(k.clone(), val);
         }
         Ok(form)
@@ -434,11 +459,12 @@ impl metalcraft::Tool for HttpApiTool {
     }
 
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let method: reqwest::Method = self
-            .config
-            .method
-            .parse()
-            .map_err(|_| make_error(&self.config.name, format!("Invalid HTTP method: {}", self.config.method)))?;
+        let method: reqwest::Method = self.config.method.parse().map_err(|_| {
+            make_error(
+                &self.config.name,
+                format!("Invalid HTTP method: {}", self.config.method),
+            )
+        })?;
 
         let url = self.expand_url(&args);
 
@@ -446,7 +472,12 @@ impl metalcraft::Tool for HttpApiTool {
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .user_agent("metalcraft-agent/0.1 (http_api_tool)")
             .build()
-            .map_err(|e| make_error(&self.config.name, format!("Failed to create HTTP client: {e}")))?;
+            .map_err(|e| {
+                make_error(
+                    &self.config.name,
+                    format!("Failed to create HTTP client: {e}"),
+                )
+            })?;
 
         let mut req = client.request(method, &url);
 
@@ -464,9 +495,10 @@ impl metalcraft::Tool for HttpApiTool {
             req = req.json(&body);
         }
 
-        let response = req.send().await.map_err(|e| {
-            make_error(&self.config.name, format!("Request to {url} failed: {e}"))
-        })?;
+        let response = req
+            .send()
+            .await
+            .map_err(|e| make_error(&self.config.name, format!("Request to {url} failed: {e}")))?;
 
         let status = response.status().as_u16();
         let body_text = response.text().await.unwrap_or_default();
@@ -515,25 +547,32 @@ mod tests {
 
     #[test]
     fn clean_placeholders_no_query_string() {
-        let result = HttpApiTool::clean_unexpanded_placeholders("http://example.com/api/v1/channels/123");
+        let result =
+            HttpApiTool::clean_unexpanded_placeholders("http://example.com/api/v1/channels/123");
         assert_eq!(result, "http://example.com/api/v1/channels/123");
     }
 
     #[test]
     fn clean_placeholders_all_expanded() {
-        let result = HttpApiTool::clean_unexpanded_placeholders("http://example.com/api?limit=10&platform=discord");
+        let result = HttpApiTool::clean_unexpanded_placeholders(
+            "http://example.com/api?limit=10&platform=discord",
+        );
         assert_eq!(result, "http://example.com/api?limit=10&platform=discord");
     }
 
     #[test]
     fn clean_placeholders_removes_unexpanded() {
-        let result = HttpApiTool::clean_unexpanded_placeholders("http://example.com/api?limit={limit}&platform=discord");
+        let result = HttpApiTool::clean_unexpanded_placeholders(
+            "http://example.com/api?limit={limit}&platform=discord",
+        );
         assert_eq!(result, "http://example.com/api?platform=discord");
     }
 
     #[test]
     fn clean_placeholders_all_unexpanded() {
-        let result = HttpApiTool::clean_unexpanded_placeholders("http://example.com/api?limit={limit}&offset={offset}");
+        let result = HttpApiTool::clean_unexpanded_placeholders(
+            "http://example.com/api?limit={limit}&offset={offset}",
+        );
         assert_eq!(result, "http://example.com/api");
     }
 
@@ -558,7 +597,8 @@ mod tests {
     #[test]
     fn build_body_params_with_defaults() {
         let mut cfg = base_config();
-        cfg.body_defaults.insert("platform".into(), json!("discord"));
+        cfg.body_defaults
+            .insert("platform".into(), json!("discord"));
         let tool = make_tool(cfg);
         let args = json!({"channel_id": "123", "content": "hello"});
         let body = tool.build_body(&args).unwrap();
@@ -570,7 +610,8 @@ mod tests {
     #[test]
     fn build_body_args_override_defaults() {
         let mut cfg = base_config();
-        cfg.body_defaults.insert("platform".into(), json!("discord"));
+        cfg.body_defaults
+            .insert("platform".into(), json!("discord"));
         let tool = make_tool(cfg);
         let args = json!({"platform": "slack", "content": "hello"});
         let body = tool.build_body(&args).unwrap();
@@ -596,10 +637,13 @@ mod tests {
         let mut cfg = base_config();
         cfg.url = "https://api.cal.com/v2/grants/{grant_id}/events".into();
         cfg.body_mapping = "params_nested".into();
-        cfg.param_paths.insert("name".into(), "attendee.name".into());
+        cfg.param_paths
+            .insert("name".into(), "attendee.name".into());
         let tool = make_tool(cfg);
         let body = tool
-            .build_body(&json!({"grant_id": "g_1", "start": "2026-01-01T09:00:00Z", "name": "Alex"}))
+            .build_body(
+                &json!({"grant_id": "g_1", "start": "2026-01-01T09:00:00Z", "name": "Alex"}),
+            )
             .unwrap();
         assert!(body.get("grant_id").is_none());
         assert_eq!(body["start"], "2026-01-01T09:00:00Z");
@@ -617,23 +661,44 @@ mod tests {
             "payload".into(),
             json!({ "structured_data": { "model_key": "ideogram-v3" } }),
         );
-        cfg.param_paths.insert("prompt".into(), "payload.structured_data.params.prompt".into());
-        cfg.param_paths.insert("model_key".into(), "payload.structured_data.model_key".into());
-        cfg.param_paths.insert("aspect_ratio".into(), "payload.structured_data.params.aspect_ratio".into());
+        cfg.param_paths.insert(
+            "prompt".into(),
+            "payload.structured_data.params.prompt".into(),
+        );
+        cfg.param_paths.insert(
+            "model_key".into(),
+            "payload.structured_data.model_key".into(),
+        );
+        cfg.param_paths.insert(
+            "aspect_ratio".into(),
+            "payload.structured_data.params.aspect_ratio".into(),
+        );
         let tool = make_tool(cfg);
 
         // Only prompt provided: default model_key survives, params nested.
         let body = tool.build_body(&json!({"prompt": "a red fox"})).unwrap();
         assert_eq!(body["type"], "image");
-        assert_eq!(body["payload"]["structured_data"]["model_key"], "ideogram-v3");
-        assert_eq!(body["payload"]["structured_data"]["params"]["prompt"], "a red fox");
+        assert_eq!(
+            body["payload"]["structured_data"]["model_key"],
+            "ideogram-v3"
+        );
+        assert_eq!(
+            body["payload"]["structured_data"]["params"]["prompt"],
+            "a red fox"
+        );
 
         // Provided model_key overrides the default.
         let body = tool
             .build_body(&json!({"prompt": "x", "model_key": "gpt-image-2", "aspect_ratio": "16:9"}))
             .unwrap();
-        assert_eq!(body["payload"]["structured_data"]["model_key"], "gpt-image-2");
-        assert_eq!(body["payload"]["structured_data"]["params"]["aspect_ratio"], "16:9");
+        assert_eq!(
+            body["payload"]["structured_data"]["model_key"],
+            "gpt-image-2"
+        );
+        assert_eq!(
+            body["payload"]["structured_data"]["params"]["aspect_ratio"],
+            "16:9"
+        );
     }
 
     #[test]
@@ -644,8 +709,14 @@ mod tests {
             "payload".into(),
             json!({ "structured_data": { "model_key": "ideogram-v3" } }),
         );
-        cfg.param_paths.insert("model_key".into(), "payload.structured_data.model_key".into());
-        cfg.param_paths.insert("prompt".into(), "payload.structured_data.params.prompt".into());
+        cfg.param_paths.insert(
+            "model_key".into(),
+            "payload.structured_data.model_key".into(),
+        );
+        cfg.param_paths.insert(
+            "prompt".into(),
+            "payload.structured_data.params.prompt".into(),
+        );
         let tool = make_tool(cfg);
 
         // A model that fills omitted optionals with "" / null must NOT clobber
@@ -653,16 +724,27 @@ mod tests {
         let body = tool
             .build_body(&json!({"prompt": "a fox", "model_key": "", "aspect_ratio": null}))
             .unwrap();
-        assert_eq!(body["payload"]["structured_data"]["model_key"], "ideogram-v3");
-        assert_eq!(body["payload"]["structured_data"]["params"]["prompt"], "a fox");
-        assert!(body["payload"]["structured_data"]["params"].get("aspect_ratio").is_none());
+        assert_eq!(
+            body["payload"]["structured_data"]["model_key"],
+            "ideogram-v3"
+        );
+        assert_eq!(
+            body["payload"]["structured_data"]["params"]["prompt"],
+            "a fox"
+        );
+        assert!(
+            body["payload"]["structured_data"]["params"]
+                .get("aspect_ratio")
+                .is_none()
+        );
     }
 
     #[test]
     fn build_body_params_nested_encodes_special_chars_safely() {
         let mut cfg = base_config();
         cfg.body_mapping = "params_nested".into();
-        cfg.param_paths.insert("prompt".into(), "payload.prompt".into());
+        cfg.param_paths
+            .insert("prompt".into(), "payload.prompt".into());
         let tool = make_tool(cfg);
         // A prompt with quotes and a newline would break template substitution;
         // here it round-trips as a real JSON string value.
@@ -698,7 +780,8 @@ mod tests {
     #[test]
     fn expand_url_replaces_provided_params() {
         let mut cfg = base_config();
-        cfg.url = "http://localhost/channels/{channel_id}/messages?limit={limit}&platform=discord".into();
+        cfg.url =
+            "http://localhost/channels/{channel_id}/messages?limit={limit}&platform=discord".into();
         let tool = make_tool(cfg);
         let args = json!({"channel_id": "456", "limit": 20});
         let url = tool.expand_url(&args);
@@ -710,7 +793,8 @@ mod tests {
     #[test]
     fn expand_url_cleans_missing_optional_params() {
         let mut cfg = base_config();
-        cfg.url = "http://localhost/channels/{channel_id}/messages?limit={limit}&platform=discord".into();
+        cfg.url =
+            "http://localhost/channels/{channel_id}/messages?limit={limit}&platform=discord".into();
         let tool = make_tool(cfg);
         let args = json!({"channel_id": "456"});
         let url = tool.expand_url(&args);
@@ -725,14 +809,21 @@ mod tests {
         // produce `?name=&type=` segments; those are dropped so the API doesn't
         // read them as "match the empty string" (the Cloudflare zone-listing bug).
         let mut cfg = base_config();
-        cfg.url = "https://api.cloudflare.com/client/v4/zones?name={name}&per_page={per_page}".into();
+        cfg.url =
+            "https://api.cloudflare.com/client/v4/zones?name={name}&per_page={per_page}".into();
         let tool = make_tool(cfg);
         let url = tool.expand_url(&json!({"name": "", "per_page": 50}));
-        assert!(!url.contains("name="), "empty name should be dropped, got {url}");
+        assert!(
+            !url.contains("name="),
+            "empty name should be dropped, got {url}"
+        );
         assert!(url.contains("per_page=50"));
 
         let url_null = tool.expand_url(&json!({"name": null, "per_page": 50}));
-        assert!(!url_null.contains("name="), "null name should be dropped, got {url_null}");
+        assert!(
+            !url_null.contains("name="),
+            "null name should be dropped, got {url_null}"
+        );
         assert!(url_null.contains("per_page=50"));
     }
 

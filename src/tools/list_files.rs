@@ -5,7 +5,9 @@ pub struct ListFilesTool;
 
 #[async_trait]
 impl metalcraft::Tool for ListFilesTool {
-    fn name(&self) -> &str { "list_files" }
+    fn name(&self) -> &str {
+        "list_files"
+    }
     fn description(&self) -> &str {
         "List files and directories at a given path. Set recursive=true for tree view (max depth 3)."
     }
@@ -26,10 +28,13 @@ impl metalcraft::Tool for ListFilesTool {
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let path_str = args["path"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "list_files".into(),
-            message: "Missing required parameter: path".into(),
-        })?;
+        let path_str =
+            args["path"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "list_files".into(),
+                    message: "Missing required parameter: path".into(),
+                })?;
         let recursive = args["recursive"].as_bool().unwrap_or(false);
         let path = Path::new(path_str);
 

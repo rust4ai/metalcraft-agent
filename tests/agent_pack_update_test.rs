@@ -21,9 +21,14 @@ fn persona(slug: &str) -> Vec<u8> {
 }
 
 fn preset(slug: &str, default: &str, roster: &[&str]) -> Vec<u8> {
-    let personas: Vec<_> = std::iter::once(serde_json::json!({ "slug": default, "role": "default" }))
-        .chain(roster.iter().map(|s| serde_json::json!({ "slug": s, "role": "subagent" })))
-        .collect();
+    let personas: Vec<_> =
+        std::iter::once(serde_json::json!({ "slug": default, "role": "default" }))
+            .chain(
+                roster
+                    .iter()
+                    .map(|s| serde_json::json!({ "slug": s, "role": "subagent" })),
+            )
+            .collect();
     serde_json::to_vec(&serde_json::json!({
         "slug": slug,
         "name": "Amy",
@@ -38,7 +43,10 @@ fn preset(slug: &str, default: &str, roster: &[&str]) -> Vec<u8> {
 /// v1: preset `amy-kitchen`, default `amy`, roster also has `amy-shopper`.
 fn v1() -> (AgentPackManifest, BTreeMap<String, Vec<u8>>) {
     let mut f = BTreeMap::new();
-    f.insert("agent_presets/amy-kitchen.json".into(), preset("amy-kitchen", "amy", &["amy-shopper"]));
+    f.insert(
+        "agent_presets/amy-kitchen.json".into(),
+        preset("amy-kitchen", "amy", &["amy-shopper"]),
+    );
     f.insert(
         "agent_presets/amy-kitchen/memories.jsonl".into(),
         b"{\"kind\":\"Semantic\",\"content\":\"Amy braises.\",\"summary\":\"braise\"}\n".to_vec(),
@@ -94,24 +102,41 @@ fn an_update_carries_agents_forward_and_says_what_changed() {
     m2.version = "2.0.0".into();
     m2.provides.personas = vec!["amy".into()];
     f2.remove("personas/amy-shopper.json");
-    f2.insert("agent_presets/amy-kitchen.json".into(), preset("amy-kitchen", "amy", &[]));
+    f2.insert(
+        "agent_presets/amy-kitchen.json".into(),
+        preset("amy-kitchen", "amy", &[]),
+    );
     let archive2 = bundle::write(m2, f2).unwrap();
 
     let report = agent_packs::update(&archive2, "bundle").expect("update to v2");
     assert_eq!(report.from_version, "1.0.0");
     assert_eq!(report.to_version, "2.0.0");
-    assert_eq!(report.personas_fell_back.len(), 1, "{:?}", report.personas_fell_back);
+    assert_eq!(
+        report.personas_fell_back.len(),
+        1,
+        "{:?}",
+        report.personas_fell_back
+    );
     let fell = &report.personas_fell_back[0];
     assert_eq!(fell.instance, shopper.id);
     assert_eq!(fell.from, "amy-shopper");
     assert_eq!(fell.to, "amy");
-    assert!(report.orphaned.is_empty(), "the preset survived, so nothing is orphaned");
+    assert!(
+        report.orphaned.is_empty(),
+        "the preset survived, so nothing is orphaned"
+    );
 
     // The record says so, rather than the change being invisible.
     let reloaded = metalcraft_agent::agent_instance::load(&shopper.id).unwrap();
     assert_eq!(reloaded.persona, "amy");
-    assert_eq!(reloaded.persona_fallback_from.as_deref(), Some("amy-shopper"));
-    assert_eq!(reloaded.name, "Amy shopping", "an update never renames an agent");
+    assert_eq!(
+        reloaded.persona_fallback_from.as_deref(),
+        Some("amy-shopper")
+    );
+    assert_eq!(
+        reloaded.name, "Amy shopping",
+        "an update never renames an agent"
+    );
 
     // The untouched agent is untouched.
     let keeper_now = metalcraft_agent::agent_instance::load(&keeper.id).unwrap();
@@ -127,18 +152,33 @@ fn an_update_carries_agents_forward_and_says_what_changed() {
         integrations: vec![],
     };
     let mut f3 = BTreeMap::new();
-    f3.insert("agent_presets/amy-baking.json".into(), preset("amy-baking", "amy", &[]));
+    f3.insert(
+        "agent_presets/amy-baking.json".into(),
+        preset("amy-baking", "amy", &[]),
+    );
     f3.insert("personas/amy.json".into(), persona("amy"));
     let archive3 = bundle::write(m3, f3).unwrap();
 
     let report = agent_packs::update(&archive3, "bundle").expect("update to v3");
-    assert_eq!(report.orphaned.len(), 2, "both agents used the withdrawn preset");
-    assert!(report.orphaned.iter().all(|o| o.agent_preset == "amy-kitchen"));
+    assert_eq!(
+        report.orphaned.len(),
+        2,
+        "both agents used the withdrawn preset"
+    );
+    assert!(
+        report
+            .orphaned
+            .iter()
+            .all(|o| o.agent_preset == "amy-kitchen")
+    );
 
     // Nothing was deleted: somebody's memory and conversations are in there.
     let keeper_now = metalcraft_agent::agent_instance::load(&keeper.id).unwrap();
     assert_eq!(keeper_now.name, "Amy at home");
-    assert_eq!(keeper_now.orphaned_from.as_deref(), Some("amy-kitchen-agent"));
+    assert_eq!(
+        keeper_now.orphaned_from.as_deref(),
+        Some("amy-kitchen-agent")
+    );
 
     // And it still resolves — the frozen copy landed in the user-local layer, which
     // is top precedence, so every existing call site keeps working unchanged.
@@ -149,7 +189,9 @@ fn an_update_carries_agents_forward_and_says_what_changed() {
     .expect("an orphaned agent's preset must still resolve");
     assert_eq!(frozen.default_persona, "amy");
     assert!(
-        metalcraft_agent::paths::data_dir().join("personas/amy.json").is_file(),
+        metalcraft_agent::paths::data_dir()
+            .join("personas/amy.json")
+            .is_file(),
         "the personas it names are frozen alongside it, or the preset resolves to nothing"
     );
 

@@ -16,11 +16,13 @@ use std::path::{Path, PathBuf};
 fn seeded_api_tools() -> Vec<(PathBuf, HttpApiToolConfig)> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/integrations");
     let mut out = Vec::new();
-    let packs = std::fs::read_dir(&root)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", root.display()));
+    let packs =
+        std::fs::read_dir(&root).unwrap_or_else(|e| panic!("reading {}: {e}", root.display()));
     for pack in packs.filter_map(|e| e.ok()) {
         let dir = pack.path().join("api_tools");
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
@@ -39,7 +41,10 @@ fn seeded_api_tools() -> Vec<(PathBuf, HttpApiToolConfig)> {
 #[test]
 fn every_seeded_api_tool_parses_and_is_coherent() {
     let tools = seeded_api_tools();
-    assert!(!tools.is_empty(), "no seeded api tools found — did seed/ move?");
+    assert!(
+        !tools.is_empty(),
+        "no seeded api tools found — did seed/ move?"
+    );
 
     let mut problems: Vec<String> = Vec::new();
     for (path, c) in &tools {
@@ -49,7 +54,10 @@ fn every_seeded_api_tool_parses_and_is_coherent() {
         // The filename IS the tool name at resolution time, so a mismatch means the
         // registry registers one name while the persona references another.
         if c.name != file {
-            bad(format!("declares name '{}' but the file is '{file}.json'", c.name));
+            bad(format!(
+                "declares name '{}' but the file is '{file}.json'",
+                c.name
+            ));
         }
         if c.description.trim().is_empty() {
             bad("empty description — the model has nothing to choose it by".into());
@@ -81,7 +89,10 @@ fn every_seeded_api_tool_parses_and_is_coherent() {
             bad("body_mapping 'multipart' without a multipart config".into());
         }
         if c.body_mapping != "params_nested" && !c.param_paths.is_empty() {
-            bad(format!("param_paths set but body_mapping is '{}'", c.body_mapping));
+            bad(format!(
+                "param_paths set but body_mapping is '{}'",
+                c.body_mapping
+            ));
         }
 
         // Parameters must be a JSON-Schema object, or the provider rejects the
@@ -96,9 +107,10 @@ fn every_seeded_api_tool_parses_and_is_coherent() {
 
         // Every `required` entry must exist in `properties` — otherwise the model
         // is told to supply an argument the schema does not define.
-        if let (Some(props), Some(required)) =
-            (props, c.parameters.get("required").and_then(|v| v.as_array()))
-        {
+        if let (Some(props), Some(required)) = (
+            props,
+            c.parameters.get("required").and_then(|v| v.as_array()),
+        ) {
             for r in required.iter().filter_map(|v| v.as_str()) {
                 if !props.contains_key(r) {
                     bad(format!("requires '{r}', which is not in properties"));
@@ -111,13 +123,19 @@ fn every_seeded_api_tool_parses_and_is_coherent() {
         if let Some(props) = props {
             for placeholder in url_placeholders(&c.url) {
                 if !props.contains_key(&placeholder) {
-                    bad(format!("url references {{{placeholder}}}, which is not a parameter"));
+                    bad(format!(
+                        "url references {{{placeholder}}}, which is not a parameter"
+                    ));
                 }
             }
         }
     }
 
-    assert!(problems.is_empty(), "malformed seeded api tools:\n  - {}", problems.join("\n  - "));
+    assert!(
+        problems.is_empty(),
+        "malformed seeded api tools:\n  - {}",
+        problems.join("\n  - ")
+    );
 }
 
 #[test]
@@ -128,10 +146,19 @@ fn seeded_api_tool_names_are_unique_across_packs() {
     let mut clashes = Vec::new();
     for (path, c) in seeded_api_tools() {
         if let Some(first) = seen.insert(c.name.clone(), path.clone()) {
-            clashes.push(format!("'{}' in both {} and {}", c.name, first.display(), path.display()));
+            clashes.push(format!(
+                "'{}' in both {} and {}",
+                c.name,
+                first.display(),
+                path.display()
+            ));
         }
     }
-    assert!(clashes.is_empty(), "duplicate api tool names:\n  - {}", clashes.join("\n  - "));
+    assert!(
+        clashes.is_empty(),
+        "duplicate api tool names:\n  - {}",
+        clashes.join("\n  - ")
+    );
 }
 
 #[test]
@@ -150,11 +177,17 @@ fn seeded_api_tools_reference_only_declared_env_keys() {
             serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
         let declared: Vec<String> = manifest["requires_env"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let dir = pack.path().join("api_tools");
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
@@ -175,7 +208,11 @@ fn seeded_api_tools_reference_only_declared_env_keys() {
             }
         }
     }
-    assert!(problems.is_empty(), "undeclared env references:\n  - {}", problems.join("\n  - "));
+    assert!(
+        problems.is_empty(),
+        "undeclared env references:\n  - {}",
+        problems.join("\n  - ")
+    );
 }
 
 /// `{name}` segments in a URL, ignoring `{{escaped}}` doubles.

@@ -38,17 +38,19 @@ use spice_framework::agent::{
     AgentConfig, AgentOutput, AgentUnderTest, ToolCall as SpiceToolCall, Turn as SpiceTurn,
 };
 use spice_framework::error::SpiceError;
-use spice_framework::{suite, test, Runner, RunnerConfig};
+use spice_framework::{Runner, RunnerConfig, suite, test};
 
 use rig::client::CompletionClient;
 
-use metalcraft::{AgentState, Executor, RunOutcome, ToolChoice, Tool};
+use metalcraft::{AgentState, Executor, RunOutcome, Tool, ToolChoice};
 use metalcraft_agent::approval::ApprovalMode;
-use metalcraft_agent::guard::{build_agent_guard, GuardConfig};
+use metalcraft_agent::guard::{GuardConfig, build_agent_guard};
 use metalcraft_agent::persona::Persona;
-use metalcraft_agent::runtime::{build_agent_runtime, AgentRuntimeContext, RuntimeOptions, DEFAULT_MODEL};
-use metalcraft_agent::tools::{say_to_user::SayToUserTool, ReplySink};
+use metalcraft_agent::runtime::{
+    AgentRuntimeContext, DEFAULT_MODEL, RuntimeOptions, build_agent_runtime,
+};
 use metalcraft_agent::seed;
+use metalcraft_agent::tools::{ReplySink, say_to_user::SayToUserTool};
 
 /// The persona a WhatsApp / PipeStreamr channel binds by default when its
 /// `persona` setting is left blank (see
@@ -62,7 +64,8 @@ static INIT: Once = Once::new();
 
 fn init() {
     INIT.call_once(|| {
-        let data_dir = std::env::temp_dir().join(format!("mc-gateway-spice-{}", std::process::id()));
+        let data_dir =
+            std::env::temp_dir().join(format!("mc-gateway-spice-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data_dir);
         // SAFETY: set before any other thread touches paths::data_dir(); guarded
         // by `Once` so it happens exactly once.
@@ -155,7 +158,11 @@ impl GatewayPersonaAgent {
 
 #[async_trait]
 impl AgentUnderTest for GatewayPersonaAgent {
-    async fn run(&self, user_message: &str, _config: &AgentConfig) -> Result<AgentOutput, SpiceError> {
+    async fn run(
+        &self,
+        user_message: &str,
+        _config: &AgentConfig,
+    ) -> Result<AgentOutput, SpiceError> {
         let start = std::time::Instant::now();
         let delivered = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
 
@@ -216,7 +223,11 @@ impl AgentUnderTest for GatewayPersonaAgent {
                 tool_calls: t
                     .tool_calls
                     .into_iter()
-                    .map(|c| SpiceToolCall { id: c.id, name: c.name, arguments: c.args })
+                    .map(|c| SpiceToolCall {
+                        id: c.id,
+                        name: c.name,
+                        arguments: c.args,
+                    })
                     .collect(),
                 tool_results: t
                     .tool_results
@@ -266,8 +277,8 @@ async fn live_gateway_replies_once_via_say_to_user() {
         return;
     }
 
-    let agent = GatewayPersonaAgent::for_persona(PERSONA_SLUG)
-        .expect("build gateway agent under test");
+    let agent =
+        GatewayPersonaAgent::for_persona(PERSONA_SLUG).expect("build gateway agent under test");
 
     let tests = vec![
         test(
@@ -281,7 +292,11 @@ async fn live_gateway_replies_once_via_say_to_user() {
             // The terminal tool must be the one that ended the turn, and it must
             // fire exactly once — a second say_to_user would be a double-send to
             // the user's phone.
-            let says = out.tools_called.iter().filter(|t| *t == "say_to_user").count();
+            let says = out
+                .tools_called
+                .iter()
+                .filter(|t| *t == "say_to_user")
+                .count();
             if says != 1 {
                 return Err(format!(
                     "expected exactly one say_to_user (the terminal reply), got {says}; \
@@ -305,7 +320,11 @@ async fn live_gateway_replies_once_via_say_to_user() {
         .expect_tools(&["say_to_user"])
         .expect_no_error()
         .expect(|out: &AgentOutput| {
-            let says = out.tools_called.iter().filter(|t| *t == "say_to_user").count();
+            let says = out
+                .tools_called
+                .iter()
+                .filter(|t| *t == "say_to_user")
+                .count();
             if says == 1 {
                 Ok(())
             } else {

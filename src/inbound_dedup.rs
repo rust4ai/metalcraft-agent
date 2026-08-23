@@ -100,7 +100,10 @@ mod tests {
 
     #[test]
     fn evicts_oldest_beyond_capacity() {
-        let mut store = Store { seen: HashSet::new(), order: VecDeque::new() };
+        let mut store = Store {
+            seen: HashSet::new(),
+            order: VecDeque::new(),
+        };
         for i in 0..(MAX_IDS + 10) {
             let id = format!("id-{i}");
             store.seen.insert(id.clone());
@@ -112,7 +115,10 @@ mod tests {
             }
         }
         assert_eq!(store.order.len(), MAX_IDS);
-        assert!(!store.seen.contains("id-0"), "oldest should have been evicted");
+        assert!(
+            !store.seen.contains("id-0"),
+            "oldest should have been evicted"
+        );
         assert!(store.seen.contains(&format!("id-{}", MAX_IDS + 9)));
     }
 }

@@ -98,7 +98,10 @@ pub async fn inject(state: &mut AgentState, opts: RecallOptions) -> bool {
         return false;
     };
     state.messages.insert(pos, AgentMessage::User(block));
-    log::debug!("memory: injected {} recalled memory/memories", results.len());
+    log::debug!(
+        "memory: injected {} recalled memory/memories",
+        results.len()
+    );
     true
 }
 
@@ -118,11 +121,23 @@ pub fn strip(outcome: RunOutcome<AgentState>) -> RunOutcome<AgentState> {
             strip_messages(&mut s.messages);
             RunOutcome::Completed(s)
         }
-        RunOutcome::Interrupted { mut state, reason, resume_from } => {
+        RunOutcome::Interrupted {
+            mut state,
+            reason,
+            resume_from,
+        } => {
             strip_messages(&mut state.messages);
-            RunOutcome::Interrupted { state, reason, resume_from }
+            RunOutcome::Interrupted {
+                state,
+                reason,
+                resume_from,
+            }
         }
-        RunOutcome::Failed { mut state, node, error } => {
+        RunOutcome::Failed {
+            mut state,
+            node,
+            error,
+        } => {
             strip_messages(&mut state.messages);
             RunOutcome::Failed { state, node, error }
         }
@@ -174,14 +189,27 @@ mod tests {
     #[test]
     fn the_latest_user_message_is_the_query_and_ignores_injected_blocks() {
         let mut state = AgentState::new("first question");
-        state.messages.push(AgentMessage::Assistant("an answer".into()));
-        state.messages.push(AgentMessage::User("second question".into()));
-        assert_eq!(latest_user_message(&state).as_deref(), Some("second question"));
+        state
+            .messages
+            .push(AgentMessage::Assistant("an answer".into()));
+        state
+            .messages
+            .push(AgentMessage::User("second question".into()));
+        assert_eq!(
+            latest_user_message(&state).as_deref(),
+            Some("second question")
+        );
 
         // An injected block must never be mistaken for the user's question, or
         // the next turn would recall against its own recall.
-        state.messages.push(AgentMessage::User(render(&[scored("x", MemoryKind::Semantic)])));
-        assert_eq!(latest_user_message(&state).as_deref(), Some("second question"));
+        state.messages.push(AgentMessage::User(render(&[scored(
+            "x",
+            MemoryKind::Semantic,
+        )])));
+        assert_eq!(
+            latest_user_message(&state).as_deref(),
+            Some("second question")
+        );
     }
 
     #[test]
@@ -207,7 +235,9 @@ mod tests {
         };
 
         let completed = strip(RunOutcome::Completed(make()));
-        let RunOutcome::Completed(s) = completed else { panic!("variant changed") };
+        let RunOutcome::Completed(s) = completed else {
+            panic!("variant changed")
+        };
         assert_eq!(s.messages.len(), 1);
 
         let interrupted = strip(RunOutcome::Interrupted {
@@ -215,7 +245,9 @@ mod tests {
             reason: "paused".into(),
             resume_from: "agent".into(),
         });
-        let RunOutcome::Interrupted { state, reason, .. } = interrupted else { panic!("variant changed") };
+        let RunOutcome::Interrupted { state, reason, .. } = interrupted else {
+            panic!("variant changed")
+        };
         assert_eq!(state.messages.len(), 1, "a paused turn is persisted too");
         assert_eq!(reason, "paused");
 
@@ -226,7 +258,9 @@ mod tests {
             node: "agent".into(),
             error: "boom".into(),
         });
-        let RunOutcome::Failed { state, error, .. } = failed else { panic!("variant changed") };
+        let RunOutcome::Failed { state, error, .. } = failed else {
+            panic!("variant changed")
+        };
         assert_eq!(state.messages.len(), 1);
         assert_eq!(error, "boom");
     }
@@ -243,7 +277,9 @@ mod tests {
     fn a_state_with_no_user_message_yields_no_query() {
         let mut state = AgentState::new("x");
         state.messages.clear();
-        state.messages.push(AgentMessage::Assistant("orphan".into()));
+        state
+            .messages
+            .push(AgentMessage::Assistant("orphan".into()));
         assert!(latest_user_message(&state).is_none());
     }
 }

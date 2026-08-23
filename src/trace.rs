@@ -17,7 +17,7 @@
 //! so the response (and its usage) never reaches us. That is the sole driver
 //! for the metalcraft `LlmResponseHook` follow-up.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -183,14 +183,10 @@ impl TraceLogger {
     ) {
         let mut st = self.inner.lock().unwrap();
         if let Some(span) = st.open_llm.as_mut() {
-            span.attrs.push((
-                "gen_ai.usage.input_tokens".into(),
-                json!(input_tokens),
-            ));
-            span.attrs.push((
-                "gen_ai.usage.output_tokens".into(),
-                json!(output_tokens),
-            ));
+            span.attrs
+                .push(("gen_ai.usage.input_tokens".into(), json!(input_tokens)));
+            span.attrs
+                .push(("gen_ai.usage.output_tokens".into(), json!(output_tokens)));
             span.attrs
                 .push(("gen_ai.usage.total_tokens".into(), json!(total_tokens)));
             if cached_input_tokens > 0 {

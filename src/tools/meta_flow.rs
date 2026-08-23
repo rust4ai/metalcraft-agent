@@ -182,14 +182,21 @@ impl metalcraft::Tool for FlowSetSchedulesTool {
         let value: serde_json::Value = if let Some(s) = raw.as_str() {
             match serde_json::from_str(s) {
                 Ok(v) => v,
-                Err(e) => return Ok(serde_json::json!({ "error": format!("invalid schedules JSON: {e}") })),
+                Err(e) => {
+                    return Ok(
+                        serde_json::json!({ "error": format!("invalid schedules JSON: {e}") }),
+                    );
+                }
             }
         } else {
             raw.clone()
         };
-        let schedules: Vec<metalcraft_flows::FlowScheduleSpec> = match serde_json::from_value(value) {
+        let schedules: Vec<metalcraft_flows::FlowScheduleSpec> = match serde_json::from_value(value)
+        {
             Ok(s) => s,
-            Err(e) => return Ok(serde_json::json!({ "error": format!("invalid schedule spec: {e}") })),
+            Err(e) => {
+                return Ok(serde_json::json!({ "error": format!("invalid schedule spec: {e}") }));
+            }
         };
         let Some(mut flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
             return Ok(serde_json::json!({ "error": format!("flow '{id}' not found") }));
@@ -324,14 +331,15 @@ impl metalcraft::Tool for FlowRunTool {
         let persona_override = args["persona"].as_str().filter(|s| !s.trim().is_empty());
         let model = args["model"].as_str().unwrap_or(DEFAULT_MODEL);
         let inputs: serde_json::Value = match args["inputs"].as_str() {
-            Some(s) => serde_json::from_str(s)
-                .unwrap_or_else(|_| serde_json::json!({})),
+            Some(s) => serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({})),
             None => serde_json::json!({}),
         };
 
         let context = match AgentRuntimeContext::from_environment() {
             Ok(c) => c,
-            Err(e) => return Ok(serde_json::json!({ "error": format!("runtime not available: {e}") })),
+            Err(e) => {
+                return Ok(serde_json::json!({ "error": format!("runtime not available: {e}") }));
+            }
         };
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
@@ -342,7 +350,16 @@ impl metalcraft::Tool for FlowRunTool {
         };
 
         if crate::flow_exec::is_v2_flow(&flow) {
-            match crate::flow_exec::run_flow_v2(&context, flow, &cwd, persona_override, model, &inputs).await {
+            match crate::flow_exec::run_flow_v2(
+                &context,
+                flow,
+                &cwd,
+                persona_override,
+                model,
+                &inputs,
+            )
+            .await
+            {
                 Ok(summary) => Ok(serde_json::to_value(summary).unwrap_or(serde_json::Value::Null)),
                 Err(e) => Ok(serde_json::json!({ "error": e })),
             }
@@ -380,15 +397,21 @@ impl metalcraft::Tool for FlowResumeTool {
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let run_id = args["run_id"].as_str().ok_or_else(|| missing_param("flow_resume", "run_id"))?;
-        let handle = args["handle"].as_str().ok_or_else(|| missing_param("flow_resume", "handle"))?;
+        let run_id = args["run_id"]
+            .as_str()
+            .ok_or_else(|| missing_param("flow_resume", "run_id"))?;
+        let handle = args["handle"]
+            .as_str()
+            .ok_or_else(|| missing_param("flow_resume", "handle"))?;
         let data: Option<serde_json::Value> = args["data"]
             .as_str()
             .and_then(|s| serde_json::from_str(s).ok());
 
         let context = match AgentRuntimeContext::from_environment() {
             Ok(c) => c,
-            Err(e) => return Ok(serde_json::json!({ "error": format!("runtime not available: {e}") })),
+            Err(e) => {
+                return Ok(serde_json::json!({ "error": format!("runtime not available: {e}") }));
+            }
         };
         match crate::flow_exec::resume_flow(&context, run_id, handle, data).await {
             Ok(summary) => Ok(serde_json::to_value(summary).unwrap_or(serde_json::Value::Null)),
@@ -415,7 +438,9 @@ impl metalcraft::Tool for FlowRunStatusTool {
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let run_id = args["run_id"].as_str().ok_or_else(|| missing_param("flow_run_status", "run_id"))?;
+        let run_id = args["run_id"]
+            .as_str()
+            .ok_or_else(|| missing_param("flow_run_status", "run_id"))?;
         match crate::flow_runs::load_run(&paths::runs_dir(), run_id) {
             Some(run) => Ok(serde_json::to_value(run).unwrap_or(serde_json::Value::Null)),
             None => Ok(serde_json::json!({ "error": format!("run '{run_id}' not found") })),
@@ -489,7 +514,11 @@ impl metalcraft::Tool for FlowTemplatesListTool {
                 let slug = path.file_stem()?.to_str()?.to_string();
                 let content = std::fs::read_to_string(&path).ok()?;
                 let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-                let name = value.get("name").and_then(|v| v.as_str()).unwrap_or(&slug).to_string();
+                let name = value
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&slug)
+                    .to_string();
                 Some(serde_json::json!({
                     "slug": slug,
                     "name": name,

@@ -122,8 +122,15 @@ impl KeyStore {
                 }
             }
         }
-        log::info!("keys.json: migrated {} legacy key(s) into the global scope", global.len());
-        Self { version: CURRENT_VERSION, global, channels: BTreeMap::new() }
+        log::info!(
+            "keys.json: migrated {} legacy key(s) into the global scope",
+            global.len()
+        );
+        Self {
+            version: CURRENT_VERSION,
+            global,
+            channels: BTreeMap::new(),
+        }
     }
 
     /// Write the store to `path` atomically (write a sibling `.tmp` then rename)
@@ -162,14 +169,20 @@ impl KeyStore {
     /// Sorted `(name, masked)` pairs for the **global** scope. Never returns raw
     /// values. (The scope-aware Keys UI uses [`list_scoped`](Self::list_scoped).)
     pub fn list_masked(&self) -> Vec<(String, String)> {
-        self.global.iter().map(|(k, v)| (k.clone(), mask(v))).collect()
+        self.global
+            .iter()
+            .map(|(k, v)| (k.clone(), mask(v)))
+            .collect()
     }
 
     // ── Channel scope ────────────────────────────────────────────────────────
 
     /// Read a channel-scoped secret's raw value.
     pub fn get_channel(&self, channel_id: &str, name: &str) -> Option<&str> {
-        self.channels.get(channel_id).and_then(|m| m.get(name)).map(String::as_str)
+        self.channels
+            .get(channel_id)
+            .and_then(|m| m.get(name))
+            .map(String::as_str)
     }
 
     /// Insert or replace a channel-scoped secret.
@@ -266,7 +279,9 @@ pub fn is_env_authoritative(name: &str) -> bool {
 /// stale keys.json entry. This is the single resolution point for `$VAR`
 /// expansion in HTTP-API tools. Returns `None` if set in neither place.
 pub fn lookup(name: &str) -> Option<String> {
-    let stored = KeyStore::load(&paths::keys_file()).get(name).map(str::to_string);
+    let stored = KeyStore::load(&paths::keys_file())
+        .get(name)
+        .map(str::to_string);
     let env = std::env::var(name).ok();
     resolve(name, stored, env)
 }
@@ -293,7 +308,9 @@ pub fn lookup_scoped(channel_id: Option<&str>, name: &str) -> Option<String> {
 /// from where it was caused. Here an empty stored value simply falls through to
 /// env, and an empty env value falls through to `None`.
 pub fn lookup_present(name: &str) -> Option<String> {
-    let stored = KeyStore::load(&paths::keys_file()).get(name).map(str::to_string);
+    let stored = KeyStore::load(&paths::keys_file())
+        .get(name)
+        .map(str::to_string);
     let env = std::env::var(name).ok();
     resolve_present(name, stored, env)
 }
@@ -370,7 +387,10 @@ mod tests {
         let loaded = KeyStore::load(&path);
         assert_eq!(loaded.get("A"), Some("alpha-value-123"));
         assert_eq!(loaded.get("B"), Some("beta-value-456"));
-        assert_eq!(loaded.get_channel("chan-1", "WEBHOOK_SECRET"), Some("whsec_channel_scoped_value"));
+        assert_eq!(
+            loaded.get_channel("chan-1", "WEBHOOK_SECRET"),
+            Some("whsec_channel_scoped_value")
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -410,7 +430,11 @@ mod tests {
     fn legacy_flat_file_migrates_into_global() {
         let path = temp_keys_path();
         // Old schema: bare top-level name→value, no "version".
-        std::fs::write(&path, r#"{ "OPENAI_API_KEY": "sk-legacy-value-123", "FOO": "barbazqux" }"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{ "OPENAI_API_KEY": "sk-legacy-value-123", "FOO": "barbazqux" }"#,
+        )
+        .unwrap();
         let store = KeyStore::load(&path);
         assert_eq!(store.get("OPENAI_API_KEY"), Some("sk-legacy-value-123"));
         assert_eq!(store.get("FOO"), Some("barbazqux"));
@@ -440,7 +464,11 @@ mod tests {
     #[test]
     fn ordinary_key_is_store_first() {
         // A normal key: keys.json wins over env (lets a user override env defaults).
-        let got = resolve("OPENAI_API_KEY", Some("stored".into()), Some("from-env".into()));
+        let got = resolve(
+            "OPENAI_API_KEY",
+            Some("stored".into()),
+            Some("from-env".into()),
+        );
         assert_eq!(got.as_deref(), Some("stored"));
         // …and falls back to env when unstored.
         let got = resolve("OPENAI_API_KEY", None, Some("from-env".into()));
@@ -450,20 +478,35 @@ mod tests {
     #[test]
     fn a_blank_stored_value_falls_through_to_env() {
         // Clearing a field in a UI must not authenticate with the empty string.
-        let got = resolve_present("OPENAI_API_KEY", Some("   ".into()), Some("from-env".into()));
+        let got = resolve_present(
+            "OPENAI_API_KEY",
+            Some("   ".into()),
+            Some("from-env".into()),
+        );
         assert_eq!(got.as_deref(), Some("from-env"));
-        assert_eq!(resolve_present("OPENAI_API_KEY", Some("".into()), None), None);
+        assert_eq!(
+            resolve_present("OPENAI_API_KEY", Some("".into()), None),
+            None
+        );
     }
 
     #[test]
     fn a_stored_value_still_wins_when_both_are_present() {
-        let got = resolve_present("OPENAI_BASE_URL", Some("https://stored".into()), Some("https://env".into()));
+        let got = resolve_present(
+            "OPENAI_BASE_URL",
+            Some("https://stored".into()),
+            Some("https://env".into()),
+        );
         assert_eq!(got.as_deref(), Some("https://stored"));
     }
 
     #[test]
     fn present_resolution_keeps_the_env_authoritative_exception() {
-        let got = resolve_present("METALCRAFT_TOKEN", Some("stale".into()), Some("injected".into()));
+        let got = resolve_present(
+            "METALCRAFT_TOKEN",
+            Some("stale".into()),
+            Some("injected".into()),
+        );
         assert_eq!(got.as_deref(), Some("injected"));
     }
 
@@ -485,7 +528,11 @@ mod tests {
         let got = resolve("METALCRAFT_TOKEN", Some("mck_stored".into()), None);
         assert_eq!(got.as_deref(), Some("mck_stored"));
         // Empty/blank env must not shadow a real stored token.
-        let got = resolve("METALCRAFT_TOKEN", Some("mck_stored".into()), Some("   ".into()));
+        let got = resolve(
+            "METALCRAFT_TOKEN",
+            Some("mck_stored".into()),
+            Some("   ".into()),
+        );
         assert_eq!(got.as_deref(), Some("mck_stored"));
     }
 }

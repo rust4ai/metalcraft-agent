@@ -12,7 +12,7 @@
 use metalcraft_agent::agent_instance::{AgentInstance, InstanceOrigin};
 use metalcraft_agent::agent_preset::AgentPreset;
 use metalcraft_agent::memory::types::{MemoryKind, Source};
-use metalcraft_agent::memory::{self, instance, RememberRequest};
+use metalcraft_agent::memory::{self, RememberRequest, instance};
 use std::fs;
 
 const SEED: &str = r#"{"kind":"Semantic","content":"Amy braises at 2:1 mirepoix to leek.","summary":"braise ratio","importance":7.0}
@@ -56,7 +56,10 @@ async fn a_learned_memory_survives_eviction() {
 
     let view = memory::instance_view(&id, 10).await;
     assert_eq!(view.learned, 1, "it should be there immediately");
-    assert_eq!(view.shipped, 1, "and the shipped base should be visible too");
+    assert_eq!(
+        view.shipped, 1,
+        "and the shipped base should be visible too"
+    );
 
     // ── evict it, exactly as the LRU does when other chats arrive ───────────
     instance::evict(&id);
@@ -84,7 +87,9 @@ async fn a_learned_memory_survives_eviction() {
     // ── forgetting must survive too ─────────────────────────────────────────
     // A purge used to be RAM-only, so the next replay brought the memory straight
     // back: a forget that lasted only until the agent left the resident set.
-    memory::instance_forget(&id, &learned_id).await.expect("forget");
+    memory::instance_forget(&id, &learned_id)
+        .await
+        .expect("forget");
     instance::evict(&id);
     let view = memory::instance_view(&id, 10).await;
     assert_eq!(view.learned, 0, "a forgotten memory must stay forgotten");
@@ -95,7 +100,10 @@ async fn a_learned_memory_survives_eviction() {
     );
 
     // ── the shipped base is untouched by any of it ──────────────────────────
-    assert_eq!(view.shipped, 1, "forgetting a learned memory must not disturb the base");
+    assert_eq!(
+        view.shipped, 1,
+        "forgetting a learned memory must not disturb the base"
+    );
 
     let _ = fs::remove_dir_all(&data_dir);
 }

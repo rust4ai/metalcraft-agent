@@ -7,9 +7,9 @@
 //! - **Error spirals**: N consecutive tool turns where every result is an error.
 //! - **Loop detection**: The same tool call (name + args) repeated within a window.
 
-use metalcraft::{AgentMessage, AgentState, GuardAction, StepEvent, StepGuard};
 use crate::diagnostics::DiagnosticsLogger;
 use crate::ui;
+use metalcraft::{AgentMessage, AgentState, GuardAction, StepEvent, StepGuard};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -111,24 +111,38 @@ impl GuardTracker {
                     let hash = call_hash(name, args);
                     new_tool_calls.push((id.clone(), hash, name.clone()));
                 }
-                AgentMessage::ToolResult { id, name, result, .. } => {
+                AgentMessage::ToolResult {
+                    id, name, result, ..
+                } => {
                     let is_error = result.starts_with("ERROR:");
                     if is_denial(result) {
                         denied_ids.push(id.clone());
                     }
                     if self.config.verbose {
                         if is_error {
-                            eprintln!("  {}: {}", ui::error(format!("✗ {name}")), truncate(result, 120));
+                            eprintln!(
+                                "  {}: {}",
+                                ui::error(format!("✗ {name}")),
+                                truncate(result, 120)
+                            );
                         } else if name == "bash" {
                             // For bash results, parse the JSON and show full stdout/stderr
                             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
-                                let exit_code = parsed.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
-                                let stdout = parsed.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
-                                let stderr = parsed.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+                                let exit_code = parsed
+                                    .get("exit_code")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(-1);
+                                let stdout =
+                                    parsed.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+                                let stderr =
+                                    parsed.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
                                 if exit_code == 0 {
                                     eprintln!("  {}", ui::success(format!("✓ {name} (exit 0)")));
                                 } else {
-                                    eprintln!("  {}", ui::warning(format!("✗ {name} (exit {exit_code})")));
+                                    eprintln!(
+                                        "  {}",
+                                        ui::warning(format!("✗ {name} (exit {exit_code})"))
+                                    );
                                 }
                                 if !stdout.trim().is_empty() {
                                     eprintln!("{}", ui::dim("── stdout ──"));
@@ -140,10 +154,18 @@ impl GuardTracker {
                                 }
                                 eprintln!("{}", ui::dim("────────────"));
                             } else {
-                                eprintln!("  {} {}", ui::success(format!("✓ {name}")), truncate(result, 200));
+                                eprintln!(
+                                    "  {} {}",
+                                    ui::success(format!("✓ {name}")),
+                                    truncate(result, 200)
+                                );
                             }
                         } else {
-                            eprintln!("  {} {}", ui::success(format!("✓ {name}")), truncate(result, 80));
+                            eprintln!(
+                                "  {} {}",
+                                ui::success(format!("✓ {name}")),
+                                truncate(result, 80)
+                            );
                         }
                     }
                     // Denied/interrupted calls were never executed — they are a
@@ -404,7 +426,9 @@ mod tests {
         // Poll the same job id many times in a row — far more than
         // max_identical_repeats — without tripping the loop guard.
         for i in 0..20 {
-            state.messages.push(named_call(&i.to_string(), "starflask_get_job"));
+            state
+                .messages
+                .push(named_call(&i.to_string(), "starflask_get_job"));
             assert!(
                 !is_stop(&t.check(&state)),
                 "poll #{i} should be allowed for a poll tool"

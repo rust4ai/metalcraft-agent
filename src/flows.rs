@@ -1,4 +1,4 @@
-use metalcraft_flows::{validate, CoreNodeType, FlowNodeType, SavedFlow};
+use metalcraft_flows::{CoreNodeType, FlowNodeType, SavedFlow, validate};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::str::FromStr;
@@ -181,7 +181,12 @@ pub fn collect_reachable_prompts(flow: &SavedFlow) -> Result<Vec<FlowPrompt>, St
                     .data
                     .get("prompt")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| format!("flow '{}' prompt node '{}' is missing data.prompt", flow.id, node.id))?;
+                    .ok_or_else(|| {
+                        format!(
+                            "flow '{}' prompt node '{}' is missing data.prompt",
+                            flow.id, node.id
+                        )
+                    })?;
                 let persona = node
                     .data
                     .get("persona")
@@ -200,11 +205,16 @@ pub fn collect_reachable_prompts(flow: &SavedFlow) -> Result<Vec<FlowPrompt>, St
             FlowNodeType::Core(other) => {
                 return Err(format!(
                     "flow '{}' uses node type '{}' at '{}' — run it with the v2 executor",
-                    flow.id, other.as_str(), node.id
+                    flow.id,
+                    other.as_str(),
+                    node.id
                 ));
             }
             FlowNodeType::Custom(custom) => {
-                return Err(format!("flow '{}' uses unsupported custom node type '{}' at '{}'", flow.id, custom, node.id));
+                return Err(format!(
+                    "flow '{}' uses unsupported custom node type '{}' at '{}'",
+                    flow.id, custom, node.id
+                ));
             }
         }
 
@@ -446,7 +456,10 @@ mod tests {
     fn prompt_inherits_flow_level_persona() {
         let flow = flow_with_personas(Some("discord-reporter-agent"), None);
         let prompts = collect_reachable_prompts(&flow).unwrap();
-        assert_eq!(prompts[0].persona.as_deref(), Some("discord-reporter-agent"));
+        assert_eq!(
+            prompts[0].persona.as_deref(),
+            Some("discord-reporter-agent")
+        );
     }
 
     #[test]

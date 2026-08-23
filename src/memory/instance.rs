@@ -104,7 +104,8 @@ impl InstanceMemory {
             .map_err(|e| format!("failed to serialize tombstones: {e}"))?;
         // tmp + rename: a torn write must not lose the whole set.
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| format!("failed to write {}: {e}", tmp.display()))?;
+        std::fs::write(&tmp, json)
+            .map_err(|e| format!("failed to write {}: {e}", tmp.display()))?;
         std::fs::rename(&tmp, &path).map_err(|e| format!("failed to finalize tombstones: {e}"))
     }
 
@@ -300,7 +301,11 @@ fn deterministic_base_id(preset: &str, content: &str, occurrence: usize) -> Stri
     // they are distinct memories, and hashing content alone collapsed them into one,
     // silently dropping the first. The occurrence index disambiguates, and only the
     // duplicate carries a suffix so the common case stays stable if a file is edited.
-    if occurrence == 0 { base } else { format!("{base}_{occurrence}") }
+    if occurrence == 0 {
+        base
+    } else {
+        format!("{base}_{occurrence}")
+    }
 }
 
 /// Build a preset's base index from a `memories.jsonl` and persist it as a snapshot.
@@ -330,7 +335,8 @@ pub fn build_base(preset: &str, version: &str, seed_file: &Path) -> Result<usize
     let count = idx.len();
 
     let dir = crate::paths::memory_preset_dir(preset, version);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
     let snapshot = idx.snapshot(None, None);
     let json = serde_json::to_string(&snapshot)
         .map_err(|e| format!("failed to serialize base snapshot: {e}"))?;
@@ -341,11 +347,17 @@ pub fn build_base(preset: &str, version: &str, seed_file: &Path) -> Result<usize
         .map_err(|e| format!("failed to finalize {}: {e}", path.display()))?;
 
     if skipped > 0 {
-        log::warn!("memory: {skipped} unreadable line(s) in {}", seed_file.display());
+        log::warn!(
+            "memory: {skipped} unreadable line(s) in {}",
+            seed_file.display()
+        );
     }
     log::info!("memory: built base {preset}@{version} with {count} memories");
     // Drop any cached copy so a rebuild is picked up.
-    bases().write().ok().map(|mut b| b.remove(&base_key(preset, version)));
+    bases()
+        .write()
+        .ok()
+        .map(|mut b| b.remove(&base_key(preset, version)));
     Ok(count)
 }
 
@@ -357,8 +369,8 @@ pub fn load_base(preset: &str, version: &str) -> Result<Arc<RwLock<MemoryIndex>>
         return Ok(existing);
     }
     let path = crate::paths::memory_preset_dir(preset, version).join("snapshot.json");
-    let contents = std::fs::read_to_string(&path)
-        .map_err(|_| format!("no base memory built for {key}"))?;
+    let contents =
+        std::fs::read_to_string(&path).map_err(|_| format!("no base memory built for {key}"))?;
     let snapshot = serde_json::from_str(&contents)
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
     let idx = Arc::new(RwLock::new(MemoryIndex::from_snapshot(snapshot)));
@@ -370,7 +382,10 @@ pub fn load_base(preset: &str, version: &str) -> Result<Arc<RwLock<MemoryIndex>>
 
 /// Base layers currently held in memory. Diagnostics for the resident-set question.
 pub fn resident_bases() -> Vec<String> {
-    bases().read().map(|b| b.keys().cloned().collect()).unwrap_or_default()
+    bases()
+        .read()
+        .map(|b| b.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 // ── instance registry ────────────────────────────────────────────────────────
@@ -402,11 +417,10 @@ fn registry() -> &'static std::sync::Mutex<Registry> {
 /// `base` is `Some((preset, version))` when the instance was created from a preset
 /// that ships memories. A missing base is not an error — the agent simply starts
 /// with nothing but what it learns.
-pub fn handle_for(
-    instance_id: &str,
-    base: Option<(&str, &str)>,
-) -> Result<InstanceMemory, String> {
-    let mut reg = registry().lock().map_err(|_| "memory registry poisoned".to_string())?;
+pub fn handle_for(instance_id: &str, base: Option<(&str, &str)>) -> Result<InstanceMemory, String> {
+    let mut reg = registry()
+        .lock()
+        .map_err(|_| "memory registry poisoned".to_string())?;
 
     let wanted_key = base.map(|(p, v)| base_key(p, v));
     if let Some(existing) = reg.resident.get(instance_id).cloned() {
@@ -532,7 +546,10 @@ fn load_delta(instance_id: &str) -> MemoryIndex {
 
 /// Instances currently resident, least recently used first.
 pub fn resident_instances() -> Vec<String> {
-    registry().lock().map(|r| r.order.clone()).unwrap_or_default()
+    registry()
+        .lock()
+        .map(|r| r.order.clone())
+        .unwrap_or_default()
 }
 
 /// Drop an instance from the resident set (used on delete).
@@ -563,7 +580,10 @@ pub fn release_base(preset: &str, version: &str) {
         && let Err(e) = std::fs::remove_dir_all(&dir)
     {
         // Wasted space, not a failed uninstall.
-        log::warn!("memory: could not remove base {key} at {}: {e}", dir.display());
+        log::warn!(
+            "memory: could not remove base {key} at {}: {e}",
+            dir.display()
+        );
     }
 }
 
@@ -589,7 +609,10 @@ not json at all
     fn seed_parsing_skips_bad_lines_and_defaults_sensibly() {
         let (memories, skipped) = parse_seed_file(SEED);
         assert_eq!(memories.len(), 3);
-        assert_eq!(skipped, 1, "one unreadable line, and it must not cost the rest");
+        assert_eq!(
+            skipped, 1,
+            "one unreadable line, and it must not cost the rest"
+        );
 
         assert_eq!(memories[0].summary, "braise base");
         assert_eq!(memories[0].entity.as_deref(), Some("braising"));
@@ -612,6 +635,9 @@ not json at all
     #[test]
     fn base_key_is_version_scoped() {
         assert_eq!(base_key("amy-kitchen", "1.4.0"), "amy-kitchen@1.4.0");
-        assert_ne!(base_key("amy-kitchen", "1.4.0"), base_key("amy-kitchen", "1.5.0"));
+        assert_ne!(
+            base_key("amy-kitchen", "1.4.0"),
+            base_key("amy-kitchen", "1.5.0")
+        );
     }
 }

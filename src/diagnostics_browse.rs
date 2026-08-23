@@ -70,23 +70,21 @@ pub fn list_diagnostics_sessions() -> Vec<DiagnosticsSessionSummary> {
             let dir_name = path.file_name()?.to_str()?.to_string();
 
             let info_path = path.join("session_info.json");
-            let (persona_slug, model_name, kind, flow_id, instance_id) =
-                if let Ok(content) = std::fs::read_to_string(&info_path) {
-                    let info: serde_json::Value =
-                        serde_json::from_str(&content).unwrap_or_default();
-                    let field = |k: &str| {
-                        info.get(k).and_then(|v| v.as_str()).map(String::from)
-                    };
-                    (
-                        field("persona_slug"),
-                        field("model_name"),
-                        field("kind"),
-                        field("flow_id"),
-                        field("instance_id"),
-                    )
-                } else {
-                    (None, None, None, None, None)
-                };
+            let (persona_slug, model_name, kind, flow_id, instance_id) = if let Ok(content) =
+                std::fs::read_to_string(&info_path)
+            {
+                let info: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+                let field = |k: &str| info.get(k).and_then(|v| v.as_str()).map(String::from);
+                (
+                    field("persona_slug"),
+                    field("model_name"),
+                    field("kind"),
+                    field("flow_id"),
+                    field("instance_id"),
+                )
+            } else {
+                (None, None, None, None, None)
+            };
 
             let turn_count = std::fs::read_dir(&path)
                 .map(|rd| {

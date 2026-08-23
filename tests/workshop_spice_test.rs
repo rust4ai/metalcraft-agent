@@ -26,12 +26,12 @@ use spice_framework::agent::{
     AgentConfig, AgentOutput, AgentUnderTest, ToolCall as SpiceToolCall, Turn as SpiceTurn,
 };
 use spice_framework::error::SpiceError;
-use spice_framework::{suite, test, Runner, RunnerConfig};
+use spice_framework::{Runner, RunnerConfig, suite, test};
 
 use metalcraft::{RunOutcome, Tool};
 use metalcraft_agent::approval::ApprovalMode;
 use metalcraft_agent::persona::Persona;
-use metalcraft_agent::runtime::{run_one_shot_task, AgentRuntimeContext, RunOneShotRequest};
+use metalcraft_agent::runtime::{AgentRuntimeContext, RunOneShotRequest, run_one_shot_task};
 use metalcraft_agent::tools::{self, meta_flow, meta_persona, meta_skill};
 use metalcraft_agent::{paths, seed};
 
@@ -122,7 +122,11 @@ async fn skill_write_round_trips_to_disk() {
     assert_eq!(out.get("saved").and_then(|v| v.as_str()), Some("greeting"));
 
     let path = paths::skills_dir().join("greeting.md");
-    assert!(path.exists(), "skill_write should create {}", path.display());
+    assert!(
+        path.exists(),
+        "skill_write should create {}",
+        path.display()
+    );
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(content.contains("description: Say hello"));
     assert!(content.contains("# Greeting"));
@@ -132,7 +136,10 @@ async fn skill_write_round_trips_to_disk() {
         .call(serde_json::json!({ "slug": "greeting" }))
         .await
         .unwrap();
-    assert_eq!(read.get("description").and_then(|v| v.as_str()), Some("Say hello"));
+    assert_eq!(
+        read.get("description").and_then(|v| v.as_str()),
+        Some("Say hello")
+    );
 }
 
 #[tokio::test]
@@ -151,12 +158,18 @@ async fn persona_write_round_trips_and_reloads() {
         }))
         .await
         .expect("persona_write call");
-    assert_eq!(out.get("saved").and_then(|v| v.as_str()), Some("note-taker"));
+    assert_eq!(
+        out.get("saved").and_then(|v| v.as_str()),
+        Some("note-taker")
+    );
 
     let loaded =
         Persona::load("note-taker", &paths::personas_dir()).expect("written persona reloads");
     assert_eq!(loaded.name, "Note Taker");
-    assert_eq!(loaded.tools, vec!["read_file".to_string(), "write_file".to_string()]);
+    assert_eq!(
+        loaded.tools,
+        vec!["read_file".to_string(), "write_file".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -179,7 +192,10 @@ async fn flow_validate_flags_a_bad_flow() {
         .expect("flow_validate call");
     assert_eq!(out.get("valid").and_then(|v| v.as_bool()), Some(false));
     let errors = out.get("errors").and_then(|v| v.as_array()).unwrap();
-    assert!(!errors.is_empty(), "expected validation errors for a bad flow id");
+    assert!(
+        !errors.is_empty(),
+        "expected validation errors for a bad flow id"
+    );
 }
 
 #[tokio::test]
@@ -233,7 +249,9 @@ async fn meta_writes_refuse_pack_owned_slugs() {
         .await
         .unwrap();
     assert!(
-        out.get("error").and_then(|v| v.as_str()).is_some_and(|e| e.contains("read-only")),
+        out.get("error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|e| e.contains("read-only")),
         "writing a pack-owned persona slug should be refused, got: {out}"
     );
 }
@@ -268,7 +286,11 @@ impl MetalcraftPersonaAgent {
 
 #[async_trait]
 impl AgentUnderTest for MetalcraftPersonaAgent {
-    async fn run(&self, user_message: &str, _config: &AgentConfig) -> Result<AgentOutput, SpiceError> {
+    async fn run(
+        &self,
+        user_message: &str,
+        _config: &AgentConfig,
+    ) -> Result<AgentOutput, SpiceError> {
         let start = std::time::Instant::now();
 
         let request = RunOneShotRequest {
@@ -288,8 +310,12 @@ impl AgentUnderTest for MetalcraftPersonaAgent {
 
         let (state, error) = match outcome {
             RunOutcome::Completed(state) => (state, None),
-            RunOutcome::Interrupted { state, reason, .. } => (state, Some(format!("interrupted: {reason}"))),
-            RunOutcome::Failed { state, node, error } => (state, Some(format!("node `{node}` failed: {error}"))),
+            RunOutcome::Interrupted { state, reason, .. } => {
+                (state, Some(format!("interrupted: {reason}")))
+            }
+            RunOutcome::Failed { state, node, error } => {
+                (state, Some(format!("node `{node}` failed: {error}")))
+            }
         };
 
         let turns = state
@@ -301,7 +327,11 @@ impl AgentUnderTest for MetalcraftPersonaAgent {
                 tool_calls: t
                     .tool_calls
                     .into_iter()
-                    .map(|c| SpiceToolCall { id: c.id, name: c.name, arguments: c.args })
+                    .map(|c| SpiceToolCall {
+                        id: c.id,
+                        name: c.name,
+                        arguments: c.args,
+                    })
                     .collect(),
                 tool_results: t
                     .tool_results

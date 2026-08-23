@@ -117,7 +117,11 @@ fn append(capture: &Capture) {
         }
     };
     use std::io::Write;
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         Ok(mut f) => {
             if let Err(e) = writeln!(f, "{line}") {
                 log::debug!("memory: could not append a capture ({e})");
@@ -199,7 +203,10 @@ pub fn record_session_end(chat_id: &str) {
 /// Whether turn capture is on (`MEMORY_CAPTURE`).
 pub fn capture_enabled() -> bool {
     match std::env::var("MEMORY_CAPTURE") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
         Err(_) => true,
     }
 }
@@ -236,7 +243,10 @@ pub fn pending() -> Vec<Capture> {
     if skipped > 0 {
         log::warn!("memory: {skipped} unreadable line(s) in the capture queue were skipped");
     }
-    let mut pending: Vec<Capture> = all.into_iter().filter(|c| c.processed_at.is_none()).collect();
+    let mut pending: Vec<Capture> = all
+        .into_iter()
+        .filter(|c| c.processed_at.is_none())
+        .collect();
     pending.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
     pending
 }
@@ -255,8 +265,12 @@ pub fn pending_count() -> usize {
 pub fn retain_pending(processed_ids: &[String]) -> std::io::Result<usize> {
     let path = crate::paths::memory_capture_file();
     let (all, _) = read_all();
-    let processed: std::collections::HashSet<&str> = processed_ids.iter().map(|s| s.as_str()).collect();
-    let keep: Vec<&Capture> = all.iter().filter(|c| !processed.contains(c.id.as_str())).collect();
+    let processed: std::collections::HashSet<&str> =
+        processed_ids.iter().map(|s| s.as_str()).collect();
+    let keep: Vec<&Capture> = all
+        .iter()
+        .filter(|c| !processed.contains(c.id.as_str()))
+        .collect();
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

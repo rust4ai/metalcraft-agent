@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::persona::strip_frontmatter;
+use async_trait::async_trait;
 use std::path::PathBuf;
 
 pub struct LoadSkillTool {
@@ -9,13 +9,18 @@ pub struct LoadSkillTool {
 
 impl LoadSkillTool {
     pub fn new(skills_dir: PathBuf, available_skills: Vec<String>) -> Self {
-        Self { skills_dir, available_skills }
+        Self {
+            skills_dir,
+            available_skills,
+        }
     }
 }
 
 #[async_trait]
 impl metalcraft::Tool for LoadSkillTool {
-    fn name(&self) -> &str { "load_skill" }
+    fn name(&self) -> &str {
+        "load_skill"
+    }
     fn description(&self) -> &str {
         "Load a skill by name to get detailed guidance for a specific task type. Use this when you need structured methodology for a task (e.g. debugging, code-review, planning)."
     }
@@ -33,10 +38,13 @@ impl metalcraft::Tool for LoadSkillTool {
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let skill_name = args["skill"].as_str().ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
-            tool: "load_skill".into(),
-            message: "Missing required parameter: skill".into(),
-        })?;
+        let skill_name =
+            args["skill"]
+                .as_str()
+                .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
+                    tool: "load_skill".into(),
+                    message: "Missing required parameter: skill".into(),
+                })?;
 
         if !self.available_skills.contains(&skill_name.to_string()) {
             return Ok(serde_json::json!({
@@ -53,12 +61,16 @@ impl metalcraft::Tool for LoadSkillTool {
         )
         .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
             tool: "load_skill".into(),
-            message: format!("Skill '{}' not found in skills dir or any enabled pack", skill_name),
+            message: format!(
+                "Skill '{}' not found in skills dir or any enabled pack",
+                skill_name
+            ),
         })?;
-        let content = std::fs::read_to_string(&file).map_err(|e| metalcraft::GraphError::ToolCallFailed {
-            tool: "load_skill".into(),
-            message: format!("Failed to read skill '{}': {}", skill_name, e),
-        })?;
+        let content =
+            std::fs::read_to_string(&file).map_err(|e| metalcraft::GraphError::ToolCallFailed {
+                tool: "load_skill".into(),
+                message: format!("Failed to read skill '{}': {}", skill_name, e),
+            })?;
 
         let body = strip_frontmatter(&content);
 

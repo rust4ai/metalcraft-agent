@@ -44,13 +44,13 @@ use spice_framework::agent::{
     AgentConfig, AgentOutput, AgentUnderTest, ToolCall as SpiceToolCall, Turn as SpiceTurn,
 };
 use spice_framework::error::SpiceError;
-use spice_framework::{suite, test, Runner, RunnerConfig};
+use spice_framework::{Runner, RunnerConfig, suite, test};
 
 use metalcraft::{RunOutcome, Tool};
 use metalcraft_agent::approval::ApprovalMode;
 use metalcraft_agent::key_store::KeyStore;
 use metalcraft_agent::persona::Persona;
-use metalcraft_agent::runtime::{run_one_shot_task, AgentRuntimeContext, RunOneShotRequest};
+use metalcraft_agent::runtime::{AgentRuntimeContext, RunOneShotRequest, run_one_shot_task};
 use metalcraft_agent::tools::{self, meta_integration, meta_keys};
 use metalcraft_agent::{integrations, key_store, paths, seed};
 
@@ -290,7 +290,9 @@ fn config_agent_wires_up() {
     // resolve to nothing and the agent would keep reaching for a tool that no longer
     // exists — silently, since unknown names are dropped from the registry.
     assert!(
-        !resolved.iter().any(|t| t == "integration_enable" || t == "integration_disable"),
+        !resolved
+            .iter()
+            .any(|t| t == "integration_enable" || t == "integration_disable"),
         "config-agent still lists a retired enable/disable tool: {resolved:?}"
     );
 
@@ -498,7 +500,9 @@ fn orchestrator_can_delegate_config() {
         "orchestrator's raw prompt must NOT hardcode the config-agent slug (ADR-0001) — use {{available_personas}}"
     );
     assert!(
-        orchestrator.system_prompt.contains("{{available_personas}}"),
+        orchestrator
+            .system_prompt
+            .contains("{{available_personas}}"),
         "orchestrator's prompt should inject the live persona list via {{available_personas}}"
     );
     // The ASSEMBLED prompt (what the model actually sees) must surface
@@ -510,7 +514,12 @@ fn orchestrator_can_delegate_config() {
     );
     // It must NOT carry the config meta tools itself — those belong to the
     // delegated persona, not the router.
-    for tool in ["agentpack_install", "key_set", "integration_list", "key_list"] {
+    for tool in [
+        "agentpack_install",
+        "key_set",
+        "integration_list",
+        "key_list",
+    ] {
         assert!(
             !orchestrator.tools.iter().any(|t| t == tool),
             "orchestrator should NOT declare `{tool}` directly — it delegates to config-agent"

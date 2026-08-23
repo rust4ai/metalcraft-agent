@@ -82,8 +82,12 @@ pub async fn send_whatsapp(
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        let detail = extract_twilio_error(&body).unwrap_or_else(|| crate::tools::truncate_output(body.trim(), 500));
-        return Err(format!("Twilio returned HTTP {} — {detail}", status.as_u16()));
+        let detail = extract_twilio_error(&body)
+            .unwrap_or_else(|| crate::tools::truncate_output(body.trim(), 500));
+        return Err(format!(
+            "Twilio returned HTTP {} — {detail}",
+            status.as_u16()
+        ));
     }
 
     let sid = serde_json::from_str::<serde_json::Value>(&body)
@@ -131,14 +135,20 @@ pub struct InboundMessage {
 /// callback rather than an inbound message).
 pub fn parse_inbound(form: &HashMap<String, String>) -> Option<InboundMessage> {
     let strip = |s: &str| s.trim().trim_start_matches("whatsapp:").to_string();
-    let from = form.get("From").map(|s| strip(s)).filter(|s| !s.is_empty())?;
+    let from = form
+        .get("From")
+        .map(|s| strip(s))
+        .filter(|s| !s.is_empty())?;
     let body = form.get("Body").cloned()?;
     let to = form.get("To").map(|s| strip(s)).unwrap_or_default();
     Some(InboundMessage {
         from,
         to,
         body,
-        message_sid: form.get("MessageSid").or_else(|| form.get("SmsSid")).cloned(),
+        message_sid: form
+            .get("MessageSid")
+            .or_else(|| form.get("SmsSid"))
+            .cloned(),
         profile_name: form.get("ProfileName").cloned().filter(|s| !s.is_empty()),
     })
 }
@@ -200,7 +210,10 @@ mod tests {
     #[test]
     fn whatsapp_addr_adds_prefix_once() {
         assert_eq!(whatsapp_addr("+15551234567"), "whatsapp:+15551234567");
-        assert_eq!(whatsapp_addr("whatsapp:+15551234567"), "whatsapp:+15551234567");
+        assert_eq!(
+            whatsapp_addr("whatsapp:+15551234567"),
+            "whatsapp:+15551234567"
+        );
     }
 
     #[test]

@@ -73,13 +73,16 @@ fn a_flow_is_bound_to_a_preset_that_can_reach_its_personas() {
     // And it can now be armed, which is the whole point.
     let mut armable = briefing.clone();
     armable.id = "morning-brief".into();
-    armable.schedules = vec![serde_json::from_str(
-        r#"{"id":"morning","enabled":true,"type":"cron","cron":"0 8 * * *"}"#,
-    )
-    .unwrap()];
-    let agent = metalcraft_agent::flow_bindings::arm(&armable, "morning", None)
-        .expect("a bound flow arms");
-    assert!(agent.persistent, "arming makes the agent it runs as durable");
+    armable.schedules = vec![
+        serde_json::from_str(r#"{"id":"morning","enabled":true,"type":"cron","cron":"0 8 * * *"}"#)
+            .unwrap(),
+    ];
+    let agent =
+        metalcraft_agent::flow_bindings::arm(&armable, "morning", None).expect("a bound flow arms");
+    assert!(
+        agent.persistent,
+        "arming makes the agent it runs as durable"
+    );
 
     // A flow the default *can* run stays with the default — an unremarkable flow
     // should belong to the unremarkable agent, not to whichever preset sorts first.
@@ -112,7 +115,10 @@ fn a_flow_is_bound_to_a_preset_that_can_reach_its_personas() {
         .unwrap(),
         ..briefing
     };
-    assert_eq!(metalcraft_agent::flow_bindings::bind_to_a_capable_preset(&stray), None);
+    assert_eq!(
+        metalcraft_agent::flow_bindings::bind_to_a_capable_preset(&stray),
+        None
+    );
 
     let _ = fs::remove_dir_all(&data_dir);
 }

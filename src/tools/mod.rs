@@ -1,5 +1,6 @@
 pub mod bash;
 pub mod edit_file;
+pub mod email_imap;
 pub mod find_files;
 pub mod gateway;
 pub mod gateway_webhook;
@@ -14,27 +15,25 @@ pub mod meta_keys;
 pub mod meta_persona;
 pub mod meta_skill;
 pub mod read_file;
+pub mod s3;
 pub mod say_to_user;
 pub mod schedule_followup;
-pub mod email_imap;
-pub mod s3;
 pub mod sub_agent;
 pub mod twilio;
 pub mod web_fetch;
 pub mod write_file;
 
-use std::path::PathBuf;
-use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use metalcraft::ToolRegistry;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Where a session's user-facing reply is delivered. The agent always replies
 /// through the channel-agnostic `say_to_user` tool; the *caller* that builds the
 /// runtime supplies this closure to route that text to the right place — the SSE
 /// stream for a workshop chat, or a gateway adapter (gateway/Twilio) for a
 /// gateway session. Takes the message text, returns Ok on delivery.
-pub type ReplySink =
-    Arc<dyn Fn(String) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
+pub type ReplySink = Arc<dyn Fn(String) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
 /// Configuration for tools that need runtime parameters.
 pub struct ToolConfig {
@@ -101,15 +100,11 @@ pub fn create_registry_for_with_config(
             "agentpack_install" => {
                 registry.register(crate::agent_packs::tools::AgentPackInstallTool)
             }
-            "agentpack_update" => {
-                registry.register(crate::agent_packs::tools::AgentPackUpdateTool)
-            }
+            "agentpack_update" => registry.register(crate::agent_packs::tools::AgentPackUpdateTool),
             "agentpack_uninstall" => {
                 registry.register(crate::agent_packs::tools::AgentPackUninstallTool)
             }
-            "agentpack_export" => {
-                registry.register(crate::agent_packs::tools::AgentPackExportTool)
-            }
+            "agentpack_export" => registry.register(crate::agent_packs::tools::AgentPackExportTool),
             "mem_remember" => registry.register(crate::memory::tools::MemRememberTool::new(
                 config.and_then(|c| c.instance_id.clone()),
             )),
@@ -142,7 +137,9 @@ pub fn create_registry_for_with_config(
             "flow_write" => registry.register(meta_flow::FlowWriteTool),
             "flow_set_schedules" => registry.register(meta_flow::FlowSetSchedulesTool),
             "flow_install" => registry.register(meta_flow::FlowInstallTool),
-            "flow_install_dependencies" => registry.register(meta_flow::FlowInstallDependenciesTool),
+            "flow_install_dependencies" => {
+                registry.register(meta_flow::FlowInstallDependenciesTool)
+            }
             "flow_delete" => registry.register(meta_flow::FlowDeleteTool),
             "flow_run" => registry.register(meta_flow::FlowRunTool),
             "flow_resume" => registry.register(meta_flow::FlowResumeTool),
@@ -232,9 +229,17 @@ pub fn create_registry_for_with_config(
 /// Register all available tools.
 pub fn create_registry() -> ToolRegistry {
     let all = vec![
-        "read_file", "write_file", "edit_file", "bash",
-        "list_files", "grep", "find_files",
-    ].into_iter().map(String::from).collect::<Vec<_>>();
+        "read_file",
+        "write_file",
+        "edit_file",
+        "bash",
+        "list_files",
+        "grep",
+        "find_files",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect::<Vec<_>>();
     create_registry_for(&all)
 }
 
@@ -315,7 +320,10 @@ mod native_tools_drift {
         }
         // `email` is seeded with native tools, so at least one pack must be checked;
         // a zero here means the guard silently stopped covering anything.
-        assert!(checked > 0, "expected at least one seeded pack with native tools");
+        assert!(
+            checked > 0,
+            "expected at least one seeded pack with native tools"
+        );
     }
 }
 
