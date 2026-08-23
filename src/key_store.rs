@@ -315,27 +315,73 @@ pub fn lookup_present(name: &str) -> Option<String> {
     resolve_present(name, stored, env)
 }
 
+/// Like [`lookup_present`], but says **which level answered**.
+///
+/// The value alone cannot distinguish a key its owner bound through the API from
+/// one the platform injected into the container — both arrive here as
+/// `OPENAI_API_KEY`. A client that wants to explain where a pod's inference comes
+/// from needs that difference, and guessing it from an empty keys.json is exactly
+/// the mistake that told provisioned pods they could not think.
+pub fn lookup_present_origin(name: &str) -> Option<(String, Origin)> {
+    let stored = KeyStore::load(&paths::keys_file())
+        .get(name)
+        .map(str::to_string);
+    let env = std::env::var(name).ok();
+    resolve_present_origin(name, stored, env)
+}
+
+/// Which level of the store answered a lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// `keys.json` — someone bound this through the API.
+    Stored,
+    /// The process environment — what provisioning injects into a managed pod,
+    /// or a self-hoster's `.env`.
+    Environment,
+}
+
+/// Blank is absent: see [`lookup_present`] for why a key saved as `""` must fall
+/// through rather than authenticate with the empty string.
+fn present(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// Pure form of [`lookup_present`], so the precedence is testable without touching
 /// global env or the on-disk keys.json.
 pub fn resolve_present(name: &str, stored: Option<String>, env: Option<String>) -> Option<String> {
-    fn present(v: Option<String>) -> Option<String> {
-        v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
-    }
-    resolve(name, present(stored), present(env))
+    resolve_present_origin(name, stored, env).map(|(v, _)| v)
+}
+
+/// Pure form of [`lookup_present_origin`].
+pub fn resolve_present_origin(
+    name: &str,
+    stored: Option<String>,
+    env: Option<String>,
+) -> Option<(String, Origin)> {
+    resolve_origin(name, present(stored), present(env))
 }
 
 /// Pure precedence rule behind [`lookup`], split out so it's unit-testable without
 /// touching global env or the on-disk keys.json. For [`ENV_AUTHORITATIVE`] keys a
 /// non-empty `env` value wins; otherwise `stored` wins, then `env`.
 pub fn resolve(name: &str, stored: Option<String>, env: Option<String>) -> Option<String> {
-    if is_env_authoritative(name) {
-        if let Some(v) = env.as_deref() {
-            if !v.trim().is_empty() {
-                return env;
-            }
-        }
+    resolve_origin(name, stored, env).map(|(v, _)| v)
+}
+
+/// [`resolve`], carrying the level that answered. The single copy of the
+/// precedence rule — everything else here delegates, so provenance can never
+/// disagree with the value it describes.
+pub fn resolve_origin(
+    name: &str,
+    stored: Option<String>,
+    env: Option<String>,
+) -> Option<(String, Origin)> {
+    if is_env_authoritative(name) && env.as_deref().is_some_and(|v| !v.trim().is_empty()) {
+        return env.map(|v| (v, Origin::Environment));
     }
-    stored.or(env)
+    stored
+        .map(|v| (v, Origin::Stored))
+        .or_else(|| env.map(|v| (v, Origin::Environment)))
 }
 
 #[cfg(test)]

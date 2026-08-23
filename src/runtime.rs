@@ -464,26 +464,99 @@ pub fn build_openai_client(api_key: &str) -> Result<openai::Client, Box<dyn std:
 /// load-bearing part: `OPENAI_BASE_URL` can point anywhere, and falling back for an
 /// arbitrary base would hand this account's token to whatever proxy someone typed.
 pub fn inference_api_key() -> Option<String> {
-    resolve_inference_key(
-        crate::key_store::lookup_present("OPENAI_API_KEY"),
+    inference_credential().map(|(key, _)| key)
+}
+
+/// Which credential a turn will authenticate with, and where it came from.
+///
+/// Exists because "can this pod think?" has no honest answer from outside the pod.
+/// The credential that makes a provisioned pod work is injected as container env
+/// and never appears in `keys.json`, so a client reading the key store sees an
+/// empty list on a perfectly healthy pod. This is the pod answering the question
+/// itself, with the same function the turn will use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceCredential {
+    /// `OPENAI_API_KEY` from this pod's key store — bound through the API, and
+    /// store-first precedence means it overrides anything injected.
+    Stored,
+    /// `OPENAI_API_KEY` from the process environment: what provisioning renders
+    /// into a managed pod, or a self-hoster's `.env`.
+    Environment,
+    /// No provider key anywhere — this pod authenticates as itself with its
+    /// `METALCRAFT_TOKEN`, which is only offered at the gateway.
+    PodToken,
+}
+
+impl InferenceCredential {
+    /// The wire name. Stable: clients branch on it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stored => "stored",
+            Self::Environment => "environment",
+            Self::PodToken => "pod_token",
+        }
+    }
+}
+
+/// [`inference_api_key`], carrying which of the three credentials answered.
+pub fn inference_credential() -> Option<(String, InferenceCredential)> {
+    resolve_inference_credential(
+        crate::key_store::lookup_present_origin("OPENAI_API_KEY"),
         crate::key_store::lookup_present("OPENAI_BASE_URL"),
         crate::key_store::lookup_present("METALCRAFT_TOKEN"),
     )
 }
 
-/// Pure form of [`inference_api_key`], so the precedence — and the refusal to send
-/// the pod token anywhere else — is testable without global env.
-fn resolve_inference_key(
-    openai_key: Option<String>,
+/// Pure form of [`inference_credential`], so the precedence — and the refusal to
+/// send the pod token anywhere else — is testable without global env.
+fn resolve_inference_credential(
+    openai_key: Option<(String, crate::key_store::Origin)>,
     base_url: Option<String>,
     pod_token: Option<String>,
-) -> Option<String> {
-    if let Some(key) = openai_key {
-        return Some(key);
+) -> Option<(String, InferenceCredential)> {
+    use crate::key_store::Origin;
+    if let Some((key, origin)) = openai_key {
+        return Some((
+            key,
+            match origin {
+                Origin::Stored => InferenceCredential::Stored,
+                Origin::Environment => InferenceCredential::Environment,
+            },
+        ));
     }
     base_url
         .filter(|base| is_metalcraft_gateway(base))
         .and(pod_token)
+        .map(|token| (token, InferenceCredential::PodToken))
+}
+
+/// Where inference is routed, safe to show a client: **userinfo and query
+/// stripped**. A base URL is configuration, not a secret, but nothing stops one
+/// carrying a credential in either position, and this value is rendered in a UI.
+/// `None` means the rig default, OpenAI proper.
+pub fn inference_base_url() -> Option<String> {
+    crate::key_store::lookup_present("OPENAI_BASE_URL").map(|base| redact_url(&base))
+}
+
+fn redact_url(base: &str) -> String {
+    let (head, rest) = match base.split_once("://") {
+        Some((scheme, rest)) => (format!("{scheme}://"), rest),
+        None => (String::new(), base),
+    };
+    let path_start = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(path_start);
+    // Keep the *last* `@` segment: that is the host, and the part before it is
+    // exactly what must not be echoed back.
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    format!("{head}{host}{path}")
+}
+
+/// Whether inference is routed at the Metalcraft gateway — the condition under
+/// which a turn bills the account's credits (and needs its premium).
+pub fn inference_at_gateway() -> bool {
+    crate::key_store::lookup_present("OPENAI_BASE_URL")
+        .is_some_and(|base| is_metalcraft_gateway(&base))
 }
 
 /// Whether `base` is a Metalcraft inference endpoint: an ecosystem host over https,
@@ -871,7 +944,11 @@ fn classify_code(raw: &str) -> ErrorCode {
 
 #[cfg(test)]
 mod inference_tests {
-    use super::{ErrorCode, classify_turn_error, resolve_inference_key};
+    use super::{
+        ErrorCode, InferenceCredential, classify_turn_error, redact_url,
+        resolve_inference_credential,
+    };
+    use crate::key_store::Origin;
 
     /// The pod already holds an ecosystem credential the gateway accepts, so being
     /// asked to paste a second one was asking twice for the same thing. What this must
@@ -879,11 +956,12 @@ mod inference_tests {
     #[test]
     fn the_pod_token_authenticates_inference_only_at_the_gateway() {
         let key = |k: Option<&str>, base: Option<&str>, token: Option<&str>| {
-            resolve_inference_key(
-                k.map(str::to_string),
+            resolve_inference_credential(
+                k.map(|v| (v.to_string(), Origin::Stored)),
                 base.map(str::to_string),
                 token.map(str::to_string),
             )
+            .map(|(v, _)| v)
         };
         let gw = Some("https://inference.metalcraftai.com/v1");
         let tok = Some("mck_live_abc");
@@ -927,6 +1005,59 @@ mod inference_tests {
             key(None, Some("http://localhost:8080/v1"), tok).as_deref(),
             Some("mck_live_abc")
         );
+    }
+
+    /// The whole point of reporting provenance: a client cannot tell an injected
+    /// credential from a bound one by looking at the key store, because the
+    /// injected one is never in it.
+    #[test]
+    fn provenance_distinguishes_a_bound_key_from_an_injected_one() {
+        let gw = Some("https://inference.metalcraftai.com/v1".to_string());
+        let tok = Some("mck_live_abc".to_string());
+        let which = |k: Option<(String, Origin)>| {
+            resolve_inference_credential(k, gw.clone(), tok.clone()).map(|(_, c)| c)
+        };
+
+        assert_eq!(
+            which(Some(("sk-real".into(), Origin::Stored))),
+            Some(InferenceCredential::Stored),
+            "bound through the API"
+        );
+        assert_eq!(
+            which(Some(("sk-real".into(), Origin::Environment))),
+            Some(InferenceCredential::Environment),
+            "injected into the container — invisible in keys.json, and the case \
+             that made an empty key store look like a dead pod"
+        );
+        assert_eq!(
+            which(None),
+            Some(InferenceCredential::PodToken),
+            "no provider key at all, so the pod authenticates as itself"
+        );
+        assert_eq!(
+            resolve_inference_credential(None, gw, None).map(|(_, c)| c),
+            None,
+            "nothing resolves: this really is a pod that cannot think"
+        );
+    }
+
+    /// This value is handed to a UI, so anything a base URL can smuggle has to
+    /// come off first.
+    #[test]
+    fn a_reported_base_url_carries_no_credentials() {
+        assert_eq!(
+            redact_url("https://user:pw@inference.metalcraftai.com/v1"),
+            "https://inference.metalcraftai.com/v1"
+        );
+        assert_eq!(
+            redact_url("https://gw.example.com/v1?token=secret"),
+            "https://gw.example.com/v1"
+        );
+        assert_eq!(
+            redact_url("https://inference.metalcraftai.com/v1"),
+            "https://inference.metalcraftai.com/v1"
+        );
+        assert_eq!(redact_url("not a url"), "not a url");
     }
 
     fn code(s: &str) -> ErrorCode {

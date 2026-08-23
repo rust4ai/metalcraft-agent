@@ -312,10 +312,11 @@ async fn auth_middleware(
         get_agent_instance_memory, post_instance_conversation,
         get_persona, put_persona, delete_persona,
         get_skill, put_skill, delete_skill,
-        get_flow, put_flow, delete_flow, post_run_flow, post_install_flow,
+        list_flows, get_flow, put_flow, delete_flow, post_run_flow, post_install_flow,
         get_flow_schedules, put_flow_schedules, post_flow_schedule, delete_flow_schedule,
         get_flow_binding, put_flow_binding, post_arm_schedule, delete_arm_schedule,
         post_inspect_agent_pack, get_agent_pack_registries, post_update_agent_pack,
+        get_octaweave_status,
         get_registry_status, post_registry_connect, post_registry_disconnect,
         get_registry_search, get_registry_manifest,
         get_flow_schedules_preview,
@@ -325,6 +326,7 @@ async fn auth_middleware(
         list_diagnostics, get_diagnostics_session,
         list_api_tools, get_api_tool, put_api_tool, delete_api_tool,
         list_keys, list_recommended_keys, put_key, delete_key, reveal_key,
+        get_inference_status,
         list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
         list_scheduled_tasks, delete_scheduled_task,
         list_integrations, get_integration, delete_integration, put_integration_enabled, post_install_integration,
@@ -337,8 +339,10 @@ async fn auth_middleware(
     components(schemas(
         ErrorResponse, ProjectSnapshot, ProjectLayout, ApiToolSummary,
         KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
+        InferenceStatus,
         FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, RunFlowOutput, ResumeFlowRunRequest,
         InstallFlowRequest, InstallDependenciesResponse, SchedulePreview,
+        FlowList, FlowListItem, FlowListSchedule,
         crate::flow_exec::FlowRunSummary, crate::flow_exec::FlowStep,
         crate::flow_runs::FlowRun, crate::flow_runs::PauseInfo,
         crate::flow_install::InstallResult, crate::flow_install::InstalledFlow,
@@ -367,6 +371,7 @@ async fn auth_middleware(
         AgentPackPreview, Registries, RegistryView, crate::agent_registry::Trust,
         crate::agent_registry::Connection, crate::agent_registry::ConnectionState,
         crate::agent_registry::SearchHit,
+        crate::octaweave::OctaweaveConnection, crate::octaweave::OctaweaveConnectionState,
         FlowBindingView, FlowPersonaCheck, ArmedSchedule, ArmConsent,
         BindFlowRequest, ArmScheduleRequest,
         crate::skill::Skill, crate::skill::SkillSummary,
@@ -459,6 +464,9 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/agent-packs", get(list_agent_packs))
         .route("/api/v1/agent-packs/install", post(post_install_agent_pack))
         .route("/api/v1/agent-packs/inspect", post(post_inspect_agent_pack))
+        // What this pod is to Octaweave: a read, because there is nothing to configure
+        // — the credential is the one the pod already holds.
+        .route("/api/v1/services/octaweave", get(get_octaweave_status))
         .route(
             "/api/v1/agent-packs/registries",
             get(get_agent_pack_registries),
@@ -525,6 +533,7 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/skills/{slug}", get(get_skill))
         .route("/api/v1/skills/{slug}", put(put_skill))
         .route("/api/v1/skills/{slug}", delete(delete_skill))
+        .route("/api/v1/flows", get(list_flows))
         // Static `/install` before the `{id}` param route (matchit prefers the
         // literal) — install a registry flow onto this agent.
         .route("/api/v1/flows/install", post(post_install_flow))
@@ -574,6 +583,7 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/api-tools/{name}", put(put_api_tool))
         .route("/api/v1/api-tools/{name}", delete(delete_api_tool))
         .route("/api/v1/keys", get(list_keys))
+        .route("/api/v1/inference", get(get_inference_status))
         .route("/api/v1/keys/recommended", get(list_recommended_keys))
         .route("/api/v1/keys/{name}", put(put_key))
         .route("/api/v1/keys/{name}", delete(delete_key))
@@ -1212,6 +1222,21 @@ fn registry_error(e: crate::agent_registry::RegistryError) -> Response {
         E::Host(_) => StatusCode::BAD_GATEWAY,
     };
     err_json(code, e.to_string())
+}
+
+/// What this pod is to Octaweave, and whether the tools are installed.
+///
+/// A read, not a write: there is nothing to configure. The pod presents the Metalcraft
+/// token it already holds, and the only human step is linking the two accounts once —
+/// which happens on Octaweave's own page, at `link_url`.
+#[utoipa::path(
+    get,
+    path = "/api/v1/services/octaweave",
+    tag = "agent-packs",
+    responses((status = 200, description = "This pod's standing with Octaweave", body = crate::octaweave::OctaweaveConnection)),
+)]
+async fn get_octaweave_status() -> Response {
+    Json(crate::octaweave::status().await).into_response()
 }
 
 #[utoipa::path(
@@ -2116,6 +2141,129 @@ async fn delete_skill(Path(slug): Path<String>) -> Response {
 
 // ── Flow handlers ───────────────────────────────────────────────────────
 
+// ── Flow listing ────────────────────────────────────────────────────────
+
+/// One flow, resolved for display.
+///
+/// Assembled here rather than served as a bare `SavedFlow` because the three facts
+/// a client needs about a flow — *which agent does it run as*, *is it armed*, *when
+/// does it fire next* — live in three different places: the flow file,
+/// `flow_bindings.json`, and a cron computation. A client that had to make four
+/// calls per flow to answer "what is this automation" would make none of them.
+#[derive(Serialize, utoipa::ToSchema)]
+struct FlowListItem {
+    id: String,
+    name: String,
+    /// The flow-wide master switch. **Disabled flows are listed too**: agent packs
+    /// ship their flows disabled, so an unarmed flow is the normal case and the one
+    /// an arm dialog exists to act on. Filtering to enabled here would hide exactly
+    /// the flows a client needs to show.
+    enabled: bool,
+    node_count: usize,
+    created_at: String,
+    updated_at: String,
+    /// v2 flows run on the state-machine executor and `POST /run` answers with a
+    /// `FlowRunSummary`; v1 flows answer with the legacy per-prompt response. Worth
+    /// knowing before offering a button that has to render one of them.
+    v2: bool,
+    /// The preset this flow runs as. Always populated — an unbound flow resolves to
+    /// the default agent, which is what it effectively already was.
+    preset: String,
+    /// True when any schedule has been armed, i.e. this flow has an agent.
+    armed: bool,
+    schedules: Vec<FlowListSchedule>,
+}
+
+/// One schedule of a listed flow: the stored spec, plus what it is bound to and
+/// when it fires next.
+#[derive(Serialize, utoipa::ToSchema)]
+struct FlowListSchedule {
+    /// The schedule exactly as stored — the same shape `PUT …/schedules` accepts, so
+    /// an editor can round-trip it without a second representation of the same thing.
+    #[serde(flatten)]
+    #[schema(value_type = Object)]
+    spec: metalcraft_flows::FlowScheduleSpec,
+    /// The agent this schedule was armed with. An instance id is pod-local and must
+    /// never be *published* (`flow_bindings`' module docs); this is the pod's own API
+    /// rather than an export path, and "which agent runs this" is the question the
+    /// list exists to answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instance_id: Option<String>,
+    /// Absent if the instance was deleted out from under the binding — the same
+    /// semantics as [`ArmedSchedule`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instance_name: Option<String>,
+    /// Human-readable trigger: `"Every 5 minute(s)"`, ``"Cron `0 0 8 * * *` (America/Detroit)"``.
+    description: String,
+    /// Next projected fire time, or absent for a manual (or invalid) trigger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_fire_at: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct FlowList {
+    flows: Vec<FlowListItem>,
+}
+
+fn flow_list_item(flow: &metalcraft_flows::SavedFlow) -> FlowListItem {
+    let binding = crate::flow_bindings::get(&flow.id);
+    let schedules: Vec<FlowListSchedule> = flow
+        .effective_schedules()
+        .into_iter()
+        .map(|spec| {
+            let preview = schedule_preview(&spec);
+            let instance_id = binding.instances.get(&spec.id).cloned();
+            let instance_name = instance_id
+                .as_deref()
+                .and_then(|id| crate::agent_instance::load(id).ok())
+                .map(|i| i.name);
+            FlowListSchedule {
+                instance_id,
+                instance_name,
+                description: preview.description,
+                // `schedule_preview` projects three; a list wants the next one.
+                next_fire_at: preview.next_runs.into_iter().next(),
+                spec,
+            }
+        })
+        .collect();
+    FlowListItem {
+        id: flow.id.clone(),
+        name: flow.name.clone(),
+        enabled: flow.enabled,
+        node_count: flow.flow.nodes.len(),
+        created_at: flow.created_at.clone(),
+        updated_at: flow.updated_at.clone(),
+        v2: crate::flow_exec::is_v2_flow(flow),
+        preset: crate::flow_bindings::preset_for(&flow.id),
+        armed: schedules.iter().any(|s| s.instance_id.is_some()),
+        schedules,
+    }
+}
+
+/// `GET /api/v1/flows` — every flow on this pod.
+///
+/// The listing the API never had: until now a client had to already know a flow's
+/// id to see anything at all, which made "show me what this pod is set up to do"
+/// unanswerable. See `docs/FLOWS_AS_AGENTS_PLAN.md` §3.
+#[utoipa::path(
+    get,
+    path = "/api/v1/flows",
+    tag = "flows",
+    responses((status = 200, description = "Every flow installed on this pod", body = FlowList)),
+)]
+async fn list_flows() -> Response {
+    let dir = paths::flows_dir();
+    // `metalcraft_flows::list_flows` sorts newest-edited first and its summaries
+    // carry no schedules; reload each flow to resolve them, keeping that order.
+    let flows: Vec<FlowListItem> = metalcraft_flows::list_flows(&dir)
+        .into_iter()
+        .filter_map(|summary| metalcraft_flows::load_flow(&dir, &summary.id))
+        .map(|flow| flow_list_item(&flow))
+        .collect();
+    Json(FlowList { flows }).into_response()
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/flows/{id}",
@@ -2957,6 +3105,49 @@ fn list_key_entries() -> Vec<KeyEntry> {
 )]
 async fn list_keys() -> Json<Vec<KeyEntry>> {
     Json(list_key_entries())
+}
+
+/// Whether this pod can run a turn, and on whose credential.
+///
+/// The one question a client cannot answer from `GET /api/v1/keys`: that endpoint
+/// lists `keys.json`, and a provisioned pod's credential is injected as container
+/// env, so a healthy pod reads as an empty store. Clients that inferred "no key,
+/// cannot think" from it told people their working pod was dead. The pod is the
+/// only honest source, so it answers here — through the same function a turn uses.
+#[derive(Serialize, utoipa::ToSchema)]
+struct InferenceStatus {
+    /// A credential resolves, so a turn has something to authenticate with. This
+    /// is not a promise the turn *succeeds*: the gateway still meters credits and
+    /// requires the account's premium, which the pod cannot see.
+    ready: bool,
+    /// Which credential answered — `"stored"` (bound through this API),
+    /// `"environment"` (injected by provisioning, or a `.env`), `"pod_token"`
+    /// (this pod's own identity, offered only at the gateway), or `"none"`.
+    credential: String,
+    /// Where inference is routed, userinfo and query stripped. Absent means the
+    /// default, OpenAI proper.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_url: Option<String>,
+    /// Routed at the Metalcraft gateway — so turns bill the account's credits.
+    gateway: bool,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/inference",
+    tag = "keys",
+    responses((status = 200, body = InferenceStatus)),
+)]
+async fn get_inference_status() -> Json<InferenceStatus> {
+    let credential = crate::runtime::inference_credential();
+    Json(InferenceStatus {
+        ready: credential.is_some(),
+        credential: credential
+            .map(|(_, c)| c.as_str().to_string())
+            .unwrap_or_else(|| "none".into()),
+        base_url: crate::runtime::inference_base_url(),
+        gateway: crate::runtime::inference_at_gateway(),
+    })
 }
 
 /// Keys recommended by enabled packs, each flagged configured/missing. Lets the

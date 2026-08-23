@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.30.0"
+    "version": "0.31.0"
   },
   "paths": {
     "/api/v1/agent-packs": {
@@ -178,6 +178,295 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Registries"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-packs/registries/{name}/connect": {
+      "post": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "post_registry_connect",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "A configured registry name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "token_key",
+            "in": "query",
+            "description": "Key-store entry to draw the bearer from; defaults to METALCRAFT_TOKEN",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Where the connection got to",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such registry is configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Registries come from AGENT_PACK_REGISTRIES and cannot be edited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-packs/registries/{name}/disconnect": {
+      "post": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "post_registry_disconnect",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "A configured registry name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The registry, now anonymous",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such registry is configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Registries come from AGENT_PACK_REGISTRIES and cannot be edited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-packs/registries/{name}/packs/{id}/manifest": {
+      "get": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "get_registry_manifest",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "A configured registry name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The pack's handle on that host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pack's manifest, as the host serves it"
+          },
+          "400": {
+            "description": "That is not a usable pack id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such registry, or no such pack on it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The host would not serve it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-packs/registries/{name}/search": {
+      "get": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "get_registry_search",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "A configured registry name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Search text; omit to browse",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, default 25",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What that host publishes"
+          },
+          "404": {
+            "description": "No such registry is configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "That host is fetch-only and does not offer search",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The host could not be searched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-packs/registries/{name}/status": {
+      "get": {
+        "tags": [
+          "agent-packs"
+        ],
+        "operationId": "get_registry_status",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "A configured registry name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What this pod is to that registry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such registry is configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1373,6 +1662,28 @@
         }
       }
     },
+    "/api/v1/flows": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "`GET /api/v1/flows` — every flow on this pod.",
+        "description": "The listing the API never had: until now a client had to already know a flow's\nid to see anything at all, which made \"show me what this pod is set up to do\"\nunanswerable. See `docs/FLOWS_AS_AGENTS_PLAN.md` §3.",
+        "operationId": "list_flows",
+        "responses": {
+          "200": {
+            "description": "Every flow installed on this pod",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/flows/install": {
       "post": {
         "tags": [
@@ -2173,6 +2484,26 @@
         }
       }
     },
+    "/api/v1/inference": {
+      "get": {
+        "tags": [
+          "keys"
+        ],
+        "operationId": "get_inference_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InferenceStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/info": {
       "get": {
         "tags": [
@@ -2738,6 +3069,28 @@
         "responses": {
           "200": {
             "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/api/v1/services/octaweave": {
+      "get": {
+        "tags": [
+          "agent-packs"
+        ],
+        "summary": "What this pod is to Octaweave, and whether the tools are installed.",
+        "description": "A read, not a write: there is nothing to configure. The pod presents the Metalcraft\ntoken it already holds, and the only human step is linking the two accounts once —\nwhich happens on Octaweave's own page, at `link_url`.",
+        "operationId": "get_octaweave_status",
+        "responses": {
+          "200": {
+            "description": "This pod's standing with Octaweave",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OctaweaveConnection"
+                }
+              }
+            }
           }
         }
       }
@@ -3808,6 +4161,70 @@
           }
         }
       },
+      "Connection": {
+        "type": "object",
+        "description": "What this pod is to one registry.",
+        "required": [
+          "registry",
+          "url",
+          "trust",
+          "state"
+        ],
+        "properties": {
+          "account": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Whatever the host will say about the account — an email, usually."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The host's own words when something went wrong, for a UI to show verbatim\ninstead of inventing an explanation."
+          },
+          "link_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where a human goes to finish the connection. Taken from the host's own answer\nrather than assembled here: a URL we guessed is a URL we would still be sending\npeople to after the host moved it."
+          },
+          "registry": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ConnectionState"
+          },
+          "token_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key-store entry this registry draws its bearer from — the name, never the\nvalue."
+          },
+          "trust": {
+            "$ref": "#/components/schemas/Trust"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "ConnectionState": {
+        "type": "string",
+        "description": "How far a registry connection got, in the only terms a UI can act on.",
+        "enum": [
+          "connected",
+          "unlinked",
+          "no-token",
+          "rejected",
+          "unsupported",
+          "unreachable"
+        ]
+      },
       "ConsentSummary": {
         "type": "object",
         "description": "What a human is shown before approving an install.",
@@ -4166,6 +4583,118 @@
             "description": "The preset the flow runs as. Always populated — an unbound flow resolves to\nthe default agent, which is what it effectively already was."
           }
         }
+      },
+      "FlowList": {
+        "type": "object",
+        "required": [
+          "flows"
+        ],
+        "properties": {
+          "flows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowListItem"
+            }
+          }
+        }
+      },
+      "FlowListItem": {
+        "type": "object",
+        "description": "One flow, resolved for display.\n\nAssembled here rather than served as a bare `SavedFlow` because the three facts\na client needs about a flow — *which agent does it run as*, *is it armed*, *when\ndoes it fire next* — live in three different places: the flow file,\n`flow_bindings.json`, and a cron computation. A client that had to make four\ncalls per flow to answer \"what is this automation\" would make none of them.",
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "node_count",
+          "created_at",
+          "updated_at",
+          "v2",
+          "preset",
+          "armed",
+          "schedules"
+        ],
+        "properties": {
+          "armed": {
+            "type": "boolean",
+            "description": "True when any schedule has been armed, i.e. this flow has an agent."
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "The flow-wide master switch. **Disabled flows are listed too**: agent packs\nship their flows disabled, so an unarmed flow is the normal case and the one\nan arm dialog exists to act on. Filtering to enabled here would hide exactly\nthe flows a client needs to show."
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "node_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "preset": {
+            "type": "string",
+            "description": "The preset this flow runs as. Always populated — an unbound flow resolves to\nthe default agent, which is what it effectively already was."
+          },
+          "schedules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowListSchedule"
+            }
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "v2": {
+            "type": "boolean",
+            "description": "v2 flows run on the state-machine executor and `POST /run` answers with a\n`FlowRunSummary`; v1 flows answer with the legacy per-prompt response. Worth\nknowing before offering a button that has to render one of them."
+          }
+        }
+      },
+      "FlowListSchedule": {
+        "allOf": [
+          {
+            "type": "object",
+            "description": "The schedule exactly as stored — the same shape `PUT …/schedules` accepts, so\nan editor can round-trip it without a second representation of the same thing."
+          },
+          {
+            "type": "object",
+            "required": [
+              "description"
+            ],
+            "properties": {
+              "description": {
+                "type": "string",
+                "description": "Human-readable trigger: `\"Every 5 minute(s)\"`, ``\"Cron `0 0 8 * * *` (America/Detroit)\"``."
+              },
+              "instance_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The agent this schedule was armed with. An instance id is pod-local and must\nnever be *published* (`flow_bindings`' module docs); this is the pod's own API\nrather than an export path, and \"which agent runs this\" is the question the\nlist exists to answer."
+              },
+              "instance_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Absent if the instance was deleted out from under the binding — the same\nsemantics as [`ArmedSchedule`]."
+              },
+              "next_fire_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Next projected fire time, or absent for a manual (or invalid) trigger."
+              }
+            }
+          }
+        ],
+        "description": "One schedule of a listed flow: the stored spec, plus what it is bound to and\nwhen it fires next."
       },
       "FlowPersonaCheck": {
         "type": "object",
@@ -4644,6 +5173,36 @@
           },
           "url": {
             "type": "string"
+          }
+        }
+      },
+      "InferenceStatus": {
+        "type": "object",
+        "description": "Whether this pod can run a turn, and on whose credential.\n\nThe one question a client cannot answer from `GET /api/v1/keys`: that endpoint\nlists `keys.json`, and a provisioned pod's credential is injected as container\nenv, so a healthy pod reads as an empty store. Clients that inferred \"no key,\ncannot think\" from it told people their working pod was dead. The pod is the\nonly honest source, so it answers here — through the same function a turn uses.",
+        "required": [
+          "ready",
+          "credential",
+          "gateway"
+        ],
+        "properties": {
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where inference is routed, userinfo and query stripped. Absent means the\ndefault, OpenAI proper."
+          },
+          "credential": {
+            "type": "string",
+            "description": "Which credential answered — `\"stored\"` (bound through this API),\n`\"environment\"` (injected by provisioning, or a `.env`), `\"pod_token\"`\n(this pod's own identity, offered only at the gateway), or `\"none\"`."
+          },
+          "gateway": {
+            "type": "boolean",
+            "description": "Routed at the Metalcraft gateway — so turns bill the account's credits."
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "A credential resolves, so a turn has something to authenticate with. This\nis not a promise the turn *succeeds*: the gateway still meters credits and\nrequires the account's premium, which the pod cannot see."
           }
         }
       },
@@ -5520,6 +6079,57 @@
           }
         }
       },
+      "OctaweaveConnection": {
+        "type": "object",
+        "required": [
+          "url",
+          "state",
+          "pack_installed"
+        ],
+        "properties": {
+          "account": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Whatever Octaweave will say about the account — an email or a name."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The host's own words when something went wrong, shown rather than paraphrased."
+          },
+          "link_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where a human goes to finish it. Octaweave's own answer when it offers one,\nfalling back to its account page — the page that hosts the link button."
+          },
+          "pack_installed": {
+            "type": "boolean",
+            "description": "Whether the tools are actually installed. Connecting without the pack reaches\nnothing, and installing the pack without connecting authenticates as nobody —\na panel needs both facts to say which half is missing."
+          },
+          "state": {
+            "$ref": "#/components/schemas/OctaweaveConnectionState"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "OctaweaveConnectionState": {
+        "type": "string",
+        "description": "How far this pod got with Octaweave, in the terms a panel can act on.\n\nNamed for its service rather than `ConnectionState`, because `utoipa` keys the\nOpenAPI document by type name: a second `Connection` does not conflict loudly, it\n**silently replaces** the first, and the generated client then types one endpoint\nagainst another endpoint's shape.",
+        "enum": [
+          "connected",
+          "unlinked",
+          "no-token",
+          "unreachable"
+        ]
+      },
       "Orphaned": {
         "type": "object",
         "description": "One agent whose preset was withdrawn by an update.",
@@ -6267,6 +6877,71 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "SearchHit": {
+        "type": "object",
+        "description": "One result from a host's `/search`.\n\nEverything past the name is optional because a fetch-only host is a real\ndeployment rather than a degenerate one (§11.1 makes `/search` optional in the\nfirst place). A browse list renders what it got; it does not refuse what it\ndidn't.",
+        "required": [
+          "reference",
+          "id",
+          "name",
+          "tags",
+          "verified"
+        ],
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "The id on this host, without the `@`."
+          },
+          "install_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string",
+            "description": "What to install: `axoniac:@amy_kitchen`. **Qualified, always** — an\nunqualified reference is an error the moment two configured hosts publish the\nsame id (§11.3), and a browse list is precisely where that collision surfaces."
+          },
+          "tagline": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "Whether the host vouches for it — worth exactly as much as the host's `trust`\nmakes it worth, and on a `verified-only` host it is what decides whether this\npod will install the pack at all."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
