@@ -549,6 +549,70 @@ pub async fn status() -> GatewayStatus {
     }
 }
 
+/// Give the number back: unregister at the gateway, then disconnect locally.
+///
+/// The counterpart to [`register`], and the one direction that was missing. A
+/// [`disconnect`] is local — it stops *this pod* receiving and leaves the
+/// account's registration standing, which is right for "not on this pod any
+/// more" and wrong for "I am done with this number". The gateway goes on holding
+/// it: the `user_phones` row stays bound and verified (so no other account may
+/// claim that number), a dedicated number stays out of the pool, and the managed
+/// integration stays live, so inbound keeps routing to a consumer that left.
+///
+/// Only a client holding the account PAT could do this before — which is every
+/// client except the ones that reach the account *through* their pod. Hence the
+/// proxy, in the same shape as the four beside it.
+///
+/// **The local disconnect is not optional.** Deleting the registration while the
+/// channel stays enabled leaves the pod claiming a connection whose account-side
+/// half no longer exists — the same "green light, dead pipe" this module works
+/// to avoid. It runs even if the remote call failed, because a pod that cannot
+/// reach the gateway is not a pod that should go on presenting itself as
+/// connected to it.
+pub async fn unregister() -> Result<serde_json::Value, String> {
+    let gw = gateway_url();
+    let tok = token()?;
+    let sent = client()?
+        .post(format!("{gw}/api/v1/phone/unregister"))
+        .bearer_auth(&tok)
+        .json(&serde_json::json!({}))
+        .send()
+        .await;
+
+    let remote = match sent {
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if status.is_success() {
+                Ok(serde_json::from_str::<serde_json::Value>(&text)
+                    .unwrap_or_else(|_| serde_json::json!({ "unregistered": true })))
+            } else {
+                let msg = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+                    .unwrap_or_else(|| text.chars().take(200).collect());
+                Err(format!(
+                    "unregister failed (HTTP {}): {msg}",
+                    status.as_u16()
+                ))
+            }
+        }
+        Err(e) => Err(format!("gateway unregister request failed: {e}")),
+    };
+
+    // Local half, either way. Its own failure is worth reporting, but not at the
+    // cost of losing why the remote half failed.
+    if let Err(e) = disconnect().await {
+        log::warn!("metalcraft-gateway: unregistered but could not clear the local channel: {e}");
+        if remote.is_ok() {
+            return Err(format!(
+                "unregistered at the gateway, but this pod could not clear its own channel: {e}"
+            ));
+        }
+    }
+    remote
+}
+
 /// Proxy a phone registration to the gateway with the pod's token (for the workshop's
 /// inline register → verify flow). Returns the gateway's JSON (incl. `verify_code`).
 pub async fn register(phone_number: &str) -> Result<serde_json::Value, String> {

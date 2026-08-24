@@ -502,6 +502,7 @@ async fn auth_middleware(
         list_channels, create_channel, update_channel, delete_channel, list_channel_events,
         gateway_metalcraft_status, gateway_metalcraft_register,
         gateway_metalcraft_connect, gateway_metalcraft_disconnect,
+        gateway_metalcraft_unregister,
     ),
     components(schemas(
         ErrorResponse, ProjectSnapshot, ProjectLayout, ApiToolSummary,
@@ -810,6 +811,10 @@ pub fn build_router(api_key: String) -> Router {
         .route(
             "/api/v1/gateway/metalcraft/disconnect",
             post(gateway_metalcraft_disconnect),
+        )
+        .route(
+            "/api/v1/gateway/metalcraft/unregister",
+            post(gateway_metalcraft_unregister),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -6063,6 +6068,27 @@ async fn gateway_metalcraft_connect(Json(req): Json<MgConnectRequest>) -> Respon
 async fn gateway_metalcraft_disconnect() -> Response {
     match crate::metalcraft_gateway::disconnect().await {
         Ok(()) => Json(serde_json::json!({ "connected": false })).into_response(),
+        Err(e) => err_json(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+/// Unregister: give the number back at the gateway, then disconnect locally.
+///
+/// The exit that `disconnect` is not. Disconnecting stops this pod receiving and
+/// leaves the account's registration standing — number still bound and verified,
+/// dedicated number still out of the pool, managed integration still routing to
+/// a consumer that left. This is the one that ends all of that, and until it
+/// existed only a client holding the account PAT could do it, which excludes
+/// every client that reaches the account through its pod.
+#[utoipa::path(
+    post,
+    path = "/api/v1/gateway/metalcraft/unregister",
+    tag = "gateway",
+    responses((status = 200, description = "Unregistered"), (status = 502, body = ErrorResponse)),
+)]
+async fn gateway_metalcraft_unregister() -> Response {
+    match crate::metalcraft_gateway::unregister().await {
+        Ok(v) => Json(v).into_response(),
         Err(e) => err_json(StatusCode::BAD_GATEWAY, e),
     }
 }
