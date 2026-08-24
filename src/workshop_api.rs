@@ -1175,7 +1175,13 @@ async fn agent_pack_bytes(
     }
     Err(err_json(
         StatusCode::BAD_REQUEST,
-        "provide ?url=, ?path=, or upload the .agentpack as the request body".to_string(),
+        // Name `?ref=` first: it is the parameter almost every caller means, and
+        // leaving it out of this message cost a client an afternoon — it sent
+        // `?reference=`, got told about three things it did not want, and had no
+        // way to see that the name was the problem.
+        "provide ?ref= (a registry reference), ?url=, ?path=, or upload the \
+         .agentpack as the request body"
+            .to_string(),
     ))
 }
 
@@ -2716,6 +2722,26 @@ fn arm_consent(preset: Option<&crate::agent_preset::AgentPreset>) -> ArmConsent 
         .iter()
         .map(|e| e.name.clone())
         .collect();
+    // The pack-derived summary covers what *integrations* vend. An agent's
+    // personas also carry built-in tools — `bash`, `edit_file`, `web_fetch` — and
+    // those are the ones you would most want named before agreeing to let it run
+    // unwatched. Without this, a seeded preset (which has no integrations at all)
+    // reported "0 tools" for an agent that can execute shell commands: a consent
+    // summary that is not merely thin but wrong.
+    let mut tools: std::collections::BTreeSet<String> = consent.tools.iter().cloned().collect();
+    for slug in preset.callable_personas() {
+        if let Ok(persona) = Persona::load(&slug, &paths::personas_dir()) {
+            tools.extend(persona.resolved_tool_names());
+        }
+    }
+    let mut mutating: Vec<String> = consent.mutating_tools.clone();
+    for name in &tools {
+        if changes_something(name) && !mutating.contains(name) {
+            mutating.push(name.clone());
+        }
+    }
+    mutating.sort();
+
     ArmConsent {
         preset_name: preset.name.clone(),
         missing_env: requires_env
@@ -2725,13 +2751,29 @@ fn arm_consent(preset: Option<&crate::agent_preset::AgentPreset>) -> ArmConsent 
             .collect(),
         requires_env,
         domains: consent.domains,
-        mutating_tools: consent.mutating_tools,
-        tool_count: consent.tools.len(),
+        mutating_tools: mutating,
+        tool_count: tools.len(),
         base_memories: crate::memory::instance::current_base_version(&preset.slug)
             .and_then(|v| crate::memory::instance::load_base(&preset.slug, &v).ok())
             .and_then(|b| b.try_read().map(|b| b.len()).ok())
             .unwrap_or(0),
     }
+}
+
+/// Whether a tool can change something, for the purpose of *describing* an agent
+/// before it runs.
+///
+/// Deliberately not `OperationKind::default_permission()`, which answers a
+/// different question — "would this prompt?" — and auto-approves `write_file`
+/// when the path does not exist yet. Creating a file is still an effect, and a
+/// summary of what an unwatched agent may do should say so. So: anything that is
+/// not a read.
+fn changes_something(tool_name: &str) -> bool {
+    use crate::approval::OperationKind as K;
+    !matches!(
+        K::classify(tool_name, &serde_json::Value::Null),
+        K::ReadFile | K::ListFiles | K::Search | K::LoadSkill | K::MetaRead
+    )
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -6909,5 +6951,25 @@ mod gateway_tests {
         assert_eq!(id, "gw-chan-1-userexamplecom");
         // Empty/symbol-only sender falls back to a stable placeholder.
         assert_eq!(gateway_chat_id("chan-1", "!!!"), "gw-chan-1-anon");
+    }
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::changes_something;
+
+    #[test]
+    fn a_read_is_not_a_change_and_everything_else_is() {
+        for read in ["read_file", "list_files", "grep", "find_files", "load_skill"] {
+            assert!(!changes_something(read), "{read} only reads");
+        }
+        // `write_file` classifies as auto-approving *WriteNewFile* when the path
+        // does not exist, which answers "would this prompt?" — the wrong question
+        // here. Creating a file is still an effect, and an agent about to run
+        // unwatched should be described by what it can do, not by what it would
+        // interrupt you for.
+        for change in ["bash", "write_file", "edit_file", "web_fetch", "sub_agent"] {
+            assert!(changes_something(change), "{change} changes something");
+        }
     }
 }

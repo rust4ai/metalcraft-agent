@@ -294,6 +294,17 @@ evaluated per persona) and `armed: [ArmedSchedule]` with `instance_id` + `instan
 `missing_env` is the sharpest field on it — credentials whose absence would otherwise
 surface "at 3am rather than at a moment anyone is looking", in the handler's own words.
 
+**Corrected again, 2026-08-23, by running it.** Against a live pod, that payload was
+*empty* for the seeded `general-agent`: `consent_for_preset` derives only from a preset's
+**integration packs**, and a seeded preset has none — so the dialog reported `tool_count: 0`
+for an agent whose personas can run `bash`. A consent summary that says "0 tools" before
+granting shell access is worse than no dialog at all. `arm_consent` now unions the
+personas' own `resolved_tool_names()` and classifies each with `changes_something` (not
+`default_permission`, which answers "would this prompt?" and auto-approves creating a
+file). The same agent now reports **49 tools, 26 mutating** — `bash`, `edit_file`,
+`key_set`, `agentpack_install`. Pinned by `consent_tests` and by
+`metalcraft-front`'s `live_pod` test.
+
 **So D is client work, not pod work.** The one pod-side nicety left: `POST …/arm` returns
 a bare `AgentInstance`, so a client that wants to show what it just permitted must re-`GET`
 the binding. Echo the `FlowBindingView` in the arm response and that round-trip goes away.
@@ -394,6 +405,30 @@ surface on top of them. What is left is **C** (run-now as the bound agent) and t
 arm dialog, which needs no pod work — see §6.
 
 ---
+
+## 11a. What running it actually found
+
+The plan above was written from reading. Then the pod was run for real
+(`--api --api-port 3999`, scratch data dir) and driven end to end. What held, and what
+did not:
+
+**Held, first try:** `GET /flows` (shape, flattened schedule, `description`,
+`next_fire_at`), arming (minted a persistent flow-origin agent, visible in the fleet),
+`POST /run` resolving the armed agent unprompted, the conversation per firing with its
+`▶` marker, the rolling window (a second firing joined the same chat), **the live bus** —
+a subscriber that did not drive the turn received `turn_started → reply → done` from a
+flow firing, which is the load-bearing claim of §4.2 and had never been observed — the
+409 refusing to delete an armed agent, and disarm keeping the agent and its conversation.
+
+**Did not hold:**
+
+1. **The consent summary was empty** for any preset without integration packs. See §6.
+   Fixed.
+2. **A five-field cron cannot be saved at all** — `PUT /flows/{id}` validates schedules
+   and 400s with the parser's own message. So the "Invalid cron" state the listing
+   renders (and `flow_list_test` pins) is only reachable through a pack install, a
+   hand-written file, or a flow saved before that validation existed. Rarer than the UI
+   work assumed, and worth knowing before someone treats that path as dead code.
 
 ## 12. Open questions
 
