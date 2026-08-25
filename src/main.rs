@@ -80,8 +80,6 @@ fn print_usage(personas_dir: &std::path::Path) {
         "  --persona <slug>  Persona to use; overrides the preset's default (also METALCRAFT_PERSONA)."
     );
     eprintln!("  --auto-approve    Skip approval prompts for all tools.");
-    eprintln!("  --migrate-agent-packs [--dry-run]");
-    eprintln!("                    Wrap legacy integration packs into agent packs, then exit.");
     eprintln!();
     let available = Persona::list_available(personas_dir);
     if available.is_empty() {
@@ -208,25 +206,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await;
         return Ok(());
-    }
-
-    // Migration is explicit and terminal: run it, print the report, exit. It must
-    // never happen on boot — an upgraded pod restructures its data dir when the
-    // operator says so, not because it restarted.
-    if invocation.migrate_agent_packs {
-        let report = metalcraft_agent::agent_packs::migrate::run(invocation.dry_run);
-        match serde_json::to_string_pretty(&report) {
-            Ok(json) => println!("{json}"),
-            Err(e) => eprintln!("{} {e}", ui::error("could not render the report:")),
-        }
-        let failed = report.failed.len();
-        if failed > 0 {
-            eprintln!(
-                "\n{} {failed} integration(s) could not be wrapped; they are unchanged.",
-                ui::warning("Warning:")
-            );
-        }
-        std::process::exit(if failed > 0 { 1 } else { 0 });
     }
 
     let auto_approve = invocation.auto_approve;

@@ -147,6 +147,37 @@ fn retire_obsolete_seeds() {
             &format!("'{id}' skill"),
         );
     }
+    // The external integration packs — the ones that lived in
+    // metalcraft-agent-external-packs and were side-loaded from the registry — are
+    // withdrawn. They were the last reason to keep a second, older install layout
+    // alive; agent packs are the install unit now, and these were never rebuilt as
+    // any. Retiring them here is the whole migration: no pod converts anything, it
+    // just stops carrying what nothing supports.
+    //
+    // `s3` goes with them even though its tools are compiled into this binary — the
+    // manifest is what makes them resolvable, and half a pack is worse than none.
+    for id in [
+        "calcom",
+        "cloudflare",
+        "discord",
+        "discord_admin",
+        "github",
+        "linear",
+        "metalcraft-meet",
+        "metalcraft_images",
+        "railway",
+        "render",
+        "s3",
+        "sentry",
+        "solarabase",
+        "sprite_builder",
+        "starflask",
+    ] {
+        retire_dir(
+            paths::integrations_dir().join(id),
+            &format!("'{id}' integration"),
+        );
+    }
     // The morning brief was a calendar flow — its persona reads `mcal_*` and its
     // prompt names them, so it cannot outlive the pack it was written against.
     retire_file(

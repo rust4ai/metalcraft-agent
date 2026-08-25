@@ -23,11 +23,6 @@ pub struct CliInvocation {
     pub preset: Option<String>,
     /// All positional tokens joined with spaces; `None` => interactive mode.
     pub task: Option<String>,
-    /// `--migrate-agent-packs` was present: wrap legacy integration packs into
-    /// agent packs and exit. Never runs on boot — migrations are explicit.
-    pub migrate_agent_packs: bool,
-    /// With `--migrate-agent-packs`, report what would happen without writing.
-    pub dry_run: bool,
     /// `--api` was present (server mode requested even without an inline key).
     pub api_requested: bool,
     /// Inline `--api <KEY>` value, if any.
@@ -47,8 +42,6 @@ pub fn parse_cli_invocation(raw: &[String]) -> Result<CliInvocation, String> {
         let arg = raw[i].as_str();
         match arg {
             "--auto-approve" => inv.auto_approve = true,
-            "--migrate-agent-packs" => inv.migrate_agent_packs = true,
-            "--dry-run" => inv.dry_run = true,
             "--preset" => {
                 i += 1;
                 let slug = raw

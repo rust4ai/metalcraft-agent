@@ -16,7 +16,6 @@
 //! ```
 pub mod bundle;
 pub mod manifest;
-pub mod migrate;
 pub mod store;
 pub mod tools;
 
