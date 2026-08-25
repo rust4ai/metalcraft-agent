@@ -234,8 +234,16 @@ fn mutate_state<T>(
 ///
 /// Kept as a function (rather than deleted) so the ~20 call sites and the workshop's
 /// `enabled` field keep working while the UIs catch up.
+///
+/// Both install layouts count. An agent pack vendors its integrations into the
+/// content store rather than `<data>/integrations/`, so a legacy-directory-only
+/// check reports every one of them as missing — which is how delegating to an
+/// agent-pack persona failed with "requires integration(s) [...] that are not
+/// installed" while that persona's tools were resolving perfectly well through
+/// [`agent_pack_layers`].
 pub fn is_enabled(id: &str) -> bool {
-    list_installed().iter().any(|p| p.manifest.id == id)
+    crate::agent_packs::store::resolve(id).is_some()
+        || list_installed().iter().any(|p| p.manifest.id == id)
 }
 
 /// **Deprecated.** Enabling now only ensures the pack's files exist; disabling is a
