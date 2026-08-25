@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.31.0"
+    "version": "0.32.0"
   },
   "paths": {
     "/api/v1/agent-packs": {
@@ -5332,7 +5332,7 @@
       },
       "InstallDependenciesResponse": {
         "type": "object",
-        "description": "Response for `POST /flows/{id}/install-dependencies`.",
+        "description": "Response for `POST /flows/{id}/check-dependencies`.",
         "required": [
           "flow",
           "packs"
@@ -5340,7 +5340,7 @@
         "properties": {
           "flow": {
             "type": "string",
-            "description": "The flow whose dependencies were installed."
+            "description": "The flow whose dependencies were checked."
           },
           "packs": {
             "type": "array",

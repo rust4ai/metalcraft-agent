@@ -3072,10 +3072,10 @@ async fn post_check_flow_dependencies(Path(id): Path<String>) -> Response {
     .into_response()
 }
 
-/// Response for `POST /flows/{id}/install-dependencies`.
+/// Response for `POST /flows/{id}/check-dependencies`.
 #[derive(Serialize, utoipa::ToSchema)]
 struct InstallDependenciesResponse {
-    /// The flow whose dependencies were installed.
+    /// The flow whose dependencies were checked.
     flow: String,
     /// One outcome per required pack.
     packs: Vec<crate::flow_install::PackInstallOutcome>,
