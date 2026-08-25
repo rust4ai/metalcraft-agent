@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "slug": "metalcraft-assistant",
   "name": "Metalcraft Assistant",
-  "tagline": "Your calendar, notes, email, drive and contacts \u2014 one agent.",
+  "tagline": "Your email, code and packs — one agent.",
   "description": "The ecosystem agent: an orchestrator that delegates to the specialist persona for each Metalcraft service, authenticated by a single account token.",
   "default_persona": "orchestrator-agent",
   "personas": [
@@ -12,66 +12,33 @@
       "description": "Delegates each job to the specialist built for it"
     },
     {
-      "slug": "metalcraft-calendar-agent",
-      "role": "subagent",
-      "description": "Manages a Metalcraft user's calendars \u2014 lists their calendars, searches events by time window, and (with a write token) creates, updates, and deletes events, keeping any linked Google calendar in sync."
-    },
-    {
-      "slug": "metalcraft-notes-agent",
-      "role": "subagent",
-      "description": "Saves and organizes markdown notes in Metalcraft Notes \u2014 lists notes and categories, reads notes and their links, and (with a write token) creates, updates, and deletes flat notes written as plain markdown, cross-linked with [[slug]] wikilinks and tagged with color-coded categories."
-    },
-    {
       "slug": "metalcraft-email-agent",
       "role": "subagent",
-      "description": "Reads a Metalcraft user's email \u2014 lists connected mailboxes, searches and lists messages, reads full messages and threads. Read-only: it can find and summarize mail but never sends, replies, deletes, or modifies it."
-    },
-    {
-      "slug": "metalcraft-drive-agent",
-      "role": "subagent",
-      "description": "Manages a Metalcraft user's files \u2014 browses folders, finds files, creates folders, and (with a write token) uploads, renames, moves, stars, trashes, and deletes files on Metalcraft Drive."
-    },
-    {
-      "slug": "metalcraft-contacts-agent",
-      "role": "subagent",
-      "description": "Manages the user's personal contacts in Metalcraft Contacts \u2014 lists and searches people, reads a contact's full details, and (with a write token) creates, updates, and deletes contacts, plus surfaces upcoming birthdays."
+      "description": "Reads a Metalcraft user's email — lists connected mailboxes, searches and lists messages, reads full messages and threads. Read-only: it can find and summarize mail but never sends, replies, deletes, or modifies it."
     },
     {
       "slug": "metalcraft-code-agent",
       "role": "subagent",
-      "description": "A remote coding agent: provisions an ephemeral sprites.dev workspace, clones a GitHub repo into it, reads and edits code, runs commands, builds and smoke-tests, configures GitHub Actions, and commits & pushes \u2014 all against code.metalcraftai.com."
+      "description": "A remote coding agent: provisions an ephemeral sprites.dev workspace, clones a GitHub repo into it, reads and edits code, runs commands, builds and smoke-tests, configures GitHub Actions, and commits & pushes — all against code.metalcraftai.com."
     },
     {
       "slug": "metalcraft-packs-agent",
       "role": "subagent",
-      "description": "Helps a user discover integrations in the Metalcraft Packs registry \u2014 searches and browses the catalog, explains what a pack does and which keys it needs, and points the user to install it on their agent."
-    },
-    {
-      "slug": "morning-briefer",
-      "role": "subagent",
-      "description": "Reads the user's Metalcraft Calendar for today and composes a concise plain-text agenda. Built for the scheduled morning-brief flow, whose own send step delivers it as a push."
+      "description": "Helps a user discover integrations in the Metalcraft Packs registry — searches and browses the catalog, explains what a pack does and which keys it needs, and points the user to install it on their agent."
     }
   ],
   "skills": [
-    "metalcraft-calendar",
     "metalcraft-code",
-    "metalcraft-contacts",
-    "metalcraft-drive",
     "metalcraft-email",
-    "metalcraft-notes",
     "metalcraft-packs"
   ],
   "integration_packs": [
-    "metalcraft-calendar",
-    "metalcraft-notes",
     "metalcraft-email",
-    "metalcraft-drive",
-    "metalcraft-contacts",
     "metalcraft-code",
     "metalcraft-packs"
   ],
   "requires_env": [
     "METALCRAFT_TOKEN"
   ],
-  "version": "1.0.0"
+  "version": "2.0.0"
 }

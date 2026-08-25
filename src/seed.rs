@@ -123,6 +123,53 @@ fn retire_obsolete_seeds() {
         paths::gateway_channels_dir(),
         "gateway channel type manifests",
     );
+    // Calendar, notes, contacts and drive are no longer seeded. Deleting them from
+    // the binary is not enough on a pod that already has them: a seed is only ever
+    // *written*, never reconciled, so the old copies would sit in the data dir
+    // forever — still installed, still resolvable, still delegatable, with nothing
+    // behind them to keep them working.
+    //
+    // Their `src/apps/` code stays in the tree, dormant: the native apps switch on
+    // from pack presence (`enabled_builtin_apps`), so removing the packs is what
+    // turns them off, and restoring the seeds is what would turn them back on.
+    for id in ["metalcraft-calendar", "metalcraft-notes", "metalcraft-contacts", "metalcraft-drive"]
+    {
+        retire_dir(
+            paths::integrations_dir().join(id),
+            &format!("'{id}' integration"),
+        );
+        retire_file(
+            paths::personas_dir().join(format!("{id}-agent.json")),
+            &format!("'{id}-agent' persona"),
+        );
+        retire_file(
+            paths::skills_dir().join(format!("{id}.md")),
+            &format!("'{id}' skill"),
+        );
+    }
+    // The morning brief was a calendar flow — its persona reads `mcal_*` and its
+    // prompt names them, so it cannot outlive the pack it was written against.
+    retire_file(
+        paths::personas_dir().join("morning-briefer.json"),
+        "'morning-briefer' persona",
+    );
+    retire_file(
+        paths::flow_templates_dir().join("morning-brief.json"),
+        "'morning-brief' flow template",
+    );
+}
+
+fn retire_file(path: PathBuf, label: &str) {
+    if path.is_file() {
+        if let Err(e) = fs::remove_file(&path) {
+            eprintln!(
+                "Warning: could not remove retired {label} at {}: {e}",
+                path.display()
+            );
+        } else {
+            log::info!("Retired obsolete {label}");
+        }
+    }
 }
 
 fn retire_dir(dir: PathBuf, label: &str) {
@@ -395,9 +442,9 @@ mod tests {
             .collect();
         for expected in [
             "email",
-            "metalcraft-notes",
-            "metalcraft-calendar",
-            "metalcraft-drive",
+            "metalcraft-email",
+            "metalcraft-code",
+            "metalcraft-packs",
         ] {
             assert!(
                 ids.contains(&expected),
@@ -467,8 +514,8 @@ mod tests {
             checked += 1;
         }
         assert!(
-            checked >= 4,
-            "expected the 4 metalcraft-* packs, checked {checked}"
+            checked >= 3,
+            "expected the metalcraft-* packs, checked {checked}"
         );
     }
 }

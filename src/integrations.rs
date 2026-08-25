@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn uninstall_refuses_builtin_and_native_tool_packs() {
         // An embedded ecosystem pack is app-managed — refused before any disk touch.
-        let err = uninstall("metalcraft-notes").unwrap_err();
+        let err = uninstall("metalcraft-email").unwrap_err();
         assert!(err.contains("built-in"), "got: {err}");
         // A registry pack that ships native (compiled-in) tools can't be fully
         // removed, so uninstall is refused (disable instead).

@@ -5,7 +5,7 @@
 //! reboot. Seeding now force-refreshes a pack when the bundled `version` is
 //! higher than the installed one, but leaves equal/older installs untouched.
 //!
-//! Uses the bundled `metalcraft-notes` pack as the vehicle (any embedded pack
+//! Uses the bundled `metalcraft-email` pack as the vehicle (any embedded pack
 //! whose bundled `requires_env` differs from a synthetic stale one would do).
 //!
 //! Everything runs inside ONE `#[test]` so the process-global
@@ -32,14 +32,14 @@ fn higher_bundled_version_reseeds_pack_but_equal_or_older_is_left_alone() {
 
     let notes = data_dir
         .join("integrations")
-        .join("metalcraft-notes")
+        .join("metalcraft-email")
         .join("integration.json");
     fs::create_dir_all(notes.parent().unwrap()).unwrap();
 
     // Simulate an old install: an early version of the notes pack declared three
     // env vars. This is exactly the stale manifest that kept showing "needs 3".
     let stale = r#"{
-  "id": "metalcraft-notes",
+  "id": "metalcraft-email",
   "name": "Metalcraft Notes",
   "description": "old",
   "version": "0.1.0",
@@ -61,7 +61,7 @@ fn higher_bundled_version_reseeds_pack_but_equal_or_older_is_left_alone() {
     // Now pretend the install is NEWER than the bundle (a hand-rolled future
     // version): seeding must not clobber it.
     let newer = r#"{
-  "id": "metalcraft-notes",
+  "id": "metalcraft-email",
   "name": "Metalcraft Notes",
   "description": "from the future",
   "version": "99.0.0",

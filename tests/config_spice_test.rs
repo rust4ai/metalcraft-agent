@@ -22,10 +22,10 @@
 //!      vendors is present or absent (see `docs/AGENT_PACKS_PLAN.md`). What is
 //!      left to configure is the key.
 //!
-//!   3. `live_config_agent_installs_metalcraft_drive` — a real, gated [Spice]
+//!   3. `live_config_agent_installs_metalcraft_email` — a real, gated [Spice]
 //!      suite that drives an actual agentic loop (OpenAI LLM -> meta tools)
 //!      through the `config-agent` persona with the prompt "install the
-//!      metalcraft-drive integration using this Metalcraft token …". Asserts
+//!      metalcraft-email integration using this Metalcraft token …". Asserts
 //!      the model calls `key_set` and verifies the key landed in the store —
 //!      the pack itself is already installed.
 //!      Skipped unless `OPENAI_API_KEY` is present (drop it in a crate-root
@@ -305,8 +305,8 @@ fn config_agent_wires_up() {
     assert!(
         integrations::list_installed()
             .iter()
-            .any(|p| p.manifest.id == "metalcraft-drive"),
-        "metalcraft-drive pack should be installed (seeded)"
+            .any(|p| p.manifest.id == "metalcraft-email"),
+        "metalcraft-email pack should be installed (seeded)"
     );
 }
 
@@ -320,7 +320,7 @@ async fn configuring_a_pack_via_meta_tools_works() {
     let _guard = lock_state();
 
     // Uses the `email` pack / IMAP_PASSWORD so it can't collide with the live
-    // tier's global state (which uses `metalcraft-drive` / METALCRAFT_TOKEN).
+    // tier's global state (which uses `metalcraft-email` / METALCRAFT_TOKEN).
     const PACK: &str = "email";
     const KEY: &str = "IMAP_PASSWORD";
     const VALUE: &str = "imap_config_spice_test_password_value";
@@ -395,13 +395,13 @@ async fn configuring_a_pack_via_meta_tools_works() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn live_config_agent_installs_metalcraft_drive() {
+async fn live_config_agent_installs_metalcraft_email() {
     init();
     let _guard = lock_state();
 
     if std::env::var("OPENAI_API_KEY").is_err() {
         eprintln!(
-            "SKIP live_config_agent_installs_metalcraft_drive: set OPENAI_API_KEY \
+            "SKIP live_config_agent_installs_metalcraft_email: set OPENAI_API_KEY \
              (e.g. in a crate-root .env) to run the live suite."
         );
         return;
@@ -411,21 +411,21 @@ async fn live_config_agent_installs_metalcraft_drive() {
     // the store. Use a recognizable sentinel so the post-run assertion is precise.
     const TEST_KEY_VALUE: &str = "mck_configspice_TESTKEY_do_not_use";
 
-    // Precondition: metalcraft-drive must start unkeyed, so the agent has to store
+    // Precondition: metalcraft-email must start unkeyed, so the agent has to store
     // the token itself rather than find one already there.
-    reset_pack_key("metalcraft-drive", "METALCRAFT_TOKEN");
+    reset_pack_key("metalcraft-email", "METALCRAFT_TOKEN");
 
     let agent =
         MetalcraftPersonaAgent::for_persona(PERSONA_SLUG).expect("build config-agent under test");
 
     let tests = vec![
         test(
-            "install-metalcraft-drive",
+            "install-metalcraft-email",
             format!(
-                "Install the metalcraft-drive integration for me. Use this Metalcraft token: {TEST_KEY_VALUE}"
+                "Install the metalcraft-email integration for me. Use this Metalcraft token: {TEST_KEY_VALUE}"
             ),
         )
-        .name("Stores METALCRAFT_TOKEN for the metalcraft-drive pack")
+        .name("Stores METALCRAFT_TOKEN for the metalcraft-email pack")
         .expect_tools(&["key_set"])
         .expect_tools_within_allowlist()
         .expect_no_error()
@@ -544,7 +544,7 @@ fn orchestrator_can_delegate_config() {
 // ---------------------------------------------------------------------------
 // Tier 5 — live: the orchestrator, given the user's exact phrasing, delegates
 // the install to config-agent and the config tools fire through the sub-agent.
-// Gated on OPENAI_API_KEY; uses a throwaway metalcraft-drive key.
+// Gated on OPENAI_API_KEY; uses a throwaway metalcraft-email key.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -562,16 +562,16 @@ async fn live_orchestrator_delegates_install_to_config() {
 
     const TEST_KEY_VALUE: &str = "mck_orchspice_TESTKEY_do_not_use";
 
-    reset_pack_key("metalcraft-drive", "METALCRAFT_TOKEN");
+    reset_pack_key("metalcraft-email", "METALCRAFT_TOKEN");
 
     let agent = MetalcraftPersonaAgent::for_persona(ORCHESTRATOR_SLUG)
         .expect("build orchestrator under test");
 
     let tests = vec![
         test(
-            "delegate-install-metalcraft-drive",
+            "delegate-install-metalcraft-email",
             format!(
-                "Install the metalcraft-drive integration for me. Use this Metalcraft token: {TEST_KEY_VALUE}"
+                "Install the metalcraft-email integration for me. Use this Metalcraft token: {TEST_KEY_VALUE}"
             ),
         )
         .name("Orchestrator delegates the install to config-agent")
@@ -630,5 +630,5 @@ async fn live_orchestrator_delegates_install_to_config() {
     );
 
     // Leave no state behind.
-    reset_pack_key("metalcraft-drive", "METALCRAFT_TOKEN");
+    reset_pack_key("metalcraft-email", "METALCRAFT_TOKEN");
 }

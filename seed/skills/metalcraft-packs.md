@@ -6,7 +6,7 @@ the registry's **public** API — no key or `METALCRAFT_TOKEN` is required.
 
 ## What a pack is
 An integration bundles personas, skills, HTTP-API tools, and flow templates
-that extend an agent as a unit (e.g. `github`, `linear`, `metalcraft-notes`). Each
+that extend an agent as a unit (e.g. `github`, `linear`, `metalcraft-email`). Each
 pack has a **slug** (its id), a **version**, and a **requires_env** list of the keys
 it needs to actually work once installed.
 

@@ -1,9 +1,0 @@
-{
-  "name": "mcon_whoami",
-  "description": "Validate the METALCRAFT_TOKEN and see its scope. Returns { sub, email, scopes } where `scopes` is a list like [\"read\",\"write\"] (or null for a full-access owner session). Call first to confirm the token works and whether it can write (create/update/delete need write). Takes no parameters.",
-  "method": "GET",
-  "url": "https://contacts.metalcraftai.com/api/v1/whoami",
-  "headers": { "Authorization": "Bearer $METALCRAFT_TOKEN", "Accept": "application/json" },
-  "parameters": { "type": "object", "properties": {} },
-  "body_mapping": "none"
-}
