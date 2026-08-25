@@ -2034,13 +2034,14 @@
         }
       }
     },
-    "/api/v1/flows/{id}/install-dependencies": {
+    "/api/v1/flows/{id}/check-dependencies": {
       "post": {
         "tags": [
           "flows"
         ],
-        "summary": "Install the integrations an already-installed flow declares in its\n`requires` block: for each, resolve its semver range against the registry,\ndownload that exact version, verify the content hash, install, and enable it.\nReturns one outcome per pack. Idempotent — packs already satisfied are left\nuntouched.",
-        "operationId": "post_install_flow_dependencies",
+        "summary": "Report whether this pod satisfies the integrations an already-installed flow\ndeclares in its `requires` block. One outcome per pack.",
+        "description": "It reports rather than installs. Fetching a pack from here was a second install\npath into a second layout; an integration reaches a pod inside an agent pack the\noperator installs, through `POST /api/v1/agent-packs/install` and nowhere else.",
+        "operationId": "post_check_flow_dependencies",
         "parameters": [
           {
             "name": "id",
@@ -2054,7 +2055,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Per-pack install outcomes",
+            "description": "Per-pack outcomes",
             "content": {
               "application/json": {
                 "schema": {
@@ -2670,57 +2671,6 @@
         }
       }
     },
-    "/api/v1/integrations/install": {
-      "post": {
-        "tags": [
-          "integrations"
-        ],
-        "summary": "Install a registry pack onto this agent: download its ZIP from\npacks.metalcraftai.com, extract it into the data dir, and enable it. Returns\nthe new pack's summary (same shape as the list endpoint).",
-        "operationId": "post_install_integration",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/InstallPackRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IntegrationSummary"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/integrations/{id}": {
       "get": {
         "tags": [
@@ -2745,55 +2695,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/IntegrationDetail"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "integrations"
-        ],
-        "operationId": "delete_integration",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Pack id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Uninstalled; body lists anything that still depends on the pack",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UninstallPackResult"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -5462,32 +5363,6 @@
           }
         }
       },
-      "InstallPackRequest": {
-        "type": "object",
-        "required": [
-          "slug"
-        ],
-        "properties": {
-          "content_sha256": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Optional integrity pin: if set, the downloaded pack's canonical content\nhash must match this or the install is refused."
-          },
-          "slug": {
-            "type": "string",
-            "description": "Registry slug of the pack to install (equals the pack id)."
-          },
-          "version": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Optional specific version to install (defaults to the registry's latest)."
-          }
-        }
-      },
       "InstallReport": {
         "type": "object",
         "description": "What an install actually did. Every field here is something a human or a UI has\na reason to see — silence about a skipped dependency is how you get an agent that\nhalf works.",
@@ -7268,29 +7143,6 @@
           "verified-only",
           "explicit"
         ]
-      },
-      "UninstallPackResult": {
-        "type": "object",
-        "required": [
-          "dependent_flows",
-          "dependent_personas"
-        ],
-        "properties": {
-          "dependent_flows": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Installed flows that still reference the removed pack — they'll fail to resolve\nit until the pack is reinstalled or the flow is edited."
-          },
-          "dependent_personas": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Surviving personas that still declare the removed pack in their `packs` list."
-          }
-        }
       },
       "UninstallReport": {
         "type": "object",

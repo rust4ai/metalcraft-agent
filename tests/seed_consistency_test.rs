@@ -22,19 +22,26 @@ fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
 }
 
+/// Every embedded agent pack's source directory: `seed/agent_packs/<id>/`.
+fn seeded_agent_packs() -> Vec<PathBuf> {
+    std::fs::read_dir(seed_dir().join("agent_packs"))
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.join("agent_pack.json").is_file())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// `slug -> (packs it declares, skills it loads)` for every persona the binary ships —
-/// the top-level `seed/personas/` **and** those inside integrations, because a
+/// the top-level `seed/personas/` **and** those inside agent packs, because a
 /// preset resolves personas through the same layered lookup the runtime uses.
 fn seeded_personas() -> HashMap<String, (Vec<String>, Vec<String>)> {
     let mut out = HashMap::new();
     let mut dirs = vec![seed_dir().join("personas")];
-    if let Ok(packs) = std::fs::read_dir(seed_dir().join("integrations")) {
-        dirs.extend(
-            packs
-                .filter_map(|e| e.ok())
-                .map(|e| e.path().join("personas")),
-        );
-    }
+    dirs.extend(seeded_agent_packs().into_iter().map(|p| p.join("personas")));
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -63,18 +70,12 @@ fn seeded_personas() -> HashMap<String, (Vec<String>, Vec<String>)> {
 }
 
 /// Every skill the binary ships — the top-level `seed/skills/` **and** those inside
-/// integrations, because a persona resolves skills through the same layered
+/// agent packs, because a persona resolves skills through the same layered
 /// lookup the runtime uses.
 fn seeded_skills() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut dirs = vec![seed_dir().join("skills")];
-    if let Ok(packs) = std::fs::read_dir(seed_dir().join("integrations")) {
-        dirs.extend(
-            packs
-                .filter_map(|e| e.ok())
-                .map(|e| e.path().join("skills")),
-        );
-    }
+    dirs.extend(seeded_agent_packs().into_iter().map(|p| p.join("skills")));
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -90,16 +91,22 @@ fn seeded_skills() -> Vec<String> {
     out
 }
 
+/// Every integration the binary ships, which is every one an agent pack vendors.
 fn seeded_packs() -> Vec<String> {
-    let dir = seed_dir().join("integrations");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().join("integration.json").is_file())
-        .filter_map(|e| e.file_name().to_str().map(String::from))
-        .collect()
+    let mut out = Vec::new();
+    for pack in seeded_agent_packs() {
+        let Ok(entries) = std::fs::read_dir(pack.join("integrations")) else {
+            continue;
+        };
+        for e in entries.filter_map(|e| e.ok()) {
+            if e.path().join("integration.json").is_file()
+                && let Some(id) = e.file_name().to_str()
+            {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out
 }
 
 #[test]
@@ -171,7 +178,7 @@ fn every_seeded_preset_is_installable() {
         for pack in declared {
             if !packs.contains(pack) {
                 problems.push(format!(
-                    "{slug}: declares integration '{pack}', which seed/integrations lacks"
+                    "{slug}: declares integration '{pack}', which no seeded agent pack vendors"
                 ));
             }
         }

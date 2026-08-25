@@ -137,8 +137,8 @@ pub fn create_registry_for_with_config(
             "flow_write" => registry.register(meta_flow::FlowWriteTool),
             "flow_set_schedules" => registry.register(meta_flow::FlowSetSchedulesTool),
             "flow_install" => registry.register(meta_flow::FlowInstallTool),
-            "flow_install_dependencies" => {
-                registry.register(meta_flow::FlowInstallDependenciesTool)
+            "flow_check_dependencies" => {
+                registry.register(meta_flow::FlowCheckDependenciesTool)
             }
             "flow_delete" => registry.register(meta_flow::FlowDeleteTool),
             "flow_run" => registry.register(meta_flow::FlowRunTool),
@@ -292,10 +292,12 @@ mod native_tools_drift {
 
     #[test]
     fn seed_manifests_match_native_integration_tool_names() {
-        let seed = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/integrations");
+        let seed = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/agent_packs");
         let mut checked = 0;
-        for entry in std::fs::read_dir(&seed).expect("seed/integrations must exist") {
-            let manifest_path = entry.unwrap().path().join("integration.json");
+        for entry in std::fs::read_dir(&seed).expect("seed/agent_packs must exist") {
+            let pack = entry.unwrap().path();
+            let id = pack.file_name().and_then(|s| s.to_str()).unwrap().to_string();
+            let manifest_path = pack.join(format!("integrations/{id}/integration.json"));
             if !manifest_path.exists() {
                 continue;
             }

@@ -248,15 +248,15 @@ impl metalcraft::Tool for FlowInstallTool {
     }
 }
 
-pub struct FlowInstallDependenciesTool;
+pub struct FlowCheckDependenciesTool;
 
 #[async_trait]
-impl metalcraft::Tool for FlowInstallDependenciesTool {
+impl metalcraft::Tool for FlowCheckDependenciesTool {
     fn name(&self) -> &str {
-        "flow_install_dependencies"
+        "flow_check_dependencies"
     }
     fn description(&self) -> &str {
-        "Install and enable the integrations a saved flow declares in its `requires` block. For each required pack: resolve its version range against the registry, download that exact version, verify the content hash, install, and enable it. Idempotent — packs already installed, enabled, and in-range are left untouched. Returns one outcome per pack (installed | already-satisfied | skipped | failed). Run this after flow_install when the dependency report lists missing packs, before flow_run."
+        "Check whether this pod has the integrations a saved flow declares in its `requires` block. Returns one outcome per pack (already-satisfied | unsatisfied | missing). Run it after flow_install and before flow_run. It reports; it does not install — an integration reaches a pod inside an agent pack the operator installs, so tell the user which pack is missing rather than trying to fetch it yourself."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -266,11 +266,11 @@ impl metalcraft::Tool for FlowInstallDependenciesTool {
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let id = id_arg(&args, "flow_install_dependencies")?;
+        let id = id_arg(&args, "flow_check_dependencies")?;
         let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
             return Ok(serde_json::json!({ "error": format!("flow '{id}' not found") }));
         };
-        let outcomes = crate::flow_install::install_flow_dependencies(&flow).await;
+        let outcomes = crate::flow_install::check_flow_dependencies(&flow);
         Ok(serde_json::json!({ "flow": id, "packs": outcomes }))
     }
 }

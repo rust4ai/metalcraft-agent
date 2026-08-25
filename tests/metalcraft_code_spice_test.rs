@@ -80,8 +80,9 @@ fn init() {
         unsafe {
             std::env::set_var("METALCRAFT_DATA_DIR", &data_dir);
         }
+        // Seeding installs the first-party agent packs through the normal
+        // installer; there is no separate enable step to perform any more.
         seed::ensure_defaults();
-        integrations::set_enabled(PACK_ID, true).expect("enable metalcraft-code pack");
     });
 }
 
@@ -91,7 +92,7 @@ fn metalcraft_code_pack_wires_up() {
 
     assert!(
         integrations::is_enabled(PACK_ID),
-        "pack should be enabled after init()"
+        "the seeded agent pack should have vendored the integration"
     );
 
     let persona = Persona::load(PERSONA_SLUG, &paths::personas_dir())

@@ -275,13 +275,17 @@ fn requirement_satisfied(
     metalcraft_flows::check_requirements(&one, std::slice::from_ref(&available)).is_empty()
 }
 
-/// Resolve, download (at the resolved version), hash-verify, install, and enable a
-/// single pack requirement — the active "three hops" (registry resolve → versioned
-/// download → hash-verified install). No-ops when the requirement is already
-/// satisfied; refuses to fetch a built-in pack from the registry.
-pub async fn install_pack_requirement(
-    pr: &metalcraft_flows::PackRequirement,
-) -> PackInstallOutcome {
+/// Report whether a single pack requirement is satisfied on this pod.
+///
+/// This used to install: resolve the range against the pack registry, download that
+/// version, hash-verify it, write it into `<data>/integrations/`, enable it. That was
+/// a second install path — a flow could put a pack on the pod without anyone
+/// approving an agent pack, and it wrote to a layout nothing else uses any more.
+///
+/// A flow's `requires` block is a **statement about what it needs**, and checking it
+/// is the useful half. Installing the answer is the operator's call, made once,
+/// through the one door: `POST /api/v1/agent-packs/install`.
+pub fn check_pack_requirement(pr: &metalcraft_flows::PackRequirement) -> PackInstallOutcome {
     let outcome =
         |status: &str, version: Option<String>, detail: Option<String>| PackInstallOutcome {
             pack: pr.id.clone(),
@@ -290,83 +294,39 @@ pub async fn install_pack_requirement(
             detail,
         };
 
-    // Built-in packs are app-managed and can't be pulled from the registry.
-    if crate::seed::is_embedded_integration(&pr.id) {
-        if let Some(installed) = crate::integrations::find_installed(&pr.id) {
-            if requirement_satisfied(pr, &installed) {
-                return outcome("already-satisfied", Some(installed.manifest.version), None);
-            }
-            if let Err(e) = crate::integrations::set_enabled(&pr.id, true) {
-                return outcome("failed", None, Some(e));
-            }
-            return outcome(
-                "installed",
-                Some(installed.manifest.version),
-                Some("enabled built-in pack".into()),
-            );
+    match crate::integrations::find_installed(&pr.id) {
+        Some(installed) if requirement_satisfied(pr, &installed) => {
+            outcome("already-satisfied", Some(installed.manifest.version), None)
         }
-        return outcome(
-            "skipped",
+        Some(installed) => outcome(
+            "unsatisfied",
+            Some(installed.manifest.version.clone()),
+            Some(format!(
+                "installed v{} does not satisfy the requirement; install an agent pack that \
+                 vendors a version which does",
+                installed.manifest.version
+            )),
+        ),
+        None => outcome(
+            "missing",
             None,
-            Some("built-in pack is not installed on this agent".into()),
-        );
+            Some(format!(
+                "no installed agent pack vendors '{}'; install one that does before arming \
+                 this flow",
+                pr.id
+            )),
+        ),
     }
-
-    if let Some(installed) = crate::integrations::find_installed(&pr.id) {
-        if requirement_satisfied(pr, &installed) {
-            return outcome("already-satisfied", Some(installed.manifest.version), None);
-        }
-    }
-
-    // Hop 1: resolve the range to a concrete version + hash.
-    let (version, resolved_hash) =
-        match crate::registry::resolve_pack_version(&pr.id, pr.version.as_deref()).await {
-            Ok(v) => v,
-            Err(e) => return outcome("failed", None, Some(e)),
-        };
-
-    // If the flow pinned a hash, the registry's resolved bytes must match it.
-    let expected_hash = match &pr.content_sha256 {
-        Some(pin) if !pin.eq_ignore_ascii_case(&resolved_hash) => {
-            return outcome(
-                "failed",
-                Some(version),
-                Some(format!(
-                    "resolved content hash {resolved_hash} does not match the pinned {pin}"
-                )),
-            );
-        }
-        Some(pin) => pin.clone(),
-        None => resolved_hash,
-    };
-
-    // Hop 2: download that exact version.
-    let bytes = match crate::registry::fetch_zip(&pr.id, Some(&version)).await {
-        Ok(b) => b,
-        Err(e) => return outcome("failed", Some(version), Some(e)),
-    };
-
-    // Hop 3: install with hash verification, then enable.
-    if let Err(e) = crate::integrations::install_from_zip(&bytes, Some(&expected_hash)) {
-        return outcome("failed", Some(version), Some(e));
-    }
-    if let Err(e) = crate::integrations::set_enabled(&pr.id, true) {
-        return outcome("failed", Some(version), Some(e));
-    }
-    outcome("installed", Some(version), None)
 }
 
-/// Satisfy every pack a flow's requirements declare, installing + enabling those
-/// that are missing or out of range/hash. Returns one outcome per pack.
-pub async fn install_flow_dependencies(
-    flow: &metalcraft_flows::SavedFlow,
-) -> Vec<PackInstallOutcome> {
-    let requires = effective_requires(flow);
-    let mut out = Vec::new();
-    for pr in &requires.packs {
-        out.push(install_pack_requirement(pr).await);
-    }
-    out
+/// Check every pack a flow's requirements declare. Returns one outcome per pack —
+/// `already-satisfied`, `unsatisfied`, or `missing`.
+pub fn check_flow_dependencies(flow: &metalcraft_flows::SavedFlow) -> Vec<PackInstallOutcome> {
+    effective_requires(flow)
+        .packs
+        .iter()
+        .map(check_pack_requirement)
+        .collect()
 }
 
 /// Download flow `slug` from the registry, validate it, and save it into the

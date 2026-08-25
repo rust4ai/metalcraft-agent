@@ -70,7 +70,6 @@ pub fn ensure_defaults() {
         paths::api_tools_dir(),
         paths::flow_templates_dir(),
         paths::chats_dir(),
-        paths::integrations_dir(),
         paths::upload_root(),
     ];
 
@@ -101,7 +100,7 @@ pub fn ensure_defaults() {
         write_seeds(&target, &as_refs(&seeds));
     }
 
-    write_integrations();
+    install_seed_agent_packs();
 
     retire_obsolete_seeds();
 }
@@ -123,67 +122,49 @@ fn retire_obsolete_seeds() {
         paths::gateway_channels_dir(),
         "gateway channel type manifests",
     );
-    // Calendar, notes, contacts and drive are no longer seeded. Deleting them from
-    // the binary is not enough on a pod that already has them: a seed is only ever
-    // *written*, never reconciled, so the old copies would sit in the data dir
-    // forever — still installed, still resolvable, still delegatable, with nothing
-    // behind them to keep them working.
+    // `<data>/integrations/` — the install layout that predates agent packs. Nothing
+    // writes it any more: the first-party packs are installed from
+    // `install_seed_agent_packs` through the normal installer, and the external ones
+    // were withdrawn. What is left on an upgraded pod is a directory of packs that
+    // resolve through no path anyone maintains.
     //
-    // Their `src/apps/` code stays in the tree, dormant: the native apps switch on
-    // from pack presence (`enabled_builtin_apps`), so removing the packs is what
-    // turns them off, and restoring the seeds is what would turn them back on.
-    for id in ["metalcraft-calendar", "metalcraft-notes", "metalcraft-contacts", "metalcraft-drive"]
-    {
-        retire_dir(
-            paths::integrations_dir().join(id),
-            &format!("'{id}' integration"),
-        );
+    // Deleting it wholesale is safe *because* it is only ever regenerated content —
+    // every pack that was ever written there came from this binary or the pack
+    // registry, and nothing a user authored has ever lived inside it. The personas
+    // and skills the old ecosystem packs seeded next to it go too, by name: those
+    // were loose files in the user-local dirs, where deleting by directory is not an
+    // option.
+    retire_dir(paths::integrations_dir(), "legacy integration packs");
+    retire_file(
+        paths::data_dir().join("integrations.json"),
+        "legacy pack enable-state",
+    );
+    for slug in [
+        "metalcraft-calendar-agent",
+        "metalcraft-notes-agent",
+        "metalcraft-contacts-agent",
+        "metalcraft-drive-agent",
+        "morning-briefer",
+    ] {
         retire_file(
-            paths::personas_dir().join(format!("{id}-agent.json")),
-            &format!("'{id}-agent' persona"),
-        );
-        retire_file(
-            paths::skills_dir().join(format!("{id}.md")),
-            &format!("'{id}' skill"),
+            paths::personas_dir().join(format!("{slug}.json")),
+            &format!("'{slug}' persona"),
         );
     }
-    // The external integration packs — the ones that lived in
-    // metalcraft-agent-external-packs and were side-loaded from the registry — are
-    // withdrawn. They were the last reason to keep a second, older install layout
-    // alive; agent packs are the install unit now, and these were never rebuilt as
-    // any. Retiring them here is the whole migration: no pod converts anything, it
-    // just stops carrying what nothing supports.
-    //
-    // `s3` goes with them even though its tools are compiled into this binary — the
-    // manifest is what makes them resolvable, and half a pack is worse than none.
-    for id in [
-        "calcom",
-        "cloudflare",
-        "discord",
-        "discord_admin",
-        "github",
-        "linear",
-        "metalcraft-meet",
-        "metalcraft_images",
-        "railway",
-        "render",
-        "s3",
-        "sentry",
-        "solarabase",
-        "sprite_builder",
-        "starflask",
+    for slug in [
+        "metalcraft-calendar",
+        "metalcraft-notes",
+        "metalcraft-contacts",
+        "metalcraft-drive",
     ] {
-        retire_dir(
-            paths::integrations_dir().join(id),
-            &format!("'{id}' integration"),
+        retire_file(
+            paths::skills_dir().join(format!("{slug}.md")),
+            &format!("'{slug}' skill"),
         );
     }
     // The morning brief was a calendar flow — its persona reads `mcal_*` and its
-    // prompt names them, so it cannot outlive the pack it was written against.
-    retire_file(
-        paths::personas_dir().join("morning-briefer.json"),
-        "'morning-briefer' persona",
-    );
+    // prompt names them, so it could not outlive the pack it was written against.
+    // It lives on in the Octaweave pack, against that workspace's calendar.
     retire_file(
         paths::flow_templates_dir().join("morning-brief.json"),
         "'morning-brief' flow template",
@@ -279,12 +260,98 @@ fn json_version(doc: &str) -> Option<(u64, u64, u64)> {
 /// only when missing. Pack files are read-only in the UI, so overwriting is
 /// safe and is the only way a manifest change (e.g. a shrunk `requires_env`)
 /// reaches existing installs, which otherwise keep the first-seeded copy.
-fn write_integrations() {
-    write_seed_tree(
-        "integrations",
-        &paths::integrations_dir(),
-        "integration.json",
-    );
+/// Install the first-party agent packs embedded in this binary — **through the
+/// normal installer**, the same call an operator's upload makes.
+///
+/// This is what "one install door" means in practice. First-party content used to
+/// take a private path: files copied straight into `<data>/integrations/`, with its
+/// own version gate and its own idea of what a pack was. Nothing it produced had
+/// been through `Bundle::validate`, so a seed could ship something the installer
+/// would have refused — and the two layouts had to be resolved through forever
+/// because of it.
+///
+/// Now the seeds are archives like any other. They are built in memory rather than
+/// shipped as `.agentpack` blobs so the tree stays readable and diffable in the
+/// repo, but from `install`'s side there is no difference at all.
+fn install_seed_agent_packs() {
+    let Some(root) = SEED.get_dir("agent_packs") else {
+        return;
+    };
+    for pack in root.dirs() {
+        let Some(id) = pack.path().file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let mut files: std::collections::BTreeMap<String, Vec<u8>> =
+            std::collections::BTreeMap::new();
+        let mut manifest_json: Option<Vec<u8>> = None;
+        collect_pack_files(pack, pack.path(), &mut files, &mut manifest_json);
+
+        let Some(manifest_json) = manifest_json else {
+            eprintln!("Warning: seed agent pack '{id}' has no agent_pack.json");
+            continue;
+        };
+        let manifest: crate::agent_packs::AgentPackManifest =
+            match serde_json::from_slice(&manifest_json) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Warning: seed agent pack '{id}' has an invalid manifest: {e}");
+                    continue;
+                }
+            };
+
+        // Already current? Then this boot has nothing to do. `install` would happily
+        // rewrite the same bytes, but it also garbage-collects the content store on
+        // the way through, and that is not work to repeat on every start.
+        if let Some(installed) = crate::agent_packs::find(id)
+            && installed.manifest.version == manifest.version
+        {
+            continue;
+        }
+
+        let bytes = match crate::agent_packs::bundle::write(manifest, files) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Warning: could not build seed agent pack '{id}': {e}");
+                continue;
+            }
+        };
+        match crate::agent_packs::install(&bytes, "seed") {
+            Ok(report) => log::info!(
+                "seeded agent pack '{id}' v{} ({} personas, {} skills)",
+                report.version,
+                report.personas.len(),
+                report.skills.len()
+            ),
+            // A pod that cannot seed one pack still boots with the rest. Loudly,
+            // though: this is first-party content failing its own validator.
+            Err(e) => eprintln!("Warning: could not install seed agent pack '{id}': {e}"),
+        }
+    }
+}
+
+/// Flatten an embedded pack directory into archive-relative paths, splitting out
+/// `agent_pack.json` — [`crate::agent_packs::bundle::write`] takes the manifest as a
+/// value and rejects a file map that also carries it.
+fn collect_pack_files(
+    dir: &include_dir::Dir<'_>,
+    root: &Path,
+    files: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    manifest: &mut Option<Vec<u8>>,
+) {
+    for f in dir.files() {
+        let Ok(rel) = f.path().strip_prefix(root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if rel == "agent_pack.json" {
+            *manifest = Some(f.contents().to_vec());
+        } else {
+            files.insert(rel, f.contents().to_vec());
+        }
+    }
+    for sub in dir.dirs() {
+        collect_pack_files(sub, root, files, manifest);
+    }
 }
 
 /// Materialize a single embedded integration into the data dir, writing
@@ -326,52 +393,6 @@ pub fn install_pack(id: &str) -> bool {
         }
     }
     true
-}
-
-/// Write every embedded `<seed_subdir>/<id>/` tree to `<dest_root>/<id>/`. Each
-/// item is force-refreshed (all files overwritten) when its bundled `manifest`
-/// version exceeds the installed one; otherwise files are written only when
-/// missing. Shared by integrations (`integration.json`) and gateway channel types
-/// (`channel_type.json`) — both ship read-only directory trees gated on a
-/// versioned manifest, so a manifest change reaches existing installs.
-fn write_seed_tree(seed_subdir: &str, dest_root: &Path, manifest: &str) {
-    let Some(group) = SEED.get_dir(seed_subdir) else {
-        return;
-    };
-    for item in group.dirs() {
-        let Some(id) = item.path().file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let item_dir = dest_root.join(id);
-
-        // Every file in the item, relative to its root (recursing into subdirs).
-        let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
-        collect_files(item, item.path(), &mut files);
-
-        let bundled_ver = files
-            .iter()
-            .find(|(rel, _)| rel.to_str() == Some(manifest))
-            .and_then(|(_, content)| json_version(&String::from_utf8_lossy(content)));
-        let installed_ver = fs::read_to_string(item_dir.join(manifest))
-            .ok()
-            .and_then(|content| json_version(&content));
-        let force_upgrade = matches!((bundled_ver, installed_ver), (Some(b), Some(i)) if b > i);
-
-        for (rel_path, content) in files {
-            let target = item_dir.join(&rel_path);
-            if force_upgrade || !target.exists() {
-                if let Some(parent) = target.parent() {
-                    if let Err(e) = fs::create_dir_all(parent) {
-                        eprintln!("Warning: could not create {}: {e}", parent.display());
-                        continue;
-                    }
-                }
-                if let Err(e) = fs::write(&target, content) {
-                    eprintln!("Warning: could not write {}: {e}", target.display());
-                }
-            }
-        }
-    }
 }
 
 /// Recursively collect every embedded file under `dir` as
@@ -466,7 +487,7 @@ mod tests {
             !embedded_flat("skills").is_empty(),
             "skills should be embedded"
         );
-        let packs = SEED.get_dir("integrations").expect("integrations embedded");
+        let packs = SEED.get_dir("agent_packs").expect("agent packs embedded");
         let ids: Vec<&str> = packs
             .dirs()
             .filter_map(|d| d.path().file_name().and_then(|s| s.to_str()))
@@ -482,46 +503,46 @@ mod tests {
                 "pack '{expected}' should be embedded, got {ids:?}"
             );
         }
-        // An integration is tools and nothing else.
+        // A seeded agent pack is a real archive: a manifest, exactly one preset, and
+        // the persona, skill and vendored integration that preset needs. Anything
+        // missing here is caught by `Bundle::validate` at boot instead — on the pod,
+        // where the operator can do nothing about it.
         //
-        // It used to carry `personas/` and `skills/` of its own, which is what made
-        // it look like a unit of capability you install. Both belong to an agent
-        // pack now — a preset curates them — and a pack that still shipped them
-        // would resolve only through the legacy fallback kept for un-migrated pods,
-        // so first-party content must not rely on it.
-        //
-        // (The email pack ships a manifest and no `api_tools/`: its tools are native
-        // Rust, compiled into the agent and declared in `native_tools`.)
+        // (The email pack vendors a manifest and no `api_tools/`: its tools are
+        // native Rust, compiled into the agent and declared in `native_tools`.)
         for id in ids {
-            let dir = SEED
-                .get_dir(format!("integrations/{id}"))
-                .expect("pack dir");
+            let dir = SEED.get_dir(format!("agent_packs/{id}")).expect("pack dir");
             let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
             collect_files(dir, dir.path(), &mut files);
             let names: Vec<String> = files
                 .iter()
                 .map(|(p, _)| p.to_string_lossy().into_owned())
                 .collect();
+            for required in [
+                "agent_pack.json".to_string(),
+                format!("agent_presets/{id}.json"),
+                format!("integrations/{id}/integration.json"),
+            ] {
+                assert!(names.contains(&required), "{id} is missing {required}: {names:?}");
+            }
             assert!(
-                names.iter().any(|n| n == "integration.json"),
-                "{id}: got {names:?}"
+                names.iter().any(|n| n.starts_with("personas/")),
+                "{id} ships no persona: {names:?}"
             );
             assert!(
-                !names
-                    .iter()
-                    .any(|n| n.starts_with("personas/") || n.starts_with("skills/")),
-                "{id} still ships personas or skills; they belong to an agent pack now — got {names:?}"
+                names.iter().any(|n| n.starts_with("skills/")),
+                "{id} ships no skill: {names:?}"
             );
         }
     }
 
-    /// Every first-party `metalcraft-*` pack must carry the ecosystem tag, or the
-    /// daemon's first-boot auto-enable (`ENABLE_METALCRAFT_PACKS`) silently skips
-    /// it. This guards a new subapp pack shipped without the tag.
+    /// Every first-party `metalcraft-*` pack must carry the ecosystem tag —
+    /// `ecosystem_pack_ids` is what marks a pack as ours rather than a stranger's.
+    /// This guards a new subapp pack shipped without the tag.
     #[test]
     fn metalcraft_packs_are_tagged_ecosystem() {
         use crate::integrations::{IntegrationManifest, is_ecosystem};
-        let packs = SEED.get_dir("integrations").expect("integrations embedded");
+        let packs = SEED.get_dir("agent_packs").expect("agent packs embedded");
         let mut checked = 0;
         for item in packs.dirs() {
             let id = item
@@ -533,7 +554,7 @@ mod tests {
                 continue;
             }
             let manifest_json = item
-                .get_file(item.path().join("integration.json"))
+                .get_file(item.path().join(format!("integrations/{id}/integration.json")))
                 .and_then(|f| f.contents_utf8())
                 .unwrap_or_else(|| panic!("{id} missing integration.json"));
             let manifest: IntegrationManifest = serde_json::from_str(manifest_json)

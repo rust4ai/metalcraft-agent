@@ -23,15 +23,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::paths;
-
-/// Cap on the total uncompressed size we'll extract for one pack — a modest
-/// guard against a zip bomb from a compromised registry. Packs are tiny
-/// (JSON + markdown); 16 MB is far more than any real pack needs.
-const MAX_PACK_BYTES: u64 = 16 * 1024 * 1024;
 
 // The pack manifest, the ecosystem tag, and the ecosystem check live in the
 // shared `metalcraft-packs` spec crate so the agent and the registry parse and
@@ -121,39 +115,41 @@ pub fn find_installed(id: &str) -> Option<Integration> {
     list_installed().into_iter().find(|p| p.manifest.id == id)
 }
 
-/// Read every `integration.json` under `<data>/integrations/*/integration.json` into
-/// memory. Malformed packs are logged and skipped.
+/// Every integration installed on this pod, in sorted-id order.
+///
+/// One source, because there is one install path: the content store, holding what
+/// the installed agent packs vendor. `<data>/integrations/` — the layout that
+/// predates agent packs — is not consulted, and [`crate::seed`] deletes it on boot.
+/// A pack that is not vendored by an installed agent pack is not installed.
+///
+/// Two agent packs vendoring different versions of the same integration is a real
+/// state the store supports; [`crate::agent_packs::store::resolve`] picks the
+/// highest, and this reports what it picked rather than both.
 pub fn list_installed() -> Vec<Integration> {
-    let root = paths::integrations_dir();
-    let entries = match std::fs::read_dir(&root) {
-        Ok(rd) => rd,
-        Err(_) => return Vec::new(),
-    };
+    let mut ids: Vec<String> = crate::agent_packs::store::live_refs()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    ids.sort();
+    ids.dedup();
+
     let mut out = Vec::new();
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if !path.is_dir() {
+    for id in ids {
+        let Some(root) = crate::agent_packs::store::resolve(&id) else {
             continue;
-        }
-        let manifest_path = path.join("integration.json");
+        };
+        let manifest_path = root.join("integration.json");
         let content = match std::fs::read_to_string(&manifest_path) {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("skipping pack at {}: {e}", path.display());
+                log::warn!("skipping pack at {}: {e}", root.display());
                 continue;
             }
         };
-        let manifest: IntegrationManifest = match serde_json::from_str(&content) {
-            Ok(m) => m,
-            Err(e) => {
-                log::warn!("invalid integration.json in {}: {e}", path.display());
-                continue;
-            }
-        };
-        out.push(Integration {
-            manifest,
-            root: path,
-        });
+        match serde_json::from_str::<IntegrationManifest>(&content) {
+            Ok(manifest) => out.push(Integration { manifest, root }),
+            Err(e) => log::warn!("invalid integration.json in {}: {e}", root.display()),
+        }
     }
     out.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
     out
@@ -243,47 +239,6 @@ fn mutate_state<T>(
 /// [`agent_pack_layers`].
 pub fn is_enabled(id: &str) -> bool {
     crate::agent_packs::store::resolve(id).is_some()
-        || list_installed().iter().any(|p| p.manifest.id == id)
-}
-
-/// **Deprecated.** Enabling now only ensures the pack's files exist; disabling is a
-/// no-op, because availability is decided by declaration (see [`is_enabled`]).
-///
-/// Materializing the files is still worth doing — that part was never the flag, it
-/// was the fix for a flag with nothing behind it.
-pub fn set_enabled(id: &str, enabled: bool) -> Result<(), String> {
-    if !enabled {
-        log::debug!(
-            "pack '{id}': disable is a no-op — a pack's tools are scoped by the persona \
-             and preset that declare them, not by a global flag"
-        );
-    }
-    if enabled {
-        crate::seed::install_pack(id);
-    }
-    // The pack must exist on disk now — either just installed from the embedded
-    // seed, or previously side-loaded into the packs dir.
-    if !list_installed().iter().any(|p| p.manifest.id == id) {
-        return Err(format!("pack '{id}' not installed"));
-    }
-    mutate_state(|state| {
-        let enabled_at = if enabled {
-            Some(chrono::Utc::now().to_rfc3339())
-        } else {
-            None
-        };
-        state
-            .entry(id.to_string())
-            .and_modify(|s| {
-                s.enabled = enabled;
-                s.enabled_at = enabled_at.clone();
-            })
-            .or_insert(IntegrationState {
-                enabled,
-                enabled_at,
-                source: None,
-            });
-    })
 }
 
 /// Record a pack's provenance (`"registry"` / `"embedded"`) without disturbing
@@ -305,7 +260,6 @@ pub fn set_source(id: &str, source: &str) -> Result<(), String> {
 // Pack id/slug validation and semver compare live in the shared spec crate so
 // the agent and the registry agree. `valid_pack_id` keeps its local name via the
 // alias; the id rule is `^[a-z0-9][a-z0-9_-]{0,63}$`.
-use metalcraft_packs::{is_valid_integration_id as valid_pack_id, version_ge};
 
 /// Canonical content hash of an already-installed pack, computed over the files
 /// on disk under `<data>/integrations/<id>/`. Matches the registry's
@@ -345,159 +299,6 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
         }
     }
     out
-}
-
-/// Install a pack from a registry ZIP into `<data>/integrations/<id>/`.
-///
-/// Validates the archive (top-level `integration.json`, safe id, no path traversal,
-/// size cap), refuses to shadow a built-in pack of the same id, and won't
-/// downgrade an existing install. When `expected_sha256` is `Some`, the extracted
-/// file-map's canonical hash must match it or the install is refused (integrity
-/// pin). On success it records `source = "registry"` and returns the pack id — it
-/// does **not** enable the pack (the caller decides, typically
-/// `set_enabled(id, true)` right after).
-pub fn install_from_zip(bytes: &[u8], expected_sha256: Option<&str>) -> Result<String, String> {
-    let mut zip =
-        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a valid zip: {e}"))?;
-
-    // Learn the pack id from the (required, top-level) manifest.
-    let manifest_json = {
-        let mut f = zip
-            .by_name("integration.json")
-            .map_err(|_| "archive has no top-level integration.json".to_string())?;
-        let mut s = String::new();
-        f.read_to_string(&mut s)
-            .map_err(|e| format!("reading integration.json: {e}"))?;
-        s
-    };
-    let manifest: IntegrationManifest = serde_json::from_str(&manifest_json)
-        .map_err(|e| format!("invalid integration.json: {e}"))?;
-    let id = manifest.id.clone();
-    if !valid_pack_id(&id) {
-        return Err(format!("invalid pack id '{id}'"));
-    }
-    // Never let a registry pack fight or shadow a bundled first-party pack: the
-    // boot seeder version-gates embedded ids, so a same-id registry copy could be
-    // clobbered on the next boot (or shadow the bundled one). Refuse up front.
-    if crate::seed::is_embedded_integration(&id) {
-        return Err(format!(
-            "'{id}' is a built-in pack — it's managed by the app, not installable from the registry"
-        ));
-    }
-    // Don't downgrade an existing install (equal versions are allowed to reinstall).
-    if let Some(existing) = find_installed(&id) {
-        if !version_ge(&manifest.version, &existing.manifest.version) {
-            return Err(format!(
-                "pack '{id}' v{} is older than the installed v{}",
-                manifest.version, existing.manifest.version
-            ));
-        }
-    }
-
-    // Extract into an in-memory file-map first so we can verify integrity before
-    // touching disk (a hash mismatch must leave nothing behind).
-    let mut files: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
-    let mut total: u64 = 0;
-    for i in 0..zip.len() {
-        let mut entry = zip
-            .by_index(i)
-            .map_err(|e| format!("reading zip entry: {e}"))?;
-        if entry.is_dir() {
-            continue;
-        }
-        // Reject anything that could escape the pack dir (`..`, absolute, drive).
-        let raw = entry.name().replace('\\', "/");
-        let rel = PathBuf::from(&raw);
-        if raw.starts_with('/')
-            || rel.components().any(|c| {
-                matches!(
-                    c,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            return Err(format!("unsafe path in zip: {}", entry.name()));
-        }
-        total = total.saturating_add(entry.size());
-        if total > MAX_PACK_BYTES {
-            return Err("pack exceeds the maximum allowed size".to_string());
-        }
-        let mut buf = Vec::with_capacity(entry.size().min(MAX_PACK_BYTES) as usize);
-        entry
-            .read_to_end(&mut buf)
-            .map_err(|e| format!("reading {}: {e}", entry.name()))?;
-        files.insert(raw, buf);
-    }
-
-    // Integrity pin: refuse to install bytes that don't match the expected hash.
-    if let Some(expected) = expected_sha256 {
-        let actual = metalcraft_packs::canonical_sha256(
-            files.iter().map(|(p, c)| (p.as_str(), c.as_slice())),
-        );
-        if !actual.eq_ignore_ascii_case(expected) {
-            return Err(format!(
-                "pack '{id}' content hash {actual} does not match the expected {expected}"
-            ));
-        }
-    }
-
-    let dest_root = paths::integrations_dir().join(&id);
-    for (raw, buf) in &files {
-        let target = dest_root.join(raw);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("creating {}: {e}", parent.display()))?;
-        }
-        std::fs::write(&target, buf).map_err(|e| format!("writing {}: {e}", target.display()))?;
-    }
-
-    // Mark provenance so the boot seeder / UI never confuse it with a bundled pack.
-    let _ = set_source(&id, "registry");
-    Ok(id)
-}
-
-/// Uninstall a registry pack: delete its files from
-/// `<data>/integrations/<id>/` and drop its enable-state entry. Refuses
-/// built-in (embedded) packs — those are app-managed and would just be re-seeded
-/// on the next boot. Returns `Ok(false)` when no such pack is installed (so the
-/// caller can answer 404), `Ok(true)` on a successful removal.
-pub fn uninstall(id: &str) -> Result<bool, String> {
-    if !valid_pack_id(id) {
-        return Err(format!("invalid pack id '{id}'"));
-    }
-    if crate::seed::is_embedded_integration(id) {
-        return Err(format!(
-            "'{id}' is a built-in pack — it's managed by the app and can't be uninstalled"
-        ));
-    }
-    // Packs that ship native (compiled-in) Rust tools — e.g. the `s3` pack —
-    // can't be fully removed: deleting the files would strip the pack's persona/docs
-    // while the tools remain live in the binary, leaving a half-uninstalled pack.
-    // Refuse and let the user disable it instead.
-    if !crate::tools::native_integration_tool_names(id).is_empty() {
-        return Err(format!(
-            "'{id}' ships built-in tools compiled into the app and can't be fully uninstalled — disable it instead"
-        ));
-    }
-    if find_installed(id).is_none() {
-        return Ok(false);
-    }
-    // Drop the enable-state entry *first* so a crash mid-uninstall can never leave a
-    // ghost `enabled: true` pointing at deleted files (a later re-install would then
-    // look enabled without the user opting in). If the file removal then fails, the
-    // pack is left installed-but-disabled — recoverable, not corrupt.
-    mutate_state(|state| {
-        state.remove(id);
-    })?;
-    // `id` is validated to a single safe path segment above, so this stays inside
-    // the packs dir.
-    let dir = paths::integrations_dir().join(id);
-    if let Err(e) = std::fs::remove_dir_all(&dir) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!("failed to remove pack files: {e}"));
-        }
-    }
-    Ok(true)
 }
 
 /// Iterate enabled packs in deterministic (sorted-id) order. Used by the
@@ -738,94 +539,6 @@ mod tests {
         assert!(is_ecosystem(&manifest("x", &["other", ECOSYSTEM_TAG])));
         // A different tag does not.
         assert!(!is_ecosystem(&manifest("x", &["metalcraft"])));
-    }
-
-    #[test]
-    fn valid_pack_id_accepts_real_ids_rejects_unsafe() {
-        assert!(valid_pack_id("github"));
-        assert!(valid_pack_id("digitalocean_spaces"));
-        assert!(valid_pack_id("metalcraft-notes"));
-        assert!(!valid_pack_id(""));
-        assert!(!valid_pack_id("../evil"));
-        assert!(!valid_pack_id("Foo")); // uppercase
-        assert!(!valid_pack_id("a/b"));
-        assert!(!valid_pack_id(&"x".repeat(65)));
-    }
-
-    // version compare + canonical hashing are now unit-tested in the shared
-    // `metalcraft-packs` crate; the agent only tests its install/verify wiring.
-
-    /// Build a minimal in-memory zip with the given files (path, contents).
-    fn zip_of(files: &[(&str, &str)]) -> Vec<u8> {
-        use std::io::Write;
-        let mut buf = std::io::Cursor::new(Vec::new());
-        {
-            let mut w = zip::ZipWriter::new(&mut buf);
-            let opts: zip::write::SimpleFileOptions = Default::default();
-            for (path, content) in files {
-                w.start_file(*path, opts).unwrap();
-                w.write_all(content.as_bytes()).unwrap();
-            }
-            w.finish().unwrap();
-        }
-        buf.into_inner()
-    }
-
-    #[test]
-    fn install_from_zip_rejects_non_zip() {
-        assert!(install_from_zip(b"definitely not a zip", None).is_err());
-    }
-
-    #[test]
-    fn install_from_zip_requires_pack_json() {
-        let z = zip_of(&[("personas/x.json", "{}")]);
-        let err = install_from_zip(&z, None).unwrap_err();
-        assert!(err.contains("integration.json"), "got: {err}");
-    }
-
-    #[test]
-    fn install_from_zip_refuses_embedded_id() {
-        // `email` ships embedded, so a registry pack claiming that id is refused
-        // before anything is written to disk.
-        let z = zip_of(&[(
-            "integration.json",
-            r#"{"id":"email","name":"x","description":"","version":"9.9.9"}"#,
-        )]);
-        let err = install_from_zip(&z, None).unwrap_err();
-        assert!(err.contains("built-in"), "got: {err}");
-    }
-
-    #[test]
-    fn uninstall_refuses_builtin_and_native_tool_packs() {
-        // An embedded ecosystem pack is app-managed — refused before any disk touch.
-        let err = uninstall("metalcraft-email").unwrap_err();
-        assert!(err.contains("built-in"), "got: {err}");
-        // A registry pack that ships native (compiled-in) tools can't be fully
-        // removed, so uninstall is refused (disable instead).
-        let err = uninstall("s3").unwrap_err();
-        assert!(err.contains("built-in tools"), "got: {err}");
-    }
-
-    #[test]
-    fn install_from_zip_rejects_invalid_id() {
-        let z = zip_of(&[(
-            "integration.json",
-            r#"{"id":"Bad Id","name":"x","description":"","version":"1.0.0"}"#,
-        )]);
-        let err = install_from_zip(&z, None).unwrap_err();
-        assert!(err.contains("invalid pack id"), "got: {err}");
-    }
-
-    #[test]
-    fn install_from_zip_rejects_hash_mismatch_before_touching_disk() {
-        // A non-embedded, valid id so we reach the integrity check, with a wrong
-        // expected hash. It must fail before any file is written.
-        let z = zip_of(&[(
-            "integration.json",
-            r#"{"id":"some-third-party-pack","name":"x","description":"","version":"1.0.0"}"#,
-        )]);
-        let err = install_from_zip(&z, Some(&"0".repeat(64))).unwrap_err();
-        assert!(err.contains("does not match"), "got: {err}");
     }
 
     #[test]

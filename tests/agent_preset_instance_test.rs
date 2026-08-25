@@ -82,19 +82,18 @@ fn presets_resolve_and_instances_group_conversations() {
         "a missing preset is an error, not a silent default"
     );
 
-    // ── ambiguity: two enabled packs providing the same slug ─────────────────
+    // ── ambiguity: two installed agent packs providing the same slug ─────────
     for pack in ["packa", "packb"] {
-        let root = data_dir.join("integrations").join(pack);
+        let root = data_dir.join("agent_packs").join(pack);
         write(
-            &root.join("integration.json"),
-            &format!(r#"{{"id":"{pack}","name":"{pack}","description":"t","version":"1.0.0"}}"#),
+            &root.join("agent_pack.json"),
+            &format!(
+                r#"{{"manifest_version":2,"id":"{pack}","name":"{pack}","description":"t",
+                     "version":"1.0.0","presets":["shared"]}}"#
+            ),
         );
         write(&root.join("agent_presets").join("shared.json"), PACK_PRESET);
     }
-    write(
-        &data_dir.join("integrations.json"),
-        r#"{"packa":{"enabled":true},"packb":{"enabled":true}}"#,
-    );
 
     let err = AgentPreset::load("shared", &presets_dir)
         .expect_err("two packs providing one slug must not silently resolve");

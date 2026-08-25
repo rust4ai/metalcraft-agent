@@ -110,67 +110,6 @@ pub async fn run_daemon() -> Result<(), DynError> {
     run(DaemonConfig::from_env()).await
 }
 
-/// One-shot: on a managed pod that sets `ENABLE_METALCRAFT_PACKS`, enable every
-/// pack tagged [`crate::integrations::ECOSYSTEM_TAG`] the first time the
-/// daemon boots, then drop a marker so it never runs again.
-///
-/// This is deliberately *not* a reconciler. After the single seed the user owns
-/// pack state — a pack they later disable stays disabled across reboots, even
-/// though the env var is still set. The marker is the whole one-shot mechanism;
-/// the env var only says "this pod opted in". Runs after
-/// [`crate::seed::ensure_defaults`] so the ecosystem packs are already on disk
-/// (and `set_enabled` installs from the embedded seed anyway).
-///
-/// No-op when the var is unset/falsey or the marker already exists — the common
-/// path on every boot after the first is a single `exists()` check.
-fn maybe_autoenable_ecosystem_packs() {
-    if !env_flag("ENABLE_METALCRAFT_PACKS", false) {
-        return;
-    }
-    let marker = paths::ecosystem_packs_seeded_marker();
-    if marker.exists() {
-        return;
-    }
-
-    let ids = crate::integrations::ecosystem_pack_ids();
-    let mut enabled = Vec::new();
-    for id in &ids {
-        match crate::integrations::set_enabled(id, true) {
-            Ok(()) => enabled.push(id.clone()),
-            Err(e) => log::warn!("auto-enable: could not enable ecosystem pack '{id}': {e}"),
-        }
-    }
-
-    // Write the marker whatever happened above. This is a convenience seed, not
-    // a reconciler: we must not retry-enable on the next boot, or we'd re-enable
-    // a pack the user deliberately turned off. Record the timestamp + what we
-    // enabled for operator forensics.
-    if let Some(parent) = marker.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let body = format!(
-        "{}\n{}\n",
-        chrono::Utc::now().to_rfc3339(),
-        enabled.join("\n")
-    );
-    match std::fs::write(&marker, body) {
-        Ok(()) => log::info!(
-            "auto-enabled {} Metalcraft ecosystem pack(s) on first boot: [{}]",
-            enabled.len(),
-            enabled.join(", ")
-        ),
-        // Marker write failed → next boot retries. set_enabled is idempotent, so
-        // a retry is harmless; log loudly so a persistently-unwritable data dir
-        // is visible rather than silently re-seeding every boot.
-        Err(e) => log::warn!(
-            "auto-enable: enabled [{}] but could not write seed marker {} ({e}); \
-             will retry on next boot",
-            enabled.join(", "),
-            marker.display()
-        ),
-    }
-}
-
 /// Run the daemon: spawn the workshop API (if keyed), then run the flow polling
 /// loop until Ctrl+C (or once, if `config.once`). The workshop API also hosts
 /// the gateway channels (inbound webhooks + management). Assumes
@@ -192,13 +131,6 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     // One-time migration of legacy global PIPESTREAMR_* keys into channel scope
     // (and a v2 keys.json schema upgrade). Idempotent — a no-op once migrated.
     crate::metalcraft_gateway::migrate_legacy_keys();
-
-    // One-shot: auto-enable the Metalcraft ecosystem packs on a managed pod's
-    // first boot (gated by ENABLE_METALCRAFT_PACKS). Placed here in `run` — not
-    // in `run_daemon` — so it fires for BOTH entrypoints (the `metalcraft-daemon`
-    // CLI bin and the umbrella crate), which both funnel through here after
-    // `seed::ensure_defaults`. Idempotent via its marker file.
-    maybe_autoenable_ecosystem_packs();
 
     let context = AgentRuntimeContext::from_environment()?;
     let cwd = std::env::current_dir()?.display().to_string();

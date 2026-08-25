@@ -395,13 +395,13 @@ async fn configuring_a_pack_via_meta_tools_works() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn live_config_agent_installs_metalcraft_email() {
+async fn live_config_agent_sets_up_metalcraft_email() {
     init();
     let _guard = lock_state();
 
     if std::env::var("OPENAI_API_KEY").is_err() {
         eprintln!(
-            "SKIP live_config_agent_installs_metalcraft_email: set OPENAI_API_KEY \
+            "SKIP live_config_agent_sets_up_metalcraft_email: set OPENAI_API_KEY \
              (e.g. in a crate-root .env) to run the live suite."
         );
         return;
@@ -420,9 +420,9 @@ async fn live_config_agent_installs_metalcraft_email() {
 
     let tests = vec![
         test(
-            "install-metalcraft-email",
+            "setup-metalcraft-email",
             format!(
-                "Install the metalcraft-email integration for me. Use this Metalcraft token: {TEST_KEY_VALUE}"
+                "Set up the metalcraft-email integration for me — store this Metalcraft token so its tools can authenticate: {TEST_KEY_VALUE}"
             ),
         )
         .name("Stores METALCRAFT_TOKEN for the metalcraft-email pack")
@@ -543,18 +543,21 @@ fn orchestrator_can_delegate_config() {
 
 // ---------------------------------------------------------------------------
 // Tier 5 — live: the orchestrator, given the user's exact phrasing, delegates
-// the install to config-agent and the config tools fire through the sub-agent.
+// setting a pack's credential to config-agent, and the config tools fire through
+// the sub-agent. The ask is "store this token", not "install this pack": a pack
+// arrives inside an agent pack the operator installs, and no tool on this pod
+// fetches one.
 // Gated on OPENAI_API_KEY; uses a throwaway metalcraft-email key.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn live_orchestrator_delegates_install_to_config() {
+async fn live_orchestrator_delegates_setup_to_config() {
     init();
     let _guard = lock_state();
 
     if std::env::var("OPENAI_API_KEY").is_err() {
         eprintln!(
-            "SKIP live_orchestrator_delegates_install_to_config: set OPENAI_API_KEY \
+            "SKIP live_orchestrator_delegates_setup_to_config: set OPENAI_API_KEY \
              (e.g. in a crate-root .env) to run the live suite."
         );
         return;
@@ -569,12 +572,12 @@ async fn live_orchestrator_delegates_install_to_config() {
 
     let tests = vec![
         test(
-            "delegate-install-metalcraft-email",
+            "delegate-setup-metalcraft-email",
             format!(
-                "Install the metalcraft-email integration for me. Use this Metalcraft token: {TEST_KEY_VALUE}"
+                "Set up the metalcraft-email integration for me — store this Metalcraft token so its tools can authenticate: {TEST_KEY_VALUE}"
             ),
         )
-        .name("Orchestrator delegates the install to config-agent")
+        .name("Orchestrator delegates the setup to config-agent")
         .expect_tools(&["sub_agent"])
         .expect_tools_within_allowlist()
         .expect_no_error()
@@ -618,7 +621,7 @@ async fn live_orchestrator_delegates_install_to_config() {
 
     assert_eq!(
         report.failed, 0,
-        "{}/{} orchestrator-delegates-install spice tests failed",
+        "{}/{} orchestrator-delegates-setup spice tests failed",
         report.failed, report.total
     );
 

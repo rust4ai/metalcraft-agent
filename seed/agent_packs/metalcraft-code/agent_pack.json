@@ -1,0 +1,27 @@
+{
+  "manifest_version": 2,
+  "id": "metalcraft-code",
+  "name": "Metalcraft Code",
+  "description": "Persona, skill, and HTTP API tools to give the agent a full remote coding environment on Metalcraft Code (code.metalcraftai.com). Connect a GitHub App installation, provision an ephemeral sprites.dev workspace, clone a repo into it, read/list/write/delete files, run arbitrary bash (mcode_exec) as if the code were local, build & smoke-test (mcode_build/mcode_test), configure GitHub Actions, and commit & push. Long-lived workspaces hibernate when idle and wake on demand. Authenticated by a single Metalcraft account token — METALCRAFT_TOKEN, sent as Authorization: Bearer — the same token that works across every Metalcraft ecosystem app. Reads work with any token; create/edit/exec/commit/push need the write scope. The API base is fixed to https://code.metalcraftai.com.",
+  "version": "0.1.0",
+  "tags": [
+    "metalcraft-ecosystem"
+  ],
+  "presets": [
+    "metalcraft-code"
+  ],
+  "provides": {
+    "personas": [
+      "metalcraft-code-agent"
+    ],
+    "skills": [
+      "metalcraft-code"
+    ],
+    "integrations": [
+      {
+        "id": "metalcraft-code",
+        "version": "0.1.0"
+      }
+    ]
+  }
+}

@@ -12,14 +12,27 @@
 use metalcraft_agent::tools::http_api::HttpApiToolConfig;
 use std::path::{Path, PathBuf};
 
-/// Every `seed/integrations/*/api_tools/*.json`, as `(path, config)`.
-fn seeded_api_tools() -> Vec<(PathBuf, HttpApiToolConfig)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/integrations");
-    let mut out = Vec::new();
+/// The directory each seeded agent pack vendors its integration in:
+/// `seed/agent_packs/<id>/integrations/<id>/`.
+fn seeded_integration_dirs() -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/agent_packs");
     let packs =
         std::fs::read_dir(&root).unwrap_or_else(|e| panic!("reading {}: {e}", root.display()));
-    for pack in packs.filter_map(|e| e.ok()) {
-        let dir = pack.path().join("api_tools");
+    packs
+        .filter_map(|e| e.ok())
+        .filter_map(|pack| {
+            let id = pack.file_name().to_str()?.to_string();
+            let dir = pack.path().join("integrations").join(&id);
+            dir.is_dir().then_some(dir)
+        })
+        .collect()
+}
+
+/// Every api tool a seeded agent pack vendors, as `(path, config)`.
+fn seeded_api_tools() -> Vec<(PathBuf, HttpApiToolConfig)> {
+    let mut out = Vec::new();
+    for pack in seeded_integration_dirs() {
+        let dir = pack.join("api_tools");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -166,10 +179,9 @@ fn seeded_api_tools_reference_only_declared_env_keys() {
     // A `$NAME` in a header that the pack does not list in `requires_env` will never
     // be surfaced to the user by `key_list`, so the tool fails at call time with a
     // literal `$NAME` in the Authorization header and no hint about what to set.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/integrations");
     let mut problems = Vec::new();
-    for pack in std::fs::read_dir(&root).unwrap().filter_map(|e| e.ok()) {
-        let manifest_path = pack.path().join("integration.json");
+    for pack in seeded_integration_dirs() {
+        let manifest_path = pack.join("integration.json");
         if !manifest_path.is_file() {
             continue;
         }
@@ -184,7 +196,7 @@ fn seeded_api_tools_reference_only_declared_env_keys() {
             })
             .unwrap_or_default();
 
-        let dir = pack.path().join("api_tools");
+        let dir = pack.join("api_tools");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };

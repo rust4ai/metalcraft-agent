@@ -178,7 +178,7 @@ impl OperationKind {
             | "flow_write"
             | "flow_set_schedules"
             | "flow_install"
-            | "flow_install_dependencies"
+            | "flow_check_dependencies"
             | "flow_delete" => Self::MetaWrite,
             "agentpack_install"
             | "agentpack_update"

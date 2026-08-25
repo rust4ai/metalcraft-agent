@@ -8,7 +8,9 @@
 //! persona references it, and the preset declares it. An installed pack is
 //! available, full stop — so there is no "installed but disabled" state left to
 //! report, and this now checks that an *installed* pack resolves and a missing one
-//! reports a plain not-found.
+//! reports a plain not-found. Packs are agent packs now — an integration carries
+//! tools and nothing else — so the fallback layer being checked is
+//! `<data>/agent_packs/<id>/personas/`.
 //!
 //! Everything runs inside ONE `#[test]` so the process-global
 //! `METALCRAFT_DATA_DIR` env var isn't raced by parallel tests.
@@ -31,6 +33,13 @@ const PACK_PERSONA: &str = r#"{
   "system_prompt": "you are a pack persona"
 }"#;
 
+const LOCAL_PERSONA: &str = r#"{
+  "name": "Local Persona",
+  "description": "the operator's own",
+  "tools": ["read_file"],
+  "system_prompt": "you are a local persona"
+}"#;
+
 #[test]
 fn persona_resolves_from_an_installed_pack() {
     // Isolated data dir for this process.
@@ -43,11 +52,12 @@ fn persona_resolves_from_an_installed_pack() {
     let local_personas = data_dir.join("personas");
     fs::create_dir_all(&local_personas).unwrap();
 
-    // A pack that ships `pack-persona`, laid out like a project.
-    let pack_root = data_dir.join("integrations").join("testpack");
+    // An installed agent pack that ships `pack-persona`.
+    let pack_root = data_dir.join("agent_packs").join("testpack");
     write(
-        &pack_root.join("integration.json"),
-        r#"{"id":"testpack","name":"Test Pack","description":"t","version":"1.0.0"}"#,
+        &pack_root.join("agent_pack.json"),
+        r#"{"manifest_version":2,"id":"testpack","name":"Test Pack","description":"t",
+            "version":"1.0.0","presets":[]}"#,
     );
     write(
         &pack_root.join("personas").join("pack-persona.json"),
@@ -59,15 +69,15 @@ fn persona_resolves_from_an_installed_pack() {
         .expect("a persona in an installed pack must resolve");
     assert_eq!(persona.name, "Pack Persona");
 
-    // 2. A stale `enabled: false` from before the flag was retired must not hide it.
-    //    Upgraded pods carry these, and honouring them would resurrect the bug.
-    write(
-        &data_dir.join("integrations.json"),
-        r#"{"testpack":{"enabled":false}}"#,
-    );
+    // 2. A user-local persona of the same slug shadows the pack's.
+    write(&local_personas.join("pack-persona.json"), LOCAL_PERSONA);
     let persona = Persona::load("pack-persona", &local_personas)
-        .expect("a stale disabled flag must not affect resolution");
-    assert_eq!(persona.name, "Pack Persona");
+        .expect("a user-local persona must still resolve");
+    assert_eq!(
+        persona.name, "Local Persona",
+        "user-local shadows the pack copy"
+    );
+    fs::remove_file(local_personas.join("pack-persona.json")).unwrap();
 
     // 3. A genuinely missing persona reports the plain not-found message.
     let err = Persona::load("nope", &local_personas).unwrap_err();

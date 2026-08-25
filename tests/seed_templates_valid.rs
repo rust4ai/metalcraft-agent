@@ -145,10 +145,10 @@ fn every_persona_a_seeded_preset_lists_is_shipped() {
         let preset: AgentPreset =
             serde_json::from_str(&std::fs::read_to_string(e.path()).unwrap()).unwrap();
         for p in preset.callable_personas() {
-            // Personas ship either standalone or inside the integration whose
+            // Personas ship either standalone or inside the agent pack whose
             // tools they are built around, and a preset may name either.
             let standalone = seed.join("personas").join(format!("{p}.json"));
-            let in_a_pack = std::fs::read_dir(seed.join("integrations"))
+            let in_a_pack = std::fs::read_dir(seed.join("agent_packs"))
                 .into_iter()
                 .flatten()
                 .flatten()

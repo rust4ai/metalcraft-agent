@@ -1,19 +1,11 @@
-//! Tests for `integrations::recommended_env` — the "keys these enabled
-//! packs still need" signal that drives the key store UI hint. Verifies it
-//! aggregates `requires_env` across *enabled* packs only, and that a stored
-//! key resolves via `key_store::lookup` (the `configured` flag's source).
+//! Tests for `integrations::recommended_env` — the "keys these packs still need"
+//! signal that drives the key store UI hint. Verifies it aggregates `requires_env`
+//! across every installed pack with the right attribution, and that a stored key
+//! resolves via `key_store::lookup` (the `configured` flag's source).
 //!
 //! Single `#[test]` so the process-global `METALCRAFT_DATA_DIR` isn't raced.
 
 use std::fs;
-use std::path::PathBuf;
-
-fn write(path: &PathBuf, contents: &str) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(path, contents).unwrap();
-}
 
 #[test]
 fn recommends_env_from_installed_packs_with_attribution() {
@@ -23,19 +15,48 @@ fn recommends_env_from_installed_packs_with_attribution() {
         std::env::set_var("METALCRAFT_DATA_DIR", &data_dir);
     }
 
-    // Pack A requires two keys; pack B requires one that overlaps with A.
-    let pack_a = data_dir.join("integrations").join("packa");
-    write(
-        &pack_a.join("integration.json"),
-        r#"{"id":"packa","name":"Pack A","description":"a","version":"1.0.0",
-            "requires_env":["SHARED_KEY","A_ONLY_KEY"]}"#,
-    );
-    let pack_b = data_dir.join("integrations").join("packb");
-    write(
-        &pack_b.join("integration.json"),
-        r#"{"id":"packb","name":"Pack B","description":"b","version":"1.0.0",
-            "requires_env":["SHARED_KEY"]}"#,
-    );
+    // Pack A requires two keys; pack B requires one that overlaps with A. Both go in
+    // through the normal installer — the only way a pack reaches a pod — so what is
+    // being read back is a real install rather than a hand-placed directory.
+    for (id, name, env) in [
+        ("packa", "Pack A", r#"["SHARED_KEY","A_ONLY_KEY"]"#),
+        ("packb", "Pack B", r#"["SHARED_KEY"]"#),
+    ] {
+        let manifest: metalcraft_agent::agent_packs::AgentPackManifest = serde_json::from_str(
+            &format!(
+                r#"{{"manifest_version":2,"id":"{id}","name":"{name}","description":"x",
+                     "version":"1.0.0","presets":["{id}"]}}"#
+            ),
+        )
+        .unwrap();
+        let mut files = std::collections::BTreeMap::new();
+        files.insert(
+            format!("agent_presets/{id}.json"),
+            format!(
+                r#"{{"manifest_version":2,"slug":"{id}","name":"{name}","default_persona":"{id}-agent",
+                     "personas":[{{"slug":"{id}-agent","role":"default"}}],"integrations":["{id}"]}}"#
+            )
+            .into_bytes(),
+        );
+        files.insert(
+            format!("personas/{id}-agent.json"),
+            format!(
+                r#"{{"name":"{name} Agent","description":"x","system_prompt":"you are {id}",
+                     "tools":[],"packs":["{id}"]}}"#
+            )
+            .into_bytes(),
+        );
+        files.insert(
+            format!("integrations/{id}/integration.json"),
+            format!(
+                r#"{{"id":"{id}","name":"{name}","description":"x","version":"1.0.0",
+                     "requires_env":{env}}}"#
+            )
+            .into_bytes(),
+        );
+        let bytes = metalcraft_agent::agent_packs::bundle::write(manifest, files).unwrap();
+        metalcraft_agent::agent_packs::install(&bytes, "test").unwrap();
+    }
 
     // Both packs are installed, so both contribute — enable/disable is retired and
     // an installed pack is available. What still matters, and is what this test is
@@ -56,23 +77,12 @@ fn recommends_env_from_installed_packs_with_attribution() {
         "a shared key names both, sorted"
     );
 
-    // A stale `enabled: false` from before the flag was retired must not suppress it.
-    write(
-        &data_dir.join("integrations.json"),
-        r#"{"packa":{"enabled":false}}"#,
-    );
-    let recs = metalcraft_agent::integrations::recommended_env();
-    assert_eq!(
-        recs.len(),
-        2,
-        "a stale disabled flag must not hide a pack's key needs"
-    );
-
     // `configured` source: a stored key resolves, a missing one does not.
-    write(
-        &data_dir.join("keys.json"),
+    fs::write(
+        data_dir.join("keys.json"),
         r#"{"SHARED_KEY":"some-secret-value"}"#,
-    );
+    )
+    .unwrap();
     assert!(metalcraft_agent::key_store::lookup("SHARED_KEY").is_some());
     assert!(metalcraft_agent::key_store::lookup("A_ONLY_KEY").is_none());
 }

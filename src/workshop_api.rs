@@ -486,7 +486,7 @@ async fn auth_middleware(
         get_registry_status, post_registry_connect, post_registry_disconnect,
         get_registry_search, get_registry_manifest,
         get_flow_schedules_preview,
-        post_install_flow_dependencies,
+        post_check_flow_dependencies,
         list_flow_runs, get_flow_run, post_resume_flow_run,
         list_flow_templates, get_flow_template,
         list_diagnostics, get_diagnostics_session,
@@ -496,7 +496,7 @@ async fn auth_middleware(
         list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
         get_chat_context, post_chat_compact, post_chat_clear,
         list_scheduled_tasks, delete_scheduled_task,
-        list_integrations, get_integration, delete_integration, put_integration_enabled, post_install_integration,
+        list_integrations, get_integration, put_integration_enabled,
         get_lockfile, post_lockfile_restore,
         list_gateway_activity,
         list_channels, create_channel, update_channel, delete_channel, list_channel_events,
@@ -517,7 +517,7 @@ async fn auth_middleware(
         crate::flow_install::DependencyReport, crate::flow_install::PackInstallOutcome,
         crate::lockfile::Lock, crate::lockfile::LockEntry, RestoreOutcome, RestoreResult,
         ChatSummary, ChatDetail, ChatMessageWire, CreateChatRequest, ChatTurnRequest, ChatEvent,
-        IntegrationSummary, IntegrationDetail, SetEnabledRequest, InstallPackRequest, UninstallPackResult,
+        IntegrationSummary, IntegrationDetail, SetEnabledRequest,
         MgRegisterRequest, MgConnectRequest,
         crate::channels::Channel, CreateChannelRequest, UpdateChannelRequest,
         crate::persona::Persona, crate::persona::PersonaSummary,
@@ -733,8 +733,8 @@ pub fn build_router(api_key: String) -> Router {
             delete(delete_arm_schedule),
         )
         .route(
-            "/api/v1/flows/{id}/install-dependencies",
-            post(post_install_flow_dependencies),
+            "/api/v1/flows/{id}/check-dependencies",
+            post(post_check_flow_dependencies),
         )
         .route("/api/v1/flow-runs", get(list_flow_runs))
         .route("/api/v1/flow-runs/{run_id}", get(get_flow_run))
@@ -769,16 +769,7 @@ pub fn build_router(api_key: String) -> Router {
             delete(delete_scheduled_task),
         )
         .route("/api/v1/integrations", get(list_integrations))
-        // Static `/install` before the `{id}` param route (matchit prefers the
-        // literal; different method anyway) — install a registry pack onto the pod.
-        .route(
-            "/api/v1/integrations/install",
-            post(post_install_integration),
-        )
-        .route(
-            "/api/v1/integrations/{id}",
-            get(get_integration).delete(delete_integration),
-        )
+        .route("/api/v1/integrations/{id}", get(get_integration))
         .route(
             "/api/v1/integrations/{id}/enabled",
             put(put_integration_enabled),
@@ -3053,26 +3044,27 @@ async fn post_install_flow(Json(req): Json<InstallFlowRequest>) -> Response {
     }
 }
 
-/// Install the integrations an already-installed flow declares in its
-/// `requires` block: for each, resolve its semver range against the registry,
-/// download that exact version, verify the content hash, install, and enable it.
-/// Returns one outcome per pack. Idempotent — packs already satisfied are left
-/// untouched.
+/// Report whether this pod satisfies the integrations an already-installed flow
+/// declares in its `requires` block. One outcome per pack.
+///
+/// It reports rather than installs. Fetching a pack from here was a second install
+/// path into a second layout; an integration reaches a pod inside an agent pack the
+/// operator installs, through `POST /api/v1/agent-packs/install` and nowhere else.
 #[utoipa::path(
     post,
-    path = "/api/v1/flows/{id}/install-dependencies",
+    path = "/api/v1/flows/{id}/check-dependencies",
     tag = "flows",
     params(("id" = String, Path, description = "Flow id")),
     responses(
-        (status = 200, description = "Per-pack install outcomes", body = InstallDependenciesResponse),
+        (status = 200, description = "Per-pack outcomes", body = InstallDependenciesResponse),
         (status = 404, body = ErrorResponse),
     ),
 )]
-async fn post_install_flow_dependencies(Path(id): Path<String>) -> Response {
+async fn post_check_flow_dependencies(Path(id): Path<String>) -> Response {
     let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
         return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
     };
-    let outcomes = crate::flow_install::install_flow_dependencies(&flow).await;
+    let outcomes = crate::flow_install::check_flow_dependencies(&flow);
     Json(InstallDependenciesResponse {
         flow: id,
         packs: outcomes,
@@ -5555,15 +5547,13 @@ fn list_file_stems(dir: &std::path::Path, ext: &str) -> Vec<String> {
     responses((status = 200, body = Vec<IntegrationSummary>)),
 )]
 async fn list_integrations() -> Json<Vec<IntegrationSummary>> {
-    let state = crate::integrations::load_state();
     let packs = crate::integrations::list_installed();
     let summaries = packs
         .into_iter()
         .map(|p| IntegrationSummary {
-            enabled: state
-                .get(&p.manifest.id)
-                .map(|s| s.enabled)
-                .unwrap_or(false),
+            // Installed *is* available; see `integrations::is_enabled`. Kept in the
+            // wire shape so existing clients keep parsing it.
+            enabled: true,
             personas: count_files(&p.personas_dir(), "json"),
             skills: count_files(&p.skills_dir(), "md"),
             // Declarative HTTP-API tools (api_tools/*.json) plus any native Rust
@@ -5621,71 +5611,6 @@ async fn get_integration(Path(id): Path<String>) -> Response {
     .into_response()
 }
 
-#[derive(Serialize, utoipa::ToSchema)]
-struct UninstallPackResult {
-    /// Installed flows that still reference the removed pack — they'll fail to resolve
-    /// it until the pack is reinstalled or the flow is edited.
-    dependent_flows: Vec<String>,
-    /// Surviving personas that still declare the removed pack in their `packs` list.
-    dependent_personas: Vec<String>,
-}
-
-#[utoipa::path(
-    delete,
-    path = "/api/v1/integrations/{id}",
-    tag = "integrations",
-    params(("id" = String, Path, description = "Pack id")),
-    responses(
-        (status = 200, body = UninstallPackResult, description = "Uninstalled; body lists anything that still depends on the pack"),
-        (status = 404, body = ErrorResponse),
-        (status = 400, body = ErrorResponse),
-    ),
-)]
-async fn delete_integration(Path(id): Path<String>) -> Response {
-    match crate::integrations::uninstall(&id) {
-        Ok(true) => {
-            let _ = crate::lockfile::remove_pack(&id);
-            Json(pack_dependents(&id)).into_response()
-        }
-        Ok(false) => err_json(StatusCode::NOT_FOUND, format!("pack '{id}' not found")),
-        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
-    }
-}
-
-/// After a pack is removed, scan the *surviving* flows and personas for references to
-/// its id — these are exactly the things that will now fail to resolve it, so the client
-/// can warn the user.
-fn pack_dependents(id: &str) -> UninstallPackResult {
-    let flows_dir = paths::flows_dir();
-    let dependent_flows = metalcraft_flows::list_flows(&flows_dir)
-        .into_iter()
-        .filter_map(|s| metalcraft_flows::load_flow(&flows_dir, &s.id))
-        .filter(|f| {
-            crate::flow_install::required_packs(f)
-                .iter()
-                .any(|p| p == id)
-        })
-        .map(|f| f.id)
-        .collect();
-
-    let personas_dir = paths::personas_dir();
-    let dependent_personas = crate::persona::Persona::list_available(&personas_dir)
-        .into_iter()
-        .filter_map(|slug| {
-            crate::persona::Persona::load(&slug, &personas_dir)
-                .ok()
-                .map(|p| (slug, p))
-        })
-        .filter(|(_, p)| p.integrations.iter().any(|x| x == id))
-        .map(|(slug, _)| slug)
-        .collect();
-
-    UninstallPackResult {
-        dependent_flows,
-        dependent_personas,
-    }
-}
-
 /// Kept only so the retired endpoint below still documents the body clients used
 /// to send; the value is ignored.
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -5723,87 +5648,6 @@ async fn put_integration_enabled(
     )
 }
 
-/// Build the same summary the list endpoint returns, for a single installed pack.
-fn integration_summary(integration: &crate::integrations::Integration) -> IntegrationSummary {
-    IntegrationSummary {
-        enabled: crate::integrations::is_enabled(&integration.manifest.id),
-        personas: count_files(&integration.personas_dir(), "json"),
-        skills: count_files(&integration.skills_dir(), "md"),
-        api_tools: count_files(&integration.api_tools_dir(), "json")
-            + crate::tools::native_integration_tool_names(&integration.manifest.id).len(),
-        flow_templates: count_files(&integration.flow_templates_dir(), "json"),
-        id: integration.manifest.id.clone(),
-        name: integration.manifest.name.clone(),
-        description: integration.manifest.description.clone(),
-        version: integration.manifest.version.clone(),
-        requires_env: integration.manifest.requires_env.clone(),
-    }
-}
-
-#[derive(Deserialize, utoipa::ToSchema)]
-struct InstallPackRequest {
-    /// Registry slug of the pack to install (equals the pack id).
-    slug: String,
-    /// Optional specific version to install (defaults to the registry's latest).
-    #[serde(default)]
-    version: Option<String>,
-    /// Optional integrity pin: if set, the downloaded pack's canonical content
-    /// hash must match this or the install is refused.
-    #[serde(default)]
-    content_sha256: Option<String>,
-}
-
-/// Install a registry pack onto this agent: download its ZIP from
-/// packs.metalcraftai.com, extract it into the data dir, and enable it. Returns
-/// the new pack's summary (same shape as the list endpoint).
-#[utoipa::path(
-    post,
-    path = "/api/v1/integrations/install",
-    tag = "integrations",
-    request_body = InstallPackRequest,
-    responses(
-        (status = 200, body = IntegrationSummary),
-        (status = 400, body = ErrorResponse),
-        (status = 502, body = ErrorResponse),
-    ),
-)]
-async fn post_install_integration(Json(req): Json<InstallPackRequest>) -> Response {
-    let slug = req.slug.trim().to_string();
-    if slug.is_empty() {
-        return err_json(StatusCode::BAD_REQUEST, "slug is required");
-    }
-    let bytes = match crate::registry::fetch_zip(&slug, req.version.as_deref()).await {
-        Ok(b) => b,
-        Err(e) => return err_json(StatusCode::BAD_GATEWAY, e),
-    };
-    let id = match crate::integrations::install_from_zip(&bytes, req.content_sha256.as_deref()) {
-        Ok(id) => id,
-        Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
-    };
-    if let Err(e) = crate::integrations::set_enabled(&id, true) {
-        return err_json(StatusCode::BAD_REQUEST, e);
-    }
-    match crate::integrations::find_installed(&id) {
-        Some(integration) => {
-            // Pin it in the lockfile so a rebuilt/cloned pod reinstalls the exact
-            // version + verified content. Best-effort: a lockfile write never fails
-            // an install.
-            if let Some(hash) = crate::integrations::installed_content_sha256(&id) {
-                let _ = crate::lockfile::record_pack(
-                    &id,
-                    &integration.manifest.version,
-                    &hash,
-                    &crate::registry::base_url(),
-                );
-            }
-            Json(integration_summary(&integration)).into_response()
-        }
-        None => err_json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "integration installed but not found",
-        ),
-    }
-}
 
 // ── Lockfile (reproducible install manifest) ────────────────────────────
 
@@ -5850,7 +5694,7 @@ async fn post_lockfile_restore() -> Response {
     let lock = crate::lockfile::load();
     let mut outcomes: Vec<RestoreOutcome> = Vec::new();
     for e in &lock.packs {
-        outcomes.push(restore_pack(e).await);
+        outcomes.push(restore_pack(e));
     }
     for e in &lock.flows {
         outcomes.push(restore_flow(e).await);
@@ -5858,7 +5702,7 @@ async fn post_lockfile_restore() -> Response {
     Json(RestoreResult { outcomes }).into_response()
 }
 
-async fn restore_pack(e: &crate::lockfile::LockEntry) -> RestoreOutcome {
+fn restore_pack(e: &crate::lockfile::LockEntry) -> RestoreOutcome {
     let done = |status: &'static str, detail: Option<String>| RestoreOutcome {
         kind: "pack",
         name: e.name.clone(),
@@ -5866,17 +5710,20 @@ async fn restore_pack(e: &crate::lockfile::LockEntry) -> RestoreOutcome {
         status,
         detail,
     };
-    let bytes = match crate::registry::fetch_zip(&e.name, Some(&e.version)).await {
-        Ok(b) => b,
-        Err(err) => return done("failed", Some(err)),
-    };
-    match crate::integrations::install_from_zip(&bytes, Some(&e.content_sha256)) {
-        Ok(id) => {
-            let _ = crate::integrations::set_enabled(&id, true);
-            done("installed", None)
-        }
-        Err(err) => done("failed", Some(err)),
-    }
+    // A pack entry can only be a leftover: nothing has recorded one since the
+    // integration registry stopped being an install path, and restoring it would
+    // mean fetching a zip and writing it somewhere no resolver reads any more.
+    //
+    // Reported rather than dropped. Somebody's lockfile still lists these, and a
+    // rebuilt pod that silently came up without them would look complete.
+    done(
+        "skipped",
+        Some(format!(
+            "'{}' is a legacy integration-registry pack; install an agent pack that vendors \
+             it instead",
+            e.name
+        )),
+    )
 }
 
 async fn restore_flow(e: &crate::lockfile::LockEntry) -> RestoreOutcome {
