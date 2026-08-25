@@ -2588,6 +2588,31 @@
         }
       }
     },
+    "/api/v1/gateway/metalcraft/unregister": {
+      "post": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Unregister: give the number back at the gateway, then disconnect locally.",
+        "description": "The exit that `disconnect` is not. Disconnecting stops this pod receiving and\nleaves the account's registration standing — number still bound and verified,\ndedicated number still out of the pool, managed integration still routing to\na consumer that left. This is the one that ends all of that, and until it\nexisted only a client holding the account PAT could do it, which excludes\nevery client that reaches the account through its pod.",
+        "operationId": "gateway_metalcraft_unregister",
+        "responses": {
+          "200": {
+            "description": "Unregistered"
+          },
+          "502": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/inference": {
       "get": {
         "tags": [
@@ -3559,6 +3584,10 @@
           },
           "default_persona": {
             "type": "string"
+          },
+          "delegates_to_any_persona": {
+            "type": "boolean",
+            "description": "**Unrestricted delegation.** Normally a preset's `sub_agent` calls are\nconfined to [`Self::callable_personas`] — the roster it declared. An\norchestrator-style preset is the exception: its whole job is to hand work to\nwhichever specialist fits, including personas that arrived later with an agent\npack it has never heard of. With this set, every persona installed on the pod\njoins its delegation roster (its own still listed first).\n\nIt is a real widening of what the agent can reach, so it stays opt-in per\npreset and is logged when an agent pack ships a preset that claims it."
           },
           "description": {
             "type": "string"
