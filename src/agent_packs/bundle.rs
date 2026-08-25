@@ -162,6 +162,17 @@ impl Bundle {
                 problems.push(e);
             }
 
+            // Not a problem — an orchestrator pack has a real reason to want it — but
+            // it is the one flag that voids the containment the rest of this function
+            // checks, so installing it must never be silent.
+            if preset.delegates_to_any_persona {
+                log::warn!(
+                    "agent pack '{}': preset '{slug}' declares delegates_to_any_persona — its                      sub-agents may run as ANY persona installed on this pod, not only the {} it                      vendors",
+                    self.manifest.id,
+                    preset.callable_personas().len()
+                );
+            }
+
             for p in preset.callable_personas() {
                 let key = format!("personas/{p}.json");
                 if !self.files.contains_key(&key) {

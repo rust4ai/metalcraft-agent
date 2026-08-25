@@ -85,6 +85,18 @@ pub struct AgentPreset {
     #[serde(default)]
     pub personas: Vec<PresetPersona>,
 
+    /// **Unrestricted delegation.** Normally a preset's `sub_agent` calls are
+    /// confined to [`Self::callable_personas`] — the roster it declared. An
+    /// orchestrator-style preset is the exception: its whole job is to hand work to
+    /// whichever specialist fits, including personas that arrived later with an agent
+    /// pack it has never heard of. With this set, every persona installed on the pod
+    /// joins its delegation roster (its own still listed first).
+    ///
+    /// It is a real widening of what the agent can reach, so it stays opt-in per
+    /// preset and is logged when an agent pack ships a preset that claims it.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub delegates_to_any_persona: bool,
+
     #[serde(default)]
     pub skills: Vec<String>,
     /// Reads `integration_packs` too — the pre-0.30 name, still present in every
@@ -276,9 +288,35 @@ impl AgentPreset {
         out
     }
 
+    /// What `sub_agent` may actually delegate to: [`Self::callable_personas`], plus —
+    /// when the preset sets [`Self::delegates_to_any_persona`] — every other persona
+    /// installed on the pod.
+    ///
+    /// The declared roster stays at the front, because this list is also the tool
+    /// schema's `enum` and the order is what the model reads first: an orchestrator
+    /// should still reach for the specialist its own author chose before it goes
+    /// shopping in the rest of the pod.
+    pub fn delegation_roster(&self, personas_dir: &Path) -> Vec<String> {
+        let mut out = self.callable_personas();
+        if self.delegates_to_any_persona {
+            for slug in crate::persona::Persona::list_available(personas_dir) {
+                if !out.contains(&slug) {
+                    out.push(slug);
+                }
+            }
+        }
+        out
+    }
+
     /// Whether `slug` may be reached from inside this preset at all.
+    ///
+    /// A preset with [`Self::delegates_to_any_persona`] allows all of them — the
+    /// containment question has one answer per preset, and a second one here would
+    /// only disagree with the roster `sub_agent` was actually built from.
     pub fn allows_persona(&self, slug: &str) -> bool {
-        slug == self.default_persona || self.personas.iter().any(|p| p.slug == slug)
+        self.delegates_to_any_persona
+            || slug == self.default_persona
+            || self.personas.iter().any(|p| p.slug == slug)
     }
 
     pub fn list_available(presets_dir: &Path) -> Vec<String> {
@@ -452,6 +490,61 @@ mod tests {
                 {"slug":"x","role":"default"},{"slug":"y","role":"default"}]}"#,
         );
         assert!(p.validate().is_err());
+    }
+
+    /// The roster is the enum `sub_agent` offers, so an unrestricted preset has to
+    /// actually *list* what arrived with later packs — otherwise the orchestrator
+    /// can only reach what its own author happened to know about.
+    #[test]
+    fn unrestricted_delegation_widens_the_roster_but_keeps_its_own_first() {
+        let dir = std::env::temp_dir().join(format!("preset-roster-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        for slug in ["x", "y", "buildr-space-agent"] {
+            std::fs::write(
+                dir.join(format!("{slug}.json")),
+                format!(r#"{{"name":"{slug}","description":"","system_prompt":"","tools":[]}}"#),
+            )
+            .expect("write persona");
+        }
+
+        let scoped = preset(
+            r#"{"slug":"a","name":"A","default_persona":"x","personas":[
+                {"slug":"x","role":"default"},{"slug":"y","role":"subagent"}]}"#,
+        );
+        assert_eq!(scoped.delegation_roster(&dir), vec!["x", "y"]);
+        assert!(!scoped.allows_persona("buildr-space-agent"));
+
+        let open = preset(
+            r#"{"slug":"a","name":"A","default_persona":"x","delegates_to_any_persona":true,
+                "personas":[{"slug":"x","role":"default"},{"slug":"y","role":"subagent"}]}"#,
+        );
+        // `list_available` is layered, so this also picks up whatever packs the pod
+        // running the test has installed — the point of the flag. Assert the shape,
+        // not an exact list that would depend on the machine.
+        let roster = open.delegation_roster(&dir);
+        assert_eq!(
+            &roster[..2],
+            ["x", "y"],
+            "declared roster first, then the rest of the pod: {roster:?}"
+        );
+        assert!(
+            roster.contains(&"buildr-space-agent".to_string()),
+            "{roster:?}"
+        );
+        assert!(open.allows_persona("buildr-space-agent"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Off unless asked for, and absent from the JSON when off — a flag this
+    /// consequential should not appear in every preset a user saves.
+    #[test]
+    fn unrestricted_delegation_is_opt_in_and_not_serialized_when_off() {
+        let p = preset(r#"{"slug":"a","name":"A","default_persona":"x"}"#);
+        assert!(!p.delegates_to_any_persona);
+        let json = serde_json::to_string(&p).expect("serialize");
+        assert!(!json.contains("delegates_to_any_persona"), "{json}");
     }
 
     #[test]

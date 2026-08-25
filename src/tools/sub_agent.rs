@@ -38,6 +38,21 @@ impl SubAgentTool {
     }
 }
 
+/// The roster, short enough to read. A preset that delegates to any installed
+/// persona can have a roster of a hundred slugs, and pasting all of them into an
+/// error the model has to parse buries the one thing it needs: which names are legal.
+fn summarize_roster(roster: &[String]) -> String {
+    const SHOWN: usize = 24;
+    if roster.len() <= SHOWN {
+        return roster.join(", ");
+    }
+    format!(
+        "{}, and {} more",
+        roster[..SHOWN].join(", "),
+        roster.len() - SHOWN
+    )
+}
+
 #[async_trait]
 impl metalcraft::Tool for SubAgentTool {
     fn name(&self) -> &str {
@@ -111,7 +126,7 @@ impl metalcraft::Tool for SubAgentTool {
                     tool: "sub_agent".into(),
                     message: format!(
                         "persona '{slug}' is not in this agent's roster ({}). Delegate to one of those, or handle the task directly.",
-                        roster.join(", ")
+                        summarize_roster(roster)
                     ),
                 });
             }

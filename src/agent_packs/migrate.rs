@@ -295,6 +295,10 @@ fn wrap(id: &str, agent_pack_id: &str, dry_run: bool) -> Result<MigratedPack, St
             "Migrated from the '{id}' integration, which used to be installed on its own."
         ),
         avatar: None,
+        // A wrapper around one legacy integration delegates to its own personas and
+        // nothing else — unrestricted delegation is a choice an author makes, not a
+        // property migration should invent.
+        delegates_to_any_persona: false,
         default_persona: default_persona.clone(),
         personas: personas
             .iter()

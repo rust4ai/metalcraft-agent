@@ -339,7 +339,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         runtime::RuntimeOptions {
             prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
             // sub_agent may only delegate inside the active preset's roster.
-            preset_personas: active_preset.as_ref().map(|p| p.callable_personas()),
+            preset_personas: active_preset
+                .as_ref()
+                .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
             instance_id: None,
             ..Default::default()
         },
@@ -366,7 +368,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // The CLI runs against the pod-global memory, not an agent instance;
                 // sub_agent still obeys the active preset's roster.
                 instance_id: None,
-                preset_personas: active_preset.as_ref().map(|p| p.callable_personas()),
+                preset_personas: active_preset
+                .as_ref()
+                .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
             },
         )
         .await?
@@ -475,7 +479,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         None, // CLI runs don't emit OTLP traces
                         runtime::RuntimeOptions {
                             prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
-                            preset_personas: active_preset.as_ref().map(|p| p.callable_personas()),
+                            preset_personas: active_preset
+                .as_ref()
+                .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
                             instance_id: None,
                             ..Default::default()
                         },
@@ -514,6 +520,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ""
                         };
                         println!("  {}{}", ui::accent(&slug), marker);
+                    }
+                    if p.delegates_to_any_persona {
+                        println!(
+                            "  {}",
+                            ui::warning("+ any other persona installed on this pod")
+                        );
                     }
                 }
                 None => println!("{}", ui::warning("No agent preset active.")),
@@ -576,7 +588,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         None, // CLI runs don't emit OTLP traces
                         runtime::RuntimeOptions {
                             prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
-                            preset_personas: active_preset.as_ref().map(|p| p.callable_personas()),
+                            preset_personas: active_preset
+                .as_ref()
+                .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
                             instance_id: None,
                             ..Default::default()
                         },
@@ -670,7 +684,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None, // CLI runs don't emit OTLP traces
                 runtime::RuntimeOptions {
                     prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
-                    preset_personas: active_preset.as_ref().map(|p| p.callable_personas()),
+                    preset_personas: active_preset
+                .as_ref()
+                .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
                     instance_id: None,
                     ..Default::default()
                 },

@@ -5,6 +5,7 @@
   "tagline": "The default. Orchestrates, delegates, and knows its way around a codebase.",
   "description": "The out-of-the-box agent: an orchestrator that breaks work into sub-tasks and hands each to the specialist persona built for it.",
   "default_persona": "orchestrator-agent",
+  "delegates_to_any_persona": true,
   "personas": [
     {
       "slug": "orchestrator-agent",
@@ -36,5 +37,5 @@
       "description": "Authors personas, skills and flows"
     }
   ],
-  "version": "1.1.0"
+  "version": "1.2.0"
 }

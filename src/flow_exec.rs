@@ -152,7 +152,7 @@ fn roster_for(flow_id: &str) -> Option<Vec<String>> {
     let slug = crate::flow_bindings::get(flow_id).preset?;
     crate::agent_preset::AgentPreset::load(&slug, &crate::paths::agent_presets_dir())
         .ok()
-        .map(|p| p.callable_personas())
+        .map(|p| p.delegation_roster(&crate::paths::personas_dir()))
 }
 
 impl<'a> FlowExecutor<'a> {

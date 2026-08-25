@@ -2729,7 +2729,10 @@ fn arm_consent(preset: Option<&crate::agent_preset::AgentPreset>) -> ArmConsent 
     // reported "0 tools" for an agent that can execute shell commands: a consent
     // summary that is not merely thin but wrong.
     let mut tools: std::collections::BTreeSet<String> = consent.tools.iter().cloned().collect();
-    for slug in preset.callable_personas() {
+    // The delegation roster, not just the declared one: a preset that delegates to
+    // any installed persona can reach their tools too, and a consent summary that
+    // omitted them would understate exactly the thing it exists to disclose.
+    for slug in preset.delegation_roster(&paths::personas_dir()) {
         if let Ok(persona) = Persona::load(&slug, &paths::personas_dir()) {
             tools.extend(persona.resolved_tool_names());
         }
