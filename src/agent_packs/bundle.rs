@@ -124,8 +124,8 @@ impl Bundle {
         Ok(bundle)
     }
 
-    /// Everything the archive claims must actually be in it, and nothing may reach
-    /// outside what its preset declared.
+    /// Everything the archive claims must actually be in it, and everything its agent
+    /// can reach must be vendored inside it.
     pub fn validate(&self) -> Result<(), String> {
         let mut problems: Vec<String> = Vec::new();
 
@@ -181,19 +181,16 @@ impl Bundle {
                     ));
                     continue;
                 }
-                // Containment: a persona may only reach packs its preset declared.
-                // Cheap to check, and it is what makes the consent summary complete.
-                if let Ok(persona) =
-                    serde_json::from_slice::<crate::persona::Persona>(&self.files[&key])
-                {
-                    for pack in &persona.integrations {
-                        if !preset.integrations.contains(pack) {
-                            problems.push(format!(
-                                "persona '{p}' uses integration '{pack}', which preset '{slug}' does not declare"
-                            ));
-                        }
-                    }
-                }
+                // A persona may reach an integration its preset never declared. It
+                // carries `packs` because a persona *is* the thing built around a set
+                // of tools — an orchestrator delegating to buildr-space-agent wants
+                // that agent to have all of buildr.space, and requiring the
+                // orchestrator's own preset to re-declare it made the preset a second
+                // place to forget.
+                //
+                // What replaces the check is below: whatever the personas reach, the
+                // archive must vendor. Self-containedness is the property that was
+                // actually worth enforcing; containment was standing in for it.
             }
 
             // Every skill the preset declares, *and* every skill its personas
@@ -218,10 +215,26 @@ impl Bundle {
                     ));
                 }
             }
-            for pack in &preset.integrations {
+            // Every integration the agent can reach — the preset's own list plus what
+            // each callable persona declares — has to be in the archive. A pack that
+            // installs a persona whose tools are somewhere else is a pack that installs
+            // a persona that does not work.
+            let mut reachable: Vec<String> = preset.integrations.clone();
+            for p in preset.callable_personas() {
+                if let Some(raw) = self.files.get(&format!("personas/{p}.json"))
+                    && let Ok(persona) = serde_json::from_slice::<crate::persona::Persona>(raw)
+                {
+                    for pack in persona.integrations {
+                        if !reachable.contains(&pack) {
+                            reachable.push(pack);
+                        }
+                    }
+                }
+            }
+            for pack in &reachable {
                 if !pack_ids.contains(pack) {
                     problems.push(format!(
-                        "preset '{slug}' requires integration '{pack}', which the archive does not vendor"
+                        "preset '{slug}' reaches integration '{pack}', which the archive does not vendor"
                     ));
                 }
             }

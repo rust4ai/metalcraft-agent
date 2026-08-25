@@ -415,7 +415,7 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
 pub fn consent_for_preset(preset: &crate::agent_preset::AgentPreset) -> ConsentSummary {
     let mut packs: HashMap<String, (Vec<u8>, Vec<(String, Vec<u8>)>)> = HashMap::new();
 
-    for id in &preset.integrations {
+    for id in &preset.reachable_integrations(&paths::personas_dir()) {
         let Some(dir) = store::resolve(id) else {
             continue;
         };
@@ -895,10 +895,12 @@ pub fn export(preset_slug: &str, version: &str) -> Result<Vec<u8>, String> {
         }
     }
 
-    // 5. every integration it declares — vendored, which is what makes the
-    //    result installable with no network.
+    // 5. every integration the agent can reach — the preset's own plus whatever its
+    //    personas declare — vendored, which is what makes the result installable with
+    //    no network. Exporting only the preset's list would drop the tools a persona
+    //    brought with it, and the pack would install one persona short of working.
     let mut pack_refs = Vec::new();
-    for id in &preset.integrations {
+    for id in &preset.reachable_integrations(&paths::personas_dir()) {
         let Some(dir) = find_pack_dir(id) else {
             missing.push(format!("integration '{id}' is not installed"));
             continue;

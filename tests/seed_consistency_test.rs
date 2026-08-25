@@ -141,19 +141,20 @@ fn every_seeded_preset_is_installable() {
             problems.push(format!("{slug}: declares slug '{}'", preset.slug));
         }
 
-        let declared = &preset.integrations;
-
         for p in preset.callable_personas() {
             let Some((persona_packs, persona_skills)) = personas.get(&p) else {
                 problems.push(format!("{slug}: names persona '{p}', which nothing ships"));
                 continue;
             };
 
-            // The containment rule the installer enforces — the one that shipped broken.
+            // A persona need not be confined to its preset's list — it carries its own
+            // `packs`, and the preset does not have to re-declare them. What the
+            // installer enforces, and what must hold here, is that something ships the
+            // integration at all.
             for pack in persona_packs {
-                if !declared.contains(pack) {
+                if !packs.contains(pack) {
                     problems.push(format!(
-                        "{slug}: persona '{p}' uses integration '{pack}', which the preset does not declare"
+                        "{slug}: persona '{p}' uses integration '{pack}', which nothing ships"
                     ));
                 }
             }
@@ -175,7 +176,7 @@ fn every_seeded_preset_is_installable() {
                 problems.push(format!("{slug}: names skill '{s}', which nothing ships"));
             }
         }
-        for pack in declared {
+        for pack in &preset.integrations {
             if !packs.contains(pack) {
                 problems.push(format!(
                     "{slug}: declares integration '{pack}', which no seeded agent pack vendors"

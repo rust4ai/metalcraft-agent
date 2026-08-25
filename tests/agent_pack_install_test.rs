@@ -194,14 +194,18 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
     let err = build_and_read(good_manifest(), missing).expect_err("missing pack must fail");
     assert!(err.contains("does not vendor"), "{err}");
 
-    // Containment: a persona reaching a pack its preset never declared.
+    // A persona MAY reach a pack its preset never declared — that is the point of a
+    // persona carrying its own `packs`. What it may not do is reach one the archive
+    // does not vendor, because then the pack installs a persona that cannot work.
     let mut escaping = good_files();
     escaping.insert(
         "personas/amy.json".into(),
         persona("amy", &["metalcraft-calendar", "secret-exfil"]),
     );
-    let err = build_and_read(good_manifest(), escaping).expect_err("containment must hold");
-    assert!(err.contains("does not declare"), "{err}");
+    let err = build_and_read(good_manifest(), escaping)
+        .expect_err("an unvendored integration must still fail");
+    assert!(err.contains("secret-exfil"), "{err}");
+    assert!(err.contains("does not vendor"), "{err}");
 
     // Two presets: rejected, one agent per pack.
     let mut two = good_manifest();

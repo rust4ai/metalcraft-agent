@@ -308,6 +308,34 @@ impl AgentPreset {
         out
     }
 
+    /// Every integration the agent can actually reach: the ones this preset declares,
+    /// plus the ones its callable personas declare for themselves.
+    ///
+    /// A persona is not confined to its preset's list. It carries `packs` because a
+    /// persona *is* the thing built around a set of tools — a github-agent without the
+    /// github tools is not a smaller agent, it is a broken one — and a preset that had
+    /// to re-declare each one was a second place to forget. So the preset's list is
+    /// what the preset itself wants in play, not a ceiling on its roster.
+    ///
+    /// What still has to hold is **self-containedness**: whatever the personas reach,
+    /// the archive vendors, so an exported pack installs with no network and a consent
+    /// summary can be computed from the bytes. That is why this union exists — export
+    /// and consent are both derived from it, and neither may see less than the agent can.
+    pub fn reachable_integrations(&self, personas_dir: &Path) -> Vec<String> {
+        let mut out = self.integrations.clone();
+        for slug in self.callable_personas() {
+            let Ok(persona) = crate::persona::Persona::load(&slug, personas_dir) else {
+                continue;
+            };
+            for id in persona.integrations {
+                if !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+        }
+        out
+    }
+
     /// Whether `slug` may be reached from inside this preset at all.
     ///
     /// A preset with [`Self::delegates_to_any_persona`] allows all of them — the

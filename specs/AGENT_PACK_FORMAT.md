@@ -385,15 +385,24 @@ experience this rule exists to prevent.
 | V10 | Preset passes §4.2 | reject |
 | V10a | Preset `manifest_version` ≤ 2, or absent (§3.4) | reject if higher |
 | V11 | Every persona in the callable roster exists at `personas/<slug>.json` | reject, naming it |
-| V12 | Every persona's `integrations[]` ⊆ the preset's `integrations` | reject, naming both |
+| V12 | *(withdrawn)* A persona may reach an integration its preset does not declare | — |
 | V13 | Every skill the preset declares **and every skill its roster personas load** exists at `skills/<slug>.md` | reject, naming it |
-| V14 | Every integration the preset declares is vendored in the archive | reject, naming it |
+| V14 | Every integration the agent **reaches** — the preset's `integrations` ∪ every callable persona's — is vendored in the archive | reject, naming it |
 | V15 | Every `provides.integrations[].content_sha256`, where present, matches the vendored bytes | reject, showing both hashes |
 | V16 | Every shipped flow names only roster personas (§8) | reject, naming both |
 | V17 | ≤ 5,000 seed memories per preset (§6) | registry: reject · pod: warn |
 
-V12 is the containment rule. It is cheap, it is what makes the consent summary complete,
-and it is why a pack cannot reach anywhere it did not disclose.
+V12 was the containment rule: a persona could only reach what its preset re-declared.
+It was withdrawn. A persona carries `packs` because a persona *is* the thing built
+around a set of tools — an orchestrator delegating to `buildr-space-agent` wants that
+agent to have all of buildr.space, and requiring the orchestrator's own preset to list
+it made the preset a second place to forget.
+
+**V14 is what V12 was standing in for.** Self-containedness, not containment, is the
+property worth enforcing: whatever the personas reach, the archive vendors. That is what
+keeps the consent summary complete — it is derived from the vendored bytes, so a pack
+still cannot reach anywhere it did not disclose — and what makes an exported pack
+installable with no network.
 
 V15 is the check whose absence on one side is exactly the divergence this document
 exists to prevent: a registry that skips it serves packs every pod refuses, and the
@@ -408,7 +417,6 @@ author finds out from a download.
 | V5 | `bundle::tests::ids_are_constrained` | `bundle::tests::ids_are_constrained` |
 | V7 | `agent_pack_install_test` (“tampering”) | `bundle::tests::a_tampered_archive_is_refused` |
 | V8 | `agent_pack_install_test` (“two presets”) | `bundle::tests::a_pack_with_two_presets_is_refused` |
-| V12 | `agent_pack_install_test` (“containment”) | `bundle::tests::a_persona_reaching_outside_its_presets_packs_is_rejected` |
 | V15 | `agent_pack_install_test::…a_vendored_pack_that_does_not_match_its_pin` | `bundle::tests::a_vendored_pack_that_does_not_match_its_pin_is_refused` |
 | V16 | `agent_pack_install_test` (flow containment) | `bundle::tests::a_flow_naming_a_persona_outside_the_roster_is_refused` |
 | V17 | *(warn — `Bundle::validate`)* | `bundle::tests::too_many_seed_memories_are_refused` |
