@@ -127,7 +127,10 @@ pub async fn status() -> OctaweaveConnection {
 
     let code = resp.status();
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
-    conn.detail = body.get("error").and_then(|v| v.as_str()).map(str::to_string);
+    conn.detail = body
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     conn.account = ["email", "name", "handle"]
         .iter()
         .find_map(|k| body.get(*k).and_then(|v| v.as_str()))

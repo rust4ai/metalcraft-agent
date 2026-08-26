@@ -22,13 +22,12 @@ fn recommends_env_from_installed_packs_with_attribution() {
         ("packa", "Pack A", r#"["SHARED_KEY","A_ONLY_KEY"]"#),
         ("packb", "Pack B", r#"["SHARED_KEY"]"#),
     ] {
-        let manifest: metalcraft_agent::agent_packs::AgentPackManifest = serde_json::from_str(
-            &format!(
+        let manifest: metalcraft_agent::agent_packs::AgentPackManifest =
+            serde_json::from_str(&format!(
                 r#"{{"manifest_version":2,"id":"{id}","name":"{name}","description":"x",
                      "version":"1.0.0","presets":["{id}"]}}"#
-            ),
-        )
-        .unwrap();
+            ))
+            .unwrap();
         let mut files = std::collections::BTreeMap::new();
         files.insert(
             format!("agent_presets/{id}.json"),

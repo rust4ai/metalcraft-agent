@@ -141,6 +141,22 @@ pub async fn compact_if_needed<M: CompletionModel + 'static>(
     compact_with(state, model, config, CompactionTrigger::Threshold).await
 }
 
+/// Whether [`compact_if_needed`] would actually pay for a summarization call.
+///
+/// Exists so a caller can *announce* compaction before it starts: a progress
+/// frame that says "compacting" on every turn, because the caller could not tell
+/// in advance, teaches people to ignore it. Runs the same predicate the real
+/// path runs — an estimate and a split, no model — rather than a second copy of
+/// the rule that could drift away from it.
+pub fn needs_compaction(state: &AgentState, config: &CompactionConfig) -> bool {
+    should_summarize(
+        estimate_tokens(state),
+        safe_split(&state.messages, config.keep_recent_messages),
+        config,
+        CompactionTrigger::Threshold,
+    )
+}
+
 /// Compact now, whatever the context size — the primitive behind `/compact`.
 ///
 /// Still returns `None` when there is genuinely nothing to do: a conversation with
@@ -274,6 +290,31 @@ mod tests {
     }
 
     #[test]
+    fn the_announcement_predicate_agrees_with_the_work_it_announces() {
+        // `needs_compaction` exists only so a client can be told "compacting"
+        // before the call starts. If it ever said yes where the real path says
+        // no, the session view would announce work that never happens.
+        let config = CompactionConfig::default();
+
+        let mut small = AgentState::new("hi".to_string());
+        assert!(
+            !needs_compaction(&small, &config),
+            "a two-message conversation has no old half and nothing to summarize"
+        );
+
+        // Long enough to cross the threshold, with plenty older than the
+        // keep-recent window.
+        let filler = "x".repeat(config.threshold_tokens() * 8);
+        for _ in 0..(config.keep_recent_messages + 4) {
+            small.messages.push(AgentMessage::Assistant(filler.clone()));
+        }
+        assert!(
+            needs_compaction(&small, &config),
+            "a conversation past the threshold is one the caller may announce"
+        );
+    }
+
+    #[test]
     fn forcing_a_compaction_skips_the_size_check_and_nothing_else() {
         let config = CompactionConfig::default();
         let under = config.threshold_tokens() - 1;
@@ -282,17 +323,47 @@ mod tests {
         // The reason `/compact` exists: automatic compaction only fires at 60% of
         // the window, which is long after the point where someone can feel a
         // conversation getting heavy and wants room before the next question.
-        assert!(!should_summarize(under, 20, &config, CompactionTrigger::Threshold));
-        assert!(should_summarize(under, 20, &config, CompactionTrigger::Forced));
+        assert!(!should_summarize(
+            under,
+            20,
+            &config,
+            CompactionTrigger::Threshold
+        ));
+        assert!(should_summarize(
+            under,
+            20,
+            &config,
+            CompactionTrigger::Forced
+        ));
 
         // Both still compact once the context is genuinely large.
-        assert!(should_summarize(over, 20, &config, CompactionTrigger::Threshold));
-        assert!(should_summarize(over, 20, &config, CompactionTrigger::Forced));
+        assert!(should_summarize(
+            over,
+            20,
+            &config,
+            CompactionTrigger::Threshold
+        ));
+        assert!(should_summarize(
+            over,
+            20,
+            &config,
+            CompactionTrigger::Forced
+        ));
 
         // Neither pays for a summary of nothing: with no messages older than
         // `keep_recent_messages` there is no old half to fold up.
-        assert!(!should_summarize(over, 0, &config, CompactionTrigger::Forced));
-        assert!(!should_summarize(under, 0, &config, CompactionTrigger::Forced));
+        assert!(!should_summarize(
+            over,
+            0,
+            &config,
+            CompactionTrigger::Forced
+        ));
+        assert!(!should_summarize(
+            under,
+            0,
+            &config,
+            CompactionTrigger::Forced
+        ));
     }
 
     #[test]

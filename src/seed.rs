@@ -169,6 +169,29 @@ fn retire_obsolete_seeds() {
         paths::flow_templates_dir().join("morning-brief.json"),
         "'morning-brief' flow template",
     );
+    // `metalcraft-code` — the first *agent pack* to be retired rather than a loose
+    // file, so it cannot go by `remove_dir_all`. An installed pack owns an entry in
+    // `agent_packs.json`, refs into the content-addressed integration store, and a
+    // line in the lockfile; unlinking its directory would leave all three pointing at
+    // nothing. `agent_packs::uninstall` unwinds them in order.
+    retire_agent_pack("metalcraft-code");
+}
+
+/// Uninstall a retired agent pack, if this pod still has it.
+///
+/// Unforced, deliberately. A pack ships a preset, and an agent built on a preset is
+/// not regenerated content the way `<data>/integrations/` was — it has memories and
+/// conversations. If one still exists the uninstall refuses and names it, and the pod
+/// boots with the pack intact so the operator decides its fate. Every pod without such
+/// an agent — which is most of them — cleans itself on the next start.
+fn retire_agent_pack(id: &str) {
+    if crate::agent_packs::find(id).is_none() {
+        return;
+    }
+    match crate::agent_packs::uninstall(id, false) {
+        Ok(_) => log::info!("Retired obsolete '{id}' agent pack"),
+        Err(e) => eprintln!("Warning: could not remove retired '{id}' agent pack: {e}"),
+    }
 }
 
 fn retire_file(path: PathBuf, label: &str) {
@@ -492,12 +515,7 @@ mod tests {
             .dirs()
             .filter_map(|d| d.path().file_name().and_then(|s| s.to_str()))
             .collect();
-        for expected in [
-            "email",
-            "metalcraft-email",
-            "metalcraft-code",
-            "metalcraft-packs",
-        ] {
+        for expected in ["email", "metalcraft-email", "metalcraft-packs"] {
             assert!(
                 ids.contains(&expected),
                 "pack '{expected}' should be embedded, got {ids:?}"
@@ -523,7 +541,10 @@ mod tests {
                 format!("agent_presets/{id}.json"),
                 format!("integrations/{id}/integration.json"),
             ] {
-                assert!(names.contains(&required), "{id} is missing {required}: {names:?}");
+                assert!(
+                    names.contains(&required),
+                    "{id} is missing {required}: {names:?}"
+                );
             }
             assert!(
                 names.iter().any(|n| n.starts_with("personas/")),
@@ -554,7 +575,10 @@ mod tests {
                 continue;
             }
             let manifest_json = item
-                .get_file(item.path().join(format!("integrations/{id}/integration.json")))
+                .get_file(
+                    item.path()
+                        .join(format!("integrations/{id}/integration.json")),
+                )
                 .and_then(|f| f.contents_utf8())
                 .unwrap_or_else(|| panic!("{id} missing integration.json"));
             let manifest: IntegrationManifest = serde_json::from_str(manifest_json)
@@ -566,7 +590,7 @@ mod tests {
             checked += 1;
         }
         assert!(
-            checked >= 3,
+            checked >= 2,
             "expected the metalcraft-* packs, checked {checked}"
         );
     }

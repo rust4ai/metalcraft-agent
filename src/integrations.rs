@@ -372,10 +372,17 @@ pub fn agent_pack_layers(pack_subdir: &str) -> Vec<(PathBuf, IntegrationOrigin)>
     for p in crate::agent_packs::list() {
         let origin = IntegrationOrigin::Pack { id: p.id.clone() };
         if pack_subdir == "api_tools" {
-            for (_, sha) in crate::agent_packs::store::read_refs(&p.id) {
+            // Tagged with the *integration's* id, not the agent pack's. They are
+            // rarely the same string, and the difference is load-bearing:
+            // `installed_tool_names_for_integration` selects layers by this id, and
+            // a persona declares `packs: ["acme-crm"]` — the integration — never the
+            // agent pack that vendored it. Tagging these layers with the pack id
+            // meant that lookup matched nothing, so an agent-pack persona resolved
+            // to zero tools unless the two ids happened to coincide.
+            for (integration_id, sha) in crate::agent_packs::store::read_refs(&p.id) {
                 out.push((
                     crate::agent_packs::store::entry_dir(&sha).join("api_tools"),
-                    origin.clone(),
+                    IntegrationOrigin::Pack { id: integration_id },
                 ));
             }
         } else {

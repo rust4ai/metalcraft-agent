@@ -118,7 +118,24 @@ pub fn list_diagnostics_sessions() -> Vec<DiagnosticsSessionSummary> {
 
 /// Reconstruct one session by id. Returns `None` when no such session dir
 /// exists.
+/// A session id names one directory under `sessions/`, and nothing else.
+///
+/// Ids are timestamps this crate wrote itself, so anything with a separator or a
+/// `..` in it did not come from here. Checked rather than assumed because these
+/// ids arrive from a URL path: `join` on an attacker-chosen id is how a reader
+/// of one directory becomes a reader of the disk.
+fn is_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains("..")
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains('\0')
+}
+
 pub fn read_diagnostics_session(id: &str) -> Option<DiagnosticsSession> {
+    if !is_session_id(id) {
+        return None;
+    }
     let session_dir = paths::sessions_dir().join(id);
     if !session_dir.is_dir() {
         return None;
@@ -169,4 +186,45 @@ pub fn read_diagnostics_session(id: &str) -> Option<DiagnosticsSession> {
         session_info,
         timeline,
     })
+}
+
+/// The OTLP trace for a session, verbatim.
+///
+/// Its sibling [`read_diagnostics_session`] answers *what* the agent did — the
+/// messages, the prompts, the tool results. This answers **when, and for how
+/// long**: `traces/<id>/otlp-trace.json` carries a span per turn, per LLM call
+/// and per tool, with real timings and token usage. That is the difference
+/// between "the turn took six minutes" and knowing which call spent them.
+///
+/// Returned as an opaque `Value` on purpose. The document follows the
+/// OpenTelemetry GenAI conventions, which are a published spec this crate does
+/// not own; re-typing it here would only add a copy to keep in sync, and every
+/// consumer of a trace already knows how to read one.
+///
+/// `None` when the session has no trace — a run from before tracing existed, or
+/// one whose trace directory could not be created. Not an error: the session's
+/// own diagnostics are still there to read.
+pub fn read_diagnostics_trace(id: &str) -> Option<serde_json::Value> {
+    if !is_session_id(id) {
+        return None;
+    }
+    let path = paths::traces_dir().join(id).join("otlp-trace.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_session_id;
+
+    #[test]
+    fn a_session_id_is_one_directory_name_and_never_a_path() {
+        assert!(is_session_id("2026-07-31T20-56-25"));
+        for hostile in ["..", "../..", "a/b", "..\\..", "", "a\0b"] {
+            assert!(
+                !is_session_id(hostile),
+                "{hostile:?} must not name a session"
+            );
+        }
+    }
 }

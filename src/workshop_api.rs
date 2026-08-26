@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     Json, Router,
@@ -130,7 +131,8 @@ type FlowThreads = Arc<Mutex<HashMap<String, (String, chrono::DateTime<chrono::U
 
 fn flow_threads() -> FlowThreads {
     static T: std::sync::OnceLock<FlowThreads> = std::sync::OnceLock::new();
-    T.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone()
+    T.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
 }
 
 /// How long after its last turn a firing still joins the previous conversation.
@@ -188,16 +190,14 @@ pub async fn flow_conversation(
         diagnostics: None,
         trace: None,
         busy: false,
+        interrupt: Arc::new(AtomicBool::new(false)),
         pending: std::collections::VecDeque::new(),
     };
     store
         .lock()
         .await
         .insert(id.clone(), Arc::new(Mutex::new(session)));
-    open.insert(
-        instance_id.to_string(),
-        (id.clone(), chrono::Utc::now()),
-    );
+    open.insert(instance_id.to_string(), (id.clone(), chrono::Utc::now()));
     Some(id)
 }
 
@@ -238,7 +238,9 @@ pub async fn record_flow_turn(chat_id: &str, prompt: &str, answer: &str) {
             Some(prev) => prev.continue_with(prompt.to_string()),
             None => AgentState::new(prompt.to_string()),
         };
-        state.messages.push(AgentMessage::Assistant(answer.to_string()));
+        state
+            .messages
+            .push(AgentMessage::Assistant(answer.to_string()));
         // The node has already finished by the time it is recorded, so the turn
         // is complete the moment it lands.
         state.is_done = true;
@@ -281,6 +283,12 @@ struct ChatSession {
     /// True while a turn is mid-flight. Prevents two concurrent turns from
     /// stomping on the same state.
     busy: bool,
+    /// Set by `POST /chats/{id}/interrupt` to ask the running turn to stop.
+    /// An `Arc<AtomicBool>` rather than a plain flag because the only place that
+    /// can act on it is the executor's step guard, which is a sync closure and
+    /// cannot take this session's async lock. Cleared when a turn starts, so a
+    /// stop pressed after the turn already ended can never kill the next one.
+    interrupt: Arc<AtomicBool>,
     /// Inbound gateway messages that arrived while a turn was already running,
     /// drained FIFO when the in-flight turn finishes. Empty for workshop chats.
     pending: std::collections::VecDeque<String>,
@@ -489,12 +497,12 @@ async fn auth_middleware(
         post_check_flow_dependencies,
         list_flow_runs, get_flow_run, post_resume_flow_run,
         list_flow_templates, get_flow_template,
-        list_diagnostics, get_diagnostics_session,
+        list_diagnostics, get_diagnostics_session, get_diagnostics_trace,
         list_api_tools, get_api_tool, put_api_tool, delete_api_tool,
         list_keys, list_recommended_keys, put_key, delete_key, reveal_key,
         get_inference_status,
         list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
-        get_chat_context, post_chat_compact, post_chat_clear,
+        get_chat_context, post_chat_compact, post_chat_clear, post_chat_interrupt,
         list_scheduled_tasks, delete_scheduled_task,
         list_integrations, get_integration, put_integration_enabled,
         get_lockfile, post_lockfile_restore,
@@ -507,7 +515,7 @@ async fn auth_middleware(
     components(schemas(
         ErrorResponse, ProjectSnapshot, ProjectLayout, ApiToolSummary,
         KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
-        InferenceStatus, ChatContext, ChatCompacted,
+        InferenceStatus, ChatContext, ChatCompacted, ChatInterrupt,
         FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, RunFlowOutput, ResumeFlowRunRequest,
         InstallFlowRequest, InstallDependenciesResponse, SchedulePreview,
         FlowList, FlowListItem, FlowListSchedule,
@@ -746,6 +754,7 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/flow-templates/{slug}", get(get_flow_template))
         .route("/api/v1/diagnostics", get(list_diagnostics))
         .route("/api/v1/diagnostics/{id}", get(get_diagnostics_session))
+        .route("/api/v1/diagnostics/{id}/trace", get(get_diagnostics_trace))
         .route("/api/v1/api-tools", get(list_api_tools))
         .route("/api/v1/api-tools/{name}", get(get_api_tool))
         .route("/api/v1/api-tools/{name}", put(put_api_tool))
@@ -762,6 +771,7 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/chats/{id}/context", get(get_chat_context))
         .route("/api/v1/chats/{id}/compact", post(post_chat_compact))
         .route("/api/v1/chats/{id}/clear", post(post_chat_clear))
+        .route("/api/v1/chats/{id}/interrupt", post(post_chat_interrupt))
         .route("/api/v1/chats/{id}/events", get(get_chat_events))
         .route("/api/v1/scheduled-tasks", get(list_scheduled_tasks))
         .route(
@@ -3110,6 +3120,36 @@ async fn get_diagnostics_session(Path(id): Path<String>) -> Response {
     }
 }
 
+/// The OTLP trace for one session — where a turn's time actually went.
+///
+/// Deliberately separate from `GET /diagnostics/{id}`: that response already
+/// carries every message of every turn, and a trace is read for timings, often
+/// while the session's transcript is already on screen. Bundling them would make
+/// the common read pay for the large one.
+///
+/// `404` covers both "no such session" and "that session has no trace" — a run
+/// from before tracing existed reads the same way to a client, which has nothing
+/// to show either way.
+#[utoipa::path(
+    get,
+    path = "/api/v1/diagnostics/{id}/trace",
+    tag = "diagnostics",
+    params(("id" = String, Path, description = "Session id")),
+    responses(
+        (status = 200, description = "OTLP/JSON trace document (OpenTelemetry GenAI conventions)"),
+        (status = 404, body = ErrorResponse),
+    ),
+)]
+async fn get_diagnostics_trace(Path(id): Path<String>) -> Response {
+    match crate::diagnostics_browse::read_diagnostics_trace(&id) {
+        Some(trace) => Json(trace).into_response(),
+        None => err_json(
+            StatusCode::NOT_FOUND,
+            format!("no trace for diagnostics session '{id}'"),
+        ),
+    }
+}
+
 // ── API Tool handlers ───────────────────────────────────────────────────
 
 fn list_api_tool_summaries() -> Vec<ApiToolSummary> {
@@ -4141,6 +4181,7 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
             trace: None, // recreated lazily on the first turn, like diagnostics
             busy: false, // anything that was busy at shutdown couldn't have
             // finished cleanly; reset so the user can retry.
+            interrupt: Arc::new(AtomicBool::new(false)),
             pending: std::collections::VecDeque::new(),
         };
         out.insert(pc.id.clone(), Arc::new(Mutex::new(session)));
@@ -4332,6 +4373,7 @@ async fn post_create_chat(
         diagnostics,
         trace,
         busy: false,
+        interrupt: Arc::new(AtomicBool::new(false)),
         pending: std::collections::VecDeque::new(),
     };
     let session_arc = Arc::new(Mutex::new(session));
@@ -4462,8 +4504,7 @@ struct ChatCompacted {
 fn chat_context_of(state: Option<&AgentState>) -> ChatContext {
     let config = crate::context::CompactionConfig::default();
     let estimated_tokens = state.map(crate::context::estimate_tokens).unwrap_or(0);
-    let threshold =
-        (config.context_window as f64 * config.compact_threshold) as usize;
+    let threshold = (config.context_window as f64 * config.compact_threshold) as usize;
     ChatContext {
         estimated_tokens,
         message_count: state.map(|s| s.messages.len()).unwrap_or(0),
@@ -4668,10 +4709,11 @@ struct ChatTurnRequest {
 
 /// SSE event wire format. One JSON object per event. The `kind` field
 /// discriminates; payloads vary by kind. Events form a lifecycle:
-///   `turn_started` → (`llm_started` → `llm_completed`
+///   `turn_started` → `phase`* → (`llm_started` → `llm_completed`
 ///                   → `tool_started`* → `tool_completed`*)+
 ///                   → `done`
-/// (`tool_started` and `tool_completed` can repeat per LLM step.)
+/// (`tool_started` and `tool_completed` can repeat per LLM step; `phase` frames
+/// cover the pre-model work that would otherwise be silent.)
 #[derive(Serialize, Clone, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ChatEvent {
@@ -4715,6 +4757,16 @@ enum ChatEvent {
     /// underlying `say_to_user` tool start/finish events are suppressed so the
     /// reply isn't also shown as a raw tool card.
     Reply { content: String },
+    /// What the turn is doing *before* the model is called — work that emits no
+    /// other frame and that a client would otherwise render as an
+    /// undifferentiated wait.
+    ///
+    /// Compaction is a whole extra summarization LLM call and recall is an
+    /// embeddings call; both run ahead of the executor, so nothing between
+    /// `turn_started` and the first `llm_started` used to say a word. `phase` is
+    /// an open string (`crate::runtime::phase`) precisely so a client older than
+    /// a phase can drop the frame instead of breaking on it.
+    Phase { phase: String },
     /// Terminal event. `status` is "completed" | "interrupted" | "failed".
     Done {
         status: String,
@@ -4732,6 +4784,68 @@ enum ChatEvent {
         message: String,
         retryable: bool,
     },
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct ChatInterrupt {
+    /// True when a turn was running and has been asked to stop. False when the
+    /// chat was already idle — the turn finished on its own between the press
+    /// and this request, which is not a failure and must not be shown as one.
+    stopping: bool,
+}
+
+/// Continue the run, unless someone has pressed stop.
+///
+/// Called at both of the step guard's exits rather than at its entry, so the
+/// frames for the step that just ran reach the transcript before the turn ends.
+/// The stop therefore lands at the next step boundary — a tool call in flight
+/// finishes, an LLM call in flight is still paid for — which is the strongest
+/// promise a step guard can keep.
+fn continue_unless_stopped(interrupt: &AtomicBool) -> GuardAction {
+    if interrupt.load(Ordering::Relaxed) {
+        GuardAction::Stop("Stopped by the user.".into())
+    } else {
+        GuardAction::Continue
+    }
+}
+
+/// Ask a running turn to stop — the client's stop button.
+///
+/// Returns as soon as the request is recorded, not when the turn ends: the
+/// executor notices at its next step boundary and finishes the turn itself,
+/// emitting `done{status:"interrupted"}` on the chat's event stream. That frame,
+/// not this response, is what says the agent has actually stopped.
+///
+/// Interrupting is resumable by construction — the guard stops the executor
+/// between steps, so the partial state is written back like any other turn and
+/// the next message continues from it. Nothing is discarded.
+#[utoipa::path(
+    post,
+    path = "/api/v1/chats/{id}/interrupt",
+    tag = "chats",
+    params(("id" = String, Path, description = "Chat id")),
+    responses(
+        (status = 200, body = ChatInterrupt),
+        (status = 404, description = "No such chat"),
+    ),
+)]
+async fn post_chat_interrupt(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let chats = state.chats.lock().await;
+    let Some(session) = chats.get(&id).cloned() else {
+        return err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"));
+    };
+    drop(chats);
+    let s = session.lock().await;
+    // An idle chat is not an error: pressing stop as the last frame arrives is
+    // an ordinary race, and the honest answer is "there was nothing to stop".
+    let stopping = s.busy;
+    if stopping {
+        s.interrupt.store(true, Ordering::Relaxed);
+    }
+    Json(ChatInterrupt { stopping }).into_response()
 }
 
 /// Run one turn against the chat session. Streams new messages as Server-Sent
@@ -4759,12 +4873,15 @@ async fn post_chat_turn(
     // Lock the session up-front: stamp it busy, snapshot what we need to run
     // the executor, and seed/continue the AgentState. If anything fails we
     // release `busy` before returning.
-    let (persona_slug, model_name, cwd, agent_state, turn_index, diagnostics, trace) = {
+    let (persona_slug, model_name, cwd, agent_state, turn_index, diagnostics, trace, interrupt) = {
         let mut s = session.lock().await;
         if s.busy {
             return err_json(StatusCode::CONFLICT, "chat is already mid-turn");
         }
         s.busy = true;
+        // Start clean: a stop pressed while nothing was running must not stop
+        // this turn before it has taken a step.
+        s.interrupt.store(false, Ordering::Relaxed);
         let prior_turns = s
             .state
             .as_ref()
@@ -4819,6 +4936,7 @@ async fn post_chat_turn(
             prior_turns, // new turn's index = prior count (0-based)
             s.diagnostics.clone(),
             s.trace.clone(),
+            s.interrupt.clone(),
         )
     };
 
@@ -4920,13 +5038,14 @@ async fn post_chat_turn(
             let tools_in_flight = tools_in_flight.clone();
             let diagnostics = diagnostics.clone();
             let trace = trace.clone();
+            let interrupt = interrupt.clone();
             Arc::new(move |state: &AgentState, _ev| {
                 if let Some(logger) = &diagnostics {
                     logger.log_turn(state);
                 }
                 let mut guard = seen.lock().unwrap();
                 if *guard >= state.messages.len() {
-                    return GuardAction::Continue;
+                    return continue_unless_stopped(&interrupt);
                 }
                 let new = &state.messages[*guard..];
                 *guard = state.messages.len();
@@ -5039,7 +5158,7 @@ async fn post_chat_turn(
                     }
                 }
 
-                GuardAction::Continue
+                continue_unless_stopped(&interrupt)
             })
         };
 
@@ -5061,6 +5180,18 @@ async fn post_chat_turn(
                         .await
                         .map_err(|e| e.to_string())
                 })
+            })
+        };
+
+        // What the turn is doing before the model is reached. `try_send`, and a
+        // full channel just drops the note: a progress frame must never apply
+        // backpressure to the turn it is describing.
+        let phase_sink: crate::runtime::PhaseSink = {
+            let tx = tx.clone();
+            Arc::new(move |phase: &str| {
+                let _ = tx.try_send(ChatEvent::Phase {
+                    phase: phase.to_string(),
+                });
             })
         };
 
@@ -5088,6 +5219,7 @@ async fn post_chat_turn(
                 preset_personas: None,
                 instance_id: None,
             },
+            Some(phase_sink),
         )
         .await;
 
@@ -5367,6 +5499,16 @@ pub async fn deliver_followup_to_chat(
             preset_personas: None,
             instance_id: None,
         },
+        // A follow-up fires with nobody necessarily watching, which is exactly
+        // when a silent four-minute compaction is hardest to explain later.
+        Some({
+            let sender = sender.clone();
+            Arc::new(move |phase: &str| {
+                let _ = sender.send(ChatEvent::Phase {
+                    phase: phase.to_string(),
+                });
+            })
+        }),
     )
     .await;
 
@@ -5404,6 +5546,9 @@ async fn run_chat_turn(
     llm_call_hook: Option<metalcraft::LlmCallHook>,
     llm_response_hook: Option<metalcraft::LlmResponseHook>,
     options: crate::runtime::RuntimeOptions,
+    // Where to announce compaction and recall. `None` for a turn nobody is
+    // watching live — a gateway turn answers over its adapter, not over frames.
+    phase_sink: Option<crate::runtime::PhaseSink>,
 ) -> Result<RunOutcome<AgentState>, Box<dyn std::error::Error + Send + Sync>> {
     use crate::runtime::build_agent_runtime;
     use rig::client::CompletionClient;
@@ -5450,6 +5595,7 @@ async fn run_chat_turn(
     let (_compacted, outcome) = crate::runtime::TurnRunner::new(runtime)
         .with_capture_context(chat_id.map(str::to_string), Some(persona_slug.to_string()))
         .with_instance(instance_id)
+        .with_phase_sink(phase_sink)
         .run(initial_state, step_guard)
         .await;
     // Box the real error rather than stringifying it, so its `source()` chain
@@ -5647,7 +5793,6 @@ async fn put_integration_enabled(
         ),
     )
 }
-
 
 // ── Lockfile (reproducible install manifest) ────────────────────────────
 
@@ -6509,6 +6654,7 @@ async fn get_or_create_gateway_session(
         diagnostics,
         trace: None,
         busy: false,
+        interrupt: Arc::new(AtomicBool::new(false)),
         pending: std::collections::VecDeque::new(),
     };
     let arc = Arc::new(Mutex::new(session));
@@ -6605,6 +6751,9 @@ async fn run_one_gateway_turn(
             preset_personas: None,
             instance_id: None,
         },
+        // This path emits no frames at all — a gateway turn answers over its
+        // adapter — so there is nobody to tell.
+        None,
     )
     .await;
 
@@ -6810,7 +6959,13 @@ mod consent_tests {
 
     #[test]
     fn a_read_is_not_a_change_and_everything_else_is() {
-        for read in ["read_file", "list_files", "grep", "find_files", "load_skill"] {
+        for read in [
+            "read_file",
+            "list_files",
+            "grep",
+            "find_files",
+            "load_skill",
+        ] {
             assert!(!changes_something(read), "{read} only reads");
         }
         // `write_file` classifies as auto-approving *WriteNewFile* when the path
@@ -6821,5 +6976,28 @@ mod consent_tests {
         for change in ["bash", "write_file", "edit_file", "web_fetch", "sub_agent"] {
             assert!(changes_something(change), "{change} changes something");
         }
+    }
+}
+
+#[cfg(test)]
+mod interrupt_tests {
+    use super::{AtomicBool, GuardAction, Ordering, continue_unless_stopped};
+
+    #[test]
+    fn a_pressed_stop_stops_the_run_and_nothing_else_does() {
+        let flag = AtomicBool::new(false);
+        assert!(matches!(
+            continue_unless_stopped(&flag),
+            GuardAction::Continue
+        ));
+
+        flag.store(true, Ordering::Relaxed);
+        let GuardAction::Stop(reason) = continue_unless_stopped(&flag) else {
+            panic!("a pressed stop must halt the executor");
+        };
+        // The reason rides out in `done{status:"interrupted", reason}` and the
+        // client prints it verbatim in the transcript, so it is a sentence
+        // addressed to a person — not a note about which flag was set.
+        assert_eq!(reason, "Stopped by the user.");
     }
 }

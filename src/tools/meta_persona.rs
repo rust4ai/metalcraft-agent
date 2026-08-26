@@ -108,7 +108,9 @@ impl metalcraft::Tool for PersonaWriteTool {
             match serde_json::from_str(s) {
                 Ok(v) => v,
                 Err(e) => {
-                    return Ok(serde_json::json!({ "error": format!("invalid persona JSON: {e}") }));
+                    return Ok(
+                        serde_json::json!({ "error": format!("invalid persona JSON: {e}") }),
+                    );
                 }
             }
         } else {

@@ -137,9 +137,7 @@ pub fn create_registry_for_with_config(
             "flow_write" => registry.register(meta_flow::FlowWriteTool),
             "flow_set_schedules" => registry.register(meta_flow::FlowSetSchedulesTool),
             "flow_install" => registry.register(meta_flow::FlowInstallTool),
-            "flow_check_dependencies" => {
-                registry.register(meta_flow::FlowCheckDependenciesTool)
-            }
+            "flow_check_dependencies" => registry.register(meta_flow::FlowCheckDependenciesTool),
             "flow_delete" => registry.register(meta_flow::FlowDeleteTool),
             "flow_run" => registry.register(meta_flow::FlowRunTool),
             "flow_resume" => registry.register(meta_flow::FlowResumeTool),
@@ -296,7 +294,11 @@ mod native_tools_drift {
         let mut checked = 0;
         for entry in std::fs::read_dir(&seed).expect("seed/agent_packs must exist") {
             let pack = entry.unwrap().path();
-            let id = pack.file_name().and_then(|s| s.to_str()).unwrap().to_string();
+            let id = pack
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap()
+                .to_string();
             let manifest_path = pack.join(format!("integrations/{id}/integration.json"));
             if !manifest_path.exists() {
                 continue;

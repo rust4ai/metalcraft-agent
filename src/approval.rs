@@ -122,19 +122,6 @@ impl OperationKind {
             {
                 Self::ReadFile
             }
-            // Metalcraft Code pack (`mcode_` tools): inspecting a workspace — who am
-            // I, what repos/workspaces/runs exist, read a file, list a directory —
-            // auto-approves. Everything else (`exec`, `git`, `build`, `write_file`,
-            // `delete_path`, workspace lifecycle) runs or changes code on a real
-            // machine and falls through to the default Execute arm.
-            n if n.starts_with("mcode_")
-                && (n.contains("_list")
-                    || n.contains("_get")
-                    || n == "mcode_whoami"
-                    || n == "mcode_read_file") =>
-            {
-                Self::ReadFile
-            }
             // Metalcraft Contacts pack (`mcon_` tools): lookups auto-approve;
             // create/update/delete/set_photo change the user's address book and fall
             // through to the default Execute arm.

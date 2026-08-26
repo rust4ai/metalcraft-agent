@@ -277,8 +277,8 @@ fn env_refs(value: &str) -> Vec<String> {
 
 /// A GET tool cannot mutate anything, so gating it behind an approval prompt is
 /// pure friction — and it is the failure mode that actually happened: the
-/// `metalcraft-code`, `metalcraft-contacts`, `metalcraft-email` and
-/// `metalcraft-packs` packs all shipped with no arm in
+/// `metalcraft-contacts`, `metalcraft-email` and `metalcraft-packs` packs all
+/// shipped with no arm in
 /// [`metalcraft_agent::approval::OperationKind::classify`], so every one of their
 /// reads fell through to `Execute` and asked permission to look something up.
 ///

@@ -12,11 +12,11 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use metalcraft_agent::agent_instance::{AgentInstance, InstanceOrigin};
-use metalcraft_agent::flow_exec::run_flow_v2_as;
 use metalcraft_agent::flow_bindings;
+use metalcraft_agent::flow_exec::run_flow_v2_as;
+use metalcraft_agent::paths;
 use metalcraft_agent::runtime::AgentRuntimeContext;
 use metalcraft_agent::workshop_api::{self, flow_conversation, record_flow_turn};
-use metalcraft_agent::paths;
 use metalcraft_flows::{SavedFlow, save_flow};
 use serde_json::json;
 
@@ -51,7 +51,12 @@ fn agent() -> AgentInstance {
             "personas":[{"slug":"amy","role":"default"}]}"#,
     )
     .unwrap();
-    let mut i = AgentInstance::new(&preset, InstanceOrigin::Flow { flow_id: "brief".into() });
+    let mut i = AgentInstance::new(
+        &preset,
+        InstanceOrigin::Flow {
+            flow_id: "brief".into(),
+        },
+    );
     i.persistent = true;
     i.save().unwrap();
     i
@@ -116,14 +121,22 @@ async fn a_firing_becomes_a_conversation_in_the_agent_it_runs_as() {
     let chat = flow_conversation(&agent.id, "amy", "m", ".")
         .await
         .expect("a conversation opens");
-    record_flow_turn(&chat, "▶ Morning brief\n\nWhat is on today?", "Three things.").await;
+    record_flow_turn(
+        &chat,
+        "▶ Morning brief\n\nWhat is on today?",
+        "Three things.",
+    )
+    .await;
 
     // Within the window, the next firing continues the same thread rather than
     // starting a new one — the rule that keeps a fast cron readable.
     let again = flow_conversation(&agent.id, "amy", "m", ".")
         .await
         .expect("a conversation opens");
-    assert_eq!(again, chat, "a firing inside the window joins the last thread");
+    assert_eq!(
+        again, chat,
+        "a firing inside the window joins the last thread"
+    );
     record_flow_turn(&chat, "Anything else?", "No.").await;
 
     // What the agent's own surfaces now say: one conversation, two turns.
@@ -191,11 +204,17 @@ async fn a_hand_triggered_run_is_the_agent_the_schedule_armed() {
     let (status, summary) = post_run("armed").await;
     assert_eq!(status, StatusCode::OK, "{summary:#}");
     // The run resolved the armed agent without being told which one.
-    let run = metalcraft_agent::flow_runs::load_run(&paths::runs_dir(), summary["run_id"].as_str().unwrap());
+    let run = metalcraft_agent::flow_runs::load_run(
+        &paths::runs_dir(),
+        summary["run_id"].as_str().unwrap(),
+    );
     // (A silent flow never pauses, so there is no persisted record; the proof is
     // that the executor accepted the instance — asserted via the agent below.)
     assert!(run.is_none());
-    assert!(summary["warnings"].as_array().is_none_or(|w| w.is_empty()), "{summary:#}");
+    assert!(
+        summary["warnings"].as_array().is_none_or(|w| w.is_empty()),
+        "{summary:#}"
+    );
 
     // An unarmed flow resolves to no agent and says nothing about one.
     let mut loose = silent_flow();

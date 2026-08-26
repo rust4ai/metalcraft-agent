@@ -114,6 +114,32 @@ pub struct BuiltAgentRuntime<M: CompletionModel + 'static> {
 /// the workshop/gateway guard is per-turn (it captures that turn's SSE/reply
 /// sender to emit tool events). Keeping it out of the struct lets both hold the
 /// runtime the way they need without forcing a guard-lifetime choice on either.
+/// A phase of a turn that happens **before the model is called**, and that would
+/// otherwise be completely silent.
+///
+/// The client's `thinking` state spans everything from `turn_started` to the
+/// first frame the executor's step guard produces, and the guard only fires once
+/// a whole graph node has finished. Two of the most expensive things a turn does
+/// live before that: compaction is an entire extra summarization LLM call, and
+/// recall is an embeddings call. A turn that spent minutes in either used to look
+/// identical to one thinking hard about the answer.
+///
+/// Deliberately a plain `Fn(&str)`, not an async sink like [`crate::tools::ReplySink`]:
+/// the only caller pushes onto an unbounded-enough channel with `try_send`, and a
+/// progress note that could block the turn it is describing would be worse than
+/// no note at all.
+pub type PhaseSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
+/// The phase names this crate emits. String constants rather than an enum: they
+/// cross an HTTP boundary to clients that are versioned separately, and a client
+/// that meets a phase it does not know must be able to ignore it.
+pub mod phase {
+    /// Summarizing older history to fit the window — a full LLM call.
+    pub const COMPACTING: &str = "compacting";
+    /// Searching memory for material to splice into the prompt — an embeddings call.
+    pub const RECALLING: &str = "recalling";
+}
+
 pub struct TurnRunner<M: CompletionModel + 'static> {
     graph: SharedAgentGraph,
     compaction_model: M,
@@ -130,6 +156,9 @@ pub struct TurnRunner<M: CompletionModel + 'static> {
     /// The agent instance whose memory this runner recalls from. `None` uses the
     /// pod-global store — the CLI and any pre-instance caller.
     instance_id: Option<String>,
+    /// Where to announce the pre-model phases. `None` for callers with nobody
+    /// watching — the CLI, one-shot runs, a flow step.
+    phase_sink: Option<PhaseSink>,
 }
 
 impl<M: CompletionModel + 'static> TurnRunner<M> {
@@ -144,11 +173,18 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
             recall: crate::memory::recall_enabled(),
             capture_ctx: crate::memory::capture::CaptureContext::default(),
             instance_id: None,
+            phase_sink: None,
         }
     }
 
     /// Bind this runner to an agent instance, so recall reads that agent's own
     /// memory rather than the pod-global store.
+    /// Announce each pre-model phase as it starts. See [`PhaseSink`].
+    pub fn with_phase_sink(mut self, sink: Option<PhaseSink>) -> Self {
+        self.phase_sink = sink;
+        self
+    }
+
     pub fn with_instance(mut self, instance_id: Option<String>) -> Self {
         // Keep the capture context in step regardless of call order — a capture
         // that doesn't name its agent is material nobody can route later.
@@ -190,6 +226,12 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
         mut state: AgentState,
         step_guard: StepGuard<AgentState>,
     ) -> (bool, Result<RunOutcome<AgentState>, GraphError>) {
+        // Asked before announcing: compaction is the expensive silent phase, but
+        // it only runs on the turns that cross the threshold, and a phase frame
+        // that fires on every turn is one nobody reads.
+        if context::needs_compaction(&state, &self.compaction_config) {
+            self.announce(phase::COMPACTING);
+        }
         let compacted = match context::compact_if_needed(
             &mut state,
             &self.compaction_model,
@@ -225,6 +267,7 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
         // Recall is spliced in AFTER compaction, so the summarizer never sees
         // (and never bakes in) a block that is about to be removed again.
         let injected = if self.recall {
+            self.announce(phase::RECALLING);
             let opts = crate::memory::recall::RecallOptions {
                 token_budget: Some(crate::memory::recall_token_budget()),
                 instance_id: self.instance_id.clone(),
@@ -256,6 +299,16 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
         }
 
         (compacted, outcome)
+    }
+}
+
+impl<M: CompletionModel + 'static> TurnRunner<M> {
+    /// Tell whoever is watching what this turn is doing now. A no-op when nobody
+    /// is — which is every path but a live chat.
+    fn announce(&self, phase: &str) {
+        if let Some(sink) = &self.phase_sink {
+            sink(phase);
+        }
     }
 }
 
@@ -444,11 +497,49 @@ mod capture_tests {
 /// as a passthrough (see metalcraft-inference `controllers::responses`), so routing
 /// through it still bills credits.
 pub fn build_openai_client(api_key: &str) -> Result<openai::Client, Box<dyn std::error::Error>> {
-    let mut builder = openai::Client::builder().api_key(api_key);
+    let mut builder = openai::Client::builder()
+        .api_key(api_key)
+        .http_client(llm_http_client());
     if let Some(base) = crate::key_store::lookup_present("OPENAI_BASE_URL") {
         builder = builder.base_url(&base);
     }
     Ok(builder.build()?)
+}
+
+/// How long one inference request may take before it is given up on.
+///
+/// Ten minutes, because a reasoning model reading a large transcript with a
+/// pack's worth of tool schemas attached legitimately takes minutes and cutting
+/// that short would be the worse failure. This is a backstop against a stalled
+/// connection, not a latency policy: rig sets no timeout at all, and neither did
+/// this function, so before it a half-open socket held a chat busy forever with
+/// no retry and no way back except restarting the pod.
+///
+/// `METALCRAFT_LLM_TIMEOUT_SECS=0` disables it, for a deployment that would
+/// rather hang than lose a very long call.
+const LLM_TIMEOUT_SECS: u64 = 600;
+
+/// The HTTP backend every inference call goes through.
+///
+/// Separate from the connect timeout on purpose: a host that never completes the
+/// handshake is dead within thirty seconds and there is nothing to wait for,
+/// while a host that *is* answering may legitimately take minutes to finish.
+///
+/// Built from **rig's** re-exported reqwest, not this crate's. They are different
+/// major versions (0.13 in rig, 0.12 here), so a client built from our own would
+/// be a different type entirely and would not satisfy rig's `HttpClientExt` —
+/// which is exactly the compile error you get for reaching for the wrong one.
+fn llm_http_client() -> rig::http_client::ReqwestClient {
+    let mut builder = rig::http_client::ReqwestClient::builder()
+        .connect_timeout(std::time::Duration::from_secs(30));
+    if let Some(timeout) = llm_timeout(std::env::var("METALCRAFT_LLM_TIMEOUT_SECS").ok().as_deref())
+    {
+        builder = builder.timeout(timeout);
+    }
+    // A builder failure means TLS could not be initialised, which the default
+    // client would hit too — fall back rather than fail every turn with a
+    // message about timeouts.
+    builder.build().unwrap_or_default()
 }
 
 /// The credential inference authenticates with.
@@ -862,6 +953,50 @@ impl ErrorCode {
             ErrorCode::Internal => "Something went wrong handling that message. Please try again.",
         }
         .to_string()
+    }
+}
+
+/// Read the request timeout from its env value. `None` means "do not set one".
+///
+/// Split out from [`llm_http_client`] because the interesting behaviour is in the
+/// parsing, and reading it back out of a built HTTP client is not possible.
+/// Unparseable input falls back to the default rather than disabling the
+/// timeout: a typo in a deployment's env must not quietly restore the hang this
+/// exists to prevent — only an explicit `0` does that.
+fn llm_timeout(raw: Option<&str>) -> Option<std::time::Duration> {
+    let secs = raw
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(LLM_TIMEOUT_SECS);
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
+#[cfg(test)]
+mod llm_timeout_tests {
+    use super::{LLM_TIMEOUT_SECS, llm_timeout};
+
+    #[test]
+    fn only_an_explicit_zero_restores_the_unbounded_wait() {
+        let default = Some(std::time::Duration::from_secs(LLM_TIMEOUT_SECS));
+        assert_eq!(llm_timeout(None), default, "unset means the default");
+        assert_eq!(
+            llm_timeout(Some("banana")),
+            default,
+            "a typo must not silently reinstate the hang"
+        );
+        assert_eq!(
+            llm_timeout(Some("")),
+            default,
+            "nor must an empty value, which is what an unset var in a .env looks like"
+        );
+        assert_eq!(
+            llm_timeout(Some(" 90 ")),
+            Some(std::time::Duration::from_secs(90))
+        );
+        assert_eq!(
+            llm_timeout(Some("0")),
+            None,
+            "0 is the deployment that would rather hang than lose a long call"
+        );
     }
 }
 

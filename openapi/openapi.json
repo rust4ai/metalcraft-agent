@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.32.0"
+    "version": "0.33.0"
   },
   "paths": {
     "/api/v1/agent-packs": {
@@ -1488,6 +1488,42 @@
         }
       }
     },
+    "/api/v1/chats/{id}/interrupt": {
+      "post": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "Ask a running turn to stop — the client's stop button.",
+        "description": "Returns as soon as the request is recorded, not when the turn ends: the\nexecutor notices at its next step boundary and finishes the turn itself,\nemitting `done{status:\"interrupted\"}` on the chat's event stream. That frame,\nnot this response, is what says the agent has actually stopped.\n\nInterrupting is resumable by construction — the guard stops the executor\nbetween steps, so the partial state is written back like any other turn and\nthe next message continues from it. Nothing is discarded.",
+        "operationId": "post_chat_interrupt",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatInterrupt"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such chat"
+          }
+        }
+      }
+    },
     "/api/v1/chats/{id}/turn": {
       "post": {
         "tags": [
@@ -1580,6 +1616,42 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/diagnostics/{id}/trace": {
+      "get": {
+        "tags": [
+          "diagnostics"
+        ],
+        "summary": "The OTLP trace for one session — where a turn's time actually went.",
+        "description": "Deliberately separate from `GET /diagnostics/{id}`: that response already\ncarries every message of every turn, and a trace is read for timings, often\nwhile the session's transcript is already on screen. Bundling them would make\nthe common read pay for the large one.\n\n`404` covers both \"no such session\" and \"that session has no trace\" — a run\nfrom before tracing existed reads the same way to a client, which has nothing\nto show either way.",
+        "operationId": "get_diagnostics_trace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OTLP/JSON trace document (OpenTelemetry GenAI conventions)"
           },
           "404": {
             "description": "",
@@ -4046,6 +4118,25 @@
           },
           {
             "type": "object",
+            "description": "What the turn is doing *before* the model is called — work that emits no\nother frame and that a client would otherwise render as an\nundifferentiated wait.\n\nCompaction is a whole extra summarization LLM call and recall is an\nembeddings call; both run ahead of the executor, so nothing between\n`turn_started` and the first `llm_started` used to say a word. `phase` is\nan open string (`crate::runtime::phase`) precisely so a client older than\na phase can drop the frame instead of breaking on it.",
+            "required": [
+              "phase",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "phase"
+                ]
+              },
+              "phase": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "Terminal event. `status` is \"completed\" | \"interrupted\" | \"failed\".",
             "required": [
               "status",
@@ -4097,7 +4188,19 @@
             }
           }
         ],
-        "description": "SSE event wire format. One JSON object per event. The `kind` field\ndiscriminates; payloads vary by kind. Events form a lifecycle:\n  `turn_started` → (`llm_started` → `llm_completed`\n                  → `tool_started`* → `tool_completed`*)+\n                  → `done`\n(`tool_started` and `tool_completed` can repeat per LLM step.)"
+        "description": "SSE event wire format. One JSON object per event. The `kind` field\ndiscriminates; payloads vary by kind. Events form a lifecycle:\n  `turn_started` → `phase`* → (`llm_started` → `llm_completed`\n                  → `tool_started`* → `tool_completed`*)+\n                  → `done`\n(`tool_started` and `tool_completed` can repeat per LLM step; `phase` frames\ncover the pre-model work that would otherwise be silent.)"
+      },
+      "ChatInterrupt": {
+        "type": "object",
+        "required": [
+          "stopping"
+        ],
+        "properties": {
+          "stopping": {
+            "type": "boolean",
+            "description": "True when a turn was running and has been asked to stop. False when the\nchat was already idle — the turn finished on its own between the press\nand this request, which is not a failure and must not be shown as one."
+          }
+        }
       },
       "ChatMessageWire": {
         "oneOf": [

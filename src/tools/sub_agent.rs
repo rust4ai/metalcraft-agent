@@ -53,6 +53,22 @@ fn summarize_roster(roster: &[String]) -> String {
     )
 }
 
+/// The integrations `persona` declares that this pod does not have installed.
+///
+/// Split out from the delegation guard below so the case that broke it stays
+/// testable without an LLM in the loop: an agent pack vendors its integrations
+/// into the content store rather than `<data>/integrations/`, and a check that
+/// missed that layout refused every agent-pack persona as "not installed" while
+/// that persona's tools were resolving perfectly well.
+pub fn missing_integrations(persona: &crate::persona::Persona) -> Vec<String> {
+    persona
+        .integrations
+        .iter()
+        .filter(|p| !crate::integrations::is_enabled(p))
+        .cloned()
+        .collect()
+}
+
 #[async_trait]
 impl metalcraft::Tool for SubAgentTool {
     fn name(&self) -> &str {
@@ -144,12 +160,7 @@ impl metalcraft::Tool for SubAgentTool {
             // model calls a tool that isn't registered, and the dropped call
             // leaves an orphaned assistant tool_call the OpenAI API rejects with
             // an opaque 400. A clear, actionable error here is far better.
-            let missing: Vec<String> = persona
-                .integrations
-                .iter()
-                .filter(|p| !crate::integrations::is_enabled(p))
-                .cloned()
-                .collect();
+            let missing = missing_integrations(&persona);
             if !missing.is_empty() {
                 return Ok(serde_json::json!({
                     "error": true,

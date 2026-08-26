@@ -590,7 +590,7 @@ impl metalcraft::Tool for HttpApiTool {
 
 #[cfg(test)]
 mod ecosystem_credential_tests {
-    use super::{fallback_name_for, host_of, HttpApiTool};
+    use super::{HttpApiTool, fallback_name_for, host_of};
 
     /// A pack is a stranger's code. The pod will stand in for a credential it holds,
     /// but only when the request is going to the service that credential belongs to —
@@ -626,10 +626,19 @@ mod ecosystem_credential_tests {
 
     #[test]
     fn a_url_that_hides_its_host_resolves_to_no_host() {
-        assert_eq!(host_of("https://octaweave.com/api/v1/notes").as_deref(), Some("octaweave.com"));
-        assert_eq!(host_of("https://Octaweave.com:8443/x").as_deref(), Some("octaweave.com"));
+        assert_eq!(
+            host_of("https://octaweave.com/api/v1/notes").as_deref(),
+            Some("octaweave.com")
+        );
+        assert_eq!(
+            host_of("https://Octaweave.com:8443/x").as_deref(),
+            Some("octaweave.com")
+        );
         // The allowed host in the one position that is not the host.
-        assert_eq!(host_of("https://octaweave.com@evil.example/x").as_deref(), Some("evil.example"));
+        assert_eq!(
+            host_of("https://octaweave.com@evil.example/x").as_deref(),
+            Some("evil.example")
+        );
         assert_eq!(host_of("file:///etc/passwd"), None);
         assert_eq!(host_of("not a url"), None);
     }

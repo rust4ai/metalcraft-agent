@@ -348,8 +348,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // sub_agent still obeys the active preset's roster.
                 instance_id: None,
                 preset_personas: active_preset
-                .as_ref()
-                .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
+                    .as_ref()
+                    .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
             },
         )
         .await?
@@ -458,9 +458,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         None, // CLI runs don't emit OTLP traces
                         runtime::RuntimeOptions {
                             prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
-                            preset_personas: active_preset
-                .as_ref()
-                .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
+                            preset_personas: active_preset.as_ref().map(|p| {
+                                p.delegation_roster(&metalcraft_agent::paths::personas_dir())
+                            }),
                             instance_id: None,
                             ..Default::default()
                         },
@@ -567,9 +567,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         None, // CLI runs don't emit OTLP traces
                         runtime::RuntimeOptions {
                             prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
-                            preset_personas: active_preset
-                .as_ref()
-                .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
+                            preset_personas: active_preset.as_ref().map(|p| {
+                                p.delegation_roster(&metalcraft_agent::paths::personas_dir())
+                            }),
                             instance_id: None,
                             ..Default::default()
                         },
@@ -664,8 +664,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 runtime::RuntimeOptions {
                     prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
                     preset_personas: active_preset
-                .as_ref()
-                .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
+                        .as_ref()
+                        .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
                     instance_id: None,
                     ..Default::default()
                 },
