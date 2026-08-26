@@ -25,6 +25,16 @@ pub struct Persona {
     /// are never force-upgraded. See `seed::write_versioned_seeds`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// How long a `sub_agent` delegation to this persona may run, in seconds.
+    ///
+    /// The delegation guard has to bound a runaway sub-agent, but the right bound
+    /// is a property of the work: a persona that provisions a remote workspace
+    /// waits one to two minutes before it can do anything at all, while one that
+    /// edits a file should never take that long. A persona that knows it is slow
+    /// says so here instead of every pod having to be reconfigured for it.
+    /// Absent means the delegation default. See [`crate::tools::sub_agent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_run_secs: Option<u64>,
     pub system_prompt: String,
 }
 

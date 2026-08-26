@@ -24,6 +24,7 @@ fn build_system_prompt_without_skills() {
         integrations: vec![],
         skills: vec![],
         version: None,
+        max_run_secs: None,
         system_prompt: "You are a test.".into(),
     };
 

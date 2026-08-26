@@ -5398,6 +5398,15 @@
             "type": "boolean",
             "description": "Marks this tool as a status **poll** (e.g. checking an async job until it\nfinishes). Polling means calling the same tool with the same arguments\nrepeatedly on purpose, which would otherwise look like a runaway loop, so\nthe step guard exempts poll tools from tight loop detection. See\n[`crate::guard`]."
           },
+          "timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long to wait on this tool's HTTP request, in seconds. Defaults to\n[`DEFAULT_TIMEOUT_SECS`], which suits an API that answers in one round\ntrip and is far too short for one that holds the request open while it\nworks — a remote build, a clone, a container coming up. Those failed in\nthe *tool* while the server was still succeeding, which is the worst\nshape of failure: the agent sees an error for work that then completes.\nClamped to [`MAX_TIMEOUT_SECS`]; `0` and anything unparseable fall back\nto the default, so a typo cannot disable the bound.",
+            "minimum": 0
+          },
           "url": {
             "type": "string"
           }
@@ -6489,6 +6498,15 @@
               "type": "string"
             },
             "description": "Integrations this persona is scoped to, by id (e.g. `\"linear\"`). Every\nHTTP-API tool an installed integration listed here provides is added to\nthe persona's tool set, so a persona can adopt a whole integration without\nenumerating each `<id>_*` tool by name. Combine with `tools` for native\ntools like `load_skill`. See [`Persona::resolved_tool_names`].\n\nReads `packs` too: that was the field's name until integrations stopped\nbeing installable, and personas carrying it are already on people's pods."
+          },
+          "max_run_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long a `sub_agent` delegation to this persona may run, in seconds.\n\nThe delegation guard has to bound a runaway sub-agent, but the right bound\nis a property of the work: a persona that provisions a remote workspace\nwaits one to two minutes before it can do anything at all, while one that\nedits a file should never take that long. A persona that knows it is slow\nsays so here instead of every pod having to be reconfigured for it.\nAbsent means the delegation default. See [`crate::tools::sub_agent`].",
+            "minimum": 0
           },
           "name": {
             "type": "string"

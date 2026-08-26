@@ -7,6 +7,13 @@ use std::time::Duration;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
+/// Ceiling on a tool-declared timeout. A pack is third-party content, so the
+/// bound it asks for is a request, not an instruction: without a cap, one
+/// mistyped config could park an agent step on a socket indefinitely. Ten
+/// minutes is the longest any known upstream (buildr.space's 600s build) holds a
+/// request open.
+const MAX_TIMEOUT_SECS: u64 = 600;
+
 fn make_error(tool: &str, message: impl std::fmt::Display) -> metalcraft::GraphError {
     metalcraft::GraphError::ToolCallFailed {
         tool: tool.into(),
@@ -52,6 +59,16 @@ pub struct HttpApiToolConfig {
     /// carries the local file path and what form-field name to send it under.
     #[serde(default)]
     pub multipart: Option<MultipartConfig>,
+    /// How long to wait on this tool's HTTP request, in seconds. Defaults to
+    /// [`DEFAULT_TIMEOUT_SECS`], which suits an API that answers in one round
+    /// trip and is far too short for one that holds the request open while it
+    /// works — a remote build, a clone, a container coming up. Those failed in
+    /// the *tool* while the server was still succeeding, which is the worst
+    /// shape of failure: the agent sees an error for work that then completes.
+    /// Clamped to [`MAX_TIMEOUT_SECS`]; `0` and anything unparseable fall back
+    /// to the default, so a typo cannot disable the bound.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// Config for a `multipart/form-data` upload tool. The argument named by
@@ -133,6 +150,18 @@ pub struct HttpApiTool {
     config: HttpApiToolConfig,
 }
 
+impl HttpApiToolConfig {
+    /// The HTTP timeout this tool should run under: what it declared, clamped to
+    /// [`MAX_TIMEOUT_SECS`], with `0`/absent meaning [`DEFAULT_TIMEOUT_SECS`].
+    pub fn timeout(&self) -> Duration {
+        let secs = match self.timeout_secs {
+            Some(s) if s > 0 => s.min(MAX_TIMEOUT_SECS),
+            _ => DEFAULT_TIMEOUT_SECS,
+        };
+        Duration::from_secs(secs)
+    }
+}
+
 impl HttpApiTool {
     /// Load an HttpApiTool from a JSON config file.
     pub fn from_config_file(path: &Path) -> Result<Self, String> {
@@ -141,6 +170,13 @@ impl HttpApiTool {
         let config: HttpApiToolConfig = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
         Ok(Self { config })
+    }
+
+    /// The parsed config this tool runs on — the runtime's own view of it,
+    /// rather than the JSON on disk, so a caller checking what a pack declared
+    /// is checking what actually took effect.
+    pub fn config(&self) -> &HttpApiToolConfig {
+        &self.config
     }
 
     /// From a list of tool names, return those that are HTTP-API tools flagged
@@ -537,7 +573,7 @@ impl metalcraft::Tool for HttpApiTool {
         let url = self.expand_url(&args);
 
         let client = Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .timeout(self.config.timeout())
             .user_agent("metalcraft-agent/0.1 (http_api_tool)")
             .build()
             .map_err(|e| {
@@ -675,6 +711,7 @@ mod tests {
             param_paths: HashMap::new(),
             poll: false,
             multipart: None,
+            timeout_secs: None,
         }
     }
 
@@ -1055,5 +1092,51 @@ mod tests {
         let config: HttpApiToolConfig = serde_json::from_str(json_str).unwrap();
         assert!(config.body_defaults.is_empty());
         assert_eq!(config.body_mapping, "params");
+    }
+
+    // -- timeout_secs --
+
+    #[test]
+    fn timeout_defaults_when_undeclared() {
+        let config = base_config();
+        assert_eq!(config.timeout_secs, None);
+        assert_eq!(config.timeout(), Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn timeout_honours_a_declared_value() {
+        let mut config = base_config();
+        config.timeout_secs = Some(330);
+        assert_eq!(config.timeout(), Duration::from_secs(330));
+    }
+
+    #[test]
+    fn timeout_is_clamped_to_the_ceiling() {
+        let mut config = base_config();
+        config.timeout_secs = Some(86_400);
+        assert_eq!(config.timeout(), Duration::from_secs(MAX_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn timeout_of_zero_falls_back_to_the_default() {
+        // A typo must not mean "wait forever" — reqwest reads a zero timeout as
+        // no timeout at all.
+        let mut config = base_config();
+        config.timeout_secs = Some(0);
+        assert_eq!(config.timeout(), Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+    }
+
+    #[test]
+    fn deserialize_config_with_timeout_secs() {
+        let json_str = r#"{
+            "name": "slow_tool",
+            "description": "Holds the request open while it works",
+            "method": "POST",
+            "url": "http://example.com/api/build",
+            "parameters": {"type": "object", "properties": {}},
+            "timeout_secs": 300
+        }"#;
+        let config: HttpApiToolConfig = serde_json::from_str(json_str).unwrap();
+        assert_eq!(config.timeout(), Duration::from_secs(300));
     }
 }

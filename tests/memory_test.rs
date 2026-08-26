@@ -383,6 +383,7 @@ async fn memory_store_round_trip() {
         integrations: vec![],
         skills: vec![],
         version: None,
+        max_run_secs: None,
         system_prompt: "You are a test persona.".into(),
     };
     let extras = PromptExtras {

@@ -2,6 +2,41 @@ use async_trait::async_trait;
 use metalcraft::{AgentState, Executor, RunOutcome, create_react_agent};
 use rig::client::CompletionClient;
 
+/// How long a delegated sub-agent may run before it is cut off.
+///
+/// A runaway sub-agent burning tokens unattended is the thing this guards, so it
+/// stays bounded — but the bound cannot be a constant. Delegation to a persona
+/// that waits on real provisioning (a buildr.space workspace reaches `ready` in
+/// one to two minutes) needs longer than one that edits a file, and a sub-agent
+/// killed mid-wait looks exactly like an agent that failed the task.
+///
+/// A persona may declare its own bound (`max_run_secs`) — the pack author knows
+/// the work — and `SUB_AGENT_TIMEOUT_SECS` overrides both, because the operator
+/// paying for the tokens gets the last word. Anything unparseable or zero is
+/// ignored in favour of the default, because a typo must not disable the guard,
+/// and everything is clamped to [`MAX_SUB_AGENT_TIMEOUT_SECS`] so a persona
+/// cannot declare its way out of being bounded at all.
+const DEFAULT_SUB_AGENT_TIMEOUT_SECS: u64 = 120;
+
+/// Ceiling on any declared or configured delegation timeout: half an hour.
+const MAX_SUB_AGENT_TIMEOUT_SECS: u64 = 1800;
+
+fn sub_agent_timeout(persona_max_run_secs: Option<u64>) -> std::time::Duration {
+    let configured = crate::key_store::lookup("SUB_AGENT_TIMEOUT_SECS")
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    std::time::Duration::from_secs(resolve_timeout_secs(configured, persona_max_run_secs))
+}
+
+/// The decision itself, split out from reading the key store so it can be tested
+/// without an ambient environment.
+fn resolve_timeout_secs(configured: Option<u64>, persona_max_run_secs: Option<u64>) -> u64 {
+    configured
+        .filter(|v| *v > 0)
+        .or(persona_max_run_secs.filter(|v| *v > 0))
+        .unwrap_or(DEFAULT_SUB_AGENT_TIMEOUT_SECS)
+        .min(MAX_SUB_AGENT_TIMEOUT_SECS)
+}
+
 pub struct SubAgentTool {
     api_key: String,
     model_name: String,
@@ -148,6 +183,9 @@ impl metalcraft::Tool for SubAgentTool {
             }
         }
 
+        // A persona's own bound on how long delegating to it may run; `None` for
+        // the ad-hoc tool_set path, which has no persona to ask.
+        let mut persona_max_run_secs: Option<u64> = None;
         let (registry, sub_prompt) = if let Some(slug) = persona_slug {
             let persona = crate::persona::Persona::load(slug, &crate::paths::personas_dir())
                 .map_err(|e| metalcraft::GraphError::ToolCallFailed {
@@ -171,6 +209,8 @@ impl metalcraft::Tool for SubAgentTool {
                     ),
                 }));
             }
+
+            persona_max_run_secs = persona.max_run_secs;
 
             let base_prompt = persona.build_system_prompt(&crate::paths::skills_dir(), ".");
             let config = crate::tools::ToolConfig {
@@ -277,11 +317,9 @@ impl metalcraft::Tool for SubAgentTool {
         let executor = Executor::new(graph).max_steps(90);
 
         // Run with timeout to prevent runaway sub-agents
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            executor.run(AgentState::new(task), "sub-agent"),
-        )
-        .await;
+        let timeout = sub_agent_timeout(persona_max_run_secs);
+        let result =
+            tokio::time::timeout(timeout, executor.run(AgentState::new(task), "sub-agent")).await;
 
         match result {
             Ok(Ok(RunOutcome::Completed(state))) => {
@@ -307,9 +345,45 @@ impl metalcraft::Tool for SubAgentTool {
                 "error": true,
             })),
             Err(_) => Ok(serde_json::json!({
-                "result": "Sub-agent timed out after 120 seconds",
+                "result": format!("Sub-agent timed out after {} seconds", timeout.as_secs()),
                 "error": true,
             })),
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nothing_declared_uses_the_default() {
+        assert_eq!(resolve_timeout_secs(None, None), DEFAULT_SUB_AGENT_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn a_persona_that_knows_it_is_slow_gets_longer() {
+        // Provisioning a remote workspace takes one to two minutes before the
+        // delegate can do anything at all; the default would kill it mid-wait.
+        assert_eq!(resolve_timeout_secs(None, Some(900)), 900);
+    }
+
+    #[test]
+    fn the_operator_overrides_the_persona() {
+        assert_eq!(resolve_timeout_secs(Some(300), Some(900)), 300);
+    }
+
+    #[test]
+    fn zero_and_garbage_fall_back_rather_than_disabling_the_guard() {
+        assert_eq!(resolve_timeout_secs(Some(0), None), DEFAULT_SUB_AGENT_TIMEOUT_SECS);
+        assert_eq!(resolve_timeout_secs(Some(0), Some(900)), 900);
+        assert_eq!(resolve_timeout_secs(None, Some(0)), DEFAULT_SUB_AGENT_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn no_declaration_can_escape_the_ceiling() {
+        assert_eq!(resolve_timeout_secs(None, Some(u64::MAX)), MAX_SUB_AGENT_TIMEOUT_SECS);
+        assert_eq!(resolve_timeout_secs(Some(u64::MAX), None), MAX_SUB_AGENT_TIMEOUT_SECS);
     }
 }

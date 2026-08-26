@@ -276,6 +276,21 @@ For each `integrations/<id>/`:
 
 Domains and tools are sorted and deduplicated.
 
+### 5.1.1 Optional fields the runtime honours
+
+Beyond what consent derives, two optional declarations exist because the right value
+is a property of the work, not of the host. Both are bounded by the runtime, so a
+pack can ask but never escape:
+
+| Where | Field | Meaning |
+|---|---|---|
+| `api_tools/<file>.json` | `timeout_secs` | How long to wait on this tool's HTTP request. Default 30, clamped to 600. Declare it on any op whose *server* holds the request open longer than that — a remote build, a clone, a container coming up — or the tool gives up on work that is still succeeding and reports a failure that did not happen. |
+| `api_tools/<file>.json` | `poll` | This tool is called repeatedly on purpose (a status check). Exempts it from tight-loop detection. |
+| `personas/<slug>.json` | `max_run_secs` | How long a `sub_agent` delegation to this persona may run. Default 120, clamped to 1800; `SUB_AGENT_TIMEOUT_SECS` overrides it. Declare it when the persona waits on something real before it can begin. |
+
+A pack that does long-running work and declares neither is the failure mode these
+exist for: it works when tested against a fast endpoint and times out in production.
+
 ### 5.2 The consent summary
 
 ```jsonc
