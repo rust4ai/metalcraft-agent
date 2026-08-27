@@ -4965,6 +4965,8 @@ dependencies = [
 [[package]]
 name = "metalcraft"
 version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c2bd2cba9ee4515b88440fffea1347b9f73e58f169dd75b9a2fc9720bdce958"
 dependencies = [
  "async-trait",
  "futures",
@@ -5027,6 +5029,8 @@ dependencies = [
 [[package]]
 name = "metalcraft-flows"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38bb8072a649a1401850062ee233c231ba9bba33fc44d05937a60e858840ef2b"
 dependencies = [
  "regex",
  "semver",

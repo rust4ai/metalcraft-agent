@@ -49,17 +49,6 @@ imap = "2"
 mail-parser = "0.11"
 native-tls = "0.2"
 
-# Until metalcraft-flows **0.6.0** is published. 0.5.0 (spec v3) is on crates.io
-# already, but only 0.6.0 carries the `schema` feature this crate now asks for —
-# without the patch the build fails on an unknown feature, not a missing version.
-# Delete this the moment 0.6.0 publishes: a `patch` that outlives its publish is
-# how 0.4.0 stalled.
-[patch.crates-io]
-metalcraft-flows = { path = "../metalcraft-flows" }
-# metalcraft 0.11.0 is not published yet: it adds the `Mailbox` hook that lets a
-# message sent mid-turn join the run already in flight. Drop once published.
-metalcraft = { path = "../metalcraft" }
-
 [[bin]]
 name = "metalcraft-agent"
 path = "src/main.rs"
