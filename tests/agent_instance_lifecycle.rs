@@ -10,6 +10,8 @@ use metalcraft_agent::agent_instance::{AgentInstance, InstanceOrigin};
 use metalcraft_agent::agent_preset::AgentPreset;
 use metalcraft_agent::memory::types::{MemoryKind, Source};
 use metalcraft_agent::memory::{self, RememberRequest, instance};
+use axum::body::Body;
+use axum::http::Request;
 use std::fs;
 
 /// Deleting an agent must take its memory with it, and must not leave it answering
@@ -57,10 +59,10 @@ async fn deleting_and_reaping_agents() {
         "and it must not still be resident, answering recalls"
     );
 
-    // ── only unnamed, idle, unreferenced agents are reaped ──────────────────
+    // ── only ephemeral, idle, unreferenced agents are reaped ───────────────
 
     let stale = "2020-01-01T00:00:00+00:00".to_string();
-    let mut mk = |persistent: bool, last: &str| {
+    let mk = |persistent: bool, last: &str| {
         let mut i = AgentInstance::new(&preset, InstanceOrigin::Workshop);
         i.persistent = persistent;
         i.last_active_at = last.to_string();
@@ -68,31 +70,61 @@ async fn deleting_and_reaping_agents() {
         i.id
     };
 
-    let idle_unnamed = mk(false, &stale);
-    let idle_named = mk(true, &stale);
-    let fresh_unnamed = mk(false, &chrono::Utc::now().to_rfc3339());
+    let idle_ephemeral = mk(false, &stale);
+    let idle_kept = mk(true, &stale);
+    let fresh_ephemeral = mk(false, &chrono::Utc::now().to_rfc3339());
     let idle_but_in_use = mk(false, &stale);
+
+    // A rename is a label, not a lifetime. Patching a name used to set `persistent`,
+    // so the gesture for "call it something I recognise" quietly changed how long the
+    // pod kept it. This one is renamed through the API and reaped all the same.
+    let idle_renamed = mk(false, &stale);
+    let router = metalcraft_agent::workshop_api::build_router("k".into());
+    let res = tower::ServiceExt::oneshot(
+        router,
+        Request::builder()
+            .method("PATCH")
+            .uri(format!("/api/v1/agents/instances/{idle_renamed}"))
+            .header("authorization", "Bearer k")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"Sunday prep"}"#))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.status(), axum::http::StatusCode::OK);
+    let mut renamed = metalcraft_agent::agent_instance::load(&idle_renamed).expect("load renamed");
+    assert_eq!(renamed.name, "Sunday prep");
+    assert!(!renamed.persistent, "a rename must not promote");
+    // The patch touched it, which is honest — someone just interacted with it. Rewind
+    // the clock so what is under test is the flag rather than the timestamp.
+    renamed.last_active_at = stale.clone();
+    renamed.save().unwrap();
 
     let report = metalcraft_agent::agent_instance::reap_ephemeral(&[idle_but_in_use.clone()]);
 
-    assert_eq!(
-        report.reaped,
-        vec![idle_unnamed.clone()],
-        "only the idle unnamed one"
-    );
+    let mut reaped = report.reaped.clone();
+    reaped.sort();
+    let mut expected = vec![idle_ephemeral.clone(), idle_renamed.clone()];
+    expected.sort();
+    assert_eq!(reaped, expected, "the idle ephemeral ones, renamed or not");
     assert!(report.failed.is_empty(), "{:?}", report.failed);
 
     let left: Vec<String> = metalcraft_agent::agent_instance::list()
         .into_iter()
         .map(|i| i.id)
         .collect();
-    assert!(!left.contains(&idle_unnamed));
+    assert!(!left.contains(&idle_ephemeral));
     assert!(
-        left.contains(&idle_named),
-        "naming an agent is what keeps it"
+        !left.contains(&idle_renamed),
+        "a name buys an agent nothing — `persistent` is what keeps it"
     );
     assert!(
-        left.contains(&fresh_unnamed),
+        left.contains(&idle_kept),
+        "an agent marked persistent is kept"
+    );
+    assert!(
+        left.contains(&fresh_ephemeral),
         "a recently used agent is not idle"
     );
     assert!(

@@ -112,7 +112,7 @@ fn presets_resolve_and_instances_group_conversations() {
 
     // ── instances ────────────────────────────────────────────────────────────
     let mut chat = AgentInstance::new(&amy, InstanceOrigin::Workshop);
-    assert!(!chat.persistent, "a chat agent is disposable until named");
+    assert!(!chat.persistent, "a chat agent is disposable until kept");
     chat.name = "Sunday prep".into();
     chat.persistent = true;
     chat.save().expect("save instance");

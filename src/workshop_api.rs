@@ -1916,9 +1916,12 @@ async fn patch_agent_instance(
         Err(e) => return err_json(StatusCode::NOT_FOUND, e),
     };
     if let Some(name) = req.name {
-        // Naming an agent is what keeps it — the promotion the UI needs one click for.
+        // A rename is a rename. It used to set `persistent` too, so the one gesture
+        // for "call it something I recognise" silently also changed how long the pod
+        // keeps it — a lifetime change nobody asked for, made from a text field that
+        // says nothing about lifetimes. Whether an agent is kept is `persistent`, and
+        // it is patched on purpose.
         instance.name = name;
-        instance.persistent = true;
     }
     if let Some(p) = req.persistent {
         instance.persistent = p;
@@ -4376,10 +4379,12 @@ async fn post_create_chat(
         );
     }
 
-    // Naming an agent is what keeps it: an unnamed chat instance is disposable.
+    // A name for the agent this chat runs as — and only a name. This may be an agent
+    // that already existed (`instance_id`), so promoting it here would change the
+    // lifetime of something the caller only meant to label. It is protected anyway
+    // while this conversation exists: the reaper keeps any agent a transcript points at.
     if let Some(name) = &req.name {
         instance.name = name.clone();
-        instance.persistent = true;
     }
     instance.touch();
     if let Err(e) = instance.save() {

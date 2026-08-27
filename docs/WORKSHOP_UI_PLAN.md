@@ -151,8 +151,9 @@ template being edited.
 
 **Ephemeral agents should be invisible until they aren't.** Every new chat mints an
 instance, so an unfiltered list is one row per chat ever started — noise. Show
-persistent agents by default; "show all" reveals the rest. Naming an agent is the
-action that promotes it, and that should be one click from the chat header.
+persistent agents by default; "show all" reveals the rest. Promotion is `persistent`
+and it is set on purpose — renaming an agent is a label, not a lifetime, and the two
+were the same gesture for long enough to be worth saying.
 
 **A channel-bound agent needs a badge.** `origin: {kind: "gateway", channel}` means
 messages arrive without anyone watching. That agent is doing things on its own and the

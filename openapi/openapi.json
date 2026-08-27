@@ -3469,7 +3469,7 @@
           },
           "persistent": {
             "type": "boolean",
-            "description": "Ephemeral instances recall against the preset but never accrue a durable\nmemory, and are reaped after a TTL. Naming one makes it persistent."
+            "description": "Ephemeral instances recall against the preset but never accrue a durable\nmemory, and are reaped after a TTL once nothing points at them. Set on purpose\n— by an explicit create, by a channel or flow binding, or by patching this\nfield. Renaming an agent does **not** set it: a label is not a lifetime."
           },
           "persona": {
             "type": "string",

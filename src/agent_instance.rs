@@ -70,7 +70,9 @@ pub struct AgentInstance {
     #[serde(default)]
     pub origin: InstanceOrigin,
     /// Ephemeral instances recall against the preset but never accrue a durable
-    /// memory, and are reaped after a TTL. Naming one makes it persistent.
+    /// memory, and are reaped after a TTL once nothing points at them. Set on purpose
+    /// — by an explicit create, by a channel or flow binding, or by patching this
+    /// field. Renaming an agent does **not** set it: a label is not a lifetime.
     #[serde(default)]
     pub persistent: bool,
     /// Set when the agent pack that provided this agent's preset withdrew it — on
@@ -207,15 +209,16 @@ pub fn delete(id: &str) -> Result<(), String> {
     std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to delete {}: {e}", dir.display()))
 }
 
-/// How long an unnamed agent survives with nothing happening in it.
+/// How long an ephemeral agent survives with nothing happening in it.
 ///
 /// Every chat mints an instance, so without a bound the directory grows by one entry
 /// per conversation ever started — and [`list`] parses all of them on every inbound
 /// gateway message, so the cost lands on the latency of answering a text.
 ///
 /// Seven days is chosen to be longer than "I'll come back to this tomorrow" and
-/// shorter than "this is clearly abandoned". Naming an agent makes it persistent and
-/// exempt; that is the whole promotion story.
+/// shorter than "this is clearly abandoned". What survives it is [`AgentInstance::
+/// persistent`] — and, in practice, anything a conversation still points at, which is
+/// every agent anyone has actually said something to.
 pub const EPHEMERAL_TTL_DAYS: i64 = 7;
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -226,7 +229,7 @@ pub struct ReapReport {
     pub failed: Vec<(String, String)>,
 }
 
-/// Remove unnamed agents that have been idle past the TTL.
+/// Remove ephemeral agents that have been idle past the TTL.
 ///
 /// Only `persistent == false` instances are eligible, and only those with no
 /// conversations left pointing at them — a transcript someone can still open is a

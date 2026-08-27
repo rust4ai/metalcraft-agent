@@ -467,12 +467,13 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     Ok(())
 }
 
-/// Remove unnamed agents nobody has touched in a week.
+/// Remove ephemeral agents nobody has touched in a week.
 ///
 /// Every chat mints an instance, so without this the directory grows by one entry per
 /// conversation ever started — and `agent_instance::list()` parses all of them on
 /// every inbound gateway message, which puts the cost on the latency of answering a
-/// text. Named agents are exempt; naming one is the act that says "keep this".
+/// text. Persistent agents are exempt, and so is any agent a conversation still points
+/// at — which is every agent anyone has actually used.
 ///
 /// Hourly rather than every tick: the poll runs every 30s and this walks the whole
 /// instance directory, which is exactly the work being economised.
@@ -499,7 +500,7 @@ fn reap_idle_agents() {
     let report = crate::agent_instance::reap_ephemeral(&live);
     if !report.reaped.is_empty() {
         log::info!(
-            "reaped {} idle unnamed agent(s) after {} days",
+            "reaped {} idle ephemeral agent(s) after {} days",
             report.reaped.len(),
             crate::agent_instance::EPHEMERAL_TTL_DAYS
         );
