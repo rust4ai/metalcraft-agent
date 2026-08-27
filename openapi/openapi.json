@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.35.0"
+    "version": "0.36.0"
   },
   "paths": {
     "/api/v1/agent-packs": {
@@ -837,6 +837,43 @@
       }
     },
     "/api/v1/agents/instances/{id}/conversations": {
+      "get": {
+        "tags": [
+          "agent-instances"
+        ],
+        "summary": "Every conversation this agent has had, newest activity first.",
+        "description": "The same list `GET …/instances/{id}` embeds, on its own route — a session list\nreloads whenever a conversation changes, and it has no use for the agent's\nmemory or its schedules, which that endpoint also pays to assemble.",
+        "operationId": "list_instance_conversations",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ChatSummary"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent"
+          }
+        }
+      },
       "post": {
         "tags": [
           "agent-instances"
@@ -1352,42 +1389,6 @@
         }
       }
     },
-    "/api/v1/chats/{id}/clear": {
-      "post": {
-        "tags": [
-          "chats"
-        ],
-        "summary": "Drop this chat's conversation but keep the chat — `/clear`.",
-        "description": "The chat row, its persona and its model survive; only the message history\ngoes. Distinct from `DELETE /chats/{id}`, which removes the chat itself.",
-        "operationId": "post_chat_clear",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Chat id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ChatContext"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The chat is mid-turn"
-          }
-        }
-      }
-    },
     "/api/v1/chats/{id}/compact": {
       "post": {
         "tags": [
@@ -1524,6 +1525,42 @@
         }
       }
     },
+    "/api/v1/chats/{id}/reset": {
+      "post": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "End this conversation's context without ending the conversation — `/reset`.",
+        "description": "The agent starts its next turn from nothing, and the transcript gains a\ndivider where that happened. Nothing is deleted: this used to be `/clear`,\nwhich dropped the history outright because the transcript and the context were\nthe same list and there was nowhere else for it to live. `DELETE /chats/{id}`\nis still how a conversation actually goes away.\n\nRefuses mid-turn, like compaction: pulling the context out from under a\nrunning turn is not a failure mode worth having.",
+        "operationId": "post_chat_reset",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatContext"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The chat is mid-turn"
+          }
+        }
+      }
+    },
     "/api/v1/chats/{id}/turn": {
       "post": {
         "tags": [
@@ -1562,6 +1599,19 @@
                 }
               }
             }
+          },
+          "202": {
+            "description": "A turn was already running: the message is queued and will run next. Its frames arrive on `GET /chats/{id}/events`, not on this response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatQueued"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such chat"
           }
         }
       }
@@ -1963,6 +2013,38 @@
         }
       }
     },
+    "/api/v1/flows/validate": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Check a flow graph without persisting it.",
+        "description": "`PUT /flows/{id}` already validates before saving and is still the authority —\nthis exists so an editor can say what is wrong *while someone is typing*,\nwhich is the only time the answer can still change what they do. Same\n`metalcraft_flows::validate` behind both, so the two can never disagree.\n\nNot a 400: an invalid graph is the expected answer to this question, not a bad\nrequest. The status says the check ran; the body says what it found.",
+        "operationId": "post_validate_flow",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SavedFlow"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowValidation"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/flows/{id}": {
       "get": {
         "tags": [
@@ -1982,11 +2064,11 @@
         ],
         "responses": {
           "200": {
-            "description": "The saved flow (metalcraft-flows SavedFlow)",
+            "description": "The saved flow, graph included",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/SavedFlow"
                 }
               }
             }
@@ -2023,7 +2105,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object"
+                "$ref": "#/components/schemas/SavedFlow"
               }
             }
           },
@@ -2031,7 +2113,24 @@
         },
         "responses": {
           "200": {
-            "description": "Saved"
+            "description": "Saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedFlow"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The graph is invalid; the body lists why",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -2238,370 +2337,6 @@
                 }
               }
             }
-          }
-        }
-      }
-    },
-    "/api/v1/flows/{id}/schedules": {
-      "get": {
-        "tags": [
-          "flows"
-        ],
-        "operationId": "get_flow_schedules",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Flow id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Effective schedules (array of FlowScheduleSpec)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
-        "tags": [
-          "flows"
-        ],
-        "operationId": "put_flow_schedules",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Flow id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Saved schedules",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "flows"
-        ],
-        "operationId": "post_flow_schedule",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Flow id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Schedule added; returns the full list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "A schedule with that id already exists",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/flows/{id}/schedules/preview": {
-      "get": {
-        "tags": [
-          "flows"
-        ],
-        "operationId": "get_flow_schedules_preview",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Flow id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Upcoming fire times per schedule",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/SchedulePreview"
-                  }
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/flows/{id}/schedules/{sid}": {
-      "delete": {
-        "tags": [
-          "flows"
-        ],
-        "operationId": "delete_flow_schedule",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Flow id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "sid",
-            "in": "path",
-            "description": "Schedule id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Removed; returns the remaining list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/flows/{id}/schedules/{sid}/arm": {
-      "post": {
-        "tags": [
-          "flows"
-        ],
-        "operationId": "post_arm_schedule",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Flow id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "sid",
-            "in": "path",
-            "description": "Schedule id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ArmScheduleRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "The agent this schedule now runs as",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentInstance"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "flows"
-        ],
-        "operationId": "delete_arm_schedule",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Flow id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "sid",
-            "in": "path",
-            "description": "Schedule id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Disarmed; the agent and its memory are kept"
           }
         }
       }
@@ -3206,6 +2941,270 @@
         }
       }
     },
+    "/api/v1/scheduled-flows": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "`GET /api/v1/scheduled-flows` — everything this pod will do on its own.",
+        "description": "The complete answer: nothing else fires a flow on a timer. An empty list means\nthis pod does nothing unless somebody asks it to.",
+        "operationId": "list_scheduled_flows",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "query",
+            "description": "Only schedules of this flow.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "instance_id",
+            "in": "query",
+            "description": "Only schedules armed to this agent.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scheduled flows on this pod",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledFlowList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "`POST /api/v1/scheduled-flows` — arm a flow.",
+        "description": "This is the consent point: it creates the schedule **and** the agent that will\nrun it, since \"run this while nobody is watching\" is one decision rather than\ntwo. Schedules of one flow share an agent unless `instance_id` says\notherwise, so the evening run remembers the morning one.",
+        "operationId": "post_scheduled_flow",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateScheduledFlowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Armed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledFlowRow"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad trigger, or a persona outside the flow's roster",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/scheduled-flows/preview": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "`POST /api/v1/scheduled-flows/preview` — when *would* this fire?",
+        "description": "Takes an unsaved spec so an editor can answer the question before committing to\nit. An empty `next_runs` on a cron trigger means this pod cannot parse it — the\nthing a person most needs to know before saving.",
+        "operationId": "post_schedule_preview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewScheduleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchedulePreview"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/scheduled-flows/{id}": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "get_scheduled_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Scheduled flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledFlowRow"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "flows"
+        ],
+        "operationId": "put_scheduled_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Scheduled flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateScheduledFlowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledFlowRow"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "`DELETE /api/v1/scheduled-flows/{id}` — disarm.",
+        "description": "**The agent and everything it remembers are kept.** Disarming is \"stop running\nthis on a timer\", not \"destroy the thing that was running it\", and a client\nshould not imply otherwise.",
+        "operationId": "delete_scheduled_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Scheduled flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Disarmed; the agent and its memory are kept"
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/scheduled-tasks": {
       "get": {
         "tags": [
@@ -3466,10 +3465,6 @@
               "null"
             ],
             "description": "Set when the agent pack that provided this agent's preset withdrew it — on\nupdate or on a forced uninstall. The agent keeps its memory and its\nconversations and goes on working against a frozen copy of the preset; this\nrecords what happened, so a UI can say so rather than presenting a\npack-provided agent that is quietly no longer pack-provided."
-          },
-          "persistent": {
-            "type": "boolean",
-            "description": "Ephemeral instances recall against the preset but never accrue a durable\nmemory, and are reaped after a TTL once nothing points at them. Set on purpose\n— by an explicit create, by a channel or flow binding, or by patching this\nfield. Renaming an agent does **not** set it: a label is not a lifetime."
           },
           "persona": {
             "type": "string",
@@ -3817,22 +3812,11 @@
           }
         }
       },
-      "ArmScheduleRequest": {
-        "type": "object",
-        "properties": {
-          "instance_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Attach to an existing agent instead of minting one — e.g. run the briefer as\nthe same agent you chat with."
-          }
-        }
-      },
       "ArmedSchedule": {
         "type": "object",
         "required": [
           "schedule_id",
+          "name",
           "instance_id"
         ],
         "properties": {
@@ -3844,10 +3828,15 @@
               "string",
               "null"
             ],
-            "description": "Absent if the instance was deleted out from under the binding."
+            "description": "Absent if the instance was deleted out from under it."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its label, so the arm dialog can say *which* schedule without showing an\nopaque id."
           },
           "schedule_id": {
-            "type": "string"
+            "type": "string",
+            "description": "The scheduled flow's id."
           }
         }
       },
@@ -4201,12 +4190,15 @@
           },
           {
             "type": "object",
-            "description": "The agent's user-facing reply, produced by a `say_to_user` tool call.\nIn tool-only mode this — not free-text `LlmCompleted` content — is the\nassistant's message; the workshop renders it as the reply bubble. The\nunderlying `say_to_user` tool start/finish events are suppressed so the\nreply isn't also shown as a raw tool card.",
+            "description": "The agent's user-facing message, produced by a `say_to_user` or\n`ask_user` tool call. In tool-only mode this — not free-text\n`LlmCompleted` content — is the assistant's message; the workshop renders\nit as the reply bubble. The underlying tool start/finish events are\nsuppressed so the reply isn't also shown as a raw tool card.\n\n`awaiting_reply` distinguishes the two ways a turn ends: an answer closes\nthe exchange, a question leaves it open and the client should invite a\nresponse (and may render `options` as tappable choices). Both are omitted\nwhen unset, so a client written before `ask_user` existed still sees a\nperfectly ordinary reply — which is the correct degradation, since the\nquestion is in the text either way.",
             "required": [
               "content",
               "kind"
             ],
             "properties": {
+              "awaiting_reply": {
+                "type": "boolean"
+              },
               "content": {
                 "type": "string"
               },
@@ -4215,6 +4207,12 @@
                 "enum": [
                   "reply"
                 ]
+              },
+              "options": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               }
             }
           },
@@ -4233,6 +4231,71 @@
                 ]
               },
               "phase": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A message was accepted while a turn was already running, and is waiting\nits turn rather than starting one.\n\nEmitted on the chat's live bus rather than on the sending request, which\nhas already been answered with 202 — the point of queueing is that the\nsender does not hold a connection open waiting. `position` is 1 for the\nnext message to run.",
+            "required": [
+              "message",
+              "position",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "queued"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "position": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "This turn's plan, as `update_plan` wrote it. Sent on every change,\nincluding the empty list a new turn starts with, so a client renders the\nplan as it stands rather than accumulating every version of it.",
+            "required": [
+              "steps",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "plan"
+                ]
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PlanStep"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A queued message joined the turn that was already running, rather than\nwaiting for it to end. The client should stop showing it as pending.",
+            "required": [
+              "message",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "injected"
+                ]
+              },
+              "message": {
                 "type": "string"
               }
             }
@@ -4286,6 +4349,29 @@
               },
               "retryable": {
                 "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The conversation's context ended — see [`ChatMessageWire::Reset`].\n\nNot part of a turn's lifecycle: it arrives on its own, usually with nobody\nhaving typed anything. Without it a client watching a flow's agent would\nsee the 3am firing start from nothing and have no way to say why, since\nthe divider it should draw is only in the transcript it loaded hours ago.",
+            "required": [
+              "at",
+              "reason",
+              "kind"
+            ],
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "reset"
+                ]
+              },
+              "reason": {
+                "type": "string"
               }
             }
           }
@@ -4426,9 +4512,51 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "A conversation boundary: everything above it is history the model no\nlonger sees.\n\nThe only wire message with no `AgentMessage` counterpart, and that is the\nwhole point of it. A reset ends a *context*, not a session — the transcript\nkeeps everything and the context restarts here.\n\nDistinct from the other way a context gets cleared, which is a *new\nsession* under the same agent (what a gateway conversation does after a\nquiet gap). That one leaves no divider because there is nothing to divide:\nit is a different conversation. This is for a clean slate inside the\nconversation you are already in. `reason` is short free text shown on the\ndivider, so a transcript can answer \"why does my history stop here\".",
+            "required": [
+              "at",
+              "reason",
+              "role"
+            ],
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "reset"
+                ]
+              }
+            }
           }
         ],
         "description": "Wire form for `metalcraft::AgentMessage` — the in-memory enum isn't\n`Serialize`, so we convert before responding. Also used as the on-disk\nformat for persisted chats, so it derives `Deserialize` too."
+      },
+      "ChatQueued": {
+        "type": "object",
+        "description": "The answer to a turn request that arrived mid-turn: taken, not started.",
+        "required": [
+          "queued",
+          "position"
+        ],
+        "properties": {
+          "position": {
+            "type": "integer",
+            "description": "Place in line, 1 for the next message to run.",
+            "minimum": 0
+          },
+          "queued": {
+            "type": "boolean",
+            "description": "Always true. Present so a client can branch on the body rather than on\nthe status code, which is easy to lose through a wrapper."
+          }
+        }
       },
       "ChatSummary": {
         "type": "object",
@@ -4459,9 +4587,24 @@
           "persona_slug": {
             "type": "string"
           },
+          "preview": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The opening line, trimmed — what makes a row identifiable as *this*\nconversation rather than a timestamp beside an id."
+          },
           "turn_count": {
             "type": "integer",
+            "description": "How many times the user spoke. The unit a person counts a conversation in\n— not messages, which counts the agent's tool chatter, and not the\ntranscript length, which now also counts reset dividers.",
             "minimum": 0
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Last activity, from the chat file's mtime — [`persist_chat`] rewrites it\nafter every turn, so it is the clock the pod already trusts for staleness\n(see [`gateway_session_is_stale`]). `None` when the file cannot be read.\n\nA list sorted by `created_at` puts a conversation someone has been in all\nday below one they opened this morning and abandoned, which is the wrong\nway round for the question a session list answers."
           }
         }
       },
@@ -4633,7 +4776,7 @@
               "string",
               "null"
             ],
-            "description": "Name the agent, which also makes it persistent."
+            "description": "Name the agent. A label only — nothing about an agent's lifetime follows\nfrom it, and nothing deletes an agent on a timer."
           },
           "persona_slug": {
             "type": [
@@ -4658,6 +4801,48 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "CreateScheduledFlowRequest": {
+        "type": "object",
+        "required": [
+          "flow_id",
+          "schedule"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Start firing immediately. Defaults to `true` — creating a schedule is the\nact of asking for it; a client staging one passes `false`."
+          },
+          "flow_id": {
+            "type": "string",
+            "description": "The flow to run."
+          },
+          "from_suggestion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The author's suggestion key, when the person accepted a suggested schedule\nfrom a pack or the registry."
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A hand-chosen id instead of a generated one. Rejected on collision: a create\nmust never overwrite an existing schedule."
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Attach to an existing agent instead of minting one — e.g. run the briefer as\nthe same agent you chat with."
+          },
+          "schedule": {
+            "type": "object",
+            "description": "When to run it: `{ \"type\": \"cron\", \"cron\": \"…\", \"timezone\": \"…\" }`."
           }
         }
       },
@@ -4890,7 +5075,7 @@
             "items": {
               "$ref": "#/components/schemas/ArmedSchedule"
             },
-            "description": "`schedule id -> agent instance`, for schedules that have been armed."
+            "description": "The schedules of this flow that are armed to an agent."
           },
           "bound": {
             "type": "boolean",
@@ -4916,6 +5101,67 @@
           }
         }
       },
+      "FlowDefinition": {
+        "type": "object",
+        "description": "A graph: nodes and the directed edges between them.",
+        "required": [
+          "nodes",
+          "edges"
+        ],
+        "properties": {
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowEdge"
+            },
+            "description": "All directed arcs in the graph."
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowNode"
+            },
+            "description": "All vertices in the graph."
+          }
+        }
+      },
+      "FlowEdge": {
+        "type": "object",
+        "description": "A directed arc connecting two nodes in a [`FlowDefinition`].",
+        "required": [
+          "id",
+          "source",
+          "target"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier within the enclosing [`FlowDefinition`]."
+          },
+          "source": {
+            "type": "string",
+            "description": "The id of the source [`FlowNode`]."
+          },
+          "source_handle": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional named output port on the source node (multi-output nodes\nlike [`CoreNodeType::Branch`])."
+          },
+          "target": {
+            "type": "string",
+            "description": "The id of the target [`FlowNode`]."
+          },
+          "target_handle": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional named input port on the target node."
+          }
+        }
+      },
       "FlowList": {
         "type": "object",
         "required": [
@@ -4932,30 +5178,26 @@
       },
       "FlowListItem": {
         "type": "object",
-        "description": "One flow, resolved for display.\n\nAssembled here rather than served as a bare `SavedFlow` because the three facts\na client needs about a flow — *which agent does it run as*, *is it armed*, *when\ndoes it fire next* — live in three different places: the flow file,\n`flow_bindings.json`, and a cron computation. A client that had to make four\ncalls per flow to answer \"what is this automation\" would make none of them.",
+        "description": "One flow, resolved for display.\n\nA flow is *what work is this*: the graph, the agent preset it runs as, and how\nmany schedules point at it. **When** it runs is not here — that is\n`GET /api/v1/scheduled-flows`, one call for the whole pod, which a client joins\nagainst this listing by `flow_id`.",
         "required": [
           "id",
           "name",
-          "enabled",
           "node_count",
           "created_at",
           "updated_at",
           "v2",
           "preset",
-          "armed",
-          "schedules"
+          "scheduled_count",
+          "enabled_count"
         ],
         "properties": {
-          "armed": {
-            "type": "boolean",
-            "description": "True when any schedule has been armed, i.e. this flow has an agent."
-          },
           "created_at": {
             "type": "string"
           },
-          "enabled": {
-            "type": "boolean",
-            "description": "The flow-wide master switch. **Disabled flows are listed too**: agent packs\nship their flows disabled, so an unarmed flow is the normal case and the one\nan arm dialog exists to act on. Filtering to enabled here would hide exactly\nthe flows a client needs to show."
+          "enabled_count": {
+            "type": "integer",
+            "description": "Of `scheduled_count`, how many are enabled. Zero means nothing fires.",
+            "minimum": 0
           },
           "id": {
             "type": "string"
@@ -4971,11 +5213,10 @@
             "type": "string",
             "description": "The preset this flow runs as. Always populated — an unbound flow resolves to\nthe default agent, which is what it effectively already was."
           },
-          "schedules": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/FlowListSchedule"
-            }
+          "scheduled_count": {
+            "type": "integer",
+            "description": "How many schedules point at this flow, of which how many are enabled.\n\nEnough for a listing to say \"runs twice a day\" or \"never runs\" without\nfetching every schedule; a client that wants the triggers themselves reads\n`/scheduled-flows`.",
+            "minimum": 0
           },
           "updated_at": {
             "type": "string"
@@ -4986,47 +5227,42 @@
           }
         }
       },
-      "FlowListSchedule": {
-        "allOf": [
-          {
-            "type": "object",
-            "description": "The schedule exactly as stored — the same shape `PUT …/schedules` accepts, so\nan editor can round-trip it without a second representation of the same thing."
-          },
-          {
-            "type": "object",
-            "required": [
-              "description"
-            ],
-            "properties": {
-              "description": {
-                "type": "string",
-                "description": "Human-readable trigger: `\"Every 5 minute(s)\"`, ``\"Cron `0 0 8 * * *` (America/Detroit)\"``."
-              },
-              "instance_id": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "The agent this schedule was armed with. An instance id is pod-local and must\nnever be *published* (`flow_bindings`' module docs); this is the pod's own API\nrather than an export path, and \"which agent runs this\" is the question the\nlist exists to answer."
-              },
-              "instance_name": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "Absent if the instance was deleted out from under the binding — the same\nsemantics as [`ArmedSchedule`]."
-              },
-              "next_fire_at": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "Next projected fire time, or absent for a manual (or invalid) trigger."
-              }
-            }
-          }
+      "FlowNode": {
+        "type": "object",
+        "description": "A single vertex in a [`FlowDefinition`].",
+        "required": [
+          "id",
+          "node_type",
+          "data"
         ],
-        "description": "One schedule of a listed flow: the stored spec, plus what it is bound to and\nwhen it fires next."
+        "properties": {
+          "data": {
+            "description": "Free-form per-node configuration. Schema depends on `node_type`."
+          },
+          "id": {
+            "type": "string",
+            "description": "Unique identifier within the enclosing [`FlowDefinition`]."
+          },
+          "node_type": {
+            "$ref": "#/components/schemas/FlowNodeType",
+            "description": "The node kind. See [`FlowNodeType`]."
+          },
+          "position": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "description": "`[x, y]` coordinates for visual editors. Defaults to `[0.0, 0.0]`."
+          }
+        }
+      },
+      "FlowNodeType": {
+        "type": "string",
+        "description": "A core node type (entry, prompt, conditional, branch, set_variable, tool, http, sub_agent, approval, wait, foreach, end, branch_tool) or a vendor-namespaced custom type such as `slack:send_message`. Custom types are opaque and must round-trip unchanged.",
+        "examples": [
+          "prompt"
+        ]
       },
       "FlowPersonaCheck": {
         "type": "object",
@@ -5110,11 +5346,15 @@
             "description": "Working directory to resume in."
           },
           "flow": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "description": "Snapshot of the flow definition at pause time, so resume routes against\nthe graph the run actually paused in — not a since-edited on-disk flow.\nAbsent (`None`) on legacy records; resume then falls back to loading the\ncurrent flow."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SavedFlow",
+                "description": "Snapshot of the flow definition at pause time, so resume routes against\nthe graph the run actually paused in — not a since-edited on-disk flow.\nAbsent (`None`) on legacy records; resume then falls back to loading the\ncurrent flow."
+              }
+            ]
           },
           "flow_id": {
             "type": "string",
@@ -5301,6 +5541,27 @@
           },
           "slug": {
             "type": "string"
+          }
+        }
+      },
+      "FlowValidation": {
+        "type": "object",
+        "description": "What is wrong with a flow graph, without saving it.",
+        "required": [
+          "valid",
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "One sentence per problem, in the validator's own words."
+          },
+          "valid": {
+            "type": "boolean",
+            "description": "True when the graph would save. An editor enables its save button on this\nrather than on an empty `errors`, so a future non-fatal warning does not\nsilently start blocking saves."
           }
         }
       },
@@ -5699,6 +5960,13 @@
           },
           "flow": {
             "$ref": "#/components/schemas/InstalledFlow"
+          },
+          "suggested_schedules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Schedules the author suggests for this flow. **Nothing was scheduled** —\ninstalling a flow starts no background work, which is now a property of the\nformat rather than a flag this path has to remember to clear. A client\noffers these; a person accepting one creates the schedule."
           }
         }
       },
@@ -5728,14 +5996,9 @@
         "required": [
           "id",
           "name",
-          "node_count",
-          "enabled"
+          "node_count"
         ],
         "properties": {
-          "enabled": {
-            "type": "boolean",
-            "description": "Whether the flow is enabled for scheduling. Registry flows install disabled."
-          },
           "id": {
             "type": "string"
           },
@@ -5769,9 +6032,9 @@
               "scheduled": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/components/schemas/ScheduledFlowRef"
+                  "$ref": "#/components/schemas/ScheduledFlowRow"
                 },
-                "description": "What this agent is scheduled to do — the flow schedules armed to it. A pod\ncould not previously answer that question about a background agent."
+                "description": "What this agent is scheduled to do — the schedules armed to it. A pod\ncould not previously answer that question about a background agent."
               }
             }
           }
@@ -5786,7 +6049,7 @@
           "scheduled": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ScheduledFlowRef"
+              "$ref": "#/components/schemas/ScheduledFlowRow"
             }
           }
         }
@@ -5901,6 +6164,7 @@
           },
           {
             "type": "object",
+            "description": "A conversation with one person on one channel.\n\nKeyed by sender, not just by channel: an agent's memory is the continuity\nit exists to have, and one agent per *number* meant everything it learned\nabout everyone who texted in went into a single shared memory. `sender` is\nthe normalized key (see `gateway_sender_key`), not the raw `From` — the\nsame person must not get a second agent because their number arrived\nformatted differently.\n\n`None` on records written before this was per-sender; they keep working as\nthe channel's catch-all agent until they age out.",
             "required": [
               "channel",
               "kind"
@@ -5913,6 +6177,12 @@
                 "type": "string",
                 "enum": [
                   "gateway"
+                ]
+              },
+              "sender": {
+                "type": [
+                  "string",
+                  "null"
                 ]
               }
             }
@@ -5936,7 +6206,7 @@
             }
           }
         ],
-        "description": "Where an instance came from. Drives the default lifetime: a workshop chat is\ndisposable, a channel-bound agent is not."
+        "description": "Where an instance came from.\n\nProvenance only, since agents are never deleted on a timer — it answers \"why\ndoes this exist\" (and, for `Gateway`, *who* it belongs to), not \"how long does\nit last\"."
       },
       "IntegrationDetail": {
         "type": "object",
@@ -6519,6 +6789,51 @@
           }
         }
       },
+      "PackRequirement": {
+        "type": "object",
+        "description": "A single integration-pack dependency.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "content_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional integrity lock: the exact canonical content hash (64 lowercase\nhex chars) the author resolved against. When set, a host may refuse to\ninstall a pack whose content hash differs."
+          },
+          "id": {
+            "type": "string",
+            "description": "Pack id / slug — the stable identity. Must match\n`^[a-z0-9][a-z0-9_-]{0,63}$`."
+          },
+          "optional": {
+            "type": "boolean",
+            "description": "When `true`, an unmet requirement is a warning rather than a hard failure —\nthe flow is expected to degrade gracefully."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable reason, surfaced in an install/enable prompt."
+          },
+          "resolved_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The concrete version the authoring environment resolved to, recorded as a\nreproducibility hint (a lock). Advisory; hosts may re-resolve within\n[`version`](Self::version)."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Semver range the pack must satisfy, e.g. `\">=1.2.0, <2.0.0\"`. `None` means\nany installed version is acceptable."
+          }
+        }
+      },
       "Parent": {
         "type": "object",
         "required": [
@@ -6546,12 +6861,6 @@
           "name": {
             "type": [
               "string",
-              "null"
-            ]
-          },
-          "persistent": {
-            "type": [
-              "boolean",
               "null"
             ]
           },
@@ -6719,6 +7028,28 @@
           }
         }
       },
+      "PlanStep": {
+        "type": "object",
+        "required": [
+          "step"
+        ],
+        "properties": {
+          "persona": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The persona this step is meant for. Advisory — the gate never checks that\nthe delegation actually went there, because a plan that reroutes mid-turn\nis a plan working as intended."
+          },
+          "status": {
+            "$ref": "#/components/schemas/StepStatus"
+          },
+          "step": {
+            "type": "string",
+            "description": "What this step does, in one line, concrete enough to tell whether it happened."
+          }
+        }
+      },
       "PresetDetail": {
         "type": "object",
         "description": "A preset with its roster resolved against what this pod actually has.\n\nTyped rather than assembled ad hoc so it reaches `openapi.json`: both Workshop\nfrontends generate their client types from the spec, and a response described only\nby a prose `description` gives them nothing to generate.",
@@ -6798,6 +7129,18 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "PreviewScheduleRequest": {
+        "type": "object",
+        "required": [
+          "schedule"
+        ],
+        "properties": {
+          "schedule": {
+            "type": "object",
+            "description": "The trigger to project. Need not correspond to anything saved."
           }
         }
       },
@@ -7013,6 +7356,26 @@
           },
           "url": {
             "type": "string"
+          }
+        }
+      },
+      "Requires": {
+        "type": "object",
+        "description": "The dependencies a flow declares.",
+        "properties": {
+          "packs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackRequirement"
+            },
+            "description": "Integration packs this flow needs, each with an optional version/hash\ncontract."
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Flat tool names the flow invokes (the real API surface — `tool` nodes bind\nby bare name). Auto-derived by [`derive_requires`]."
           }
         }
       },
@@ -7253,56 +7616,130 @@
           }
         }
       },
+      "SavedFlow": {
+        "type": "object",
+        "description": "A persisted flow document — what a `.json` file on disk contains.\n\nA flow describes **what work is this**, and nothing else. When it runs, as\nwhom, and on which agent live in [`ScheduledFlow`](crate::scheduled::ScheduledFlow)\ndocuments that point at it by id. A flow with no `ScheduledFlow` pointing at\nit cannot fire — which is what makes \"installing something never starts\nbackground work\" a property of the format rather than a rule every install\npath has to remember.",
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "updated_at",
+          "flow"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "ISO-8601 / RFC-3339 creation timestamp."
+          },
+          "flow": {
+            "$ref": "#/components/schemas/FlowDefinition",
+            "description": "The graph definition."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable identifier. Must match `^[A-Za-z0-9-]{1,64}$`."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable label."
+          },
+          "requires": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Requires",
+                "description": "Declared integration-pack / tool dependencies. Absent on legacy documents;\nsee [`crate::requires`]."
+              }
+            ]
+          },
+          "spec_version": {
+            "type": "string",
+            "description": "Spec version this document conforms to. Defaults to `\"1\"` when absent."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "ISO-8601 / RFC-3339 last-modified timestamp."
+          }
+        }
+      },
       "SchedulePreview": {
         "type": "object",
-        "description": "One upcoming-fire preview for a schedule.",
+        "description": "Projected firing times for a trigger — `description` plus the next few runs.",
         "required": [
-          "schedule_id",
           "description",
           "next_runs"
         ],
         "properties": {
           "description": {
             "type": "string",
-            "description": "Human-readable description of the cadence."
+            "description": "Human-readable trigger, e.g. ``\"Cron `0 0 8 * * *` (America/Detroit)\"``."
           },
           "next_runs": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Up to a few upcoming fire times, RFC-3339. Empty for `manual`."
-          },
-          "schedule_id": {
-            "type": "string",
-            "description": "The schedule's id."
+            "description": "Next few firing times as RFC-3339 strings. Empty for a manual trigger, and\nfor a cron this pod cannot parse — which is the visible symptom of a\nschedule that will never fire."
           }
         }
       },
-      "ScheduledFlowRef": {
+      "ScheduledFlowList": {
         "type": "object",
         "required": [
-          "flow_id",
-          "schedule_ids"
+          "scheduled"
         ],
         "properties": {
-          "flow_id": {
-            "type": "string"
-          },
-          "flow_name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Absent when the flow file is gone but the binding is not — worth surfacing\nrather than hiding, since it means a stale binding."
-          },
-          "schedule_ids": {
+          "scheduled": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ScheduledFlowRow"
             }
           }
         }
+      },
+      "ScheduledFlowRow": {
+        "allOf": [
+          {
+            "type": "object",
+            "description": "The artifact exactly as stored, so an editor can round-trip it without a\nsecond representation of the same thing."
+          },
+          {
+            "type": "object",
+            "required": [
+              "description"
+            ],
+            "properties": {
+              "description": {
+                "type": "string",
+                "description": "Human-readable trigger: ``\"Cron `0 0 8 * * *` (America/Detroit)\"``."
+              },
+              "flow_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Name of the flow it runs. **Absent when that flow no longer exists** — a\nschedule that can never fire, which is worth showing as broken rather than\nquietly listing as fine."
+              },
+              "instance_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Name of the agent it runs as. Absent if the instance was deleted out from\nunder it."
+              },
+              "next_fire_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Next projected fire time, or absent for a manual trigger — and for a cron\nthis pod cannot parse, which is how a schedule that will never fire looks."
+              }
+            }
+          }
+        ],
+        "description": "One scheduled flow, resolved for display: the stored document plus the three\nthings a client would otherwise have to compute or fetch."
       },
       "SearchHit": {
         "type": "object",
@@ -7437,6 +7874,15 @@
           }
         }
       },
+      "StepStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "in_progress",
+          "done",
+          "skipped"
+        ]
+      },
       "TimelineEvent": {
         "type": "object",
         "required": [
@@ -7557,6 +8003,32 @@
           },
           "to_version": {
             "type": "string"
+          }
+        }
+      },
+      "UpdateScheduledFlowRequest": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Pause (`false`) or resume (`true`) without deleting. The agent and its\nmemory are untouched either way."
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Move this schedule to a different agent."
+          },
+          "schedule": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Replace the trigger and its overrides."
           }
         }
       }

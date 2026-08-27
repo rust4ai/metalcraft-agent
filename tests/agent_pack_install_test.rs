@@ -269,10 +269,15 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
 
     // ── a pack that ships flows arms exactly zero schedules ─────────────────
     //
-    // The acceptance test from AGENT_PRESETS_PLAN §5.5. The archive below declares
-    // its flow enabled *and* its schedule enabled — an author shipping exactly what
-    // they run — and the installer must land both switched off, because installing
-    // an identity must never start background work.
+    // The acceptance test from AGENT_PRESETS_PLAN §5.5. The archive below is a
+    // pre-v3 document declaring its flow enabled *and* its schedule enabled — an
+    // author shipping exactly what they run — and installing it must still leave
+    // this pod doing nothing on its own, because installing an identity must never
+    // start background work.
+    //
+    // It is now a stronger claim than "both switches landed off": there is no
+    // switch. The flow arrives with no schedule pointing at it, so there is
+    // nothing to be off.
     {
         let mut with_flow = good_files();
         with_flow.insert(
@@ -289,13 +294,10 @@ fn an_agent_pack_round_trips_and_refuses_what_it_should() {
         let saved =
             metalcraft_flows::load_flow(&metalcraft_agent::paths::flows_dir(), "sunday-prep")
                 .expect("the flow was written");
+        assert_eq!(saved.spec_version, "3", "a legacy pack flow lands migrated");
         assert!(
-            !saved.enabled,
-            "install must never arm a flow's master switch"
-        );
-        assert!(
-            saved.schedules.iter().all(|s| !s.enabled),
-            "install must never arm an individual schedule either"
+            metalcraft_agent::scheduled_flows::for_flow("sunday-prep").is_empty(),
+            "installing a pack must schedule nothing, whatever the author shipped"
         );
 
         // And it is bound to the pack's preset, which is what makes the arm dialog's

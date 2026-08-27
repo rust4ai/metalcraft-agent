@@ -57,7 +57,6 @@ pub struct FlowRun {
     /// Absent (`None`) on legacy records; resume then falls back to loading the
     /// current flow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
     pub flow: Option<metalcraft_flows::SavedFlow>,
     /// Non-fatal warnings computed when the run started — e.g. required packs/personas
     /// that aren't installed or enabled. Surfaced in flow-debug UIs so a run that can't

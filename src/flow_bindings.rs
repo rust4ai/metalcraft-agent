@@ -1,4 +1,4 @@
-//! Which agent a flow runs as.
+//! Which **preset** a flow belongs to.
 //!
 //! A flow's `prompt` / `branch` / `sub_agent` nodes each name a persona, and nothing
 //! constrained *which* — a flow could reach any persona on the pod, which is the one
@@ -6,24 +6,21 @@
 //! to an [agent preset](crate::agent_preset) closes that: a flow may only name
 //! personas from its preset's roster.
 //!
-//! Arming a schedule then mints a **persistent agent instance**, and every firing is
-//! a conversation inside it — so scheduled work accumulates memory across runs. A
-//! morning briefer can notice it said the same thing yesterday.
-//!
 //! ## Why this lives beside the flow rather than inside it
 //!
-//! `SavedFlow` and `FlowScheduleSpec` are published types in the `metalcraft-flows`
-//! crate, so neither can gain a field from here. That is only a stopgap for `preset`
-//! (which ought to travel with a published flow — see the note in
-//! `docs/FLOWS_AND_AGENT_PRESETS_PLAN.md` §3.1). For `instance` it is *correct*: an
-//! instance id is pod-local and must never be published, or a downloaded flow would
-//! arrive carrying somebody else's agent.
+//! `SavedFlow` is a published type in the `metalcraft-flows` crate, so it cannot
+//! gain a field from here. That is a stopgap: a flow's preset ought to travel with
+//! it when published — see the note in `docs/FLOWS_AND_AGENT_PRESETS_PLAN.md` §3.1.
+//!
+//! **Arming lives in [`crate::scheduled_flows`]**, not here. Which agent runs a
+//! schedule is a property of the schedule, and now that a schedule is its own
+//! document it can simply hold the instance id. The `instances` map this file used
+//! to keep is gone; [`clear_instances`] exists only to drain it during migration.
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent_instance::{AgentInstance, InstanceOrigin};
 use crate::agent_preset::{AgentPreset, DEFAULT_PRESET};
 use crate::paths;
 
@@ -32,8 +29,15 @@ pub struct FlowBinding {
     /// The agent preset this flow belongs to. `None` resolves to the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
-    /// `schedule id -> agent instance id`. Populated by [`arm`], never by install.
-    #[serde(default)]
+    /// **Legacy**: `schedule id -> agent instance id`, from before schedules were
+    /// their own documents.
+    ///
+    /// Read once, by the migration in [`crate::scheduled_flows`], to carry each
+    /// armed agent onto the [`ScheduledFlow`](metalcraft_flows::ScheduledFlow) that
+    /// replaces it; [`clear_instances`] then empties it. Nothing writes to it, and
+    /// an empty map is not serialized, so a migrated pod's bindings file stops
+    /// mentioning it at all.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub instances: HashMap<String, String>,
 }
 
@@ -147,8 +151,13 @@ pub fn unbind(flow_id: &str) -> Result<(), String> {
     save(&b)
 }
 
-/// Every persona a flow names: the flow-level default on the entry node, each node's
-/// own override, and each schedule's.
+/// Every persona a flow names: the flow-level default on the entry node and each
+/// node's own override.
+///
+/// A *schedule* may also override the persona, but a schedule is no longer part of
+/// the flow — so that check belongs to the moment a schedule is created
+/// ([`crate::scheduled_flows::arm`]) rather than here, where it would have to guess
+/// which schedules exist.
 pub fn personas_named(flow: &metalcraft_flows::SavedFlow) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |v: Option<&str>| {
@@ -160,9 +169,6 @@ pub fn personas_named(flow: &metalcraft_flows::SavedFlow) -> Vec<String> {
     };
     for node in &flow.flow.nodes {
         push(node.data.get("persona").and_then(|v| v.as_str()));
-    }
-    for s in &flow.schedules {
-        push(s.persona.as_deref());
     }
     out
 }
@@ -188,166 +194,30 @@ pub fn check_personas(
     ))
 }
 
-/// The instance a schedule runs as, if it has been armed.
-pub fn instance_for(flow_id: &str, schedule_id: &str) -> Option<String> {
-    get(flow_id).instances.get(schedule_id).cloned()
-}
-
-/// Whether this flow has a schedule by that id — asked the same way a *reader*
-/// would ask it.
+/// Drain a flow's legacy `instances` map, keeping its preset.
 ///
-/// Pulled out of [`arm`] because the answer being wrong is a whole class of bug
-/// rather than one line. `effective_schedules` resolves three tiers: the
-/// top-level `schedules` array, else a spec synthesized from a legacy entry
-/// node, else a single manual `default`. Every read goes through it —
-/// `GET /flows`, `GET /flows/{id}/schedules`, and the daemon deciding what to
-/// fire — so validating an arm against the raw array instead meant the pod
-/// offered a schedule it would then refuse to bind, for every flow whose
-/// schedules are synthesized rather than stored.
-///
-/// Manual triggers answer `true` deliberately. Nothing fires on its own from
-/// one ([`crate::flows::parse_schedules`] drops them), so arming a manual
-/// schedule starts no background work — it names the agent a hand-run resolves
-/// to, which is the only way to say "when I run this myself, remember it".
-fn has_schedule(flow: &metalcraft_flows::SavedFlow, schedule_id: &str) -> bool {
-    flow.effective_schedules()
-        .iter()
-        .any(|s| s.id == schedule_id)
-}
-
-/// Arm a schedule: bind it to a persistent agent, minting one if needed.
-///
-/// **Arming is what creates the agent.** Installing a pack ships flows disabled, so
-/// this is the deliberate "yes, run this in the background" act — the natural moment
-/// for the instance to come into existence, and the second consent point after
-/// install.
-///
-/// Schedules of one flow share an agent by default: two crons on the same flow (the
-/// 08:00 and 18:00 case) are the same agent, so the evening run remembers the
-/// morning one. Pass `instance` to attach to an existing agent instead — running a
-/// briefer as the same agent you chat with is a reasonable thing to want.
-pub fn arm(
-    flow: &metalcraft_flows::SavedFlow,
-    schedule_id: &str,
-    instance: Option<&str>,
-) -> Result<AgentInstance, String> {
-    let preset_slug = preset_for(&flow.id);
-    let preset = AgentPreset::load(&preset_slug, &paths::agent_presets_dir())?;
-    check_personas(flow, &preset)?;
-
-    // Validated against `effective_schedules()` — the same function every *read*
-    // of this flow's schedules goes through — and not against the raw
-    // `schedules` array.
-    //
-    // The array is only the first of three tiers. A flow that predates the
-    // top-level `schedules` block has its schedule synthesized from its entry
-    // node, and a flow with neither gets a single manual `default`. Both are
-    // listed by `GET /flows` and `GET /flows/{id}/schedules`, so checking the
-    // array here meant offering a schedule and then refusing to arm it — for
-    // every legacy flow, not just the manual case.
-    //
-    // Manual triggers are deliberately armable. Nothing fires on its own from
-    // one — `flows::parse_schedules` drops them — so arming names the agent a
-    // hand-run resolves to, and nothing else. That is the only way to say "when
-    // I run this myself, remember it", which an unarmed flow cannot do.
-    if !has_schedule(flow, schedule_id) {
-        return Err(format!(
-            "flow '{}' has no schedule '{schedule_id}'",
-            flow.id
-        ));
-    }
-
+/// Called once per flow by the migration in [`crate::scheduled_flows`], after the
+/// agents it named have been written onto the schedules that replace it.
+pub fn clear_instances(flow_id: &str) -> Result<(), String> {
     let mut b = load();
-    let binding = b.flows.entry(flow.id.clone()).or_default();
-
-    // Explicit target, then another armed schedule of this flow, then a new agent.
-    let resolved = match instance {
-        Some(id) => {
-            // Arming makes an agent do work on a timer, which is the same commitment
-            // as naming it. Without this, attaching a schedule to an existing chat's
-            // agent left it ephemeral and eligible for reaping — deleting the memory
-            // the recurring run was accumulating.
-            let mut existing = crate::agent_instance::load(id)?;
-            if !existing.persistent {
-                existing.persistent = true;
-                existing.save()?;
-            }
-            existing
-        }
-        None => match binding
-            .instances
-            .values()
-            .next()
-            .and_then(|id| crate::agent_instance::load(id).ok())
-        {
-            Some(existing) => existing,
-            None => {
-                let mut i = AgentInstance::new(
-                    &preset,
-                    InstanceOrigin::Flow {
-                        flow_id: flow.id.clone(),
-                    },
-                );
-                let label = flow
-                    .schedules
-                    .iter()
-                    .find(|s| s.id == schedule_id)
-                    .and_then(|s| s.name.clone())
-                    .unwrap_or_else(|| flow.name.clone());
-                i.name = format!("{} — {label}", preset.name);
-                i.persistent = true;
-                i.save()?;
-                i
-            }
-        },
+    let Some(binding) = b.flows.get_mut(flow_id) else {
+        return Ok(());
     };
-
-    binding
-        .instances
-        .insert(schedule_id.to_string(), resolved.id.clone());
-    if binding.preset.is_none() {
-        binding.preset = Some(preset_slug);
+    if binding.instances.is_empty() {
+        return Ok(());
     }
-    save(&b)?;
-    Ok(resolved)
-}
-
-/// Disarm a schedule. **Keeps the agent and everything it remembers** — disarming is
-/// "stop running this on a timer", not "destroy the thing that was running it".
-pub fn disarm(flow_id: &str, schedule_id: &str) -> Result<(), String> {
-    let mut b = load();
-    if let Some(binding) = b.flows.get_mut(flow_id) {
-        binding.instances.remove(schedule_id);
-    }
+    binding.instances.clear();
     save(&b)
 }
 
-/// Forget a flow's bindings entirely (on flow delete).
+/// Forget a flow's binding entirely (on flow delete).
+///
+/// Its schedules are a separate matter — see
+/// [`crate::scheduled_flows::forget_flow`], which the same delete path calls.
 pub fn forget(flow_id: &str) -> Result<(), String> {
     let mut b = load();
     b.flows.remove(flow_id);
     save(&b)
-}
-
-/// Flows bound to an agent — "what is this thing scheduled to do", which a pod
-/// currently cannot answer.
-pub fn flows_for_instance(instance_id: &str) -> Vec<(String, Vec<String>)> {
-    let b = load();
-    let mut out: Vec<(String, Vec<String>)> = b
-        .flows
-        .into_iter()
-        .filter_map(|(flow_id, binding)| {
-            let schedules: Vec<String> = binding
-                .instances
-                .into_iter()
-                .filter(|(_, id)| id == instance_id)
-                .map(|(sched, _)| sched)
-                .collect();
-            (!schedules.is_empty()).then_some((flow_id, schedules))
-        })
-        .collect();
-    out.sort();
-    out
 }
 
 #[cfg(test)]
@@ -406,81 +276,14 @@ mod tests {
         check_personas(&f, &p).expect("both personas are in the roster");
     }
 
-    // ── has_schedule ────────────────────────────────────────────────────
+    // The `has_schedule` tests that used to live here are gone with the function.
     //
-    // The invariant these pin: **anything the pod lists, the pod can arm.**
-    // Validating against the raw `schedules` array broke that for the two tiers
-    // `effective_schedules` synthesizes, and both are ordinary flows rather than
-    // edge cases — one is every flow written before the top-level array existed.
-
-    #[test]
-    fn a_stored_schedule_can_be_armed() {
-        let f = flow(
-            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
-                "schedules":[{"id":"morning","type":"cron","cron":"0 8 * * *"}],
-                "flow":{"nodes":[],"edges":[]}}"#,
-        );
-        assert!(has_schedule(&f, "morning"));
-        assert!(!has_schedule(&f, "evening"));
-    }
-
-    #[test]
-    fn a_legacy_entry_node_schedule_can_be_armed() {
-        // No top-level `schedules`, a cron on the entry node. The pod lists this
-        // as a real schedule and used to refuse to arm it — the bug, on every
-        // flow that predates the array.
-        let f = flow(
-            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
-                "flow":{"nodes":[{"id":"entry","node_type":"entry",
-                    "data":{"schedule_type":"cron","cron":"0 8 * * *"},"position":[0,0]}],"edges":[]}}"#,
-        );
-        let listed = f.effective_schedules();
-        assert_eq!(listed.len(), 1, "the pod lists one schedule for this flow");
-        assert!(
-            has_schedule(&f, &listed[0].id),
-            "the pod must be able to arm the schedule it just listed"
-        );
-    }
-
-    #[test]
-    fn the_synthesized_manual_default_can_be_armed() {
-        // Neither tier: the pod synthesizes `{id: "default", manual}`. Arming it
-        // starts nothing — manual triggers never fire on their own — it names
-        // the agent a hand-run resolves to.
-        let f = flow(
-            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
-                "flow":{"nodes":[],"edges":[]}}"#,
-        );
-        assert!(f.schedules.is_empty(), "nothing is stored");
-        assert!(has_schedule(&f, "default"));
-        assert!(!has_schedule(&f, "not-a-schedule"));
-    }
-
-    /// The property behind all three, stated once: every id the pod would show
-    /// is an id the pod would accept.
-    #[test]
-    fn every_listed_schedule_is_armable() {
-        for json in [
-            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
-                "schedules":[{"id":"a","type":"cron","cron":"0 8 * * *"},
-                             {"id":"b","type":"minutes","interval":5}],
-                "flow":{"nodes":[],"edges":[]}}"#,
-            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
-                "flow":{"nodes":[{"id":"entry","node_type":"entry",
-                    "data":{"schedule_type":"hours","interval":6},"position":[0,0]}],"edges":[]}}"#,
-            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
-                "flow":{"nodes":[],"edges":[]}}"#,
-        ] {
-            let f = flow(json);
-            for spec in f.effective_schedules() {
-                assert!(
-                    has_schedule(&f, &spec.id),
-                    "flow lists '{}' but would refuse to arm it",
-                    spec.id
-                );
-            }
-        }
-    }
+    // They pinned "anything the pod lists, the pod can arm" — an invariant that
+    // existed because listing a flow's schedules meant *resolving* them through
+    // three tiers while arming validated against only the first, so the pod would
+    // offer a schedule and then refuse it. There is nothing left to disagree: a
+    // schedule is a document that exists or does not, and arming creates one
+    // rather than selecting from a synthesized list.
 
     #[test]
     fn a_flow_naming_no_personas_is_always_allowed() {

@@ -112,9 +112,7 @@ fn presets_resolve_and_instances_group_conversations() {
 
     // ── instances ────────────────────────────────────────────────────────────
     let mut chat = AgentInstance::new(&amy, InstanceOrigin::Workshop);
-    assert!(!chat.persistent, "a chat agent is disposable until kept");
     chat.name = "Sunday prep".into();
-    chat.persistent = true;
     chat.save().expect("save instance");
 
     let reloaded = agent_instance::load(&chat.id).expect("load instance");
@@ -123,23 +121,35 @@ fn presets_resolve_and_instances_group_conversations() {
     assert_eq!(reloaded.persona, "amy");
     assert_eq!(reloaded.created_from_version.as_deref(), Some("1.4.0"));
 
-    // A channel binds to one agent and keeps it across calls — that's the continuity
-    // an idle conversation reset would otherwise destroy.
-    let first = agent_instance::for_channel("sms-amy", "amy-kitchen").expect("bind channel");
-    let second = agent_instance::for_channel("sms-amy", "amy-kitchen").expect("rebind channel");
+    // A sender binds to one agent and keeps it across calls — that's the continuity
+    // starting a new session after a quiet gap would otherwise destroy.
+    let first = agent_instance::for_gateway_sender("sms-amy", "gw-sms-amy-1", "Amy", "amy-kitchen")
+        .expect("bind sender");
+    let second =
+        agent_instance::for_gateway_sender("sms-amy", "gw-sms-amy-1", "Amy", "amy-kitchen")
+            .expect("rebind sender");
     assert_eq!(
         first.id, second.id,
-        "a channel must not mint a new agent per conversation"
+        "a sender must not mint a new agent per conversation"
     );
-    assert!(
-        first.persistent,
-        "channel agents are persistent by construction"
-    );
+    // No lifetime flag to check any more: every agent is kept, so the thing worth
+    // pinning is that this one is *the same* agent, which is the continuity.
+
     assert_eq!(
         first.origin,
         InstanceOrigin::Gateway {
-            channel: "sms-amy".into()
+            channel: "sms-amy".into(),
+            sender: Some("gw-sms-amy-1".into()),
         }
+    );
+
+    // A second person on the same channel is a different agent, with a memory of
+    // their own — the whole reason this is keyed by sender.
+    let other = agent_instance::for_gateway_sender("sms-amy", "gw-sms-amy-2", "Bo", "amy-kitchen")
+        .expect("bind second sender");
+    assert_ne!(
+        first.id, other.id,
+        "two people on one channel must not share an agent"
     );
 
     assert!(agent_instance::list().len() >= 2);
@@ -162,7 +172,6 @@ fn presets_resolve_and_instances_group_conversations() {
         .as_str()
         .expect("chat must now name its agent");
     let inst = agent_instance::load(bound).expect("backfilled instance exists");
-    assert!(inst.persistent, "existing history is not disposable");
     assert_eq!(inst.persona, "orchestrator-agent");
     assert_eq!(
         inst.agent_preset, "general-agent",

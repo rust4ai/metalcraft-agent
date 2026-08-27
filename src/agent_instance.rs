@@ -23,29 +23,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths;
 
-/// Where an instance came from. Drives the default lifetime: a workshop chat is
-/// disposable, a channel-bound agent is not.
+/// Where an instance came from.
+///
+/// Provenance only, since agents are never deleted on a timer — it answers "why
+/// does this exist" (and, for `Gateway`, *who* it belongs to), not "how long does
+/// it last".
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InstanceOrigin {
     Workshop,
     Cli,
-    Gateway { channel: String },
+    /// A conversation with one person on one channel.
+    ///
+    /// Keyed by sender, not just by channel: an agent's memory is the continuity
+    /// it exists to have, and one agent per *number* meant everything it learned
+    /// about everyone who texted in went into a single shared memory. `sender` is
+    /// the normalized key (see `gateway_sender_key`), not the raw `From` — the
+    /// same person must not get a second agent because their number arrived
+    /// formatted differently.
+    ///
+    /// `None` on records written before this was per-sender; they keep working as
+    /// the channel's catch-all agent until they age out.
+    Gateway {
+        channel: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender: Option<String>,
+    },
     Flow { flow_id: String },
 }
 
 impl Default for InstanceOrigin {
     fn default() -> Self {
         Self::Workshop
-    }
-}
-
-impl InstanceOrigin {
-    /// Whether an instance from this origin should survive reaping by default.
-    /// Channel- and flow-bound agents are long-lived by construction; a chat is not
-    /// until someone names it.
-    pub fn defaults_persistent(&self) -> bool {
-        matches!(self, Self::Gateway { .. } | Self::Flow { .. })
     }
 }
 
@@ -69,12 +78,6 @@ pub struct AgentInstance {
     pub persona: String,
     #[serde(default)]
     pub origin: InstanceOrigin,
-    /// Ephemeral instances recall against the preset but never accrue a durable
-    /// memory, and are reaped after a TTL once nothing points at them. Set on purpose
-    /// — by an explicit create, by a channel or flow binding, or by patching this
-    /// field. Renaming an agent does **not** set it: a label is not a lifetime.
-    #[serde(default)]
-    pub persistent: bool,
     /// Set when the agent pack that provided this agent's preset withdrew it — on
     /// update or on a forced uninstall. The agent keeps its memory and its
     /// conversations and goes on working against a frozen copy of the preset; this
@@ -104,7 +107,6 @@ impl AgentInstance {
             created_from_version: preset.version.clone(),
             name: preset.name.clone(),
             persona: preset.default_persona.clone(),
-            persistent: origin.defaults_persistent(),
             origin,
             orphaned_from: None,
             persona_fallback_from: None,
@@ -209,97 +211,71 @@ pub fn delete(id: &str) -> Result<(), String> {
     std::fs::remove_dir_all(&dir).map_err(|e| format!("failed to delete {}: {e}", dir.display()))
 }
 
-/// How long an ephemeral agent survives with nothing happening in it.
-///
-/// Every chat mints an instance, so without a bound the directory grows by one entry
-/// per conversation ever started — and [`list`] parses all of them on every inbound
-/// gateway message, so the cost lands on the latency of answering a text.
-///
-/// Seven days is chosen to be longer than "I'll come back to this tomorrow" and
-/// shorter than "this is clearly abandoned". What survives it is [`AgentInstance::
-/// persistent`] — and, in practice, anything a conversation still points at, which is
-/// every agent anyone has actually said something to.
-pub const EPHEMERAL_TTL_DAYS: i64 = 7;
+// Agents are **never** deleted on a timer.
+//
+// There used to be a seven-day sweep over "ephemeral" instances here, guarded by
+// a `persistent` flag that naming an agent used to set. It is gone, and so is the
+// flag: an agent is the memory of a relationship, and the cost of keeping one
+// nobody has spoken to in a fortnight is a directory entry, while the cost of
+// deleting it is everything it had learned. Only an explicit [`delete`] removes
+// one.
+//
+// What *is* swept is sessions — `workshop_api::reap_stale_chats`, at 30 days of
+// inactivity. A transcript ages out; the agent that wrote it does not.
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct ReapReport {
-    pub reaped: Vec<String>,
-    /// Ids that could not be removed, with why. Reported rather than fatal — one
-    /// stuck directory must not stop the sweep.
-    pub failed: Vec<(String, String)>,
-}
-
-/// Remove ephemeral agents that have been idle past the TTL.
+/// Find the agent that talks to `sender` on `channel`, or mint one.
 ///
-/// Only `persistent == false` instances are eligible, and only those with no
-/// conversations left pointing at them — a transcript someone can still open is a
-/// reason to keep the agent that produced it, since deleting it would strand the
-/// memory that explains the conversation.
-pub fn reap_ephemeral(live_instance_ids: &[String]) -> ReapReport {
-    let mut report = ReapReport::default();
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(EPHEMERAL_TTL_DAYS);
-
-    for inst in list() {
-        if inst.persistent || live_instance_ids.contains(&inst.id) {
-            continue;
-        }
-        // An agent a schedule fires into is doing work on a timer, whether or not
-        // anyone named it — `flow_bindings::arm` can bind an *existing* instance, and
-        // that branch does not mark it persistent. Reaping it would delete the memory
-        // the recurring run exists to accumulate and leave the schedule firing into a
-        // dead id.
-        if !crate::flow_bindings::flows_for_instance(&inst.id).is_empty() {
-            continue;
-        }
-        // An unparseable timestamp is treated as recent: refusing to guess is better
-        // than deleting an agent because its clock field was odd.
-        let idle_since = chrono::DateTime::parse_from_rfc3339(&inst.last_active_at)
-            .map(|t| t.with_timezone(&chrono::Utc));
-        let Ok(last) = idle_since else { continue };
-        if last >= cutoff {
-            continue;
-        }
-        match delete(&inst.id) {
-            Ok(()) => report.reaped.push(inst.id),
-            Err(e) => report.failed.push((inst.id, e)),
-        }
-    }
-    report
-}
-
-/// Find an existing instance for a gateway channel, or mint one.
+/// This is what gives the relationship continuity across conversations: a session
+/// ends after a quiet gap, the agent does not. Everything it learns about this
+/// person accumulates in one memory (`memory/instances/{id}`) and is shared by
+/// every session it has ever had with them.
 ///
-/// This is what gives a channel continuity across idle resets: the conversation ends,
-/// the agent does not.
-pub fn for_channel(channel: &str, preset_slug: &str) -> Result<AgentInstance, String> {
-    if let Some(found) = list().into_iter().find(|i| {
-        i.origin
-            == InstanceOrigin::Gateway {
-                channel: channel.to_string(),
-            }
-    }) {
+/// `label` is what to call the agent when minting — the sender's display name if
+/// the channel gave us one, otherwise their address.
+pub fn for_gateway_sender(
+    channel: &str,
+    sender: &str,
+    label: &str,
+    preset_slug: &str,
+) -> Result<AgentInstance, String> {
+    let origin = InstanceOrigin::Gateway {
+        channel: channel.to_string(),
+        sender: Some(sender.to_string()),
+    };
+    // An agent minted before this was per-sender answered for the whole channel.
+    // Adopt it for the first sender that comes back rather than stranding a real
+    // memory beside a brand-new empty one; later senders get their own.
+    let legacy = InstanceOrigin::Gateway {
+        channel: channel.to_string(),
+        sender: None,
+    };
+    let existing = list()
+        .into_iter()
+        .find(|i| i.origin == origin)
+        .or_else(|| list().into_iter().find(|i| i.origin == legacy));
+    if let Some(mut found) = existing {
         // The existing agent wins even if the channel has since been pointed at a
         // different preset — its memories are the continuity the channel exists to
         // have, and silently swapping them out is not a re-point, it is amnesia. Say
         // so rather than ignoring the argument, which is what this used to do.
         if found.agent_preset != preset_slug {
             log::warn!(
-                "channel '{channel}' is configured for agent '{preset_slug}' but already has \
-                 an agent of '{}' ({}). Keeping it — delete that agent to start fresh.",
+                "channel '{channel}' is configured for agent '{preset_slug}' but {} already \
+                 has an agent of '{}' ({}). Keeping it — delete that agent to start fresh.",
+                sender,
                 found.agent_preset,
                 found.id
             );
         }
+        if found.origin == legacy {
+            found.origin = origin;
+            found.save()?;
+        }
         return Ok(found);
     }
     let preset = crate::agent_preset::AgentPreset::load(preset_slug, &paths::agent_presets_dir())?;
-    let mut instance = AgentInstance::new(
-        &preset,
-        InstanceOrigin::Gateway {
-            channel: channel.to_string(),
-        },
-    );
-    instance.name = format!("{} — {channel}", preset.name);
+    let mut instance = AgentInstance::new(&preset, origin);
+    instance.name = format!("{} — {label}", preset.name);
     instance.save()?;
     Ok(instance)
 }
@@ -308,8 +284,7 @@ pub fn for_channel(channel: &str, preset_slug: &str) -> Result<AgentInstance, St
 /// is orphaned.
 ///
 /// Chats predate presets, so they bind to whichever preset declares their persona, or
-/// to the default. They are marked persistent because they already exist and someone
-/// kept them — reaping a user's history would be the wrong default.
+/// to the default.
 pub fn backfill_from_chats(chats_dir: &Path) -> Result<BackfillReport, String> {
     let mut report = BackfillReport::default();
     let Ok(entries) = std::fs::read_dir(chats_dir) else {
@@ -364,8 +339,6 @@ pub fn backfill_from_chats(chats_dir: &Path) -> Result<BackfillReport, String> {
             instance.created_at = created.to_string();
             instance.last_active_at = created.to_string();
         }
-        // Existing history is not disposable.
-        instance.persistent = true;
         instance.save()?;
 
         doc["instance_id"] = serde_json::Value::String(instance.id.clone());
@@ -410,40 +383,51 @@ mod tests {
     }
 
     #[test]
-    fn chat_instances_are_disposable_but_channel_and_flow_instances_are_not() {
-        assert!(!AgentInstance::new(&preset(), InstanceOrigin::Workshop).persistent);
-        assert!(!AgentInstance::new(&preset(), InstanceOrigin::Cli).persistent);
-        assert!(
-            AgentInstance::new(
-                &preset(),
-                InstanceOrigin::Gateway {
-                    channel: "sms".into()
-                }
-            )
-            .persistent,
-            "a channel-bound agent must survive reaping — it is the continuity"
-        );
-        assert!(
-            AgentInstance::new(
-                &preset(),
-                InstanceOrigin::Flow {
-                    flow_id: "brief".into()
-                }
-            )
-            .persistent
-        );
+    fn an_agent_has_no_lifetime_flag_to_get_wrong() {
+        // The property that replaced `persistent`: nothing about where an agent
+        // came from shortens its life, because nothing deletes one on a timer.
+        // Sessions age out (`workshop_api::reap_stale_chats`); agents do not.
+        for origin in [
+            InstanceOrigin::Workshop,
+            InstanceOrigin::Cli,
+            InstanceOrigin::Gateway {
+                channel: "sms".into(),
+                sender: Some("gw-sms-15550001234".into()),
+            },
+            InstanceOrigin::Flow {
+                flow_id: "brief".into(),
+            },
+        ] {
+            let json = serde_json::to_value(AgentInstance::new(&preset(), origin.clone())).unwrap();
+            assert!(
+                json.get("persistent").is_none(),
+                "no lifetime flag on the wire for {origin:?}"
+            );
+        }
     }
 
     #[test]
     fn origin_round_trips_through_json() {
         let o = InstanceOrigin::Gateway {
             channel: "sms-amy".into(),
+            sender: Some("gw-sms-amy-15550001234".into()),
         };
         let json = serde_json::to_string(&o).unwrap();
         assert_eq!(serde_json::from_str::<InstanceOrigin>(&json).unwrap(), o);
         // An old record with no origin still loads.
         let legacy: InstanceOrigin = serde_json::from_str(r#"{"kind":"workshop"}"#).unwrap();
         assert_eq!(legacy, InstanceOrigin::Workshop);
+        // So does a gateway agent minted before they were per-sender: it stays
+        // the channel's catch-all until a sender adopts it.
+        let legacy: InstanceOrigin =
+            serde_json::from_str(r#"{"kind":"gateway","channel":"sms-amy"}"#).unwrap();
+        assert_eq!(
+            legacy,
+            InstanceOrigin::Gateway {
+                channel: "sms-amy".into(),
+                sender: None,
+            }
+        );
     }
 
     #[test]

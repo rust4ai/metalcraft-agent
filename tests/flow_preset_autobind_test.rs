@@ -47,8 +47,6 @@ fn a_flow_is_bound_to_a_preset_that_can_reach_its_personas() {
         name: "Morning brief".into(),
         created_at: "2026-08-19T00:00:00Z".into(),
         updated_at: "2026-08-19T00:00:00Z".into(),
-        enabled: false,
-        schedules: vec![],
         requires: None,
         flow: serde_json::from_str(
             r#"{"nodes":[{"id":"entry","node_type":"entry","data":{}},
@@ -70,18 +68,35 @@ fn a_flow_is_bound_to_a_preset_that_can_reach_its_personas() {
         "briefing-agent"
     );
 
-    // And it can now be armed, which is the whole point.
-    let mut armable = briefing.clone();
-    armable.id = "morning-brief".into();
-    armable.schedules = vec![
-        serde_json::from_str(r#"{"id":"morning","enabled":true,"type":"cron","cron":"0 8 * * *"}"#)
-            .unwrap(),
-    ];
+    // And it can now be scheduled, which is the whole point.
+    metalcraft_flows::save_flow(&metalcraft_agent::paths::flows_dir(), &briefing)
+        .expect("save the flow a schedule will point at");
+    let scheduled = metalcraft_agent::scheduled_flows::arm(
+        metalcraft_agent::scheduled_flows::NewSchedule {
+            flow: &briefing,
+            schedule: metalcraft_flows::ScheduleSpec {
+                trigger: metalcraft_flows::ScheduleTrigger::Cron {
+                    cron: "0 0 8 * * *".into(),
+                },
+                name: Some("Morning".into()),
+                timezone: None,
+                inputs: None,
+                persona: None,
+            },
+            enabled: true,
+            instance: None,
+            from_suggestion: None,
+            id: None,
+        },
+    )
+    .expect("a bound flow arms");
     let agent =
-        metalcraft_agent::flow_bindings::arm(&armable, "morning", None).expect("a bound flow arms");
+        metalcraft_agent::agent_instance::load(scheduled.instance_id.as_deref().unwrap()).unwrap();
     assert!(
-        agent.persistent,
-        "arming makes the agent it runs as durable"
+        matches!(&agent.origin, metalcraft_agent::agent_instance::InstanceOrigin::Flow { flow_id }
+                 if flow_id == "morning-brief"),
+        "the agent arming minted belongs to the flow: {:?}",
+        agent.origin
     );
 
     // A flow the default *can* run stays with the default — an unremarkable flow

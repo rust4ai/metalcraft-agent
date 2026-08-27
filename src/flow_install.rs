@@ -44,8 +44,6 @@ pub struct InstalledFlow {
     pub id: String,
     pub name: String,
     pub node_count: usize,
-    /// Whether the flow is enabled for scheduling. Registry flows install disabled.
-    pub enabled: bool,
 }
 
 /// The result of a successful install: what landed + what it still needs.
@@ -53,6 +51,13 @@ pub struct InstalledFlow {
 pub struct InstallResult {
     pub flow: InstalledFlow,
     pub dependencies: DependencyReport,
+    /// Schedules the author suggests for this flow. **Nothing was scheduled** —
+    /// installing a flow starts no background work, which is now a property of the
+    /// format rather than a flag this path has to remember to clear. A client
+    /// offers these; a person accepting one creates the schedule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(value_type = Vec<Object>)]
+    pub suggested_schedules: Vec<metalcraft_flows::Suggestion>,
     /// The agent preset this flow was bound to, chosen because its roster covers
     /// every persona the flow names. `None` means no installed preset can reach them
     /// all — the flow is saved and runnable by hand, but cannot be armed until one
@@ -338,7 +343,8 @@ pub async fn install_flow_from_registry(slug: &str) -> Result<InstallResult, Str
         return Err("slug is required".to_string());
     }
 
-    let mut flow = registry::fetch_flow(slug).await?;
+    let fetched = registry::fetch_flow(slug).await?;
+    let mut flow = fetched.flow;
 
     let errors = metalcraft_flows::validate(&flow);
     if !errors.is_empty() {
@@ -364,21 +370,10 @@ pub async fn install_flow_from_registry(slug: &str) -> Result<InstallResult, Str
         }
     }
 
-    // Non-destructive upgrade: if the flow is already installed and the user has
-    // customized its schedules, keep their schedules rather than clobbering them
-    // with the published defaults. The published `schedules` seed only a *fresh*
-    // install (or an upgrade the user never touched the schedule on). Mirrors how
-    // we treat an author `requires` block without overwriting user intent.
-    if let Some(existing) = metalcraft_flows::load_flow(&paths::flows_dir(), &flow.id) {
-        if !existing.schedules.is_empty() {
-            log::info!(
-                "Preserving {} existing schedule(s) on re-install of flow '{}'",
-                existing.schedules.len(),
-                flow.id
-            );
-            flow.schedules = existing.schedules;
-        }
-    }
+    // Re-installing a flow rewrites the graph and leaves its schedules alone: they
+    // are separate documents pointing at this id, so an upgrade cannot clobber the
+    // times a person chose. That used to need a "preserve the user's schedules"
+    // special case here; now it needs nothing.
 
     let dependencies = dependency_report(&flow);
 
@@ -398,9 +393,9 @@ pub async fn install_flow_from_registry(slug: &str) -> Result<InstallResult, Str
             id: flow.id.clone(),
             name: flow.name.clone(),
             node_count: flow.flow.nodes.len(),
-            enabled: flow.enabled,
         },
         dependencies,
+        suggested_schedules: fetched.suggestions,
         agent_preset: bound_preset,
     })
 }

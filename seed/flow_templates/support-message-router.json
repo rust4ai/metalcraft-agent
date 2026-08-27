@@ -1,20 +1,26 @@
 {
-  "spec_version": "2",
+  "spec_version": "3",
   "id": "support-message-router",
   "name": "Route a support message (LLM branch)",
   "created_at": "2026-07-27T00:00:00Z",
   "updated_at": "2026-07-27T00:00:00Z",
-  "enabled": false,
   "flow": {
     "nodes": [
       {
         "id": "entry",
         "node_type": "entry",
         "data": {
-          "schedule_type": "manual",
-          "inputs": { "message": { "type": "string", "required": true } }
+          "inputs": {
+            "message": {
+              "type": "string",
+              "required": true
+            }
+          }
         },
-        "position": [0.0, 0.0]
+        "position": [
+          0.0,
+          0.0
+        ]
       },
       {
         "id": "classify",
@@ -22,38 +28,96 @@
         "data": {
           "query": "Classify this customer message and pick the matching category. Message:\n\n{{message}}",
           "outputs": [
-            { "handle": "complaint", "description": "An unhappy customer reporting a problem", "schema": { "type": "string", "description": "one-line reason" } },
-            { "handle": "question", "description": "A customer asking how to do something", "schema": { "type": "string", "description": "one-line reason" } },
-            { "handle": "spam", "description": "Irrelevant or promotional noise", "schema": { "type": "string", "description": "one-line reason" } }
+            {
+              "handle": "complaint",
+              "description": "An unhappy customer reporting a problem",
+              "schema": {
+                "type": "string",
+                "description": "one-line reason"
+              }
+            },
+            {
+              "handle": "question",
+              "description": "A customer asking how to do something",
+              "schema": {
+                "type": "string",
+                "description": "one-line reason"
+              }
+            },
+            {
+              "handle": "spam",
+              "description": "Irrelevant or promotional noise",
+              "schema": {
+                "type": "string",
+                "description": "one-line reason"
+              }
+            }
           ],
           "default_handle": "question"
         },
-        "position": [260.0, 0.0]
+        "position": [
+          260.0,
+          0.0
+        ]
       },
       {
         "id": "handle_complaint",
         "node_type": "prompt",
-        "data": { "prompt": "Draft an empathetic first response to this complaint:\n\n{{message}}\n\n(flagged because: {{_last}})" },
-        "position": [540.0, -140.0]
+        "data": {
+          "prompt": "Draft an empathetic first response to this complaint:\n\n{{message}}\n\n(flagged because: {{_last}})"
+        },
+        "position": [
+          540.0,
+          -140.0
+        ]
       },
       {
         "id": "handle_question",
         "node_type": "prompt",
-        "data": { "prompt": "Answer this customer question clearly and concisely:\n\n{{message}}" },
-        "position": [540.0, 0.0]
+        "data": {
+          "prompt": "Answer this customer question clearly and concisely:\n\n{{message}}"
+        },
+        "position": [
+          540.0,
+          0.0
+        ]
       },
       {
         "id": "drop_spam",
         "node_type": "end",
-        "data": { "status": "spam" },
-        "position": [540.0, 140.0]
+        "data": {
+          "status": "spam"
+        },
+        "position": [
+          540.0,
+          140.0
+        ]
       }
     ],
     "edges": [
-      { "id": "e0", "source": "entry", "target": "classify" },
-      { "id": "e1", "source": "classify", "target": "handle_complaint", "source_handle": "complaint" },
-      { "id": "e2", "source": "classify", "target": "handle_question", "source_handle": "question" },
-      { "id": "e3", "source": "classify", "target": "drop_spam", "source_handle": "spam" }
+      {
+        "id": "e0",
+        "source": "entry",
+        "target": "classify"
+      },
+      {
+        "id": "e1",
+        "source": "classify",
+        "target": "handle_complaint",
+        "source_handle": "complaint"
+      },
+      {
+        "id": "e2",
+        "source": "classify",
+        "target": "handle_question",
+        "source_handle": "question"
+      },
+      {
+        "id": "e3",
+        "source": "classify",
+        "target": "drop_spam",
+        "source_handle": "spam"
+      }
     ]
   }
 }

@@ -93,7 +93,16 @@ pub struct Handoff {
     pub suggest_persona: Option<String>,
 }
 
-#[derive(Debug, Default)]
+/// Told whenever the plan changes, so a client can watch it being worked.
+///
+/// The plan is the one piece of an agent's reasoning that is already structured
+/// — the model wrote it down as a list — and a list the person can watch being
+/// crossed off is the difference between "it is doing something" and "it is on
+/// step 3 of 5". Called synchronously from the tool that changed it, so it must
+/// not block: send on a channel, do not wait on one.
+pub type PlanSink = Arc<dyn Fn(&[PlanStep]) + Send + Sync>;
+
+#[derive(Default)]
 pub struct TurnPlan {
     steps: Vec<PlanStep>,
     /// Handoffs recorded since the last `set_steps`. Writing a new plan is the
@@ -101,6 +110,20 @@ pub struct TurnPlan {
     /// so `set_steps` clears these.
     handoffs: Vec<Handoff>,
     refusals: usize,
+    /// Where to announce changes. `None` for a run nobody is watching.
+    on_change: Option<PlanSink>,
+}
+
+impl std::fmt::Debug for TurnPlan {
+    // Hand-written because a sink is a closure, which has no Debug.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnPlan")
+            .field("steps", &self.steps)
+            .field("handoffs", &self.handoffs)
+            .field("refusals", &self.refusals)
+            .field("watched", &self.on_change.is_some())
+            .finish()
+    }
 }
 
 impl TurnPlan {
@@ -113,6 +136,14 @@ impl TurnPlan {
     pub fn set_steps(&mut self, steps: Vec<PlanStep>) {
         self.steps = steps;
         self.handoffs.clear();
+        self.announce();
+    }
+
+    /// Tell the watcher, if there is one, what the plan looks like now.
+    fn announce(&self) {
+        if let Some(sink) = &self.on_change {
+            sink(&self.steps);
+        }
     }
 
     pub fn record_handoff(&mut self, handoff: Handoff) {
@@ -129,6 +160,9 @@ impl TurnPlan {
         self.steps.clear();
         self.handoffs.clear();
         self.refusals = 0;
+        // Announced too: a new turn starts with no plan, and a client still
+        // showing the last one would be showing history as if it were live.
+        self.announce();
     }
 
     pub fn steps(&self) -> &[PlanStep] {
@@ -233,7 +267,15 @@ impl TurnPlan {
 pub type SharedTurnPlan = Arc<Mutex<TurnPlan>>;
 
 pub fn new_shared() -> SharedTurnPlan {
-    Arc::new(Mutex::new(TurnPlan::default()))
+    new_shared_watched(None)
+}
+
+/// A plan whose every change is announced to `sink`.
+pub fn new_shared_watched(sink: Option<PlanSink>) -> SharedTurnPlan {
+    Arc::new(Mutex::new(TurnPlan {
+        on_change: sink,
+        ..TurnPlan::default()
+    }))
 }
 
 /// Take the plan lock, recovering from a poisoned mutex.

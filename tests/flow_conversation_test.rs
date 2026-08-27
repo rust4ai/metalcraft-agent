@@ -57,7 +57,6 @@ fn agent() -> AgentInstance {
             flow_id: "brief".into(),
         },
     );
-    i.persistent = true;
     i.save().unwrap();
     i
 }
@@ -144,7 +143,10 @@ async fn a_firing_becomes_a_conversation_in_the_agent_it_runs_as() {
     assert_eq!(status, StatusCode::OK);
     let conversations = detail["conversations"].as_array().unwrap();
     assert_eq!(conversations.len(), 1, "{detail:#}");
-    assert_eq!(conversations[0]["turn_count"], 4); // 2 user + 2 assistant
+    // Turns, not messages: the two times someone spoke to it. This endpoint used
+    // to count raw messages while `GET /chats` counted user turns, so the same
+    // conversation was "4" on one screen and "2" on the other.
+    assert_eq!(conversations[0]["turn_count"], 2);
 
     let (_, chat_detail) = get_json(&format!("/api/v1/chats/{chat}")).await;
     let messages = chat_detail["messages"].as_array().unwrap();
@@ -183,10 +185,6 @@ async fn a_firing_becomes_a_conversation_in_the_agent_it_runs_as() {
 async fn a_hand_triggered_run_is_the_agent_the_schedule_armed() {
     let mut armable = silent_flow();
     armable.id = "armed".into();
-    armable.schedules = serde_json::from_value(serde_json::json!([
-        { "id": "daily", "name": "Daily", "type": "cron", "cron": "0 0 8 * * *", "enabled": true }
-    ]))
-    .unwrap();
     save_flow(&paths::flows_dir(), &armable).unwrap();
 
     // A preset the flow can be bound to, then armed — which is what mints the agent.
@@ -199,7 +197,28 @@ async fn a_hand_triggered_run_is_the_agent_the_schedule_armed() {
     )
     .unwrap();
     flow_bindings::bind_preset(&armable, "amy").expect("bind");
-    let agent = flow_bindings::arm(&armable, "daily", None).expect("arm");
+    let armed_schedule = metalcraft_agent::scheduled_flows::arm(
+        metalcraft_agent::scheduled_flows::NewSchedule {
+            flow: &armable,
+            schedule: metalcraft_flows::ScheduleSpec {
+                trigger: metalcraft_flows::ScheduleTrigger::Cron {
+                    cron: "0 0 8 * * *".into(),
+                },
+                name: Some("Daily".into()),
+                timezone: None,
+                inputs: None,
+                persona: None,
+            },
+            enabled: true,
+            instance: None,
+            from_suggestion: None,
+            id: None,
+        },
+    )
+    .expect("arm");
+    let agent =
+        metalcraft_agent::agent_instance::load(armed_schedule.instance_id.as_deref().unwrap())
+            .expect("arming minted the agent");
 
     let (status, summary) = post_run("armed").await;
     assert_eq!(status, StatusCode::OK, "{summary:#}");

@@ -48,14 +48,22 @@ fn all_seed_flow_templates_parse_and_validate() {
         );
     }
 
-    // No v1 templates should remain.
+    // Templates ship at the current spec version — and, since v3, carry no
+    // scheduling: a template is a shape to start from, not something that starts
+    // running when you copy it.
     for f in &files {
         let raw = std::fs::read_to_string(f).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            doc.get("schedules").is_none() && doc.get("enabled").is_none(),
+            "{} still carries scheduling",
+            f.display()
+        );
         let flow: SavedFlow = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             flow.spec_version,
-            "2",
-            "{} is not spec_version 2",
+            "3",
+            "{} is not spec_version 3",
             f.display()
         );
 

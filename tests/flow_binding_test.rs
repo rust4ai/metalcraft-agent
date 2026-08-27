@@ -3,8 +3,22 @@
 //! Own test binary: `paths::data_dir()` caches `METALCRAFT_DATA_DIR` in a `OnceLock`,
 //! so two tests in one process would share a data dir whatever they set.
 
-use metalcraft_agent::{agent_instance, agent_preset, flow_bindings, paths};
+use metalcraft_agent::{agent_instance, agent_preset, flow_bindings, paths, scheduled_flows};
+use metalcraft_flows::{ScheduleSpec, ScheduleTrigger};
 use std::fs;
+
+/// A cron trigger with a label, which is all these tests need to vary.
+fn at(name: &str, cron: &str) -> ScheduleSpec {
+    ScheduleSpec {
+        trigger: ScheduleTrigger::Cron {
+            cron: cron.to_string(),
+        },
+        name: Some(name.to_string()),
+        timezone: None,
+        inputs: None,
+        persona: None,
+    }
+}
 
 fn write_preset(slug: &str, default_persona: &str, roster: &[(&str, &str)]) {
     let dir = paths::agent_presets_dir();
@@ -39,20 +53,19 @@ fn flow(id: &str, personas: &[&str]) -> metalcraft_flows::SavedFlow {
             "data": { "persona": p, "prompt": "do a thing" },
         }));
     }
-    serde_json::from_value(serde_json::json!({
-        "spec_version": "2",
+    let flow: metalcraft_flows::SavedFlow = serde_json::from_value(serde_json::json!({
+        "spec_version": "3",
         "id": id,
         "name": format!("flow {id}"),
         "created_at": "2026-01-01T00:00:00Z",
         "updated_at": "2026-01-01T00:00:00Z",
-        "enabled": false,
         "flow": { "nodes": nodes, "edges": [] },
-        "schedules": [
-            { "id": "morning", "name": "Morning", "type": "cron", "cron": "0 8 * * *", "enabled": true },
-            { "id": "evening", "name": "Evening", "type": "cron", "cron": "0 18 * * *", "enabled": true },
-        ],
     }))
-    .expect("fixture flow parses")
+    .expect("fixture flow parses");
+    // Saved, because a schedule points at a flow by id and the lookups below read
+    // the flows dir rather than taking the value.
+    metalcraft_flows::save_flow(&paths::flows_dir(), &flow).expect("save fixture flow");
+    flow
 }
 
 #[test]
@@ -95,11 +108,25 @@ fn binding_arming_and_disarming_a_flow() {
     assert_eq!(flow_bindings::preset_for("brief"), "amy");
 
     // ── arming is what creates the agent ──────────────────────────────────────
-    assert!(flow_bindings::instance_for("brief", "morning").is_none());
-    let morning = flow_bindings::arm(&brief, "morning", None).expect("arm morning");
     assert!(
-        morning.persistent,
-        "a scheduled agent must outlive a TTL reap"
+        scheduled_flows::for_flow("brief").is_empty(),
+        "nothing is scheduled until somebody schedules it"
+    );
+    let morning_sf = scheduled_flows::arm(scheduled_flows::NewSchedule {
+        flow: &brief,
+        schedule: at("Morning", "0 0 8 * * *"),
+        enabled: true,
+        instance: None,
+        from_suggestion: None,
+        id: None,
+    })
+    .expect("arm morning");
+    let morning = agent_instance::load(morning_sf.instance_id.as_deref().unwrap())
+        .expect("the instance was persisted, not just referenced");
+    assert!(
+        matches!(&morning.origin, agent_instance::InstanceOrigin::Flow { flow_id } if flow_id == "brief"),
+        "the agent belongs to the flow that minted it: {:?}",
+        morning.origin
     );
     assert_eq!(morning.agent_preset, "amy");
     assert_eq!(
@@ -116,43 +143,66 @@ fn binding_arming_and_disarming_a_flow() {
         "named after the schedule: {}",
         morning.name
     );
-    agent_instance::load(&morning.id).expect("the instance was persisted, not just returned");
 
     // ── a second schedule on the same flow shares the agent ───────────────────
     // The 18:00 run should remember the 08:00 one; two agents would not.
-    let evening = flow_bindings::arm(&brief, "evening", None).expect("arm evening");
+    let evening_sf = scheduled_flows::arm(scheduled_flows::NewSchedule {
+        flow: &brief,
+        schedule: at("Evening", "0 0 18 * * *"),
+        enabled: true,
+        instance: None,
+        from_suggestion: None,
+        id: None,
+    })
+    .expect("arm evening");
     assert_eq!(
-        evening.id, morning.id,
+        evening_sf.instance_id, morning_sf.instance_id,
         "schedules of one flow share an agent by default"
     );
+    assert_ne!(evening_sf.id, morning_sf.id, "but are separate documents");
 
-    // ── arming an unknown schedule is an error, not a silent no-op ────────────
-    let err = flow_bindings::arm(&brief, "midnight", None).expect_err("no such schedule");
-    assert!(err.contains("midnight"), "{err}");
+    // ── the containment rule reaches a schedule's own persona override ────────
+    let mut outside = at("Outside", "0 0 9 * * *");
+    outside.persona = Some("mitch-critic".into());
+    let err = scheduled_flows::arm(scheduled_flows::NewSchedule {
+        flow: &brief,
+        schedule: outside,
+        enabled: true,
+        instance: None,
+        from_suggestion: None,
+        id: None,
+    })
+    .expect_err("mitch-critic is not in amy's roster");
+    assert!(err.contains("mitch-critic"), "{err}");
 
     // ── what is this agent scheduled to do? ───────────────────────────────────
-    let scheduled = flow_bindings::flows_for_instance(&morning.id);
-    assert_eq!(scheduled.len(), 1);
-    assert_eq!(scheduled[0].0, "brief");
-    let mut sids = scheduled[0].1.clone();
-    sids.sort();
-    assert_eq!(sids, vec!["evening", "morning"]);
+    let scheduled = scheduled_flows::for_instance(&morning.id);
+    assert_eq!(scheduled.len(), 2);
+    assert!(scheduled.iter().all(|sf| sf.flow_id == "brief"));
 
     // ── attaching to an existing agent instead of minting one ─────────────────
     let other = flow("other", &["amy-chef"]);
     flow_bindings::bind_preset(&other, "amy").unwrap();
-    let attached = flow_bindings::arm(&other, "morning", Some(&morning.id)).expect("attach");
-    assert_eq!(attached.id, morning.id);
+    let attached = scheduled_flows::arm(scheduled_flows::NewSchedule {
+        flow: &other,
+        schedule: at("Morning", "0 0 8 * * *"),
+        enabled: true,
+        instance: Some(&morning.id),
+        from_suggestion: None,
+        id: None,
+    })
+    .expect("attach");
+    assert_eq!(attached.instance_id.as_deref(), Some(morning.id.as_str()));
     assert_eq!(
-        flow_bindings::flows_for_instance(&morning.id).len(),
-        2,
-        "one agent now runs both flows"
+        scheduled_flows::for_instance(&morning.id).len(),
+        3,
+        "one agent now runs schedules of both flows"
     );
 
     // ── disarming keeps the agent and everything it remembers ─────────────────
-    flow_bindings::disarm("brief", "evening").unwrap();
-    assert!(flow_bindings::instance_for("brief", "evening").is_none());
-    assert!(flow_bindings::instance_for("brief", "morning").is_some());
+    scheduled_flows::disarm(&evening_sf.id).unwrap();
+    assert!(scheduled_flows::get(&evening_sf.id).is_none());
+    assert!(scheduled_flows::get(&morning_sf.id).is_some());
     agent_instance::load(&morning.id).expect("disarm must not delete the agent");
 
     // ── rebinding to the default keeps armed schedules ────────────────────────
@@ -162,23 +212,31 @@ fn binding_arming_and_disarming_a_flow() {
         agent_preset::DEFAULT_PRESET
     );
     assert_eq!(
-        flow_bindings::instance_for("brief", "morning"),
-        Some(morning.id.clone()),
+        scheduled_flows::get(&morning_sf.id)
+            .and_then(|sf| sf.instance_id)
+            .as_deref(),
+        Some(morning.id.as_str()),
         "unbinding the preset must not orphan the running agent"
     );
 
-    // ── forgetting a flow drops its bindings entirely ─────────────────────────
-    flow_bindings::forget("brief").unwrap();
-    assert!(flow_bindings::instance_for("brief", "morning").is_none());
+    // ── deleting a flow's schedules leaves the other flow's alone ─────────────
+    assert_eq!(scheduled_flows::forget_flow("brief"), 1);
+    assert!(scheduled_flows::get(&morning_sf.id).is_none());
     assert_eq!(
-        flow_bindings::flows_for_instance(&morning.id).len(),
+        scheduled_flows::for_instance(&morning.id).len(),
         1,
-        "only the 'other' flow is left"
+        "only the 'other' flow's schedule is left"
     );
 
-    // ── bindings survive a restart ────────────────────────────────────────────
+    // ── bindings and schedules survive a restart ──────────────────────────────
     assert_eq!(flow_bindings::preset_for("other"), "amy");
     assert!(paths::data_dir().join("flow_bindings.json").is_file());
+    assert!(
+        paths::scheduled_flows_dir()
+            .join(format!("{}.json", attached.id))
+            .is_file(),
+        "one document per schedule, named by its id"
+    );
 
     let _ = fs::remove_dir_all(&data_dir);
 }

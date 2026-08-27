@@ -66,6 +66,7 @@ pub fn ensure_defaults() {
         paths::agent_instances_dir(),
         paths::skills_dir(),
         paths::flows_dir(),
+        paths::scheduled_flows_dir(),
         paths::sessions_dir(),
         paths::api_tools_dir(),
         paths::flow_templates_dir(),
@@ -101,6 +102,13 @@ pub fn ensure_defaults() {
     }
 
     install_seed_agent_packs();
+
+    // Lift scheduling out of any pre-v3 flow document, before anything can read —
+    // or, worse, re-save — one. A v3 `SavedFlow` has no `schedules` field, so a
+    // flow that got saved through the new types before migrating would lose its
+    // scheduling silently. Idempotent, so running it on every start costs a
+    // directory scan and nothing else.
+    crate::scheduled_flows::migrate_from_flows();
 
     retire_obsolete_seeds();
 }

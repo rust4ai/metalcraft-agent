@@ -181,6 +181,9 @@ impl AgentUnderTest for GatewayPersonaAgent {
             // gateway turn is stoppable), so a `None` here would quietly stop
             // mirroring the config this suite exists to reproduce.
             interrupt: Some(Arc::new(std::sync::atomic::AtomicBool::new(false))),
+            // Mirrors the gateway path, which watches no plan: nothing renders
+            // a task list over SMS.
+            plan_sink: None,
         };
 
         let persona = Persona::load(&self.persona_slug, &self.context.personas_dir)

@@ -166,6 +166,9 @@ pub struct TurnRunner<M: CompletionModel + 'static> {
     phase_sink: Option<PhaseSink>,
     /// This turn's plan, cleared at the start of each [`run`](Self::run).
     turn_plan: crate::turn_plan::SharedTurnPlan,
+    /// Where messages sent *during* this turn come from. `None` for a run
+    /// nobody can talk to — a flow node, a one-shot task, a sub-agent.
+    mailbox: Option<metalcraft::Mailbox<AgentState>>,
 }
 
 impl<M: CompletionModel + 'static> TurnRunner<M> {
@@ -182,6 +185,7 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
             capture_ctx: crate::memory::capture::CaptureContext::default(),
             instance_id: None,
             phase_sink: None,
+            mailbox: None,
         }
     }
 
@@ -190,6 +194,18 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
     /// Announce each pre-model phase as it starts. See [`PhaseSink`].
     pub fn with_phase_sink(mut self, sink: Option<PhaseSink>) -> Self {
         self.phase_sink = sink;
+        self
+    }
+
+    /// Let messages sent while this turn runs join it, rather than waiting for
+    /// it to end.
+    ///
+    /// The caller supplies the boundary rule as well as the messages — see
+    /// [`metalcraft::Mailbox`]. For a chat turn that means delivering only when
+    /// the agent node is next, because a user message appended between a tool
+    /// call and its result is the orphaned history the Responses API rejects.
+    pub fn with_mailbox(mut self, mailbox: Option<metalcraft::Mailbox<AgentState>>) -> Self {
+        self.mailbox = mailbox;
         self
     }
 
@@ -290,11 +306,13 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
             false
         };
 
-        let outcome = Executor::new_from_arc(self.graph.clone())
+        let mut executor = Executor::new_from_arc(self.graph.clone())
             .max_steps(self.max_steps)
-            .with_step_guard(step_guard)
-            .run(state, "agent")
-            .await;
+            .with_step_guard(step_guard);
+        if let Some(mailbox) = &self.mailbox {
+            executor = executor.with_mailbox(mailbox.clone());
+        }
+        let outcome = executor.run(state, "agent").await;
 
         // Ephemeral: the block never reaches the persisted transcript, the token
         // estimate that drives compaction, or the next turn's recall query.
@@ -782,6 +800,9 @@ pub struct RuntimeOptions {
     /// themselves (`sub_agent`, whose call *is* an agent run). `None` for turns
     /// nobody can press stop on: flows, one-shot tasks, the CLI.
     pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Where to announce this turn's plan as it changes, so a client can render
+    /// the task list being worked. `None` ⇒ nobody is watching.
+    pub plan_sink: Option<crate::turn_plan::PlanSink>,
 }
 
 pub fn build_agent_runtime<M>(
@@ -802,7 +823,7 @@ where
         persona.build_system_prompt_with(&context.skills_dir, cwd, &options.prompt_extras);
     // One plan per runtime, shared by `update_plan`, `sub_agent` and
     // `say_to_user`; `TurnRunner::run` clears it before each turn.
-    let turn_plan = crate::turn_plan::new_shared();
+    let turn_plan = crate::turn_plan::new_shared_watched(options.plan_sink.clone());
     let tool_config = crate::tools::ToolConfig {
         preset_personas: options.preset_personas.clone(),
         instance_id: options.instance_id.clone(),

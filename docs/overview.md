@@ -26,8 +26,8 @@ calling external HTTP APIs, and delegating to sub-agents. Sensitive actions pass
    Orchestrator persona (use `--persona <slug>` to pick another).
 2. **One-shot task** — `metalcraft-agent "refactor the auth module"` runs a single request and
    exits. Persona is selected with `--persona <slug>`; every positional arg is the task.
-3. **Flow scheduler daemon** — `metalcraft-daemon` polls the `flows/` directory and runs
-   enabled workflows on a schedule (interval or cron), and fires due scheduled follow-ups. It
+3. **Flow scheduler daemon** — `metalcraft-daemon` polls the `scheduled_flows/` directory and
+   runs the flows those schedules name (interval or cron), and fires due scheduled follow-ups. It
    can additionally serve the Workshop API, which hosts **gateway channels** that receive
    inbound messaging webhooks (e.g. WhatsApp via PipeStreamr/Twilio) and turn them into agent
    turns.
@@ -39,7 +39,8 @@ calling external HTTP APIs, and delegating to sub-agents. Sensitive actions pass
 | **Persona** | A JSON config (`personas/*.json`) defining an agent's name, description, system prompt, allowed tools, and skills. Personas are the unit of agent identity and capability. |
 | **Skill** | A Markdown file (`skills/*.md`) holding reusable methodology (e.g. how to review code, how to debug). Loaded on demand via the `load_skill` tool, or attached to a persona. |
 | **Tool** | A capability the agent can call. Core built-ins: `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `find_files`, `list_files`, `load_skill`, `web_fetch`, `sub_agent`. The registry also ships native meta tools (`persona_*`, `skill_*`, `flow_*`, `pack_*`, `key_*`, `diagnostics_*`), delivery tools (`say_to_user`, `gateway_send_message`, `schedule_followup`), and integration tools (`spaces_*` S3, `email_*` IMAP). Further tools come from JSON-configured HTTP API definitions. |
-| **Flow** | A workflow graph (JSON) of nodes and edges, with a schedule. v2 flows run as a stateful state machine (`entry / prompt / set_variable / tool / conditional` nodes, plus staged `branch / http / sub_agent / approval / wait / foreach`) threading a shared `variables` object and routing by output handle; legacy v1 flows use the older path that runs each reachable `prompt` node as a one-shot task. |
+| **Scheduled flow** | A separate document (`scheduled_flows/<id>.json`) binding one trigger to one flow, with the inputs, persona and agent instance that firing uses. Creating one is arming; a flow none point at never runs on its own. |
+| **Flow** | A workflow graph (JSON) of nodes and edges. v2 flows run as a stateful state machine (`entry / prompt / set_variable / tool / conditional` nodes, plus staged `branch / http / sub_agent / approval / wait / foreach`) threading a shared `variables` object and routing by output handle; legacy v1 flows use the older path that runs each reachable `prompt` node as a one-shot task. |
 | **Integration Pack** | A bundle of personas, skills, HTTP tools, and flow templates that can be enabled or disabled as a unit (e.g. the Discord pack, the Solarabase RAG pack). User files always shadow pack files. |
 | **Key Store** | A JSON file (`keys.json`) mapping secret names to values. HTTP tools reference secrets with `$NAME` placeholders so credentials never live in tool configs. |
 | **Workshop** | The admin REST API (and companion app) for editing personas, skills, flows, tools, packs, and keys, and for running chats and flows. |

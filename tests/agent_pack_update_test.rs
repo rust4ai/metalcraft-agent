@@ -85,7 +85,6 @@ fn an_update_carries_agents_forward_and_says_what_changed() {
         metalcraft_agent::agent_instance::InstanceOrigin::Workshop,
     );
     keeper.name = "Amy at home".into();
-    keeper.persistent = true;
     keeper.save().unwrap();
 
     let mut shopper = metalcraft_agent::agent_instance::AgentInstance::new(
@@ -94,7 +93,6 @@ fn an_update_carries_agents_forward_and_says_what_changed() {
     );
     shopper.name = "Amy shopping".into();
     shopper.persona = "amy-shopper".into();
-    shopper.persistent = true;
     shopper.save().unwrap();
 
     // ── v2 withdraws `amy-shopper` ──────────────────────────────────────────

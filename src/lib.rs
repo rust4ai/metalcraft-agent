@@ -30,6 +30,7 @@ pub mod paths;
 pub mod persona;
 pub mod registry;
 pub mod runtime;
+pub mod scheduled_flows;
 pub mod scheduled_tasks;
 pub mod seed;
 pub mod session_io;

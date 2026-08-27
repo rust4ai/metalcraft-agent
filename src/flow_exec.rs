@@ -1123,12 +1123,16 @@ impl Tool for SharedTool {
     }
 }
 
-/// Whether a flow should run on the v2 [`FlowExecutor`] rather than the legacy
-/// linear runner. True if it declares `spec_version = "2"` or uses any v2 core
-/// node type — so existing v1 `entry`+`prompt` flows keep their exact
-/// legacy semantics for back-compat.
+/// Whether a flow should run on the [`FlowExecutor`] rather than the legacy
+/// linear runner. True for any spec version **above** v1, or for any flow using a
+/// v2 core node type — so existing v1 `entry`+`prompt` flows keep their exact
+/// legacy semantics for back-compat and everything else gets the state machine.
+///
+/// Written as "not v1" rather than a list of known versions on purpose: v3 added
+/// itself to that list once, silently routing every migrated flow down the legacy
+/// path, and the next version would have done it again.
 pub fn is_v2_flow(flow: &SavedFlow) -> bool {
-    flow.spec_version == "2"
+    flow.spec_version != "1"
         || flow
             .flow
             .nodes
@@ -1655,8 +1659,6 @@ mod tests {
             name: "T".into(),
             created_at: "2026-07-27T00:00:00Z".into(),
             updated_at: "2026-07-27T00:00:00Z".into(),
-            enabled: false,
-            schedules: vec![],
             requires: None,
             flow: FlowDefinition { nodes, edges },
         }
@@ -1779,6 +1781,13 @@ mod tests {
         let mut v2 = saved(vec![node("e", "entry", json!({}))], vec![]);
         v2.spec_version = "2".into();
         assert!(is_v2_flow(&v2));
+
+        // As is v3 — the version every migrated flow now carries. Testing this
+        // by name because the first cut checked `== "2"`, which quietly sent
+        // every v3 flow down the legacy linear path.
+        let mut v3 = saved(vec![node("e", "entry", json!({}))], vec![]);
+        v3.spec_version = "3".into();
+        assert!(is_v2_flow(&v3));
     }
 
     #[tokio::test]

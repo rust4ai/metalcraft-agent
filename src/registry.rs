@@ -23,7 +23,20 @@ pub fn flows_base_url() -> String {
 /// Download and parse the `SavedFlow` for `slug` from the flows registry's public
 /// download endpoint. A flow is a single self-contained JSON document, so unlike a
 /// pack there's no ZIP to extract — this returns the parsed flow ready to save.
-pub async fn fetch_flow(slug: &str) -> Result<metalcraft_flows::SavedFlow, String> {
+/// A flow as the registry serves it: the document, plus any schedules its author
+/// suggests.
+///
+/// Suggestions are inert — installing never turns one into a live schedule. They
+/// exist so an install report can say "the author runs this at 08:00" and let a
+/// person agree, which is the difference between an offer and a surprise.
+pub struct FetchedFlow {
+    /// The flow itself, normalized to spec v3.
+    pub flow: metalcraft_flows::SavedFlow,
+    /// Schedules the author suggests, keyed in the author's namespace.
+    pub suggestions: Vec<metalcraft_flows::Suggestion>,
+}
+
+pub async fn fetch_flow(slug: &str) -> Result<FetchedFlow, String> {
     let url = format!(
         "{}/api/v1/flows/{}/download",
         flows_base_url().trim_end_matches('/'),
@@ -56,7 +69,38 @@ pub async fn fetch_flow(slug: &str) -> Result<metalcraft_flows::SavedFlow, Strin
     if bytes.len() > MAX_DOWNLOAD_BYTES {
         return Err(format!("flow '{slug}' download is too large"));
     }
-    serde_json::from_slice(&bytes).map_err(|e| format!("invalid flow document from registry: {e}"))
+    let doc: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("invalid flow document from registry: {e}"))?;
+
+    // A registry may serve either shape. A v3 listing carries its suggestions in a
+    // sibling field; a pre-v3 one has them inside the document as `schedules[]` —
+    // and those become *suggestions* here, never live schedules, which is how a
+    // published flow that used to arrive pre-scheduled stops doing that.
+    let published: Vec<metalcraft_flows::Suggestion> = doc
+        .get("suggested_schedules")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
+    let extracted = metalcraft_flows::extract(&doc)
+        .map_err(|e| format!("invalid flow document from registry: {e}"))?;
+    let suggestions = if published.is_empty() {
+        extracted
+            .schedules
+            .into_iter()
+            .map(|s| metalcraft_flows::Suggestion {
+                key: s.key,
+                schedule: s.schedule,
+            })
+            .collect()
+    } else {
+        published
+    };
+
+    Ok(FetchedFlow {
+        flow: extracted.flow,
+        suggestions,
+    })
 }
 
 /// Ask the registry to resolve a semver range to the highest published version of

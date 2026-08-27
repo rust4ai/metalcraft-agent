@@ -63,6 +63,16 @@ pub fn flows_dir() -> PathBuf {
     data_dir().join("flows")
 }
 
+/// Directory holding this agent's [scheduled flows](crate::scheduled_flows) —
+/// one JSON per schedule, saying *when* a flow in `flows_dir()` runs.
+///
+/// Separate from the flows themselves so "what can this agent do" and "what is
+/// this agent going to do" are two listings rather than one you have to read
+/// carefully.
+pub fn scheduled_flows_dir() -> PathBuf {
+    data_dir().join("scheduled_flows")
+}
+
 /// Directory holding in-flight and finished flow runs (one JSON per run),
 /// used by the v2 executor for pause/resume checkpointing.
 pub fn runs_dir() -> PathBuf {

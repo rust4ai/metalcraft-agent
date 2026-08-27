@@ -128,7 +128,7 @@ impl metalcraft::Tool for FlowWriteTool {
         "flow_write"
     }
     fn description(&self) -> &str {
-        "Create or overwrite a flow. Provide a `flow` SavedFlow document; the `id` field on it identifies the flow. The flow is validated first — if it fails, nothing is saved and the errors are returned."
+        "Create or overwrite a flow — the WORK, not when it runs. Provide a `flow` SavedFlow document (spec_version \"3\"); the `id` field on it identifies the flow. Validated first: if it fails, nothing is saved and the errors are returned. Writing a flow schedules nothing — use scheduled_flow_create for that. Overwriting a flow leaves its existing schedules pointing at the new version."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -153,68 +153,183 @@ impl metalcraft::Tool for FlowWriteTool {
     }
 }
 
-pub struct FlowSetSchedulesTool;
+/// Shared: parse a `schedule` argument, which arrives either as a JSON string
+/// (what strict function schemas force) or as an inline object.
+fn schedule_arg(
+    args: &serde_json::Value,
+    tool: &str,
+) -> Result<metalcraft_flows::ScheduleSpec, String> {
+    let raw = args
+        .get("schedule")
+        .ok_or_else(|| format!("{tool}: missing `schedule`"))?;
+    let value: serde_json::Value = match raw.as_str() {
+        Some(s) => serde_json::from_str(s).map_err(|e| format!("invalid schedule JSON: {e}"))?,
+        None => raw.clone(),
+    };
+    serde_json::from_value(value).map_err(|e| format!("invalid schedule spec: {e}"))
+}
+
+/// The shape every scheduled-flow tool describes to the model. Written once
+/// because three tools take it and a drifting description is how a model learns a
+/// field that does not exist.
+const SCHEDULE_SHAPE: &str = "`{ \"type\": \"cron\"|\"minutes\"|\"hours\"|\"manual\", \"cron\"?: \"0 0 8 * * *\", \"interval\"?: number, \"name\"?: \"Morning brief\", \"timezone\"?: \"America/Detroit\", \"persona\"?: string, \"inputs\"?: object }`";
+
+fn scheduled_view(sf: &metalcraft_flows::ScheduledFlow) -> serde_json::Value {
+    let preview = crate::scheduled_flows::preview(&sf.schedule);
+    serde_json::json!({
+        "id": sf.id,
+        "flow_id": sf.flow_id,
+        "enabled": sf.enabled,
+        "name": sf.schedule.display_name(),
+        "description": preview.description,
+        "next_runs": preview.next_runs,
+        "instance_id": sf.instance_id,
+        "schedule": sf.schedule,
+    })
+}
+
+pub struct ScheduledFlowListTool;
 
 #[async_trait]
-impl metalcraft::Tool for FlowSetSchedulesTool {
+impl metalcraft::Tool for ScheduledFlowListTool {
     fn name(&self) -> &str {
-        "flow_set_schedules"
+        "scheduled_flow_list"
     }
     fn description(&self) -> &str {
-        "Set WHEN a flow runs by replacing its `schedules` array (flow-level, not on the entry node). A flow may have MANY schedules — e.g. run at 8am AND 6pm are two entries. Each schedule is `{ \"id\": \"morning\", \"type\": \"cron\"|\"minutes\"|\"hours\"|\"manual\", \"cron\"?: \"0 8 * * *\", \"interval\"?: number, \"enabled\"?: true, \"name\"?: string, \"timezone\"?: \"America/Detroit\", \"persona\"?: string, \"inputs\"?: object }`. Replaces the whole array. The flow must already be `enabled` for schedules to fire."
+        "List everything this agent will do on its own: every scheduled flow, with its trigger, whether it is enabled, and when it fires next. Optionally filter by `flow_id`. An empty list means nothing runs unless somebody asks."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "Flow id" },
-                "schedules": { "type": "string", "description": "A JSON array of schedule objects, as a JSON string." }
-            },
-            "required": ["id", "schedules"]
+                "flow_id": { "type": "string", "description": "Only schedules of this flow" }
+            }
         })
     }
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        let id = id_arg(&args, "flow_set_schedules")?;
-        let raw = args
-            .get("schedules")
-            .ok_or_else(|| missing_param("flow_set_schedules", "schedules"))?;
-        // Accept a JSON string (what strict function schemas force) or an inline array.
-        let value: serde_json::Value = if let Some(s) = raw.as_str() {
-            match serde_json::from_str(s) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Ok(
-                        serde_json::json!({ "error": format!("invalid schedules JSON: {e}") }),
-                    );
-                }
-            }
-        } else {
-            raw.clone()
+        let all = match args["flow_id"].as_str().filter(|s| !s.is_empty()) {
+            Some(flow_id) => crate::scheduled_flows::for_flow(flow_id),
+            None => crate::scheduled_flows::list(),
         };
-        let schedules: Vec<metalcraft_flows::FlowScheduleSpec> = match serde_json::from_value(value)
-        {
+        Ok(serde_json::json!({
+            "scheduled": all.iter().map(scheduled_view).collect::<Vec<_>>()
+        }))
+    }
+}
+
+pub struct ScheduledFlowCreateTool;
+
+#[async_trait]
+impl metalcraft::Tool for ScheduledFlowCreateTool {
+    fn name(&self) -> &str {
+        "scheduled_flow_create"
+    }
+    fn description(&self) -> &str {
+        "Schedule a flow: say WHEN an existing flow runs, and start running it. This also creates the persistent agent the schedule runs as, so successive firings remember each other — it is the \"yes, run this in the background\" step, and nothing runs on a timer without one. Schedules of the same flow share an agent by default. The `schedule` is a JSON object (or JSON string) of the form: see the `schedule` parameter."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "flow_id": { "type": "string", "description": "The flow to run" },
+                "schedule": { "type": "string", "description": format!("The trigger, as a JSON object or JSON string: {SCHEDULE_SHAPE}") },
+                "enabled": { "type": "boolean", "description": "Start firing immediately (default true)" },
+                "instance_id": { "type": "string", "description": "Run as an existing agent instead of minting one" }
+            },
+            "required": ["flow_id", "schedule"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let flow_id = match args["flow_id"].as_str().filter(|s| !s.is_empty()) {
+            Some(f) => f,
+            None => return Err(missing_param("scheduled_flow_create", "flow_id")),
+        };
+        let schedule = match schedule_arg(&args, "scheduled_flow_create") {
             Ok(s) => s,
-            Err(e) => {
-                return Ok(serde_json::json!({ "error": format!("invalid schedule spec: {e}") }));
-            }
+            Err(e) => return Ok(serde_json::json!({ "error": e })),
         };
-        let Some(mut flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
-            return Ok(serde_json::json!({ "error": format!("flow '{id}' not found") }));
+        let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), flow_id) else {
+            return Ok(serde_json::json!({ "error": format!("flow '{flow_id}' not found") }));
         };
-        flow.schedules = schedules;
-        // Full validation + cron parsing; a bad cron or duplicate id is reported
-        // here rather than failing silently in the daemon.
-        if let Err(e) = crate::flows::parse_schedules(&flow) {
-            return Ok(serde_json::json!({ "saved": false, "error": e }));
+        match crate::scheduled_flows::arm(crate::scheduled_flows::NewSchedule {
+            flow: &flow,
+            schedule,
+            enabled: args["enabled"].as_bool().unwrap_or(true),
+            instance: args["instance_id"].as_str().filter(|s| !s.is_empty()),
+            from_suggestion: None,
+            id: None,
+        }) {
+            Ok(sf) => Ok(serde_json::json!({ "created": true, "scheduled": scheduled_view(&sf) })),
+            Err(e) => Ok(serde_json::json!({ "created": false, "error": e })),
         }
-        match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
-            Ok(()) => Ok(serde_json::json!({
-                "saved": true,
-                "id": flow.id,
-                "schedules": flow.schedules,
-                "enabled": flow.enabled,
-            })),
-            Err(e) => Ok(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+pub struct ScheduledFlowUpdateTool;
+
+#[async_trait]
+impl metalcraft::Tool for ScheduledFlowUpdateTool {
+    fn name(&self) -> &str {
+        "scheduled_flow_update"
+    }
+    fn description(&self) -> &str {
+        "Change an existing schedule: a new trigger, or pause/resume it with `enabled`. Pausing keeps the agent and everything it has learned. Use `scheduled_flow_list` first to get the id."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Scheduled flow id (from scheduled_flow_list)" },
+                "schedule": { "type": "string", "description": format!("Replacement trigger, as a JSON object or JSON string: {SCHEDULE_SHAPE}") },
+                "enabled": { "type": "boolean", "description": "Pause (false) or resume (true)" }
+            },
+            "required": ["id"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = id_arg(&args, "scheduled_flow_update")?;
+        let Some(mut sf) = crate::scheduled_flows::get(&id) else {
+            return Ok(serde_json::json!({ "error": format!("no scheduled flow '{id}'") }));
+        };
+        if args.get("schedule").is_some() {
+            match schedule_arg(&args, "scheduled_flow_update") {
+                Ok(schedule) => sf.schedule = schedule,
+                Err(e) => return Ok(serde_json::json!({ "error": e })),
+            }
+        }
+        if let Some(enabled) = args["enabled"].as_bool() {
+            sf.enabled = enabled;
+        }
+        sf.updated_at = chrono::Utc::now().to_rfc3339();
+        match crate::scheduled_flows::save(&sf) {
+            Ok(()) => Ok(serde_json::json!({ "saved": true, "scheduled": scheduled_view(&sf) })),
+            Err(e) => Ok(serde_json::json!({ "saved": false, "error": e })),
+        }
+    }
+}
+
+pub struct ScheduledFlowDeleteTool;
+
+#[async_trait]
+impl metalcraft::Tool for ScheduledFlowDeleteTool {
+    fn name(&self) -> &str {
+        "scheduled_flow_delete"
+    }
+    fn description(&self) -> &str {
+        "Stop running a flow on a timer, by scheduled flow id. The agent and everything it remembers are KEPT — this is 'stop doing this', not 'forget what you learned'. The flow itself is untouched and can still be run by hand."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "id": { "type": "string", "description": "Scheduled flow id" } },
+            "required": ["id"]
+        })
+    }
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = id_arg(&args, "scheduled_flow_delete")?;
+        match crate::scheduled_flows::disarm(&id) {
+            Ok(()) => Ok(serde_json::json!({ "deleted": id, "agent_kept": true })),
+            Err(e) => Ok(serde_json::json!({ "error": e })),
         }
     }
 }

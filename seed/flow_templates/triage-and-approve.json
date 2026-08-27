@@ -1,20 +1,26 @@
 {
-  "spec_version": "2",
+  "spec_version": "3",
   "id": "triage-and-approve",
   "name": "Triage an item, escalate P0 with approval",
   "created_at": "2026-07-27T00:00:00Z",
   "updated_at": "2026-07-27T00:00:00Z",
-  "enabled": false,
   "flow": {
     "nodes": [
       {
         "id": "entry",
         "node_type": "entry",
         "data": {
-          "schedule_type": "manual",
-          "inputs": { "item": { "type": "string", "required": true } }
+          "inputs": {
+            "item": {
+              "type": "string",
+              "required": true
+            }
+          }
         },
-        "position": [0.0, 0.0]
+        "position": [
+          0.0,
+          0.0
+        ]
       },
       {
         "id": "triage",
@@ -22,63 +28,144 @@
         "data": {
           "prompt": "Assess this item and reply with ONLY a JSON object of the form {\"severity\": \"P0|P1|P2\", \"summary\": \"…\"}. Item:\n\n{{item}}",
           "output_var": "triage",
-          "output_schema": { "type": "object", "properties": { "severity": { "type": "string" }, "summary": { "type": "string" } } }
+          "output_schema": {
+            "type": "object",
+            "properties": {
+              "severity": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              }
+            }
+          }
         },
-        "position": [260.0, 0.0]
+        "position": [
+          260.0,
+          0.0
+        ]
       },
       {
         "id": "route",
         "node_type": "conditional",
         "data": {
           "conditions": [
-            { "handle": "high", "variable": "triage.severity", "operator": "equals", "value": "P0" }
+            {
+              "handle": "high",
+              "variable": "triage.severity",
+              "operator": "equals",
+              "value": "P0"
+            }
           ],
           "default_handle": "normal"
         },
-        "position": [520.0, 0.0]
+        "position": [
+          520.0,
+          0.0
+        ]
       },
       {
         "id": "approve",
         "node_type": "approval",
         "data": {
           "message": "P0 item — escalate now?\n\n{{triage.summary}}",
-          "choices": ["escalate", "dismiss"]
+          "choices": [
+            "escalate",
+            "dismiss"
+          ]
         },
-        "position": [780.0, -100.0]
+        "position": [
+          780.0,
+          -100.0
+        ]
       },
       {
         "id": "escalated",
         "node_type": "prompt",
-        "data": { "prompt": "Write a short escalation note for on-call about:\n\n{{triage.summary}}" },
-        "position": [1040.0, -160.0]
+        "data": {
+          "prompt": "Write a short escalation note for on-call about:\n\n{{triage.summary}}"
+        },
+        "position": [
+          1040.0,
+          -160.0
+        ]
       },
       {
         "id": "dismissed",
         "node_type": "end",
-        "data": { "status": "dismissed" },
-        "position": [1040.0, -40.0]
+        "data": {
+          "status": "dismissed"
+        },
+        "position": [
+          1040.0,
+          -40.0
+        ]
       },
       {
         "id": "filed",
         "node_type": "prompt",
-        "data": { "prompt": "File this normally and note next steps:\n\n{{triage.summary}}" },
-        "position": [780.0, 120.0]
+        "data": {
+          "prompt": "File this normally and note next steps:\n\n{{triage.summary}}"
+        },
+        "position": [
+          780.0,
+          120.0
+        ]
       },
       {
         "id": "unparsed",
         "node_type": "end",
-        "data": { "status": "triage_unparsed" },
-        "position": [520.0, 160.0]
+        "data": {
+          "status": "triage_unparsed"
+        },
+        "position": [
+          520.0,
+          160.0
+        ]
       }
     ],
     "edges": [
-      { "id": "e0", "source": "entry", "target": "triage" },
-      { "id": "e1", "source": "triage", "target": "route", "source_handle": "ok" },
-      { "id": "e2", "source": "route", "target": "approve", "source_handle": "high" },
-      { "id": "e3", "source": "route", "target": "filed", "source_handle": "normal" },
-      { "id": "e4", "source": "approve", "target": "escalated", "source_handle": "escalate" },
-      { "id": "e5", "source": "approve", "target": "dismissed", "source_handle": "dismiss" },
-      { "id": "e6", "source": "triage", "target": "unparsed", "source_handle": "error" }
+      {
+        "id": "e0",
+        "source": "entry",
+        "target": "triage"
+      },
+      {
+        "id": "e1",
+        "source": "triage",
+        "target": "route",
+        "source_handle": "ok"
+      },
+      {
+        "id": "e2",
+        "source": "route",
+        "target": "approve",
+        "source_handle": "high"
+      },
+      {
+        "id": "e3",
+        "source": "route",
+        "target": "filed",
+        "source_handle": "normal"
+      },
+      {
+        "id": "e4",
+        "source": "approve",
+        "target": "escalated",
+        "source_handle": "escalate"
+      },
+      {
+        "id": "e5",
+        "source": "approve",
+        "target": "dismissed",
+        "source_handle": "dismiss"
+      },
+      {
+        "id": "e6",
+        "source": "triage",
+        "target": "unparsed",
+        "source_handle": "error"
+      }
     ]
   }
 }

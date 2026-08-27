@@ -4964,9 +4964,7 @@ dependencies = [
 
 [[package]]
 name = "metalcraft"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bd509f8145b5ee8e187c00475ad1331b8fc3bf40ff1d87316858aadd1ed2d1c"
+version = "0.11.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -5028,14 +5026,13 @@ dependencies = [
 
 [[package]]
 name = "metalcraft-flows"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e92db0095eae35fa1be62d5ad0971bbd2008411ee8553bb1e29a2af72312e487"
+version = "0.6.0"
 dependencies = [
  "regex",
  "semver",
  "serde",
  "serde_json",
+ "utoipa",
 ]
 
 [[package]]

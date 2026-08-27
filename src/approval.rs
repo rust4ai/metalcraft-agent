@@ -151,6 +151,7 @@ impl OperationKind {
             | "skill_read"
             | "flow_list"
             | "flow_read"
+            | "scheduled_flow_list"
             | "flow_validate"
             | "flow_templates_list"
             | "flow_template_read"
@@ -163,7 +164,9 @@ impl OperationKind {
             | "skill_write"
             | "skill_delete"
             | "flow_write"
-            | "flow_set_schedules"
+            | "scheduled_flow_create"
+            | "scheduled_flow_update"
+            | "scheduled_flow_delete"
             | "flow_install"
             | "flow_check_dependencies"
             | "flow_delete" => Self::MetaWrite,

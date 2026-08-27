@@ -140,11 +140,17 @@ fn flow_threads() -> FlowThreads {
 ///
 /// "A new conversation per firing" is right for a daily briefer and wrong for a
 /// five-minute cron, which would mint 288 threads a day and bury the agent's real
-/// ones. This is the rule the pod already uses everywhere else to decide whether
-/// something is still the same conversation — the gateway's idle reset, and the
-/// follow-up policy — so flows are consistent with the rest rather than special.
-/// A fast cron produces one rolling thread, which is what anyone would want to
-/// read; a daily one produces a thread per day.
+/// ones. This is the rule the pod uses everywhere else to decide whether something
+/// is still the same conversation — a gateway sender's next message
+/// ([`gateway_session_for`]) and the follow-up policy — so flows are consistent
+/// with the rest rather than special. A fast cron produces one rolling thread,
+/// which is what anyone would want to read; a daily one produces a thread per day.
+///
+/// Note what this is *not*: it never clears a context in place. Past the window a
+/// firing starts a new session under the same agent, which has no context to
+/// clear — and the agent's memory, which lives on the instance rather than the
+/// session, carries into it. Resetting a live conversation is a separate,
+/// explicit act (`POST /chats/{id}/reset`).
 const FLOW_CONVERSATION_TTL_SECS: i64 = DEFAULT_GATEWAY_SESSION_TTL_SECS as i64;
 
 /// The conversation this agent's next flow turn belongs in, creating one if the
@@ -184,6 +190,7 @@ pub async fn flow_conversation(
         cwd: cwd.to_string(),
         preset: SessionPreset::Workshop,
         state: None,
+        archived: Vec::new(),
         created_at: chrono::Utc::now().to_rfc3339(),
         // The flow run has its own diagnostics session (`flow_exec` builds one,
         // tagged with `flow_id` + `instance_id`); a second logger here would
@@ -192,7 +199,7 @@ pub async fn flow_conversation(
         trace: None,
         busy: false,
         interrupt: Arc::new(AtomicBool::new(false)),
-        pending: std::collections::VecDeque::new(),
+        pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
     };
     store
         .lock()
@@ -278,7 +285,19 @@ struct ChatSession {
     /// The session's I/O type — workshop chat vs. a bound gateway conversation.
     /// Decides where `say_to_user` replies are delivered.
     preset: SessionPreset,
+    /// The context a model still sees. `None` after a reset, until the next turn.
+    ///
+    /// Deliberately **not** the conversation: `transcript` is. These were one list
+    /// until reset needed to end a context while keeping the history, which is
+    /// what made the difference between the two worth naming.
     state: Option<AgentState>,
+    /// The conversation *before* the current context: every message closed off by
+    /// a reset, each run ending in the divider that closed it.
+    ///
+    /// Frozen by construction — nothing appends here except a reset, and nothing
+    /// ever rewrites it. That is what lets a reset keep the history it is hiding
+    /// from the model, which `/clear` could not do when there was only one list.
+    archived: Vec<ChatMessageWire>,
     created_at: String,
     diagnostics: Option<Arc<DiagnosticsLogger>>,
     /// OTLP trace writer, parallel to `diagnostics`. Shares its session id.
@@ -292,9 +311,14 @@ struct ChatSession {
     /// cannot take this session's async lock. Cleared when a turn starts, so a
     /// stop pressed after the turn already ended can never kill the next one.
     interrupt: Arc<AtomicBool>,
-    /// Inbound gateway messages that arrived while a turn was already running,
-    /// drained FIFO when the in-flight turn finishes. Empty for workshop chats.
-    pending: std::collections::VecDeque<String>,
+    /// Messages that arrived while a turn was already running, drained FIFO.
+    ///
+    /// A `std::sync::Mutex` behind an `Arc` rather than a plain field, for the
+    /// same reason [`Self::interrupt`] is an `Arc<AtomicBool>`: the executor's
+    /// mailbox is a sync closure and cannot take this session's async lock. That
+    /// mailbox is what lets a message join the turn already running instead of
+    /// waiting for it, so the queue has to be reachable from inside the run.
+    pending: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
 }
 
 /// Build a [`TraceLogger`] keyed to a diagnostics logger's session-dir name, so
@@ -486,17 +510,18 @@ async fn auth_middleware(
         list_agent_instances, get_agent_instance, post_create_agent_instance,
         get_agent_instance_flows,
         patch_agent_instance, delete_agent_instance,
-        get_agent_instance_memory, post_instance_conversation,
+        get_agent_instance_memory, post_instance_conversation, list_instance_conversations,
         list_personas, get_persona, put_persona, delete_persona,
         list_skills, get_skill, put_skill, delete_skill,
-        list_flows, get_flow, put_flow, delete_flow, post_run_flow, post_install_flow,
-        get_flow_schedules, put_flow_schedules, post_flow_schedule, delete_flow_schedule,
-        get_flow_binding, put_flow_binding, post_arm_schedule, delete_arm_schedule,
+        list_flows, get_flow, put_flow, post_validate_flow, delete_flow, post_run_flow,
+        post_install_flow,
+        list_scheduled_flows, get_scheduled_flow, post_scheduled_flow,
+        put_scheduled_flow, delete_scheduled_flow, post_schedule_preview,
+        get_flow_binding, put_flow_binding,
         post_inspect_agent_pack, get_agent_pack_registries, post_update_agent_pack,
         get_octaweave_status,
         get_registry_status, post_registry_connect, post_registry_disconnect,
         get_registry_search, get_registry_manifest,
-        get_flow_schedules_preview,
         post_check_flow_dependencies,
         list_flow_runs, get_flow_run, post_resume_flow_run,
         list_flow_templates, get_flow_template,
@@ -505,7 +530,8 @@ async fn auth_middleware(
         list_keys, list_recommended_keys, put_key, delete_key, reveal_key,
         get_inference_status,
         list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
-        get_chat_context, post_chat_compact, post_chat_clear, post_chat_interrupt,
+        post_chat_reset,
+        get_chat_context, post_chat_compact, post_chat_interrupt,
         list_scheduled_tasks, delete_scheduled_task,
         list_integrations, get_integration, put_integration_enabled,
         get_lockfile, post_lockfile_restore,
@@ -520,10 +546,19 @@ async fn auth_middleware(
         FactoryResetRequest, ResetReport, ResetScope, ResetFailure, RestartExpectation,
         ErrorResponse, ProjectSnapshot, ProjectLayout, ApiToolSummary,
         KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
-        InferenceStatus, ChatContext, ChatCompacted, ChatInterrupt,
+        InferenceStatus, ChatContext, ChatCompacted, ChatInterrupt, ChatQueued,
         FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, RunFlowOutput, ResumeFlowRunRequest,
-        InstallFlowRequest, InstallDependenciesResponse, SchedulePreview,
-        FlowList, FlowListItem, FlowListSchedule,
+        InstallFlowRequest, InstallDependenciesResponse,
+        crate::scheduled_flows::SchedulePreview,
+        FlowList, FlowListItem, FlowValidation,
+        // The graph itself, from `metalcraft-flows` (its `schema` feature). Without
+        // these a client cannot type a flow at all — which is why both clients
+        // stopped at `node_count` and neither could draw one.
+        metalcraft_flows::SavedFlow, metalcraft_flows::FlowDefinition,
+        metalcraft_flows::FlowNode, metalcraft_flows::FlowEdge,
+        metalcraft_flows::FlowNodeType,
+        ScheduledFlowList, ScheduledFlowRow, CreateScheduledFlowRequest,
+        UpdateScheduledFlowRequest, PreviewScheduleRequest,
         crate::flow_exec::FlowRunSummary, crate::flow_exec::FlowStep,
         crate::flow_runs::FlowRun, crate::flow_runs::PauseInfo,
         crate::flow_install::InstallResult, crate::flow_install::InstalledFlow,
@@ -548,13 +583,13 @@ async fn auth_middleware(
         ExportAgentPackRequest,
         crate::memory::InstanceMemoryView, crate::memory::MemorySample,
         InstanceDetail, CreateInstanceRequest, PatchInstanceRequest, NewConversationRequest,
-        ScheduledFlowRef, InstanceFlows, PresetDetail, RosterPersona, InstanceList, InstanceListItem,
+        InstanceFlows, PresetDetail, RosterPersona, InstanceList, InstanceListItem,
         AgentPackPreview, Registries, RegistryView, crate::agent_registry::Trust,
         crate::agent_registry::Connection, crate::agent_registry::ConnectionState,
         crate::agent_registry::SearchHit,
         crate::octaweave::OctaweaveConnection, crate::octaweave::OctaweaveConnectionState,
         FlowBindingView, FlowPersonaCheck, ArmedSchedule, ArmConsent,
-        BindFlowRequest, ArmScheduleRequest,
+        BindFlowRequest,
         crate::skill::Skill, crate::skill::SkillSummary,
         crate::gateway_activity::GatewayEvent,
         crate::metalcraft_gateway::GatewayStatus,
@@ -698,7 +733,7 @@ pub fn build_router(api_key: String) -> Router {
         )
         .route(
             "/api/v1/agents/instances/{id}/conversations",
-            post(post_instance_conversation),
+            get(list_instance_conversations).post(post_instance_conversation),
         )
         .route(
             "/api/v1/agents/instances/{id}",
@@ -720,33 +755,25 @@ pub fn build_router(api_key: String) -> Router {
         // Static `/install` before the `{id}` param route (matchit prefers the
         // literal) — install a registry flow onto this agent.
         .route("/api/v1/flows/install", post(post_install_flow))
+        // Literal before `{id}`, like `/install` above.
+        .route("/api/v1/flows/validate", post(post_validate_flow))
         .route("/api/v1/flows/{id}", get(get_flow))
         .route("/api/v1/flows/{id}", put(put_flow))
         .route("/api/v1/flows/{id}", delete(delete_flow))
         .route("/api/v1/flows/{id}/run", post(post_run_flow))
-        // Flow schedules — the literal `schedules/preview` before the `{sid}`
-        // param so matchit prefers the static segment.
-        .route("/api/v1/flows/{id}/schedules", get(get_flow_schedules))
-        .route("/api/v1/flows/{id}/schedules", put(put_flow_schedules))
-        .route("/api/v1/flows/{id}/schedules", post(post_flow_schedule))
-        .route(
-            "/api/v1/flows/{id}/schedules/preview",
-            get(get_flow_schedules_preview),
-        )
-        .route(
-            "/api/v1/flows/{id}/schedules/{sid}",
-            delete(delete_flow_schedule),
-        )
         .route("/api/v1/flows/{id}/binding", get(get_flow_binding))
         .route("/api/v1/flows/{id}/binding", put(put_flow_binding))
+        // Scheduled flows — *when* a flow runs. The literal `preview` is
+        // registered before the `{id}` param so matchit prefers the static segment.
+        .route("/api/v1/scheduled-flows", get(list_scheduled_flows))
+        .route("/api/v1/scheduled-flows", post(post_scheduled_flow))
         .route(
-            "/api/v1/flows/{id}/schedules/{sid}/arm",
-            post(post_arm_schedule),
+            "/api/v1/scheduled-flows/preview",
+            post(post_schedule_preview),
         )
-        .route(
-            "/api/v1/flows/{id}/schedules/{sid}/arm",
-            delete(delete_arm_schedule),
-        )
+        .route("/api/v1/scheduled-flows/{id}", get(get_scheduled_flow))
+        .route("/api/v1/scheduled-flows/{id}", put(put_scheduled_flow))
+        .route("/api/v1/scheduled-flows/{id}", delete(delete_scheduled_flow))
         .route(
             "/api/v1/flows/{id}/check-dependencies",
             post(post_check_flow_dependencies),
@@ -777,7 +804,12 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/chats/{id}/turn", post(post_chat_turn))
         .route("/api/v1/chats/{id}/context", get(get_chat_context))
         .route("/api/v1/chats/{id}/compact", post(post_chat_compact))
-        .route("/api/v1/chats/{id}/clear", post(post_chat_clear))
+        .route("/api/v1/chats/{id}/reset", post(post_chat_reset))
+        // `/clear` predates `/reset` and now does the same non-destructive thing.
+        // Kept because shipped clients (the phone's `/clear` command, the desktop
+        // menu) still call it, and a 404 there would read as the pod being broken
+        // rather than as a rename.
+        .route("/api/v1/chats/{id}/clear", post(post_chat_reset))
         .route("/api/v1/chats/{id}/interrupt", post(post_chat_interrupt))
         .route("/api/v1/chats/{id}/events", get(get_chat_events))
         .route("/api/v1/scheduled-tasks", get(list_scheduled_tasks))
@@ -998,10 +1030,7 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
     let keys = list_key_summaries();
     let agent_presets =
         crate::agent_preset::AgentPreset::list_summaries(&paths::agent_presets_dir());
-    let agent_instances: Vec<_> = crate::agent_instance::list()
-        .into_iter()
-        .filter(|i| i.persistent)
-        .collect();
+    let agent_instances: Vec<_> = crate::agent_instance::list();
 
     Json(ProjectSnapshot {
         personas,
@@ -1677,33 +1706,15 @@ struct InstanceDetail {
     #[serde(flatten)]
     instance: crate::agent_instance::AgentInstance,
     conversations: Vec<ChatSummary>,
-    /// What this agent is scheduled to do — the flow schedules armed to it. A pod
+    /// What this agent is scheduled to do — the schedules armed to it. A pod
     /// could not previously answer that question about a background agent.
-    scheduled: Vec<ScheduledFlowRef>,
+    scheduled: Vec<ScheduledFlowRow>,
 }
 
-#[derive(Serialize, utoipa::ToSchema)]
-struct ScheduledFlowRef {
-    flow_id: String,
-    /// Absent when the flow file is gone but the binding is not — worth surfacing
-    /// rather than hiding, since it means a stale binding.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    flow_name: Option<String>,
-    schedule_ids: Vec<String>,
-}
-
-fn scheduled_for(instance_id: &str) -> Vec<ScheduledFlowRef> {
-    crate::flow_bindings::flows_for_instance(instance_id)
+fn scheduled_for(instance_id: &str) -> Vec<ScheduledFlowRow> {
+    crate::scheduled_flows::for_instance(instance_id)
         .into_iter()
-        .map(|(flow_id, mut schedule_ids)| {
-            schedule_ids.sort();
-            ScheduledFlowRef {
-                flow_name: metalcraft_flows::load_flow(&paths::flows_dir(), &flow_id)
-                    .map(|f| f.name),
-                flow_id,
-                schedule_ids,
-            }
-        })
+        .map(scheduled_row)
         .collect()
 }
 
@@ -1735,23 +1746,16 @@ async fn get_agent_instance_flows(Path(id): Path<String>) -> Response {
 
 #[derive(Serialize, utoipa::ToSchema)]
 struct InstanceFlows {
-    scheduled: Vec<ScheduledFlowRef>,
+    scheduled: Vec<ScheduledFlowRow>,
 }
 
 fn conversations_of(instance_id: &str) -> Vec<ChatSummary> {
     let mut out: Vec<ChatSummary> = read_persisted_chats()
         .into_iter()
         .filter(|c| c.instance_id.as_deref() == Some(instance_id))
-        .map(|c| ChatSummary {
-            id: c.id,
-            instance_id: c.instance_id,
-            persona_slug: c.persona_slug,
-            model_name: c.model_name,
-            created_at: c.created_at,
-            turn_count: c.messages.len(),
-        })
+        .map(ChatSummary::of)
         .collect();
-    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    out.sort_by(|a, b| b.recency().cmp(a.recency()));
     out
 }
 
@@ -1838,9 +1842,6 @@ async fn post_create_agent_instance(Json(req): Json<CreateInstanceRequest>) -> R
         Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
     };
     let mut instance = AgentInstance::new(&preset, InstanceOrigin::Workshop);
-    // Creating an agent explicitly (rather than incidentally, by starting a chat)
-    // means keeping it.
-    instance.persistent = true;
     if let Some(name) = req.name {
         instance.name = name;
     }
@@ -1865,11 +1866,13 @@ async fn delete_agent_instance(Path(id): Path<String>) -> Response {
     if !scheduled.is_empty() {
         let what: Vec<String> = scheduled
             .iter()
-            .map(|f| {
+            .map(|row| {
                 format!(
                     "{} ({})",
-                    f.flow_name.as_deref().unwrap_or(&f.flow_id),
-                    f.schedule_ids.join(", ")
+                    row.flow_name
+                        .as_deref()
+                        .unwrap_or(&row.scheduled.flow_id),
+                    row.scheduled.schedule.display_name()
                 )
             })
             .collect();
@@ -1894,8 +1897,6 @@ async fn delete_agent_instance(Path(id): Path<String>) -> Response {
 struct PatchInstanceRequest {
     #[serde(default)]
     name: Option<String>,
-    #[serde(default)]
-    persistent: Option<bool>,
     /// Move within the preset's roster. Rejected if the persona isn't in it.
     #[serde(default)]
     persona: Option<String>,
@@ -1918,15 +1919,11 @@ async fn patch_agent_instance(
         Err(e) => return err_json(StatusCode::NOT_FOUND, e),
     };
     if let Some(name) = req.name {
-        // A rename is a rename. It used to set `persistent` too, so the one gesture
-        // for "call it something I recognise" silently also changed how long the pod
-        // keeps it — a lifetime change nobody asked for, made from a text field that
-        // says nothing about lifetimes. Whether an agent is kept is `persistent`, and
-        // it is patched on purpose.
+        // A rename is a rename, and now it could not be anything else: the
+        // `persistent` flag it used to set alongside the name — silently changing
+        // how long the pod kept the agent, from a text field that says nothing
+        // about lifetimes — does not exist. Nothing deletes an agent on a timer.
         instance.name = name;
-    }
-    if let Some(p) = req.persistent {
-        instance.persistent = p;
     }
     if let Some(persona) = req.persona {
         match crate::agent_preset::AgentPreset::load(
@@ -1990,6 +1987,28 @@ struct NewConversationRequest {
     /// Start this conversation as a specific persona from the agent's roster.
     #[serde(default)]
     persona_slug: Option<String>,
+}
+
+/// Every conversation this agent has had, newest activity first.
+///
+/// The same list `GET …/instances/{id}` embeds, on its own route — a session list
+/// reloads whenever a conversation changes, and it has no use for the agent's
+/// memory or its schedules, which that endpoint also pays to assemble.
+#[utoipa::path(
+    get,
+    path = "/api/v1/agents/instances/{id}/conversations",
+    tag = "agent-instances",
+    params(("id" = String, Path, description = "Instance id")),
+    responses(
+        (status = 200, body = Vec<ChatSummary>),
+        (status = 404, description = "No such agent"),
+    ),
+)]
+async fn list_instance_conversations(Path(id): Path<String>) -> Response {
+    if crate::agent_instance::load(&id).is_err() {
+        return err_json(StatusCode::NOT_FOUND, format!("agent '{id}' not found"));
+    }
+    Json(conversations_of(&id)).into_response()
 }
 
 #[utoipa::path(
@@ -2365,20 +2384,14 @@ async fn delete_skill(Path(slug): Path<String>) -> Response {
 
 /// One flow, resolved for display.
 ///
-/// Assembled here rather than served as a bare `SavedFlow` because the three facts
-/// a client needs about a flow — *which agent does it run as*, *is it armed*, *when
-/// does it fire next* — live in three different places: the flow file,
-/// `flow_bindings.json`, and a cron computation. A client that had to make four
-/// calls per flow to answer "what is this automation" would make none of them.
+/// A flow is *what work is this*: the graph, the agent preset it runs as, and how
+/// many schedules point at it. **When** it runs is not here — that is
+/// `GET /api/v1/scheduled-flows`, one call for the whole pod, which a client joins
+/// against this listing by `flow_id`.
 #[derive(Serialize, utoipa::ToSchema)]
 struct FlowListItem {
     id: String,
     name: String,
-    /// The flow-wide master switch. **Disabled flows are listed too**: agent packs
-    /// ship their flows disabled, so an unarmed flow is the normal case and the one
-    /// an arm dialog exists to act on. Filtering to enabled here would hide exactly
-    /// the flows a client needs to show.
-    enabled: bool,
     node_count: usize,
     created_at: String,
     updated_at: String,
@@ -2389,35 +2402,14 @@ struct FlowListItem {
     /// The preset this flow runs as. Always populated — an unbound flow resolves to
     /// the default agent, which is what it effectively already was.
     preset: String,
-    /// True when any schedule has been armed, i.e. this flow has an agent.
-    armed: bool,
-    schedules: Vec<FlowListSchedule>,
-}
-
-/// One schedule of a listed flow: the stored spec, plus what it is bound to and
-/// when it fires next.
-#[derive(Serialize, utoipa::ToSchema)]
-struct FlowListSchedule {
-    /// The schedule exactly as stored — the same shape `PUT …/schedules` accepts, so
-    /// an editor can round-trip it without a second representation of the same thing.
-    #[serde(flatten)]
-    #[schema(value_type = Object)]
-    spec: metalcraft_flows::FlowScheduleSpec,
-    /// The agent this schedule was armed with. An instance id is pod-local and must
-    /// never be *published* (`flow_bindings`' module docs); this is the pod's own API
-    /// rather than an export path, and "which agent runs this" is the question the
-    /// list exists to answer.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instance_id: Option<String>,
-    /// Absent if the instance was deleted out from under the binding — the same
-    /// semantics as [`ArmedSchedule`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instance_name: Option<String>,
-    /// Human-readable trigger: `"Every 5 minute(s)"`, ``"Cron `0 0 8 * * *` (America/Detroit)"``.
-    description: String,
-    /// Next projected fire time, or absent for a manual (or invalid) trigger.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    next_fire_at: Option<String>,
+    /// How many schedules point at this flow, of which how many are enabled.
+    ///
+    /// Enough for a listing to say "runs twice a day" or "never runs" without
+    /// fetching every schedule; a client that wants the triggers themselves reads
+    /// `/scheduled-flows`.
+    scheduled_count: usize,
+    /// Of `scheduled_count`, how many are enabled. Zero means nothing fires.
+    enabled_count: usize,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -2426,38 +2418,17 @@ struct FlowList {
 }
 
 fn flow_list_item(flow: &metalcraft_flows::SavedFlow) -> FlowListItem {
-    let binding = crate::flow_bindings::get(&flow.id);
-    let schedules: Vec<FlowListSchedule> = flow
-        .effective_schedules()
-        .into_iter()
-        .map(|spec| {
-            let preview = schedule_preview(&spec);
-            let instance_id = binding.instances.get(&spec.id).cloned();
-            let instance_name = instance_id
-                .as_deref()
-                .and_then(|id| crate::agent_instance::load(id).ok())
-                .map(|i| i.name);
-            FlowListSchedule {
-                instance_id,
-                instance_name,
-                description: preview.description,
-                // `schedule_preview` projects three; a list wants the next one.
-                next_fire_at: preview.next_runs.into_iter().next(),
-                spec,
-            }
-        })
-        .collect();
+    let scheduled = crate::scheduled_flows::for_flow(&flow.id);
     FlowListItem {
         id: flow.id.clone(),
         name: flow.name.clone(),
-        enabled: flow.enabled,
         node_count: flow.flow.nodes.len(),
         created_at: flow.created_at.clone(),
         updated_at: flow.updated_at.clone(),
         v2: crate::flow_exec::is_v2_flow(flow),
         preset: crate::flow_bindings::preset_for(&flow.id),
-        armed: schedules.iter().any(|s| s.instance_id.is_some()),
-        schedules,
+        enabled_count: scheduled.iter().filter(|sf| sf.enabled).count(),
+        scheduled_count: scheduled.len(),
     }
 }
 
@@ -2474,8 +2445,8 @@ fn flow_list_item(flow: &metalcraft_flows::SavedFlow) -> FlowListItem {
 )]
 async fn list_flows() -> Response {
     let dir = paths::flows_dir();
-    // `metalcraft_flows::list_flows` sorts newest-edited first and its summaries
-    // carry no schedules; reload each flow to resolve them, keeping that order.
+    // `metalcraft_flows::list_flows` sorts newest-edited first; reload each flow to
+    // resolve its preset and schedule counts, keeping that order.
     let flows: Vec<FlowListItem> = metalcraft_flows::list_flows(&dir)
         .into_iter()
         .filter_map(|summary| metalcraft_flows::load_flow(&dir, &summary.id))
@@ -2489,7 +2460,10 @@ async fn list_flows() -> Response {
     path = "/api/v1/flows/{id}",
     tag = "flows",
     params(("id" = String, Path, description = "Flow id")),
-    responses((status = 200, description = "The saved flow (metalcraft-flows SavedFlow)", body = Object), (status = 404, body = ErrorResponse)),
+    responses(
+        (status = 200, description = "The saved flow, graph included", body = metalcraft_flows::SavedFlow),
+        (status = 404, body = ErrorResponse),
+    ),
 )]
 async fn get_flow(Path(id): Path<String>) -> Response {
     match metalcraft_flows::load_flow(&paths::flows_dir(), &id) {
@@ -2498,25 +2472,75 @@ async fn get_flow(Path(id): Path<String>) -> Response {
     }
 }
 
+/// What is wrong with a flow graph, without saving it.
+#[derive(Serialize, utoipa::ToSchema)]
+struct FlowValidation {
+    /// True when the graph would save. An editor enables its save button on this
+    /// rather than on an empty `errors`, so a future non-fatal warning does not
+    /// silently start blocking saves.
+    valid: bool,
+    /// One sentence per problem, in the validator's own words.
+    errors: Vec<String>,
+}
+
+/// Check a flow graph without persisting it.
+///
+/// `PUT /flows/{id}` already validates before saving and is still the authority —
+/// this exists so an editor can say what is wrong *while someone is typing*,
+/// which is the only time the answer can still change what they do. Same
+/// `metalcraft_flows::validate` behind both, so the two can never disagree.
+///
+/// Not a 400: an invalid graph is the expected answer to this question, not a bad
+/// request. The status says the check ran; the body says what it found.
+#[utoipa::path(
+    post,
+    path = "/api/v1/flows/validate",
+    tag = "flows",
+    request_body = metalcraft_flows::SavedFlow,
+    responses((status = 200, body = FlowValidation)),
+)]
+async fn post_validate_flow(Json(flow): Json<metalcraft_flows::SavedFlow>) -> Response {
+    let errors: Vec<String> = metalcraft_flows::validate(&flow)
+        .into_iter()
+        .map(|e| e.to_string())
+        .collect();
+    Json(FlowValidation {
+        valid: errors.is_empty(),
+        errors,
+    })
+    .into_response()
+}
+
 #[utoipa::path(
     put,
     path = "/api/v1/flows/{id}",
     tag = "flows",
     params(("id" = String, Path, description = "Flow id")),
-    request_body = Object,
-    responses((status = 200, description = "Saved")),
+    request_body = metalcraft_flows::SavedFlow,
+    responses(
+        (status = 200, description = "Saved", body = metalcraft_flows::SavedFlow),
+        (status = 400, description = "The graph is invalid; the body lists why", body = ErrorResponse),
+    ),
 )]
 async fn put_flow(
     Path(id): Path<String>,
     Json(mut flow): Json<metalcraft_flows::SavedFlow>,
 ) -> Response {
     flow.id = id;
-    // The schedules endpoints validate cron expressions; this one did not, so a
-    // client saving a whole flow could store a schedule that parses as JSON, saves
-    // fine, and then never fires — the daemon just logs a warning nobody reads.
-    // Same check, same 400.
-    if let Err(e) = crate::flows::parse_schedules(&flow) {
-        return err_json(StatusCode::BAD_REQUEST, e);
+    // Saving a graph can no longer break a timer: the schedules pointing at this
+    // flow are separate documents and are not touched here. What a bad save can
+    // still do is make the flow unrunnable, which the daemon reports when the
+    // schedule next comes due.
+    let errors = metalcraft_flows::validate(&flow);
+    if !errors.is_empty() {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            errors
+                .into_iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
     }
     match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
         Ok(()) => Json(flow).into_response(),
@@ -2534,173 +2558,314 @@ async fn put_flow(
 async fn delete_flow(Path(id): Path<String>) -> Response {
     if metalcraft_flows::delete_flow(&paths::flows_dir(), &id) {
         let _ = crate::lockfile::remove_flow(&id);
-        // The binding outlives the flow file otherwise, and a later flow reusing the
-        // id would silently inherit somebody else's agent.
+        // Both outlive the flow file otherwise: a later flow reusing the id would
+        // silently inherit somebody else's agent, and an orphaned schedule would
+        // make the daemon log a missing-flow warning on every poll forever.
         let _ = crate::flow_bindings::forget(&id);
+        let dropped = crate::scheduled_flows::forget_flow(&id);
+        if dropped > 0 {
+            log::info!("Deleted flow '{id}' and its {dropped} schedule(s)");
+        }
         StatusCode::NO_CONTENT.into_response()
     } else {
         err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"))
     }
 }
 
-// ---- Flow schedules -------------------------------------------------------
+// ---- Scheduled flows -------------------------------------------------------
 //
-// Scheduling lives in the flow-level `schedules` array (see metalcraft-flows
-// §1.3). These endpoints let a UI edit just the schedules without rewriting the
-// graph. GET returns the *effective* schedules (materializing a legacy entry-node
-// trigger), so a client can GET → edit → PUT and the first save migrates the flow
-// onto the array form.
+// *When* a flow runs, as its own resource. One document per schedule, so creating
+// one is arming and deleting one is disarming — there is no separate "is it on"
+// flag on the flow that could disagree with what is here.
 
-/// One upcoming-fire preview for a schedule.
+/// One scheduled flow, resolved for display: the stored document plus the three
+/// things a client would otherwise have to compute or fetch.
 #[derive(Serialize, utoipa::ToSchema)]
-struct SchedulePreview {
-    /// The schedule's id.
-    schedule_id: String,
-    /// Human-readable description of the cadence.
+struct ScheduledFlowRow {
+    /// The artifact exactly as stored, so an editor can round-trip it without a
+    /// second representation of the same thing.
+    #[serde(flatten)]
+    #[schema(value_type = Object)]
+    scheduled: metalcraft_flows::ScheduledFlow,
+    /// Name of the flow it runs. **Absent when that flow no longer exists** — a
+    /// schedule that can never fire, which is worth showing as broken rather than
+    /// quietly listing as fine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flow_name: Option<String>,
+    /// Name of the agent it runs as. Absent if the instance was deleted out from
+    /// under it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instance_name: Option<String>,
+    /// Human-readable trigger: ``"Cron `0 0 8 * * *` (America/Detroit)"``.
     description: String,
-    /// Up to a few upcoming fire times, RFC-3339. Empty for `manual`.
-    next_runs: Vec<String>,
+    /// Next projected fire time, or absent for a manual trigger — and for a cron
+    /// this pod cannot parse, which is how a schedule that will never fire looks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_fire_at: Option<String>,
 }
 
-/// Persist `schedules` onto flow `id`, validating shape + cron syntax first.
-/// Returns the saved list on success.
-fn save_flow_schedules(id: &str, schedules: Vec<metalcraft_flows::FlowScheduleSpec>) -> Response {
-    let Some(mut flow) = metalcraft_flows::load_flow(&paths::flows_dir(), id) else {
-        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
-    };
-    flow.schedules = schedules;
-    // parse_schedules runs full validation (unique ids, positive intervals) and
-    // parses every enabled cron expression, so a bad cron is a 400 here rather
-    // than a silent daemon-log warning later.
-    if let Err(e) = crate::flows::parse_schedules(&flow) {
-        return err_json(StatusCode::BAD_REQUEST, e);
+fn scheduled_row(sf: metalcraft_flows::ScheduledFlow) -> ScheduledFlowRow {
+    let preview = crate::scheduled_flows::preview(&sf.schedule);
+    ScheduledFlowRow {
+        flow_name: metalcraft_flows::load_flow(&paths::flows_dir(), &sf.flow_id).map(|f| f.name),
+        instance_name: sf
+            .instance_id
+            .as_deref()
+            .and_then(|id| crate::agent_instance::load(id).ok())
+            .map(|i| i.name),
+        description: preview.description,
+        // `preview` projects three; a row wants the next one.
+        next_fire_at: preview.next_runs.into_iter().next(),
+        scheduled: sf,
     }
-    match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
-        Ok(()) => {
-            // Any schedule that just disappeared can no longer be armed. Reconciling
-            // here rather than in each caller covers every edit shape — single
-            // delete, bulk replace, add — with one rule: an armed binding outlives
-            // its schedule only if the schedule is still there. The agent itself is
-            // kept; see `flow_bindings::disarm`.
-            let live: Vec<&str> = flow.schedules.iter().map(|s| s.id.as_str()).collect();
-            for sid in crate::flow_bindings::get(id).instances.keys() {
-                if !live.contains(&sid.as_str()) {
-                    let _ = crate::flow_bindings::disarm(id, sid);
-                }
-            }
-            Json(flow.schedules).into_response()
-        }
-        Err(e) => err_json(StatusCode::BAD_REQUEST, e.to_string()),
-    }
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct ScheduledFlowList {
+    scheduled: Vec<ScheduledFlowRow>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+struct ScheduledFlowQuery {
+    /// Only schedules of this flow.
+    #[serde(default)]
+    flow_id: Option<String>,
+    /// Only schedules armed to this agent.
+    #[serde(default)]
+    instance_id: Option<String>,
+}
+
+/// `GET /api/v1/scheduled-flows` — everything this pod will do on its own.
+///
+/// The complete answer: nothing else fires a flow on a timer. An empty list means
+/// this pod does nothing unless somebody asks it to.
+#[utoipa::path(
+    get,
+    path = "/api/v1/scheduled-flows",
+    tag = "flows",
+    params(ScheduledFlowQuery),
+    responses((status = 200, description = "Scheduled flows on this pod", body = ScheduledFlowList)),
+)]
+async fn list_scheduled_flows(Query(q): Query<ScheduledFlowQuery>) -> Response {
+    let scheduled: Vec<ScheduledFlowRow> = crate::scheduled_flows::list()
+        .into_iter()
+        .filter(|sf| q.flow_id.as_deref().is_none_or(|f| sf.flow_id == f))
+        .filter(|sf| {
+            q.instance_id
+                .as_deref()
+                .is_none_or(|i| sf.instance_id.as_deref() == Some(i))
+        })
+        .map(scheduled_row)
+        .collect();
+    Json(ScheduledFlowList { scheduled }).into_response()
 }
 
 #[utoipa::path(
     get,
-    path = "/api/v1/flows/{id}/schedules",
+    path = "/api/v1/scheduled-flows/{id}",
     tag = "flows",
-    params(("id" = String, Path, description = "Flow id")),
+    params(("id" = String, Path, description = "Scheduled flow id")),
+    responses((status = 200, body = ScheduledFlowRow), (status = 404, body = ErrorResponse)),
+)]
+async fn get_scheduled_flow(Path(id): Path<String>) -> Response {
+    match crate::scheduled_flows::get(&id) {
+        Some(sf) => Json(scheduled_row(sf)).into_response(),
+        None => err_json(StatusCode::NOT_FOUND, format!("no scheduled flow '{id}'")),
+    }
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct CreateScheduledFlowRequest {
+    /// The flow to run.
+    flow_id: String,
+    /// When to run it: `{ "type": "cron", "cron": "…", "timezone": "…" }`.
+    #[schema(value_type = Object)]
+    schedule: metalcraft_flows::ScheduleSpec,
+    /// Start firing immediately. Defaults to `true` — creating a schedule is the
+    /// act of asking for it; a client staging one passes `false`.
+    #[serde(default = "default_true")]
+    enabled: bool,
+    /// Attach to an existing agent instead of minting one — e.g. run the briefer as
+    /// the same agent you chat with.
+    #[serde(default)]
+    instance_id: Option<String>,
+    /// The author's suggestion key, when the person accepted a suggested schedule
+    /// from a pack or the registry.
+    #[serde(default)]
+    from_suggestion: Option<String>,
+    /// A hand-chosen id instead of a generated one. Rejected on collision: a create
+    /// must never overwrite an existing schedule.
+    #[serde(default)]
+    id: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `POST /api/v1/scheduled-flows` — arm a flow.
+///
+/// This is the consent point: it creates the schedule **and** the agent that will
+/// run it, since "run this while nobody is watching" is one decision rather than
+/// two. Schedules of one flow share an agent unless `instance_id` says
+/// otherwise, so the evening run remembers the morning one.
+#[utoipa::path(
+    post,
+    path = "/api/v1/scheduled-flows",
+    tag = "flows",
+    request_body = CreateScheduledFlowRequest,
     responses(
-        (status = 200, description = "Effective schedules (array of FlowScheduleSpec)", body = Object),
-        (status = 404, body = ErrorResponse),
+        (status = 201, description = "Armed", body = ScheduledFlowRow),
+        (status = 400, description = "Bad trigger, or a persona outside the flow's roster", body = ErrorResponse),
+        (status = 404, description = "No such flow", body = ErrorResponse),
     ),
 )]
-async fn get_flow_schedules(Path(id): Path<String>) -> Response {
-    match metalcraft_flows::load_flow(&paths::flows_dir(), &id) {
-        Some(flow) => Json(flow.effective_schedules()).into_response(),
-        None => err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found")),
+async fn post_scheduled_flow(Json(req): Json<CreateScheduledFlowRequest>) -> Response {
+    let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &req.flow_id) else {
+        return err_json(
+            StatusCode::NOT_FOUND,
+            format!("flow '{}' not found", req.flow_id),
+        );
+    };
+    match crate::scheduled_flows::arm(crate::scheduled_flows::NewSchedule {
+        flow: &flow,
+        schedule: req.schedule,
+        enabled: req.enabled,
+        instance: req.instance_id.as_deref(),
+        from_suggestion: req.from_suggestion,
+        id: req.id,
+    }) {
+        Ok(sf) => (StatusCode::CREATED, Json(scheduled_row(sf))).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
     }
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct UpdateScheduledFlowRequest {
+    /// Replace the trigger and its overrides.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    schedule: Option<metalcraft_flows::ScheduleSpec>,
+    /// Pause (`false`) or resume (`true`) without deleting. The agent and its
+    /// memory are untouched either way.
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// Move this schedule to a different agent.
+    #[serde(default)]
+    instance_id: Option<String>,
 }
 
 #[utoipa::path(
     put,
-    path = "/api/v1/flows/{id}/schedules",
+    path = "/api/v1/scheduled-flows/{id}",
     tag = "flows",
-    params(("id" = String, Path, description = "Flow id")),
-    request_body = Object,
+    params(("id" = String, Path, description = "Scheduled flow id")),
+    request_body = UpdateScheduledFlowRequest,
     responses(
-        (status = 200, description = "Saved schedules", body = Object),
+        (status = 200, body = ScheduledFlowRow),
         (status = 400, body = ErrorResponse),
         (status = 404, body = ErrorResponse),
     ),
 )]
-async fn put_flow_schedules(
+async fn put_scheduled_flow(
     Path(id): Path<String>,
-    Json(schedules): Json<Vec<metalcraft_flows::FlowScheduleSpec>>,
+    Json(req): Json<UpdateScheduledFlowRequest>,
 ) -> Response {
-    save_flow_schedules(&id, schedules)
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/v1/flows/{id}/schedules",
-    tag = "flows",
-    params(("id" = String, Path, description = "Flow id")),
-    request_body = Object,
-    responses(
-        (status = 200, description = "Schedule added; returns the full list", body = Object),
-        (status = 400, body = ErrorResponse),
-        (status = 404, body = ErrorResponse),
-        (status = 409, description = "A schedule with that id already exists", body = ErrorResponse),
-    ),
-)]
-async fn post_flow_schedule(
-    Path(id): Path<String>,
-    Json(spec): Json<metalcraft_flows::FlowScheduleSpec>,
-) -> Response {
-    let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
-        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
+    let Some(mut sf) = crate::scheduled_flows::get(&id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("no scheduled flow '{id}'"));
     };
-    // Materialize the effective list so appending to a legacy flow keeps its
-    // existing trigger instead of silently dropping it.
-    let mut schedules = if flow.schedules.is_empty() {
-        flow.effective_schedules()
-    } else {
-        flow.schedules
-    };
-    if schedules.iter().any(|s| s.id == spec.id) {
-        return err_json(
-            StatusCode::CONFLICT,
-            format!("schedule '{}' already exists", spec.id),
-        );
+    if let Some(schedule) = req.schedule {
+        // A schedule may override the persona, and the containment rule has to hold
+        // for an edit exactly as it does for a create — otherwise arming safely and
+        // then editing into a persona outside the roster is a way around it.
+        if let Some(persona) = schedule.persona.as_deref() {
+            let preset_slug = crate::flow_bindings::preset_for(&sf.flow_id);
+            match crate::agent_preset::AgentPreset::load(&preset_slug, &paths::agent_presets_dir())
+            {
+                Ok(preset) if !preset.allows_persona(persona) => {
+                    return err_json(
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "schedule names persona '{persona}', which is not in agent '{}'",
+                            preset.slug
+                        ),
+                    );
+                }
+                _ => {}
+            }
+        }
+        sf.schedule = schedule;
     }
-    schedules.push(spec);
-    save_flow_schedules(&id, schedules)
+    if let Some(enabled) = req.enabled {
+        sf.enabled = enabled;
+    }
+    if let Some(instance_id) = req.instance_id {
+        // Checked, not created: moving a schedule onto an agent that does not
+        // exist would leave it firing into nothing every morning, silently.
+        if crate::agent_instance::load(&instance_id).is_err() {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                format!("no agent '{instance_id}'"),
+            );
+        }
+        sf.instance_id = Some(instance_id);
+    }
+    sf.updated_at = chrono::Utc::now().to_rfc3339();
+    match crate::scheduled_flows::save(&sf) {
+        Ok(()) => Json(scheduled_row(sf)).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
 }
 
+/// `DELETE /api/v1/scheduled-flows/{id}` — disarm.
+///
+/// **The agent and everything it remembers are kept.** Disarming is "stop running
+/// this on a timer", not "destroy the thing that was running it", and a client
+/// should not imply otherwise.
 #[utoipa::path(
     delete,
-    path = "/api/v1/flows/{id}/schedules/{sid}",
+    path = "/api/v1/scheduled-flows/{id}",
     tag = "flows",
-    params(
-        ("id" = String, Path, description = "Flow id"),
-        ("sid" = String, Path, description = "Schedule id"),
-    ),
+    params(("id" = String, Path, description = "Scheduled flow id")),
     responses(
-        (status = 200, description = "Removed; returns the remaining list", body = Object),
+        (status = 204, description = "Disarmed; the agent and its memory are kept"),
         (status = 404, body = ErrorResponse),
     ),
 )]
-async fn delete_flow_schedule(Path((id, sid)): Path<(String, String)>) -> Response {
-    let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
-        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
-    };
-    let mut schedules = if flow.schedules.is_empty() {
-        flow.effective_schedules()
-    } else {
-        flow.schedules
-    };
-    let before = schedules.len();
-    schedules.retain(|s| s.id != sid);
-    if schedules.len() == before {
-        return err_json(StatusCode::NOT_FOUND, format!("schedule '{sid}' not found"));
+async fn delete_scheduled_flow(Path(id): Path<String>) -> Response {
+    match crate::scheduled_flows::disarm(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err_json(StatusCode::NOT_FOUND, e),
     }
-    // `save_flow_schedules` disarms whatever no longer exists, once the save lands.
-    save_flow_schedules(&id, schedules)
 }
 
-// ---- Flow ↔ agent binding -------------------------------------------------
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct PreviewScheduleRequest {
+    /// The trigger to project. Need not correspond to anything saved.
+    #[schema(value_type = Object)]
+    schedule: metalcraft_flows::ScheduleSpec,
+}
+
+/// `POST /api/v1/scheduled-flows/preview` — when *would* this fire?
+///
+/// Takes an unsaved spec so an editor can answer the question before committing to
+/// it. An empty `next_runs` on a cron trigger means this pod cannot parse it — the
+/// thing a person most needs to know before saving.
+#[utoipa::path(
+    post,
+    path = "/api/v1/scheduled-flows/preview",
+    tag = "flows",
+    request_body = PreviewScheduleRequest,
+    responses((status = 200, body = crate::scheduled_flows::SchedulePreview)),
+)]
+async fn post_schedule_preview(Json(req): Json<PreviewScheduleRequest>) -> Response {
+    Json(crate::scheduled_flows::preview(&req.schedule)).into_response()
+}
+
+// ---- Flow ↔ preset binding -------------------------------------------------
 //
-// Which agent a flow runs as, and which agent instance each schedule fires into.
+// Which preset a flow runs as — the roster its personas must come from. Which
+// *instance* each schedule fires into lives on the schedule itself.
 // See `docs/FLOWS_AND_AGENT_PRESETS_PLAN.md`.
 
 /// The binding for one flow, resolved for display.
@@ -2714,7 +2879,7 @@ struct FlowBindingView {
     bound: bool,
     /// Personas the flow names, and whether the preset can reach each one.
     personas: Vec<FlowPersonaCheck>,
-    /// `schedule id -> agent instance`, for schedules that have been armed.
+    /// The schedules of this flow that are armed to an agent.
     armed: Vec<ArmedSchedule>,
     /// Everything the arm dialog needs to state what arming this actually permits.
     ///
@@ -2826,9 +2991,13 @@ struct FlowPersonaCheck {
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 struct ArmedSchedule {
+    /// The scheduled flow's id.
     schedule_id: String,
+    /// Its label, so the arm dialog can say *which* schedule without showing an
+    /// opaque id.
+    name: String,
     instance_id: String,
-    /// Absent if the instance was deleted out from under the binding.
+    /// Absent if the instance was deleted out from under it.
     #[serde(skip_serializing_if = "Option::is_none")]
     instance_name: Option<String>,
 }
@@ -2849,21 +3018,20 @@ fn binding_view(flow: &metalcraft_flows::SavedFlow) -> FlowBindingView {
                 slug,
             })
             .collect(),
-        armed: {
-            let mut v: Vec<ArmedSchedule> = raw
-                .instances
-                .into_iter()
-                .map(|(schedule_id, instance_id)| ArmedSchedule {
+        armed: crate::scheduled_flows::for_flow(&flow.id)
+            .into_iter()
+            .filter_map(|sf| {
+                let instance_id = sf.instance_id?;
+                Some(ArmedSchedule {
                     instance_name: crate::agent_instance::load(&instance_id)
                         .ok()
                         .map(|i| i.name),
-                    schedule_id,
+                    name: sf.schedule.display_name(),
+                    schedule_id: sf.id,
                     instance_id,
                 })
-                .collect();
-            v.sort_by(|a, b| a.schedule_id.cmp(&b.schedule_id));
-            v
-        },
+            })
+            .collect(),
         consent: arm_consent(preset.as_ref()),
     }
 }
@@ -2912,143 +3080,6 @@ async fn put_flow_binding(Path(id): Path<String>, Json(req): Json<BindFlowReques
     match result {
         Ok(()) => Json(binding_view(&flow)).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
-    }
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-struct ArmScheduleRequest {
-    /// Attach to an existing agent instead of minting one — e.g. run the briefer as
-    /// the same agent you chat with.
-    #[serde(default)]
-    instance_id: Option<String>,
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/v1/flows/{id}/schedules/{sid}/arm",
-    tag = "flows",
-    params(
-        ("id" = String, Path, description = "Flow id"),
-        ("sid" = String, Path, description = "Schedule id"),
-    ),
-    request_body = ArmScheduleRequest,
-    responses(
-        (status = 200, description = "The agent this schedule now runs as", body = crate::agent_instance::AgentInstance),
-        (status = 400, body = ErrorResponse),
-        (status = 404, body = ErrorResponse),
-    ),
-)]
-async fn post_arm_schedule(
-    Path((id, sid)): Path<(String, String)>,
-    Json(req): Json<ArmScheduleRequest>,
-) -> Response {
-    let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
-        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
-    };
-    match crate::flow_bindings::arm(&flow, &sid, req.instance_id.as_deref()) {
-        Ok(instance) => Json(instance).into_response(),
-        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
-    }
-}
-
-#[utoipa::path(
-    delete,
-    path = "/api/v1/flows/{id}/schedules/{sid}/arm",
-    tag = "flows",
-    params(
-        ("id" = String, Path, description = "Flow id"),
-        ("sid" = String, Path, description = "Schedule id"),
-    ),
-    responses((status = 204, description = "Disarmed; the agent and its memory are kept")),
-)]
-async fn delete_arm_schedule(Path((id, sid)): Path<(String, String)>) -> Response {
-    match crate::flow_bindings::disarm(&id, &sid) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/v1/flows/{id}/schedules/preview",
-    tag = "flows",
-    params(("id" = String, Path, description = "Flow id")),
-    responses(
-        (status = 200, description = "Upcoming fire times per schedule", body = [SchedulePreview]),
-        (status = 404, body = ErrorResponse),
-    ),
-)]
-async fn get_flow_schedules_preview(Path(id): Path<String>) -> Response {
-    let Some(flow) = metalcraft_flows::load_flow(&paths::flows_dir(), &id) else {
-        return err_json(StatusCode::NOT_FOUND, format!("flow '{id}' not found"));
-    };
-    let previews: Vec<SchedulePreview> = flow
-        .effective_schedules()
-        .iter()
-        .map(schedule_preview)
-        .collect();
-    Json(previews).into_response()
-}
-
-/// Best-effort upcoming-fire preview for one schedule. Cron times are exact;
-/// interval schedules are projected from now (the daemon's real last-run clock is
-/// in-memory and not known here).
-fn schedule_preview(spec: &metalcraft_flows::FlowScheduleSpec) -> SchedulePreview {
-    use chrono::Utc;
-    use metalcraft_flows::ScheduleTrigger;
-    const N: usize = 3;
-
-    let (description, next_runs) = match &spec.trigger {
-        ScheduleTrigger::Manual => ("Manual (runs only when triggered)".to_string(), vec![]),
-        ScheduleTrigger::Minutes { interval } => {
-            let now = Utc::now();
-            let runs = (1..=N as i64)
-                .filter_map(|k| {
-                    now.checked_add_signed(chrono::TimeDelta::minutes(k * *interval as i64))
-                })
-                .map(|t| t.to_rfc3339())
-                .collect();
-            (format!("Every {interval} minute(s)"), runs)
-        }
-        ScheduleTrigger::Hours { interval } => {
-            let now = Utc::now();
-            let runs = (1..=N as i64)
-                .filter_map(|k| {
-                    now.checked_add_signed(chrono::TimeDelta::hours(k * *interval as i64))
-                })
-                .map(|t| t.to_rfc3339())
-                .collect();
-            (format!("Every {interval} hour(s)"), runs)
-        }
-        ScheduleTrigger::Cron { cron } => match std::str::FromStr::from_str(cron) {
-            Ok(sched) => {
-                let sched: cron::Schedule = sched;
-                let runs: Vec<String> = match spec
-                    .timezone
-                    .as_deref()
-                    .and_then(|z| z.parse::<chrono_tz::Tz>().ok())
-                {
-                    Some(zone) => sched
-                        .upcoming(zone)
-                        .take(N)
-                        .map(|t| t.to_rfc3339())
-                        .collect(),
-                    None => sched
-                        .upcoming(chrono::Local)
-                        .take(N)
-                        .map(|t| t.to_rfc3339())
-                        .collect(),
-                };
-                let tz = spec.timezone.as_deref().unwrap_or("local time");
-                (format!("Cron `{cron}` ({tz})"), runs)
-            }
-            Err(e) => (format!("Invalid cron `{cron}`: {e}"), vec![]),
-        },
-    };
-    SchedulePreview {
-        schedule_id: spec.id.clone(),
-        description,
-        next_runs,
     }
 }
 
@@ -3755,8 +3786,10 @@ fn instance_for_manual_run(
     if let Some(id) = explicit {
         return (Some(id.to_string()), None);
     }
-    let binding = crate::flow_bindings::get(flow_id);
-    let mut armed: Vec<String> = binding.instances.into_values().collect();
+    let mut armed: Vec<String> = crate::scheduled_flows::for_flow(flow_id)
+        .into_iter()
+        .filter_map(|sf| sf.instance_id)
+        .collect();
     armed.sort();
     armed.dedup();
     match armed.len() {
@@ -3960,7 +3993,82 @@ struct ChatSummary {
     persona_slug: String,
     model_name: String,
     created_at: String,
+    /// How many times the user spoke. The unit a person counts a conversation in
+    /// — not messages, which counts the agent's tool chatter, and not the
+    /// transcript length, which now also counts reset dividers.
     turn_count: usize,
+    /// Last activity, from the chat file's mtime — [`persist_chat`] rewrites it
+    /// after every turn, so it is the clock the pod already trusts for staleness
+    /// (see [`gateway_session_is_stale`]). `None` when the file cannot be read.
+    ///
+    /// A list sorted by `created_at` puts a conversation someone has been in all
+    /// day below one they opened this morning and abandoned, which is the wrong
+    /// way round for the question a session list answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+    /// The opening line, trimmed — what makes a row identifiable as *this*
+    /// conversation rather than a timestamp beside an id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview: Option<String>,
+}
+
+/// How many times the user spoke in a transcript.
+fn turns_in(messages: &[ChatMessageWire]) -> usize {
+    messages
+        .iter()
+        .filter(|m| matches!(m, ChatMessageWire::User { .. }))
+        .count()
+}
+
+/// The first thing the user said, as a one-line label.
+///
+/// Taken from the *user's* words rather than the agent's: the opening line is
+/// what someone remembers a conversation by, and an agent's first reply is
+/// usually a greeting that reads the same in every thread.
+fn preview_of(messages: &[ChatMessageWire]) -> Option<String> {
+    let first = messages.iter().find_map(|m| match m {
+        ChatMessageWire::User { content } => Some(content.as_str()),
+        _ => None,
+    })?;
+    let line: String = first.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() {
+        return None;
+    }
+    const MAX: usize = 80;
+    if line.chars().count() <= MAX {
+        return Some(line);
+    }
+    Some(line.chars().take(MAX).collect::<String>() + "…")
+}
+
+/// When a chat was last written, RFC-3339.
+fn chat_updated_at(id: &str) -> Option<String> {
+    let modified = std::fs::metadata(chat_file_path(id)).ok()?.modified().ok()?;
+    Some(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
+}
+
+impl ChatSummary {
+    /// The one place a stored chat becomes a list row, so every endpoint that
+    /// lists conversations describes them identically. They did not: one counted
+    /// user turns and the other counted raw messages, so the same conversation
+    /// showed two different sizes depending on which screen you opened.
+    fn of(pc: PersistedChat) -> Self {
+        Self {
+            updated_at: chat_updated_at(&pc.id),
+            preview: preview_of(&pc.messages),
+            turn_count: turns_in(&pc.messages),
+            id: pc.id,
+            instance_id: pc.instance_id,
+            persona_slug: pc.persona_slug,
+            model_name: pc.model_name,
+            created_at: pc.created_at,
+        }
+    }
+
+    /// Newest activity first, falling back to creation for a chat with no file.
+    fn recency(&self) -> &str {
+        self.updated_at.as_deref().unwrap_or(&self.created_at)
+    }
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -4008,6 +4116,62 @@ enum ChatMessageWire {
         name: String,
         result: String,
     },
+    /// A conversation boundary: everything above it is history the model no
+    /// longer sees.
+    ///
+    /// The only wire message with no `AgentMessage` counterpart, and that is the
+    /// whole point of it. A reset ends a *context*, not a session — the transcript
+    /// keeps everything and the context restarts here.
+    ///
+    /// Distinct from the other way a context gets cleared, which is a *new
+    /// session* under the same agent (what a gateway conversation does after a
+    /// quiet gap). That one leaves no divider because there is nothing to divide:
+    /// it is a different conversation. This is for a clean slate inside the
+    /// conversation you are already in. `reason` is short free text shown on the
+    /// divider, so a transcript can answer "why does my history stop here".
+    Reset {
+        at: String,
+        reason: String,
+    },
+}
+
+
+impl ChatMessageWire {
+    /// The model-facing form of this message, or `None` when it has none.
+    ///
+    /// Replaces a `From` impl on purpose: with [`ChatMessageWire::Reset`] in the
+    /// enum the conversion stopped being total, and an infallible-looking `into()`
+    /// would have had to invent a message for a divider.
+    fn into_agent_message(self) -> Option<AgentMessage> {
+        Some(match self {
+            Self::User { content } => AgentMessage::User(content),
+            Self::Assistant { content } => AgentMessage::Assistant(content),
+            Self::Reasoning { id, encrypted } => AgentMessage::Reasoning { id, encrypted },
+            Self::ToolCall {
+                id,
+                call_id,
+                name,
+                args,
+            } => AgentMessage::ToolCall {
+                id,
+                call_id,
+                name,
+                args,
+            },
+            Self::ToolResult {
+                id,
+                call_id,
+                name,
+                result,
+            } => AgentMessage::ToolResult {
+                id,
+                call_id,
+                name,
+                result,
+            },
+            Self::Reset { .. } => return None,
+        })
+    }
 }
 
 impl From<&AgentMessage> for ChatMessageWire {
@@ -4045,38 +4209,72 @@ impl From<&AgentMessage> for ChatMessageWire {
     }
 }
 
-impl From<ChatMessageWire> for AgentMessage {
-    fn from(w: ChatMessageWire) -> Self {
-        match w {
-            ChatMessageWire::User { content } => AgentMessage::User(content),
-            ChatMessageWire::Assistant { content } => AgentMessage::Assistant(content),
-            ChatMessageWire::Reasoning { id, encrypted } => {
-                AgentMessage::Reasoning { id, encrypted }
-            }
-            ChatMessageWire::ToolCall {
-                id,
-                call_id,
-                name,
-                args,
-            } => AgentMessage::ToolCall {
-                id,
-                call_id,
-                name,
-                args,
-            },
-            ChatMessageWire::ToolResult {
-                id,
-                call_id,
-                name,
-                result,
-            } => AgentMessage::ToolResult {
-                id,
-                call_id,
-                name,
-                result,
-            },
+/// The whole conversation: the segments that have been closed off by a reset,
+/// then whatever the live context holds now.
+///
+/// There is deliberately **no index** relating the two halves. Compaction
+/// rewrites `state.messages` wholesale from inside a running turn
+/// (`runtime::…::compact_if_needed`), so any cursor into it is stale the moment
+/// a long conversation crosses the threshold — and the messages a stale cursor
+/// drops are the newest ones. Concatenation cannot go wrong that way.
+fn transcript_of(s: &ChatSession) -> Vec<ChatMessageWire> {
+    let mut out = s.archived.clone();
+    out.extend(live_messages(s));
+    out
+}
+
+/// The live context's messages in wire form.
+fn live_messages(s: &ChatSession) -> impl Iterator<Item = ChatMessageWire> + '_ {
+    s.state
+        .iter()
+        .flat_map(|st| st.messages.iter().map(ChatMessageWire::from))
+}
+
+/// End this conversation's context without ending the conversation.
+///
+/// The messages the agent is about to stop seeing move into `archived` — where
+/// nothing will rewrite them — and a divider goes in behind them. The model
+/// starts the next turn from nothing.
+fn mark_reset(s: &mut ChatSession, reason: &str) -> ChatMessageWire {
+    let closing: Vec<ChatMessageWire> = live_messages(s).collect();
+    s.archived.extend(closing);
+    let mark = ChatMessageWire::Reset {
+        at: chrono::Utc::now().to_rfc3339(),
+        reason: reason.to_string(),
+    };
+    s.archived.push(mark.clone());
+    s.state = None;
+    mark
+}
+
+/// Rebuild a conversation's context from its transcript: the messages after the
+/// last reset, with the dividers themselves dropped.
+fn context_from_transcript(transcript: &[ChatMessageWire]) -> Option<AgentState> {
+    let start = transcript
+        .iter()
+        .rposition(|m| matches!(m, ChatMessageWire::Reset { .. }))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let mut messages = transcript[start..]
+        .iter()
+        .cloned()
+        .filter_map(ChatMessageWire::into_agent_message);
+    let first = messages.next()?;
+    // `AgentState::new` insists on an opening user message and keeps the rest of
+    // its fields private, so seed with one and correct it when the first message
+    // is something else (a transcript can start mid-turn after a reload).
+    let mut st = match first {
+        AgentMessage::User(content) => AgentState::new(content),
+        other => {
+            let mut s = AgentState::new("");
+            s.messages.clear();
+            s.messages.push(other);
+            s
         }
-    }
+    };
+    st.messages.extend(messages);
+    st.is_done = true; // turns are complete when persisted
+    Some(st)
 }
 
 /// On-disk shape for a persisted chat. Mirrors [`ChatSession`] but flattens
@@ -4106,6 +4304,10 @@ fn chat_file_path(id: &str) -> std::path::PathBuf {
 
 /// Snapshot the session and write it to disk. Holds the mutex briefly to
 /// collect data, drops it before the (synchronous) write.
+///
+/// The file holds the whole conversation — archived segments and live context
+/// both — so what is on disk is what a client renders, and the split is an
+/// in-memory detail of which half a model is still being shown.
 async fn persist_chat(session: &Arc<Mutex<ChatSession>>) {
     let snapshot = {
         let s = session.lock().await;
@@ -4117,11 +4319,7 @@ async fn persist_chat(session: &Arc<Mutex<ChatSession>>) {
             cwd: s.cwd.clone(),
             created_at: s.created_at.clone(),
             preset: s.preset.clone(),
-            messages: s
-                .state
-                .as_ref()
-                .map(|st| st.messages.iter().map(ChatMessageWire::from).collect())
-                .unwrap_or_default(),
+            messages: transcript_of(&s),
         }
     };
     let path = chat_file_path(&snapshot.id);
@@ -4135,6 +4333,30 @@ async fn persist_chat(session: &Arc<Mutex<ChatSession>>) {
             }
         }
         Err(e) => log::warn!("failed to serialize chat {}: {e}", snapshot.id),
+    }
+    touch_instance(snapshot.instance_id.as_deref());
+}
+
+/// Mark an agent as having just done something.
+///
+/// Called from [`persist_chat`] because that is the one point every kind of turn
+/// already passes through — a workshop turn, a gateway message, a flow firing.
+/// It used to be called only when an agent was patched or a conversation was
+/// created, so an agent answering WhatsApp all day looked untouched since the day
+/// it was minted, and both clients filed it under "history" after three days of
+/// exactly the traffic it exists to handle.
+fn touch_instance(instance_id: Option<&str>) {
+    let Some(id) = instance_id else { return };
+    let Ok(mut instance) = crate::agent_instance::load(id) else {
+        // A conversation can outlive its agent (deleting one keeps its
+        // transcripts on purpose). Not worth a warning on every turn.
+        return;
+    };
+    instance.touch();
+    if let Err(e) = instance.save() {
+        // Never fails a turn: a stale `last_active_at` sorts a list wrong, which
+        // is not worth losing the conversation that was just persisted.
+        log::debug!("could not touch agent {id}: {e}");
     }
 }
 
@@ -4175,37 +4397,20 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
                 continue;
             }
         };
-        let state = if pc.messages.is_empty() {
-            None
-        } else {
-            // Reconstruct an AgentState from the persisted messages. Rebuild
-            // it from scratch using `new` + push so we don't have to mark
-            // every field of AgentState public.
-            let mut iter = pc.messages.into_iter();
-            let first = match iter.next() {
-                Some(m) => m,
-                None => {
-                    log::warn!("empty messages on chat {} after non-empty check", pc.id);
-                    continue;
-                }
-            };
-            // First message should be a User in normal flow; if not, seed with
-            // an empty user message so AgentState::new is satisfied.
-            let mut st = match first {
-                ChatMessageWire::User { ref content } => AgentState::new(content.clone()),
-                _ => {
-                    let mut s = AgentState::new("");
-                    s.messages.clear();
-                    s.messages.push(first.into());
-                    s
-                }
-            };
-            for m in iter {
-                st.messages.push(m.into());
-            }
-            st.is_done = true; // turns are completed when persisted
-            Some(st)
-        };
+        // A reload resumes the *context*, not the whole file: everything before
+        // the last divider is history this agent has already stopped seeing, and
+        // replaying it here would undo every reset on the next restart.
+        // Split the file back into the two halves: everything up to and including
+        // the last divider is closed, the rest is the context to resume. Replaying
+        // the whole file as context would quietly undo every reset on restart.
+        let split = pc
+            .messages
+            .iter()
+            .rposition(|m| matches!(m, ChatMessageWire::Reset { .. }))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let state = context_from_transcript(&pc.messages);
+        let archived = pc.messages[..split].to_vec();
         let session = ChatSession {
             id: pc.id.clone(),
             instance_id: pc.instance_id.clone(),
@@ -4214,13 +4419,14 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
             cwd: pc.cwd,
             preset: pc.preset,
             state,
+            archived,
             created_at: pc.created_at,
             diagnostics: None,
             trace: None, // recreated lazily on the first turn, like diagnostics
             busy: false, // anything that was busy at shutdown couldn't have
             // finished cleanly; reset so the user can retry.
             interrupt: Arc::new(AtomicBool::new(false)),
-            pending: std::collections::VecDeque::new(),
+            pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         };
         out.insert(pc.id.clone(), Arc::new(Mutex::new(session)));
     }
@@ -4242,7 +4448,8 @@ struct CreateChatRequest {
     /// accumulates conversations.
     #[serde(default)]
     instance_id: Option<String>,
-    /// Name the agent, which also makes it persistent.
+    /// Name the agent. A label only — nothing about an agent's lifetime follows
+    /// from it, and nothing deletes an agent on a timer.
     #[serde(default)]
     name: Option<String>,
 }
@@ -4261,38 +4468,97 @@ async fn list_chats(State(_state): State<Arc<ApiState>>) -> Response {
     // authority for *live* per-turn state, not the catalog.
     let mut out: Vec<ChatSummary> = read_persisted_chats()
         .into_iter()
-        .map(|pc| ChatSummary {
-            id: pc.id,
-            instance_id: pc.instance_id,
-            persona_slug: pc.persona_slug,
-            model_name: pc.model_name,
-            created_at: pc.created_at,
-            turn_count: pc
-                .messages
-                .iter()
-                .filter(|m| matches!(m, ChatMessageWire::User { .. }))
-                .count(),
-        })
+        .map(ChatSummary::of)
         .collect();
-    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    out.sort_by(|a, b| b.recency().cmp(a.recency()));
     Json(out).into_response()
 }
 
 /// Read and parse every `<data>/chats/*.json` into [`PersistedChat`]s.
 /// Malformed files are logged and skipped. Shared by the list endpoint and
 /// startup load.
-/// Every agent instance some conversation still belongs to.
+/// How long a session survives with nothing said in it.
 ///
-/// The daemon's reaper consults this so a transcript someone can still open keeps the
-/// agent that produced it — the memory is what explains the conversation.
-pub fn instance_ids_with_conversations() -> Vec<String> {
-    let mut out: Vec<String> = read_persisted_chats()
+/// Sessions are what age out, not agents. A transcript nobody has opened in a
+/// month is history; the agent that wrote it is a relationship, and everything it
+/// learned lives in its memory rather than in the transcript — so dropping the
+/// one costs a reading of what happened, and dropping the other would cost
+/// everything it knows.
+///
+/// Thirty days is chosen to be longer than any plausible "I'll come back to
+/// this" and short enough that a pod answering texts all year does not accrue an
+/// unbounded directory that [`read_persisted_chats`] walks on every listing.
+pub const SESSION_TTL_DAYS: i64 = 30;
+
+/// What one sweep did. For the log and the tests; nothing branches on it.
+#[derive(Debug, Default, Clone)]
+pub struct ChatReapReport {
+    pub reaped: Vec<String>,
+    /// Ids that could not be removed, with why. Reported rather than fatal — one
+    /// stuck file must not stop the sweep.
+    pub failed: Vec<(String, String)>,
+}
+
+/// Delete sessions with no activity in [`SESSION_TTL_DAYS`], file and all.
+///
+/// One thing is spared: a session a **paused flow run** will resume into. An
+/// approval waiting three weeks for a person is exactly the case this protects,
+/// and resuming into a deleted transcript would hand the agent a decision it has
+/// no context for.
+///
+/// Deliberately *not* spared: anything merely present in the in-memory store.
+/// That map is hydrated from disk at startup, so it holds every chat this pod has
+/// ever written — "in the map" means loaded, not open, and treating it as a guard
+/// would spare everything and sweep nothing.
+///
+/// The map entry goes with the file, so the sweep frees the memory too rather
+/// than leaving a session nobody can reach still resident.
+///
+/// **The agent is never touched.** Reaping every session an agent has does not
+/// reap the agent: it goes on knowing what it learned, with nothing left to read.
+pub async fn reap_stale_chats() -> ChatReapReport {
+    let mut report = ChatReapReport::default();
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(SESSION_TTL_DAYS);
+
+    // A run that has not finished may still resume into its conversation.
+    let awaited: Vec<String> = crate::flow_runs::list_runs(&paths::runs_dir())
         .into_iter()
-        .filter_map(|c| c.instance_id)
+        .filter(|r| r.status == "paused")
+        .filter_map(|r| r.chat_id)
         .collect();
-    out.sort();
-    out.dedup();
-    out
+
+    let stale: Vec<String> = read_persisted_chats()
+        .into_iter()
+        .map(|c| c.id)
+        .filter(|id| !awaited.contains(id))
+        .filter(|id| {
+            // An unparseable (or missing) timestamp is treated as recent:
+            // refusing to guess is better than deleting somebody's transcript
+            // because its clock field was odd.
+            chat_updated_at(id)
+                .as_deref()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| t.with_timezone(&chrono::Utc) < cutoff)
+                .unwrap_or(false)
+        })
+        .collect();
+    if stale.is_empty() {
+        return report;
+    }
+
+    let store = chat_store();
+    let mut chats = store.lock().await;
+    for id in stale {
+        match std::fs::remove_file(chat_file_path(&id)) {
+            Ok(()) => {
+                chats.remove(&id);
+                crate::memory::capture::record_session_end(&id);
+                report.reaped.push(id);
+            }
+            Err(e) => report.failed.push((id, e.to_string())),
+        }
+    }
+    report
 }
 
 fn read_persisted_chats() -> Vec<PersistedChat> {
@@ -4409,12 +4675,13 @@ async fn post_create_chat(
         cwd: state.cwd.clone(),
         preset: SessionPreset::Workshop,
         state: None,
+        archived: Vec::new(),
         created_at: chrono::Utc::now().to_rfc3339(),
         diagnostics,
         trace,
         busy: false,
         interrupt: Arc::new(AtomicBool::new(false)),
-        pending: std::collections::VecDeque::new(),
+        pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
     };
     let session_arc = Arc::new(Mutex::new(session));
     {
@@ -4451,6 +4718,11 @@ async fn post_create_chat(
         model_name: s.model_name.clone(),
         created_at: s.created_at.clone(),
         turn_count: 0,
+        // Just written by `persist_chat` above, so this is "now" — and a brand
+        // new conversation with no `updated_at` would sort to the bottom of the
+        // list it was just created at the top of.
+        updated_at: chat_updated_at(&s.id),
+        preview: None,
     })
     .into_response()
 }
@@ -4469,11 +4741,9 @@ async fn get_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) ->
     };
     drop(chats);
     let s = session.lock().await;
-    let messages = s
-        .state
-        .as_ref()
-        .map(|st| st.messages.iter().map(ChatMessageWire::from).collect())
-        .unwrap_or_default();
+    // The transcript, not the context: a client renders the conversation, and a
+    // reset must not look like the history was deleted.
+    let messages = transcript_of(&s);
     Json(ChatDetail {
         id: s.id.clone(),
         instance_id: s.instance_id.clone(),
@@ -4711,13 +4981,19 @@ async fn post_chat_compact(State(state): State<Arc<ApiState>>, Path(id): Path<St
     .into_response()
 }
 
-/// Drop this chat's conversation but keep the chat — `/clear`.
+/// End this conversation's context without ending the conversation — `/reset`.
 ///
-/// The chat row, its persona and its model survive; only the message history
-/// goes. Distinct from `DELETE /chats/{id}`, which removes the chat itself.
+/// The agent starts its next turn from nothing, and the transcript gains a
+/// divider where that happened. Nothing is deleted: this used to be `/clear`,
+/// which dropped the history outright because the transcript and the context were
+/// the same list and there was nowhere else for it to live. `DELETE /chats/{id}`
+/// is still how a conversation actually goes away.
+///
+/// Refuses mid-turn, like compaction: pulling the context out from under a
+/// running turn is not a failure mode worth having.
 #[utoipa::path(
     post,
-    path = "/api/v1/chats/{id}/clear",
+    path = "/api/v1/chats/{id}/reset",
     tag = "chats",
     params(("id" = String, Path, description = "Chat id")),
     responses(
@@ -4725,7 +5001,7 @@ async fn post_chat_compact(State(state): State<Arc<ApiState>>, Path(id): Path<St
         (status = 409, description = "The chat is mid-turn"),
     ),
 )]
-async fn post_chat_clear(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+async fn post_chat_reset(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
     let chats = state.chats.lock().await;
     let Some(session) = chats.get(&id).cloned() else {
         return err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"));
@@ -4736,10 +5012,26 @@ async fn post_chat_clear(State(state): State<Arc<ApiState>>, Path(id): Path<Stri
         if s.busy {
             return err_json(StatusCode::CONFLICT, "chat is already mid-turn");
         }
-        s.state = None;
+        reset_context(&mut s, "reset").await;
     }
     persist_chat(&session).await;
     Json(chat_context_of(None)).into_response()
+}
+
+/// Reset a conversation's context and tell anyone watching.
+///
+/// The one path every reset goes through — the explicit endpoint, the gateway's
+/// idle cutoff, a flow's pre-run wipe — so the divider is written and broadcast
+/// exactly once regardless of who asked.
+async fn reset_context(s: &mut ChatSession, reason: &str) {
+    let mark = mark_reset(s, reason);
+    if let ChatMessageWire::Reset { at, reason } = mark {
+        // A send error only means nobody is watching; the mark is in the
+        // transcript either way, and the next load will render it.
+        let _ = chat_event_sender(&s.id)
+            .await
+            .send(ChatEvent::Reset { at, reason });
+    }
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -4820,6 +5112,21 @@ enum ChatEvent {
     /// an open string (`crate::runtime::phase`) precisely so a client older than
     /// a phase can drop the frame instead of breaking on it.
     Phase { phase: String },
+    /// A message was accepted while a turn was already running, and is waiting
+    /// its turn rather than starting one.
+    ///
+    /// Emitted on the chat's live bus rather than on the sending request, which
+    /// has already been answered with 202 — the point of queueing is that the
+    /// sender does not hold a connection open waiting. `position` is 1 for the
+    /// next message to run.
+    Queued { message: String, position: usize },
+    /// This turn's plan, as `update_plan` wrote it. Sent on every change,
+    /// including the empty list a new turn starts with, so a client renders the
+    /// plan as it stands rather than accumulating every version of it.
+    Plan { steps: Vec<crate::turn_plan::PlanStep> },
+    /// A queued message joined the turn that was already running, rather than
+    /// waiting for it to end. The client should stop showing it as pending.
+    Injected { message: String },
     /// Terminal event. `status` is "completed" | "interrupted" | "failed".
     Done {
         status: String,
@@ -4837,6 +5144,23 @@ enum ChatEvent {
         message: String,
         retryable: bool,
     },
+    /// The conversation's context ended — see [`ChatMessageWire::Reset`].
+    ///
+    /// Not part of a turn's lifecycle: it arrives on its own, usually with nobody
+    /// having typed anything. Without it a client watching a flow's agent would
+    /// see the 3am firing start from nothing and have no way to say why, since
+    /// the divider it should draw is only in the transcript it loaded hours ago.
+    Reset { at: String, reason: String },
+}
+
+/// The answer to a turn request that arrived mid-turn: taken, not started.
+#[derive(Serialize, utoipa::ToSchema)]
+struct ChatQueued {
+    /// Always true. Present so a client can branch on the body rather than on
+    /// the status code, which is easy to lose through a wrapper.
+    queued: bool,
+    /// Place in line, 1 for the next message to run.
+    position: usize,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -4931,7 +5255,11 @@ async fn post_chat_interrupt(
     tag = "chats",
     params(("id" = String, Path, description = "Chat id")),
     request_body = ChatTurnRequest,
-    responses((status = 200, description = "SSE stream (text/event-stream) of ChatEvent frames", body = ChatEvent, content_type = "text/event-stream")),
+    responses(
+        (status = 200, description = "SSE stream (text/event-stream) of ChatEvent frames", body = ChatEvent, content_type = "text/event-stream"),
+        (status = 202, description = "A turn was already running: the message is queued and will run next. Its frames arrive on `GET /chats/{id}/events`, not on this response.", body = ChatQueued),
+        (status = 404, description = "No such chat"),
+    ),
 )]
 async fn post_chat_turn(
     State(state): State<Arc<ApiState>>,
@@ -4947,10 +5275,37 @@ async fn post_chat_turn(
     // Lock the session up-front: stamp it busy, snapshot what we need to run
     // the executor, and seed/continue the AgentState. If anything fails we
     // release `busy` before returning.
-    let (persona_slug, model_name, cwd, agent_state, turn_index, diagnostics, trace, interrupt) = {
+    let (
+        persona_slug,
+        model_name,
+        cwd,
+        agent_state,
+        turn_index,
+        diagnostics,
+        trace,
+        interrupt,
+        pending_for_mailbox,
+    ) = {
         let mut s = session.lock().await;
         if s.busy {
-            return err_json(StatusCode::CONFLICT, "chat is already mid-turn");
+            // Queue rather than refuse. A person who thinks of something while
+            // the agent is eight tool calls deep should not have to hold the
+            // thought until it finishes — and 409 made the client lock its
+            // composer, which is what made that necessary.
+            let position = queue_message(&mut lock_pending(&s.pending), req.message.clone());
+            drop(s);
+            let _ = chat_event_sender(&id).await.send(ChatEvent::Queued {
+                message: req.message.clone(),
+                position,
+            });
+            return (
+                StatusCode::ACCEPTED,
+                Json(ChatQueued {
+                    queued: true,
+                    position,
+                }),
+            )
+                .into_response();
         }
         s.busy = true;
         // Start clean: a stop pressed while nothing was running must not stop
@@ -5011,6 +5366,7 @@ async fn post_chat_turn(
             s.diagnostics.clone(),
             s.trace.clone(),
             s.interrupt.clone(),
+            s.pending.clone(),
         )
     };
 
@@ -5304,8 +5660,23 @@ async fn post_chat_turn(
                 // step guard above cannot reach. `sub_agent` reads this flag so
                 // stop lands there too.
                 interrupt: Some(interrupt.clone()),
+                plan_sink: Some({
+                    let tx = tx.clone();
+                    Arc::new(move |steps: &[crate::turn_plan::PlanStep]| {
+                        let _ = tx.try_send(ChatEvent::Plan { steps: steps.to_vec() });
+                    })
+                }),
             },
             Some(phase_sink),
+            // What the person types while this turn runs, delivered at the
+            // next safe boundary instead of waiting for the turn to end.
+            chat_mailbox(pending_for_mailbox.clone(), {
+                let tx = tx.clone();
+                Arc::new(move |ev| {
+                    let _ = tx.try_send(ev);
+                })
+            })
+            .into(),
         )
         .await;
 
@@ -5405,6 +5776,11 @@ async fn post_chat_turn(
             }
         }
         persist_chat(&session_for_task).await;
+
+        // Anything the person sent while this turn ran now gets its turn. Runs
+        // inside the same spawned task rather than a new one, so a queue that
+        // refills mid-drain stays one conversation running in order.
+        drain_queued_turns(&context, &id).await;
     });
 
     let stream = ReceiverStream::new(rx).map(|ev| -> Result<Event, Infallible> {
@@ -5481,6 +5857,226 @@ async fn delete_scheduled_task(
             .into_response(),
         Ok(false) => err_json(StatusCode::NOT_FOUND, "no pending follow-up with that id"),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Run whatever queued up while a turn was in flight, one message at a time,
+/// until the queue is empty.
+///
+/// Called after a turn releases the session, so it claims `busy` the ordinary
+/// way and cannot run beside a user turn. Frames go to the chat's live bus
+/// rather than to an HTTP response: the request that queued the message was
+/// answered with 202 long ago, so the bus (`GET /chats/{id}/events`) is the only
+/// place a client can still be listening.
+///
+/// Loops rather than recursing, because a queue that refills while it is being
+/// drained is the normal case — someone typing three things in a row — and the
+/// alternative is one task per message, each waiting on the last.
+/// The mailbox for a chat turn: hand the run whatever the person typed while it
+/// was going, at a boundary where doing so is safe.
+///
+/// **`event.next == "agent"` is the whole rule.** The ReAct graph alternates
+/// `agent → tools → agent`, and a message appended anywhere else lands between a
+/// tool call and its result — the orphaned-call history the Responses API
+/// rejects with an opaque 400. Waiting for the agent node means every tool
+/// result from the batch has already been appended, so the history is coherent.
+///
+/// Messages that arrive too late to catch a boundary stay in the queue and are
+/// picked up by [`drain_queued_turns`] once the turn ends, so nothing is lost by
+/// being strict here.
+fn chat_mailbox(
+    pending: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    announce: Arc<dyn Fn(ChatEvent) + Send + Sync>,
+) -> metalcraft::Mailbox<AgentState> {
+    Arc::new(move |_state: &AgentState, event: &metalcraft::StepEvent| {
+        if event.next != "agent" {
+            return Vec::new();
+        }
+        let taken: Vec<String> = { lock_pending(&pending).drain(..).collect() };
+        taken
+            .into_iter()
+            .map(|message| {
+                announce(ChatEvent::Injected {
+                    message: message.clone(),
+                });
+                metalcraft::AgentUpdate::UserMessage(message)
+            })
+            .collect()
+    })
+}
+
+/// Take the sync queue lock, recovering from a poisoned mutex.
+///
+/// A panic elsewhere must not strand a chat unable to accept messages; the worst
+/// case of reading a poisoned queue is a message ordering nobody notices.
+fn lock_pending(
+    pending: &std::sync::Mutex<std::collections::VecDeque<String>>,
+) -> std::sync::MutexGuard<'_, std::collections::VecDeque<String>> {
+    pending.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Take the next queued message and claim the turn, or say why not.
+///
+/// Both halves have to happen under one lock or two drains racing each other
+/// both pop, and the same conversation runs twice from two different states.
+/// Split out from the lock so the rule is testable without an ambient chat: the
+/// case that matters is the one that only shows up under contention.
+fn claim_next_queued(
+    busy: &mut bool,
+    pending: &mut std::collections::VecDeque<String>,
+) -> Option<String> {
+    if *busy {
+        return None;
+    }
+    let message = pending.pop_front()?;
+    *busy = true;
+    Some(message)
+}
+
+/// Put a message in line and report where it landed. 1 is next to run.
+fn queue_message(pending: &mut std::collections::VecDeque<String>, message: String) -> usize {
+    pending.push_back(message);
+    pending.len()
+}
+
+pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
+    loop {
+        let store = chat_store();
+        let session = { store.lock().await.get(chat_id).cloned() };
+        let Some(session) = session else { return };
+
+        // Claim the turn and take the next message under one lock, so two
+        // drains racing cannot both pop.
+        let (
+            message,
+            persona_slug,
+            model_name,
+            cwd,
+            agent_state,
+            diagnostics,
+            interrupt,
+            // The same queue, kept past the lock: a message typed during *this*
+            // drained turn should join it, not wait for yet another one.
+            pending_for_mailbox,
+        ) = {
+            let mut s = session.lock().await;
+            // Busy means a user turn started first; it drains the rest when it
+            // finishes, so this one has nothing left to do. Empty means done.
+            // The queue handle is cloned out first: `pending` is an Arc, so this
+            // is a pointer copy, and it frees the borrow of `s` that taking the
+            // sync lock inline would otherwise hold across `&mut s.busy`.
+            let pending = s.pending.clone();
+            let Some(message) = claim_next_queued(&mut s.busy, &mut lock_pending(&pending)) else {
+                return;
+            };
+
+            s.interrupt.store(false, Ordering::Relaxed);
+            let next_state = match s.state.take() {
+                Some(prev) => prev.continue_with(message.clone()),
+                None => AgentState::new(message.clone()),
+            };
+            (
+                message,
+                s.persona_slug.clone(),
+                s.model_name.clone(),
+                s.cwd.clone(),
+                next_state,
+                s.diagnostics.clone(),
+                s.interrupt.clone(),
+                pending,
+            )
+        };
+        let sender = chat_event_sender(chat_id).await;
+        let reply_sink: crate::tools::ReplySink = {
+            let sender = sender.clone();
+            Arc::new(move |reply: crate::tools::ReplyEnvelope| {
+                let sender = sender.clone();
+                Box::pin(async move {
+                    let _ = sender.send(ChatEvent::Reply {
+                        content: reply.text,
+                        awaiting_reply: reply.awaiting_reply,
+                        options: reply.options,
+                    });
+                    Ok(())
+                })
+            })
+        };
+        let step_guard = stoppable(
+            crate::guard::build_agent_guard(crate::guard::GuardConfig::default(), diagnostics.clone()),
+            interrupt.clone(),
+        );
+        let llm_call_hook: Option<metalcraft::LlmCallHook> = diagnostics.as_ref().map(|d| {
+            let logger = d.clone();
+            Arc::new(move |snapshot: &metalcraft::LlmCallSnapshot| {
+                logger.log_llm_request(snapshot);
+            }) as metalcraft::LlmCallHook
+        });
+
+        let _ = sender.send(ChatEvent::TurnStarted {
+            turn_index: 0,
+            user_message: message.clone(),
+            session_id: None,
+        });
+
+        let outcome = run_chat_turn(
+            context,
+            &persona_slug,
+            &cwd,
+            &model_name,
+            Some(chat_id),
+            agent_state,
+            step_guard,
+            llm_call_hook,
+            None,
+            RuntimeOptions {
+                reply_sink: Some(reply_sink),
+                tool_choice: metalcraft::ToolChoice::Required,
+                terminal_tools: vec!["say_to_user".to_string(), "ask_user".to_string()],
+                session_binding: Some(crate::scheduled_tasks::IoBinding::WorkshopChat {
+                    chat_id: chat_id.to_string(),
+                }),
+                reschedule_depth: 0,
+                prompt_extras: crate::persona::PromptExtras::load().await,
+                preset_personas: None,
+                instance_id: None,
+                interrupt: Some(interrupt.clone()),
+                plan_sink: Some({
+                    let sender = sender.clone();
+                    Arc::new(move |steps: &[crate::turn_plan::PlanStep]| {
+                        let _ = sender.send(ChatEvent::Plan { steps: steps.to_vec() });
+                    })
+                }),
+            },
+            Some({
+                let sender = sender.clone();
+                Arc::new(move |phase: &str| {
+                    let _ = sender.send(ChatEvent::Phase {
+                        phase: phase.to_string(),
+                    });
+                })
+            }),
+        chat_mailbox(pending_for_mailbox.clone(), {
+            let sender = sender.clone();
+            Arc::new(move |ev| {
+                let _ = sender.send(ev);
+            })
+        })
+        .into(),
+        )
+        .await;
+
+        {
+            let mut s = session.lock().await;
+            if let Ok(RunOutcome::Completed(state)) = outcome {
+                s.state = Some(state);
+            }
+            s.busy = false;
+        }
+        persist_chat(&session).await;
+        let _ = sender.send(ChatEvent::Done {
+            status: "completed".into(),
+            reason: None,
+        });
     }
 }
 
@@ -5595,6 +6191,12 @@ pub async fn deliver_followup_to_chat(
             preset_personas: None,
             instance_id: None,
             interrupt: Some(interrupt.clone()),
+            plan_sink: Some({
+                let sender = sender.clone();
+                Arc::new(move |steps: &[crate::turn_plan::PlanStep]| {
+                    let _ = sender.send(ChatEvent::Plan { steps: steps.to_vec() });
+                })
+            }),
         },
         // A follow-up fires with nobody necessarily watching, which is exactly
         // when a silent four-minute compaction is hardest to explain later.
@@ -5606,6 +6208,9 @@ pub async fn deliver_followup_to_chat(
                 });
             })
         }),
+        // A follow-up fires on its own; anything typed while it runs is
+        // picked up by the drain afterwards.
+        None,
     )
     .await;
 
@@ -5625,6 +6230,10 @@ pub async fn deliver_followup_to_chat(
         status: "completed".into(),
         reason: None,
     });
+
+    // A follow-up firing at 3am is exactly when someone might be typing. Drain
+    // here too, or their message waits for the *next* turn from any source.
+    drain_queued_turns(context, chat_id).await;
 
     FollowupDelivery::Delivered
 }
@@ -5646,6 +6255,9 @@ async fn run_chat_turn(
     // Where to announce compaction and recall. `None` for a turn nobody is
     // watching live — a gateway turn answers over its adapter, not over frames.
     phase_sink: Option<crate::runtime::PhaseSink>,
+    // Messages sent while this turn runs. `None` for a turn nobody is talking
+    // to as it happens — a fired follow-up delivers to a queue-drain instead.
+    mailbox: Option<metalcraft::Mailbox<AgentState>>,
 ) -> Result<RunOutcome<AgentState>, Box<dyn std::error::Error + Send + Sync>> {
     use crate::runtime::build_agent_runtime;
     use rig::client::CompletionClient;
@@ -5693,6 +6305,7 @@ async fn run_chat_turn(
         .with_capture_context(chat_id.map(str::to_string), Some(persona_slug.to_string()))
         .with_instance(instance_id)
         .with_phase_sink(phase_sink)
+        .with_mailbox(mailbox)
         .run(initial_state, step_guard)
         .await;
     // Box the real error rather than stringifying it, so its `source()` chain
@@ -6656,11 +7269,15 @@ struct NormalizedInbound {
     session_ttl_secs: Option<u64>,
 }
 
-/// Deterministic chat id for a gateway conversation: one chat per sender per
-/// channel instance, stable across restarts (the persisted file is named by id,
-/// so `load_persisted_chats` rehydrates the same conversation). Filename- and
-/// URL-safe: phone numbers reduce to digits; other ids keep ascii alphanumerics.
-fn gateway_chat_id(channel_slug: &str, sender: &str) -> String {
+/// Stable key for one person on one channel — the identity a gateway
+/// conversation belongs to, independent of how many sessions it has had.
+///
+/// Used both as the agent instance's `sender` and as the prefix every one of that
+/// sender's session ids carries, so the sessions can be found again by id alone
+/// after a restart. Filename- and URL-safe: phone numbers reduce to digits; other
+/// ids keep ascii alphanumerics, so the same person formatted two different ways
+/// ("+1 (555) 000-1234", "whatsapp:+15550001234") is still one key.
+fn gateway_sender_key(channel_slug: &str, sender: &str) -> String {
     // Reduce a phone number to bare digits (dropping any `whatsapp:` prefix and
     // punctuation) for a stable, filename-safe suffix.
     let digits: String = sender
@@ -6682,6 +7299,40 @@ fn gateway_chat_id(channel_slug: &str, sender: &str) -> String {
         digits
     };
     format!("gw-{channel_slug}-{suffix}")
+}
+
+/// A fresh session id for `sender_key`, ordered by when it started.
+///
+/// The timestamp is what makes "the newest session" answerable from the id alone,
+/// which is how [`latest_gateway_session`] avoids opening every chat file on the
+/// pod to answer it for each inbound message.
+fn new_gateway_chat_id(sender_key: &str, started_at: i64) -> String {
+    format!("{sender_key}-{started_at}")
+}
+
+/// This sender's most recent session, if they have one.
+///
+/// Reads only the keys of the chat store, which is loaded from disk at startup —
+/// so it survives a restart, and it never takes a session lock while holding the
+/// store's (the pod locks store-then-session everywhere, and reversing it here
+/// would be the one place a deadlock could come from).
+fn latest_gateway_session(chats: &HashMap<String, Arc<Mutex<ChatSession>>>, key: &str) -> Option<String> {
+    let prefix = format!("{key}-");
+    chats
+        .keys()
+        .filter_map(|id| {
+            if id == key {
+                // Written before sessions were per-conversation: one chat that
+                // was meant to last forever. It sorts oldest so that any real
+                // session supersedes it, and it is still adopted when it is all
+                // this sender has.
+                return Some((i64::MIN, id.clone()));
+            }
+            let started: i64 = id.strip_prefix(&prefix)?.parse().ok()?;
+            Some((started, id.clone()))
+        })
+        .max_by_key(|(started, _)| *started)
+        .map(|(_, id)| id)
 }
 
 /// Default idle window before a gateway conversation starts fresh, used when a
@@ -6795,9 +7446,47 @@ fn gateway_reply_sink(
 /// Find an existing gateway chat for this sender, or create one (with a
 /// diagnostics session) and persist it. Mirrors `post_create_chat` but keyed by
 /// the deterministic gateway id and stamped with a `Gateway` preset.
+/// Which session this inbound belongs to: the sender's most recent one, or a new
+/// one when they have been quiet past the channel's TTL.
+///
+/// A gap does not end the *relationship*, so the agent — and everything it
+/// remembers — carries across; it ends the conversation, and the next message
+/// opens a new one under the same agent. That is where the fresh context comes
+/// from: a new session simply has none, so there is nothing to clear.
+///
+/// TTL is per-channel (`session_ttl_minutes`); `0` keeps one session forever.
+async fn gateway_session_for(
+    state: &Arc<ApiState>,
+    n: &NormalizedInbound,
+    sender_key: &str,
+) -> String {
+    let latest = {
+        let chats = state.chats.lock().await;
+        latest_gateway_session(&chats, sender_key)
+    };
+    let ttl_secs = n
+        .session_ttl_secs
+        .unwrap_or(DEFAULT_GATEWAY_SESSION_TTL_SECS);
+    let Some(latest) = latest else {
+        return new_gateway_chat_id(sender_key, chrono::Utc::now().timestamp());
+    };
+    if ttl_secs == 0 || !gateway_session_is_stale(&latest, std::time::Duration::from_secs(ttl_secs))
+    {
+        return latest;
+    }
+    log::info!("Gateway {sender_key}: quiet for over {ttl_secs}s — starting a new session");
+    // The one place the system can say "that conversation is over", so it is the
+    // right place to let memory distill the episode instead of waiting for a
+    // later gap to prove it. The memory belongs to the agent, not the session, so
+    // the next conversation still starts knowing this person.
+    crate::memory::capture::record_session_end(&latest);
+    new_gateway_chat_id(sender_key, chrono::Utc::now().timestamp())
+}
+
 async fn get_or_create_gateway_session(
     state: &Arc<ApiState>,
     n: &NormalizedInbound,
+    sender_key: &str,
     chat_id: &str,
 ) -> Arc<Mutex<ChatSession>> {
     {
@@ -6806,9 +7495,11 @@ async fn get_or_create_gateway_session(
             return existing.clone();
         }
     }
-    // Bind this channel to a persistent agent first, so the diagnostics session can
-    // record which agent it belongs to. The idle TTL ends a *conversation*; the
-    // instance — and everything it remembers — carries across them.
+    // Bind this conversation to the sender's persistent agent first, so the
+    // diagnostics session can record which agent it belongs to. The TTL ends a
+    // *session*; the agent — and everything it remembers about this person —
+    // carries across every session it has ever had with them.
+    //
     // The channel's own agent, not whatever the pod defaults to. Hard-wiring
     // `DEFAULT_PRESET` here meant installing an agent pack and pointing a number at
     // it was not expressible: the channel answered as the default agent, and read
@@ -6816,12 +7507,19 @@ async fn get_or_create_gateway_session(
     let channel_preset = crate::channels::get_channel(&n.channel_slug)
         .and_then(|c| c.agent_preset)
         .unwrap_or_else(|| crate::agent_preset::DEFAULT_PRESET.to_string());
-    let instance_id = match crate::agent_instance::for_channel(&n.channel_slug, &channel_preset) {
+    let label = n.sender_name.clone().unwrap_or_else(|| n.sender.clone());
+    let instance_id = match crate::agent_instance::for_gateway_sender(
+        &n.channel_slug,
+        sender_key,
+        &label,
+        &channel_preset,
+    ) {
         Ok(i) => Some(i.id),
         Err(e) => {
             log::warn!(
-                "gateway channel '{}': could not bind an agent instance: {e}",
-                n.channel_slug
+                "gateway channel '{}': could not bind an agent instance for {}: {e}",
+                n.channel_slug,
+                n.sender
             );
             None
         }
@@ -6857,12 +7555,13 @@ async fn get_or_create_gateway_session(
             from: n.from.clone(),
         },
         state: None,
+        archived: Vec::new(),
         created_at: chrono::Utc::now().to_rfc3339(),
         diagnostics,
         trace: None,
         busy: false,
         interrupt: Arc::new(AtomicBool::new(false)),
-        pending: std::collections::VecDeque::new(),
+        pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
     };
     let arc = Arc::new(Mutex::new(session));
     {
@@ -6962,9 +7661,14 @@ async fn run_one_gateway_turn(
             preset_personas: None,
             instance_id: None,
             interrupt: Some(interrupt.clone()),
+            // Nothing renders a task list over SMS.
+            plan_sink: None,
         },
         // This path emits no frames at all — a gateway turn answers over its
         // adapter — so there is nobody to tell.
+        None,
+        // A gateway sender who texts again mid-turn is handled by the
+        // inbound queue, which starts a fresh turn — no mid-run injection here.
         None,
     )
     .await;
@@ -7036,15 +7740,16 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
         }
     };
 
-    let chat_id = gateway_chat_id(&n.channel_slug, &n.sender);
-    let session = get_or_create_gateway_session(&state, &n, &chat_id).await;
+    let sender_key = gateway_sender_key(&n.channel_slug, &n.sender);
+    let chat_id = gateway_session_for(&state, &n, &sender_key).await;
+    let session = get_or_create_gateway_session(&state, &n, &sender_key, &chat_id).await;
 
     // Claim the turn. If one is already running for this sender, enqueue the
     // body so it's processed when the in-flight turn finishes (no lost messages).
     {
         let mut s = session.lock().await;
         if s.busy {
-            s.pending.push_back(n.body.clone());
+            lock_pending(&s.pending).push_back(n.body.clone());
             log::info!(
                 "Inbound from {} queued — chat {chat_id} is mid-turn",
                 n.sender
@@ -7063,25 +7768,6 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
             });
             return StatusCode::OK;
         }
-        // Idle-reset: if this conversation has been dormant past the channel's TTL,
-        // drop the old history and start fresh (run_one_gateway_turn does
-        // `AgentState::new` when `state` is None). Gives a clean session after a
-        // gap and sheds any pre-upgrade turns a reasoning model would 400 on. TTL
-        // is per-channel (`session_ttl_minutes` setting); 0 disables it.
-        let ttl_secs = n
-            .session_ttl_secs
-            .unwrap_or(DEFAULT_GATEWAY_SESSION_TTL_SECS);
-        if ttl_secs > 0 && s.state.is_some() {
-            let ttl = std::time::Duration::from_secs(ttl_secs);
-            if gateway_session_is_stale(&chat_id, ttl) {
-                s.state = None;
-                log::info!("Gateway chat {chat_id}: idle > {ttl_secs}s — starting a fresh session");
-                // This is the one place the system says "that conversation is
-                // over", so it is the right place to tell memory the episode can
-                // be distilled without waiting for a gap to prove it.
-                crate::memory::capture::record_session_end(&chat_id);
-            }
-        }
         s.busy = true;
     }
 
@@ -7092,7 +7778,7 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
         Err(_) => {
             let mut s = session.lock().await;
             s.busy = false;
-            s.pending.push_back(n.body.clone());
+            lock_pending(&s.pending).push_back(n.body.clone());
             log::warn!(
                 "Inbound from {} deferred — max concurrent agent runs ({MAX_WEBHOOK_TASKS}) reached",
                 n.sender
@@ -7117,7 +7803,8 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
         loop {
             run_one_gateway_turn(&session, &context, sink.clone(), body).await;
             let mut s = session.lock().await;
-            match s.pending.pop_front() {
+            let next = { lock_pending(&s.pending).pop_front() };
+            match next {
                 Some(next) => body = next,
                 None => {
                     s.busy = false;
@@ -7131,37 +7818,352 @@ async fn dispatch_inbound(state: Arc<ApiState>, n: NormalizedInbound) -> StatusC
 }
 
 #[cfg(test)]
-mod gateway_tests {
-    use super::gateway_chat_id;
+mod summary_tests {
+    use super::{ChatMessageWire, preview_of, turns_in};
+
+    fn user(content: &str) -> ChatMessageWire {
+        ChatMessageWire::User {
+            content: content.into(),
+        }
+    }
 
     #[test]
-    fn chat_id_is_deterministic_per_sender_and_channel() {
-        let a = gateway_chat_id("chan-1", "+1 (555) 000-1234");
-        let b = gateway_chat_id("chan-1", "whatsapp:+15550001234");
-        // Same sender (modulo formatting) on the same channel → same chat,
-        // so a conversation accumulates and survives restarts.
+    fn a_conversation_is_counted_in_the_times_the_user_spoke() {
+        let messages = vec![
+            user("hi"),
+            ChatMessageWire::Assistant {
+                content: "hello".into(),
+            },
+            ChatMessageWire::ToolCall {
+                id: "t".into(),
+                call_id: None,
+                name: "bash".into(),
+                args: serde_json::Value::Null,
+            },
+            ChatMessageWire::Reset {
+                at: "2026-08-27T04:00:00Z".into(),
+                reason: "reset".into(),
+            },
+            user("again"),
+        ];
+        // Not 5. The agent's tool chatter and the divider are not things anyone
+        // said, and counting raw messages made the same conversation show two
+        // different sizes on two screens.
+        assert_eq!(turns_in(&messages), 2);
+    }
+
+    #[test]
+    fn a_preview_is_the_first_thing_the_user_said() {
+        let messages = vec![
+            ChatMessageWire::Assistant {
+                content: "Good morning!".into(),
+            },
+            user("what is on my calendar"),
+        ];
+        // Deliberately not the assistant's greeting, which reads identically in
+        // every thread and would make every row look the same.
+        assert_eq!(
+            preview_of(&messages).as_deref(),
+            Some("what is on my calendar")
+        );
+    }
+
+    #[test]
+    fn a_preview_is_one_line_and_bounded() {
+        let long = "a ".repeat(200);
+        let preview = preview_of(&[user(&format!("line one\n\n  line two {long}"))]).unwrap();
+        assert!(!preview.contains('\n'), "a row is one line");
+        assert!(preview.starts_with("line one line two"));
+        assert_eq!(preview.chars().count(), 81, "80 characters plus the ellipsis");
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn a_conversation_with_nothing_said_has_no_preview() {
+        assert_eq!(preview_of(&[]), None);
+        assert_eq!(preview_of(&[user("   ")]), None);
+    }
+}
+
+#[cfg(test)]
+mod transcript_tests {
+    use super::{
+        AgentMessage, AgentState, ChatMessageWire, ChatSession, SessionPreset,
+        context_from_transcript, mark_reset, transcript_of,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    fn session() -> ChatSession {
+        ChatSession {
+            id: "c1".into(),
+            instance_id: None,
+            persona_slug: String::new(),
+            model_name: String::new(),
+            cwd: String::new(),
+            preset: SessionPreset::Workshop,
+            state: None,
+            archived: Vec::new(),
+            created_at: String::new(),
+            diagnostics: None,
+            trace: None,
+            busy: false,
+            interrupt: Arc::new(AtomicBool::new(false)),
+            pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        }
+    }
+
+    /// A transcript reduced to something readable, which is enough to identify
+    /// every message these tests care about.
+    fn said(ts: &[ChatMessageWire]) -> Vec<String> {
+        ts.iter()
+            .map(|m| match m {
+                ChatMessageWire::User { content } => format!("u:{content}"),
+                ChatMessageWire::Assistant { content } => format!("a:{content}"),
+                ChatMessageWire::Reset { reason, .. } => format!("reset:{reason}"),
+                _ => "?".into(),
+            })
+            .collect()
+    }
+
+    fn turn(s: &mut ChatSession, user: &str, assistant: &str) {
+        let mut st = match s.state.take() {
+            Some(prev) => prev.continue_with(user.to_string()),
+            None => AgentState::new(user.to_string()),
+        };
+        st.messages
+            .push(AgentMessage::Assistant(assistant.to_string()));
+        st.is_done = true;
+        s.state = Some(st);
+    }
+
+    #[test]
+    fn a_conversation_reads_as_one_thing() {
+        let mut s = session();
+        turn(&mut s, "hi", "hello");
+        assert_eq!(said(&transcript_of(&s)), ["u:hi", "a:hello"]);
+    }
+
+    #[test]
+    fn a_reset_keeps_the_history_and_drops_the_context() {
+        let mut s = session();
+        turn(&mut s, "hi", "hello");
+        mark_reset(&mut s, "reset");
+        // The conversation is intact and says where it restarted...
+        assert_eq!(said(&transcript_of(&s)), ["u:hi", "a:hello", "reset:reset"]);
+        // ...and the model is starting from nothing. This is the whole point:
+        // `/clear` used to achieve the second by throwing away the first.
+        assert!(s.state.is_none());
+
+        turn(&mut s, "who am i", "no idea");
+        assert_eq!(
+            said(&transcript_of(&s)),
+            ["u:hi", "a:hello", "reset:reset", "u:who am i", "a:no idea"]
+        );
+        assert_eq!(s.state.as_ref().unwrap().messages.len(), 2);
+    }
+
+    #[test]
+    fn a_reload_resumes_the_context_not_the_whole_file() {
+        let mut s = session();
+        turn(&mut s, "hi", "hello");
+        mark_reset(&mut s, "reset");
+        turn(&mut s, "who am i", "no idea");
+
+        // What `load_persisted_chats` does with the file this session would write.
+        let file = transcript_of(&s);
+        let reloaded = context_from_transcript(&file).expect("a context");
+        assert_eq!(reloaded.messages.len(), 2, "only the post-reset turn");
+        assert!(matches!(&reloaded.messages[0], AgentMessage::User(u) if u == "who am i"));
+        // Replaying the pre-reset messages here would quietly undo every reset on
+        // the next restart, which is the failure this guards.
+    }
+
+    #[test]
+    fn a_reload_after_a_reset_with_nothing_since_has_no_context() {
+        let mut s = session();
+        turn(&mut s, "hi", "hello");
+        mark_reset(&mut s, "reset");
+        let file = transcript_of(&s);
+        assert!(context_from_transcript(&file).is_none());
+        // The history is still on disk, though — it is a divider, not a delete.
+        assert_eq!(said(&file), ["u:hi", "a:hello", "reset:reset"]);
+    }
+
+    #[test]
+    fn only_the_last_reset_starts_the_context() {
+        let mut s = session();
+        turn(&mut s, "one", "1");
+        mark_reset(&mut s, "reset");
+        turn(&mut s, "two", "2");
+        mark_reset(&mut s, "reset");
+        turn(&mut s, "three", "3");
+        let reloaded = context_from_transcript(&transcript_of(&s)).expect("a context");
+        assert_eq!(reloaded.messages.len(), 2);
+        assert!(matches!(&reloaded.messages[0], AgentMessage::User(u) if u == "three"));
+    }
+
+    #[test]
+    fn compaction_cannot_reach_what_a_reset_closed_off() {
+        let mut s = session();
+        turn(&mut s, "one", "1");
+        mark_reset(&mut s, "reset");
+        turn(&mut s, "two", "2");
+
+        // What compaction does, from inside a running turn: replace the live
+        // messages with a shorter summary. Only the current segment is its to
+        // rewrite — everything a reset closed off is frozen.
+        let mut compacted = AgentState::new("summary of the above");
+        compacted.is_done = true;
+        s.state = Some(compacted);
+
+        // The archived segment survives untouched; the live one is whatever the
+        // context now holds. Compaction collapsing the *current* segment is not
+        // fixed here — but it can no longer reach across a reset, and it can no
+        // longer drop the newest messages, which an index into the message list
+        // did whenever compaction ran mid-turn.
+        assert_eq!(
+            said(&transcript_of(&s)),
+            ["u:one", "a:1", "reset:reset", "u:summary of the above"]
+        );
+    }
+
+    #[test]
+    fn a_legacy_transcript_with_no_reset_loads_whole() {
+        let transcript = vec![
+            ChatMessageWire::User {
+                content: "hi".into(),
+            },
+            ChatMessageWire::Assistant {
+                content: "hello".into(),
+            },
+        ];
+        let st = context_from_transcript(&transcript).expect("a context");
+        assert_eq!(st.messages.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod gateway_tests {
+    use super::{
+        ChatSession, SessionPreset, gateway_sender_key, latest_gateway_session,
+        new_gateway_chat_id,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::Mutex;
+
+    #[test]
+    fn sender_key_is_deterministic_per_sender_and_channel() {
+        let a = gateway_sender_key("chan-1", "+1 (555) 000-1234");
+        let b = gateway_sender_key("chan-1", "whatsapp:+15550001234");
+        // Same person (modulo formatting) on the same channel → same key, so
+        // every session they ever have lands under one agent and one memory.
         assert_eq!(a, b);
         assert_eq!(a, "gw-chan-1-15550001234");
     }
 
     #[test]
-    fn chat_id_separates_senders_and_channels() {
+    fn sender_key_separates_senders_and_channels() {
         assert_ne!(
-            gateway_chat_id("chan-1", "+15550001234"),
-            gateway_chat_id("chan-1", "+15550009999")
+            gateway_sender_key("chan-1", "+15550001234"),
+            gateway_sender_key("chan-1", "+15550009999")
         );
         assert_ne!(
-            gateway_chat_id("chan-1", "+15550001234"),
-            gateway_chat_id("chan-2", "+15550001234")
+            gateway_sender_key("chan-1", "+15550001234"),
+            gateway_sender_key("chan-2", "+15550001234")
         );
     }
 
     #[test]
-    fn chat_id_handles_non_numeric_senders() {
-        let id = gateway_chat_id("chan-1", "user@example.com");
+    fn sender_key_handles_non_numeric_senders() {
+        let id = gateway_sender_key("chan-1", "user@example.com");
         assert_eq!(id, "gw-chan-1-userexamplecom");
         // Empty/symbol-only sender falls back to a stable placeholder.
-        assert_eq!(gateway_chat_id("chan-1", "!!!"), "gw-chan-1-anon");
+        assert_eq!(gateway_sender_key("chan-1", "!!!"), "gw-chan-1-anon");
+    }
+
+    /// A chat store holding nothing but ids — everything `latest_gateway_session`
+    /// reads.
+    fn store(ids: &[&str]) -> HashMap<String, Arc<Mutex<ChatSession>>> {
+        ids.iter()
+            .map(|id| {
+                let s = ChatSession {
+                    id: (*id).to_string(),
+                    instance_id: None,
+                    persona_slug: String::new(),
+                    model_name: String::new(),
+                    cwd: String::new(),
+                    preset: SessionPreset::Workshop,
+                    state: None,
+                    archived: Vec::new(),
+                    created_at: String::new(),
+                    diagnostics: None,
+                    trace: None,
+                    busy: false,
+                    interrupt: Arc::new(AtomicBool::new(false)),
+                    pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+                };
+                ((*id).to_string(), Arc::new(Mutex::new(s)))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_newest_session_is_the_current_one() {
+        let key = "gw-chan-1-15550001234";
+        let chats = store(&[
+            &new_gateway_chat_id(key, 1_000),
+            &new_gateway_chat_id(key, 3_000),
+            &new_gateway_chat_id(key, 2_000),
+        ]);
+        assert_eq!(
+            latest_gateway_session(&chats, key).as_deref(),
+            Some(new_gateway_chat_id(key, 3_000).as_str())
+        );
+    }
+
+    #[test]
+    fn another_senders_sessions_are_not_mine() {
+        let mine = "gw-chan-1-15550001234";
+        // Deliberately a sender whose key is *almost* a prefix of the other's:
+        // without the separator, "…123" would match "…1234-<time>" and two people
+        // would share one conversation.
+        let theirs = "gw-chan-1-1555000123";
+        let chats = store(&[
+            &new_gateway_chat_id(mine, 5_000),
+            &new_gateway_chat_id(theirs, 9_000),
+        ]);
+        assert_eq!(
+            latest_gateway_session(&chats, mine).as_deref(),
+            Some(new_gateway_chat_id(mine, 5_000).as_str())
+        );
+        assert_eq!(
+            latest_gateway_session(&chats, theirs).as_deref(),
+            Some(new_gateway_chat_id(theirs, 9_000).as_str())
+        );
+    }
+
+    #[test]
+    fn a_sender_with_no_history_has_no_session() {
+        assert_eq!(latest_gateway_session(&store(&[]), "gw-chan-1-1"), None);
+    }
+
+    #[test]
+    fn the_pre_sessions_chat_is_adopted_and_then_superseded() {
+        let key = "gw-chan-1-15550001234";
+        // A pod upgraded from one-chat-per-sender-forever: the old conversation
+        // is the current one, so the next message continues it rather than
+        // appearing to lose it.
+        let chats = store(&[key]);
+        assert_eq!(latest_gateway_session(&chats, key).as_deref(), Some(key));
+        // Once it goes stale and a real session starts, that one wins.
+        let chats = store(&[key, &new_gateway_chat_id(key, 1)]);
+        assert_eq!(
+            latest_gateway_session(&chats, key).as_deref(),
+            Some(new_gateway_chat_id(key, 1).as_str())
+        );
     }
 }
 
@@ -7188,6 +8190,126 @@ mod consent_tests {
         for change in ["bash", "write_file", "edit_file", "web_fetch", "sub_agent"] {
             assert!(changes_something(change), "{change} changes something");
         }
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::{ChatEvent, chat_mailbox, claim_next_queued, queue_message};
+    use metalcraft::{AgentState, AgentUpdate, StepEvent, StepOutcome};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    fn step_to(next: &str) -> StepEvent {
+        StepEvent {
+            node: "tools".into(),
+            next: next.into(),
+            duration: std::time::Duration::from_millis(1),
+            outcome: StepOutcome::Success,
+        }
+    }
+
+    /// A queue with one message in it, and a recorder for the frames the
+    /// mailbox announces.
+    fn mailbox_with(
+        message: &str,
+    ) -> (
+        metalcraft::Mailbox<AgentState>,
+        Arc<Mutex<VecDeque<String>>>,
+        Arc<Mutex<Vec<ChatEvent>>>,
+    ) {
+        let pending = Arc::new(Mutex::new(VecDeque::from([message.to_string()])));
+        let seen: Arc<Mutex<Vec<ChatEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let mailbox = chat_mailbox(pending.clone(), {
+            let seen = seen.clone();
+            Arc::new(move |ev| seen.lock().unwrap().push(ev))
+        });
+        (mailbox, pending, seen)
+    }
+
+    /// The rule the whole feature rests on. A user message appended between a
+    /// tool call and its result orphans the call, and the Responses API rejects
+    /// the next request with an opaque 400 — so the mailbox delivers only when
+    /// the agent node is next, by which point every result in the batch has
+    /// landed.
+    #[test]
+    fn a_message_is_only_delivered_when_the_agent_node_is_next() {
+        let (mailbox, pending, seen) = mailbox_with("actually, do X instead");
+        let state = AgentState::new("original");
+
+        // About to run tools: the history is mid-batch. Deliver nothing, and
+        // leave the message queued rather than dropping it.
+        assert!(mailbox(&state, &step_to("tools")).is_empty());
+        assert_eq!(pending.lock().unwrap().len(), 1, "a held message is not a lost one");
+        assert!(seen.lock().unwrap().is_empty(), "nothing was delivered to announce");
+
+        // The turn is ending: too late to be answered, so it stays queued for
+        // `drain_queued_turns` to run as its own turn.
+        assert!(mailbox(&state, &step_to("__end__")).is_empty());
+        assert_eq!(pending.lock().unwrap().len(), 1);
+
+        // Back to the agent: now it is safe, and the queue empties.
+        let updates = mailbox(&state, &step_to("agent"));
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(&updates[0], AgentUpdate::UserMessage(m) if m == "actually, do X instead"));
+        assert!(pending.lock().unwrap().is_empty(), "a delivered message must not be redelivered");
+    }
+
+    /// The client showed the message as pending when it was queued; it has to
+    /// learn when that stopped being true.
+    #[test]
+    fn delivering_announces_the_message_it_took() {
+        let (mailbox, _pending, seen) = mailbox_with("hurry up");
+        let _ = mailbox(&AgentState::new("x"), &step_to("agent"));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(matches!(&seen[0], ChatEvent::Injected { message } if message == "hurry up"));
+    }
+
+    /// The common case: nothing typed, so the hook costs one call and changes
+    /// nothing about the run.
+    #[test]
+    fn an_empty_queue_delivers_nothing() {
+        let pending = Arc::new(Mutex::new(VecDeque::new()));
+        let mailbox = chat_mailbox(pending, Arc::new(|_| {}));
+        assert!(mailbox(&AgentState::new("x"), &step_to("agent")).is_empty());
+    }
+
+    #[test]
+    fn a_message_sent_mid_turn_gets_a_place_in_line() {
+        let mut pending = VecDeque::new();
+        assert_eq!(queue_message(&mut pending, "first".into()), 1);
+        assert_eq!(queue_message(&mut pending, "second".into()), 2);
+    }
+
+    /// The claim and the pop are one operation. If they were not, two drains
+    /// running at once would both take a message and run the same conversation
+    /// twice from two different states.
+    #[test]
+    fn claiming_takes_the_turn_and_the_message_together() {
+        let mut busy = false;
+        let mut pending = VecDeque::from(["first".to_string(), "second".to_string()]);
+
+        assert_eq!(claim_next_queued(&mut busy, &mut pending).as_deref(), Some("first"));
+        assert!(busy, "claiming a message must also claim the turn");
+
+        // A second drain arriving while the first holds the turn gets nothing,
+        // and must not consume "second".
+        assert_eq!(claim_next_queued(&mut busy, &mut pending), None);
+        assert_eq!(pending.len(), 1, "a refused claim must not eat a message");
+
+        busy = false;
+        assert_eq!(claim_next_queued(&mut busy, &mut pending).as_deref(), Some("second"));
+    }
+
+    /// An empty queue leaves the turn unclaimed — otherwise a drain that found
+    /// nothing to do would strand the chat as permanently busy.
+    #[test]
+    fn an_empty_queue_does_not_claim_the_turn() {
+        let mut busy = false;
+        let mut pending = VecDeque::new();
+        assert_eq!(claim_next_queued(&mut busy, &mut pending), None);
+        assert!(!busy, "nothing ran, so nothing may be left holding the chat");
     }
 }
 

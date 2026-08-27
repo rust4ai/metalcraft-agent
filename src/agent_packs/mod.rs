@@ -648,28 +648,30 @@ fn is_pod_managed(rel: &str) -> bool {
     matches!(rel, "agent_pack.json" | "integrations.json")
 }
 
-/// Write one packaged flow to `<data>/flows/`, disabled and unarmed.
+/// Write one packaged flow to `<data>/flows/`.
 ///
-/// Three things are forced regardless of what the author shipped:
+/// Installing a pack cannot start background work: a flow only fires if a
+/// [`ScheduledFlow`](metalcraft_flows::ScheduledFlow) points at it, and this never
+/// writes one. That used to take two defensive assignments here — clearing the
+/// flow's master switch and every schedule's — which were load-bearing and easy to
+/// forget. Now the flow document has nothing to clear.
 ///
-/// * `enabled = false` — the master switch. Installing an identity must not start
-///   background work, and a pack that arrived with it on would do exactly that.
-/// * every `schedules[].enabled = false` — belt and braces, so enabling the flow by
-///   hand later still doesn't fire a trigger nobody looked at.
-/// * the flow is **bound to the pack's preset**, which is what makes the arm dialog's
-///   consent summary constructible: personas, domains and credentials all resolve
-///   through the preset that owns the flow.
-///
-/// A schedule's `instance` is never carried — it lives in `flow_bindings.json`, which
-/// this never populates. `arm()` is the only thing that mints an instance.
+/// The flow is **bound to the pack's preset**, which is what makes the arm dialog's
+/// consent summary constructible: personas, domains and credentials all resolve
+/// through the preset that owns the flow. Any schedules the pack suggests stay
+/// suggestions until somebody accepts one.
 fn install_flow_unscheduled(name: &str, bytes: &[u8], preset_slug: &str) -> Result<String, String> {
-    let mut flow: metalcraft_flows::SavedFlow =
+    // Parsed through `extract` rather than straight into a `SavedFlow`: a pack built
+    // before spec v3 has its schedules inside the document, and parsing directly
+    // would drop them without anyone noticing. Here they are dropped *deliberately*
+    // — an installed pack's flow starts unscheduled either way — but the difference
+    // matters the day we want to offer them as suggestions.
+    let doc: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|e| format!("not a valid flow document: {e}"))?;
+    let mut flow = metalcraft_flows::extract(&doc)
+        .map_err(|e| format!("not a valid flow document: {e}"))?
+        .flow;
 
-    flow.enabled = false;
-    for s in &mut flow.schedules {
-        s.enabled = false;
-    }
     if flow.id.is_empty() {
         flow.id = name.to_string();
     }
@@ -707,18 +709,18 @@ pub fn uninstall(id: &str, force: bool) -> Result<UninstallReport, String> {
 
     // Every agent made from one of this pack's presets, named or not.
     //
-    // The check used to consider only `persistent` ones, which meant an ordinary
-    // in-progress chat — unnamed by default — had its preset deleted underneath it
-    // with no warning, and its next turn failed to load. Unnamed agents still don't
-    // *block* the uninstall (nobody chose to keep them), but they are evicted so a
-    // live one stops answering from a preset that no longer exists.
+    // All of them block, and that is a change: the check used to exempt anything
+    // without the `persistent` flag, which meant an ordinary in-progress chat —
+    // unnamed, and so not "persistent" — had its preset deleted underneath it with
+    // no warning, and its next turn failed to load. There is no such flag now, and
+    // no agent is disposable: every one is somebody's, so every one is named here
+    // and `force` is the way to orphan them deliberately.
     let all: Vec<crate::agent_instance::AgentInstance> = crate::agent_instance::list()
         .into_iter()
         .filter(|i| pack.manifest.presets.contains(&i.agent_preset))
         .collect();
     let dependents: Vec<String> = all
         .iter()
-        .filter(|i| i.persistent)
         .map(|i| format!("{} ({})", i.name, i.id))
         .collect();
     if !dependents.is_empty() && !force {

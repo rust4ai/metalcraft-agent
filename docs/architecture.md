@@ -10,7 +10,8 @@ glossary, see **[overview.md](overview.md)**.
 | Runtime | `src/runtime.rs` | Builds the agent runtime (`build_agent_runtime`) and hosts `TurnRunner`, the shared per-turn wrapper (compact → executor) used by the CLI, the daemon chat path, and one-shot tasks |
 | Persona | `src/persona.rs` | Load/save/list personas; assemble the templated system prompt; parse skill frontmatter |
 | Skill | `src/skill.rs` | Skill-file CRUD shared by the Workshop API and the `skill_*` meta tools |
-| Flows (v1) | `src/flows.rs` | Load flows, parse schedules, BFS-collect reachable prompt nodes (legacy path) |
+| Flows (v1) | `src/flows.rs` | Join scheduled flows to their flows, parse triggers, BFS-collect reachable prompt nodes (legacy path) |
+| Scheduled flows | `src/scheduled_flows.rs` | *When* a flow runs: the store, arming/disarming, firing-time previews, and the v2→v3 migration |
 | Flow executor (v2) | `src/flow_exec.rs`, `src/flow_runs.rs` | Stateful flow state machine (conditional/branch/tool/http/… nodes) with pause/resume and run persistence |
 | Tools | `src/tools/` | Core built-ins (file ops, bash, grep, web fetch, sub-agent), the generic HTTP-API tool, and native meta/integration tools |
 | Approval | `src/approval.rs` | Classify operations by sensitivity; interactive approval prompt with diff preview |
@@ -98,12 +99,18 @@ diagnostics.
 
 ## Flows and the scheduler
 
-Flows are workflow graphs loaded by `metalcraft-daemon`:
+A flow (`<data>/flows/`) is *what work is*. A **scheduled flow**
+(`<data>/scheduled_flows/`, `src/scheduled_flows.rs`) is *when it runs* — a separate
+document naming the flow, the trigger, the inputs, the persona, and the agent instance it
+runs as. A flow no scheduled flow points at cannot fire, which is why installing a pack or
+downloading a flow starts no background work.
 
-1. The daemon loads every enabled flow from `<data>/flows/`.
-2. Each flow's **entry node** carries a schedule: `manual`, `minutes: N`, `hours: N`, or a
-   `cron:` expression (evaluated in the daemon's local timezone).
-3. On each poll, the daemon checks whether a flow is due, and separately fires any due
+1. The daemon loads every **enabled, timed** scheduled flow and joins it to its flow
+   (`flows::load_due_candidates`), skipping — loudly — anything that cannot run.
+2. Each carries one trigger: `manual`, `minutes: N`, `hours: N`, or a `cron:` expression
+   (evaluated in the schedule's IANA timezone, else the daemon's local one).
+3. On each poll, the daemon checks whether each schedule is due — keyed by scheduled-flow
+   id, so two schedules of one flow fire independently — and separately fires any due
    **scheduled follow-ups** (`src/scheduled_tasks.rs`).
 4. When a flow is due, the daemon branches on `flow_exec::is_v2_flow`:
    - **v2 flows** run through `flow_exec::run_flow_v2` (`src/flow_exec.rs`) — a stateful state
@@ -114,7 +121,15 @@ Flows are workflow graphs loaded by `metalcraft-daemon`:
      (`resume_flow`).
    - **v1 (legacy) flows** take the older path: BFS-collect reachable `prompt` nodes
      (`src/flows.rs`) and run each as a one-shot task.
-5. Persona can be overridden per-flow (on the entry node) or per-node.
+5. Persona can be overridden per-schedule, per-flow (on the entry node), or per-node.
+6. Creating a scheduled flow is **arming**: it mints (or attaches) the persistent agent the
+   run belongs to, so successive firings accumulate memory. Deleting it stops the timer and
+   keeps the agent. `src/flow_bindings.rs` keeps the other half — which *preset* a flow
+   belongs to, and therefore which personas it may name.
+
+Pods upgrading from spec v2 migrate at startup (`scheduled_flows::migrate_from_flows`, called
+from `seed::ensure_defaults`): each `schedules[]` entry becomes one document, enabled only if
+the flow's master switch **and** the schedule's own toggle were both on.
 
 Flow templates (`<data>/flow_templates/`) are reusable starting points exposed through the
 Workshop API.
