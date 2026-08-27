@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.33.0"
+    "version": "0.35.0"
   },
   "paths": {
     "/api/v1/agent-packs": {
@@ -1655,6 +1655,58 @@
           },
           "404": {
             "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/factory-reset": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Erase this pod and restart it as if it had just been provisioned.",
+        "description": "Answers **before** it exits, and the report it returns is the last word this\nprocess says — anything the client wants to know about what was removed has\nto come from here, because the next thing to answer on this port will be a\npod with no history of the request.",
+        "operationId": "post_factory_reset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FactoryResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Wiped; the pod is restarting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResetReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Confirmation phrase missing or wrong",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Could not read the data directory; nothing was removed",
             "content": {
               "application/json": {
                 "schema": {
@@ -4754,6 +4806,23 @@
           }
         }
       },
+      "FactoryResetRequest": {
+        "type": "object",
+        "description": "Body for `POST /api/v1/factory-reset`.",
+        "required": [
+          "confirm"
+        ],
+        "properties": {
+          "confirm": {
+            "type": "string",
+            "description": "Must be exactly `FACTORY RESET`. A typed phrase rather than a flag, so\nthat nothing reaches this endpoint by accident — see\n[`crate::factory_reset::CONFIRM_PHRASE`]."
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ResetScope",
+            "description": "Defaults to [`ResetScope::Full`], the scope that actually reproduces a\nnew pod. `keep_keys` is the convenience option and the weaker test."
+          }
+        }
+      },
       "FlowBindingView": {
         "type": "object",
         "description": "The binding for one flow, resolved for display.",
@@ -6896,6 +6965,85 @@
             "type": "string"
           }
         }
+      },
+      "ResetFailure": {
+        "type": "object",
+        "description": "A single entry the wipe could not remove.",
+        "required": [
+          "name",
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "description": "Entry name, relative to the data dir."
+          }
+        }
+      },
+      "ResetReport": {
+        "type": "object",
+        "description": "What the reset actually did — reported rather than assumed.\n\nA partial wipe is a real outcome (a busy file, a read-only mount, a\npermission the container lost), and it is the outcome where \"success\" is the\nmost dangerous thing to say: the operator would go on to test onboarding\nagainst a pod that still has half its state.",
+        "required": [
+          "scope",
+          "data_dir",
+          "removed",
+          "kept",
+          "failed",
+          "restart"
+        ],
+        "properties": {
+          "data_dir": {
+            "type": "string",
+            "description": "The data directory that was emptied."
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResetFailure"
+            },
+            "description": "Entries that could not be removed. Non-empty means the pod is *not*\nfactory-fresh, whatever the HTTP status said."
+          },
+          "kept": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Entry names deliberately left in place by the scope."
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Entry names removed, sorted. Directory entries count once."
+          },
+          "restart": {
+            "$ref": "#/components/schemas/RestartExpectation",
+            "description": "Whether the process expects to be restarted for it, or left down."
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ResetScope"
+          }
+        }
+      },
+      "ResetScope": {
+        "type": "string",
+        "description": "How much of the pod to take away.",
+        "enum": [
+          "full",
+          "keep_keys"
+        ]
+      },
+      "RestartExpectation": {
+        "type": "string",
+        "description": "What the pod expects to happen to it after the wipe.",
+        "enum": [
+          "supervised",
+          "manual"
+        ]
       },
       "RestoreOutcome": {
         "type": "object",

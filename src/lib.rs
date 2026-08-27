@@ -10,6 +10,7 @@ pub mod daemon;
 pub mod diagnostics;
 pub mod diagnostics_browse;
 pub mod diff_preview;
+pub mod factory_reset;
 pub mod flow_bindings;
 pub mod flow_exec;
 pub mod flow_install;

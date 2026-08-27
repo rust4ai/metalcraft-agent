@@ -24,6 +24,7 @@ use crate::diagnostics::{DiagnosticsLogger, SessionInfo};
 use crate::diagnostics_browse::{
     DiagnosticsSessionSummary, list_diagnostics_sessions, read_diagnostics_session,
 };
+use crate::factory_reset::{ResetFailure, ResetReport, ResetScope, RestartExpectation};
 use crate::flows;
 use crate::paths;
 use crate::persona::{Persona, PersonaSummary};
@@ -511,8 +512,10 @@ async fn auth_middleware(
         gateway_metalcraft_status, gateway_metalcraft_register,
         gateway_metalcraft_connect, gateway_metalcraft_disconnect,
         gateway_metalcraft_unregister,
+        post_factory_reset,
     ),
     components(schemas(
+        FactoryResetRequest, ResetReport, ResetScope, ResetFailure, RestartExpectation,
         ErrorResponse, ProjectSnapshot, ProjectLayout, ApiToolSummary,
         KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
         InferenceStatus, ChatContext, ChatCompacted, ChatInterrupt,
@@ -817,6 +820,10 @@ pub fn build_router(api_key: String) -> Router {
             "/api/v1/gateway/metalcraft/unregister",
             post(gateway_metalcraft_unregister),
         )
+        // Authenticated like everything else: the workshop key is already a
+        // full-admin credential, so a separate gate would be theatre. The guard
+        // that matters is the typed confirmation phrase in the body.
+        .route("/api/v1/factory-reset", post(post_factory_reset))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -6128,6 +6135,85 @@ async fn gateway_metalcraft_unregister() -> Response {
         Ok(v) => Json(v).into_response(),
         Err(e) => err_json(StatusCode::BAD_GATEWAY, e),
     }
+}
+
+// ── Factory reset ────────────────────────────────────────────────────────
+//
+// The destructive one. See [`crate::factory_reset`] for why it wipes the data
+// directory rather than any feature's idea of "my content", and why it exits
+// the process afterwards instead of clearing caches in place.
+
+/// Body for `POST /api/v1/factory-reset`.
+#[derive(Deserialize, utoipa::ToSchema)]
+struct FactoryResetRequest {
+    /// Must be exactly `FACTORY RESET`. A typed phrase rather than a flag, so
+    /// that nothing reaches this endpoint by accident — see
+    /// [`crate::factory_reset::CONFIRM_PHRASE`].
+    confirm: String,
+    /// Defaults to [`ResetScope::Full`], the scope that actually reproduces a
+    /// new pod. `keep_keys` is the convenience option and the weaker test.
+    #[serde(default)]
+    scope: ResetScope,
+}
+
+/// Erase this pod and restart it as if it had just been provisioned.
+///
+/// Answers **before** it exits, and the report it returns is the last word this
+/// process says — anything the client wants to know about what was removed has
+/// to come from here, because the next thing to answer on this port will be a
+/// pod with no history of the request.
+#[utoipa::path(
+    post,
+    path = "/api/v1/factory-reset",
+    tag = "admin",
+    request_body = FactoryResetRequest,
+    responses(
+        (status = 200, description = "Wiped; the pod is restarting", body = ResetReport),
+        (status = 400, description = "Confirmation phrase missing or wrong", body = ErrorResponse),
+        (status = 500, description = "Could not read the data directory; nothing was removed", body = ErrorResponse),
+    ),
+)]
+async fn post_factory_reset(Json(req): Json<FactoryResetRequest>) -> Response {
+    if req.confirm != crate::factory_reset::CONFIRM_PHRASE {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "factory reset requires confirm: \"{}\"",
+                crate::factory_reset::CONFIRM_PHRASE
+            ),
+        );
+    }
+
+    let report = match crate::factory_reset::wipe(req.scope) {
+        Ok(r) => r,
+        // Nothing was removed — the directory could not even be listed. Leave
+        // the pod running; there is nothing to restart into.
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("factory reset could not read the data dir: {e}"),
+            );
+        }
+    };
+
+    // A partial wipe still restarts. The alternative is a pod left half-erased
+    // *and* running on stale in-memory state, which is the worst of both; the
+    // report carries `failed` so the operator knows not to trust what comes
+    // back as factory-fresh.
+    if !report.is_clean() {
+        log::error!(
+            "factory reset left {} entr{} behind: {:?}",
+            report.failed.len(),
+            if report.failed.len() == 1 { "y" } else { "ies" },
+            report.failed,
+        );
+    }
+
+    // Long enough for this response to be written and read; short enough that
+    // nothing meaningful can be persisted from a stale cache in the gap.
+    crate::factory_reset::seed_and_exit(std::time::Duration::from_millis(750));
+
+    Json(report).into_response()
 }
 
 // ── Inbound gateway webhooks ─────────────────────────────────────────────
