@@ -3086,6 +3086,31 @@
         }
       }
     },
+    "/api/v1/personas": {
+      "get": {
+        "tags": [
+          "personas"
+        ],
+        "summary": "Every persona on this pod: the pod's own, plus those an enabled pack vendors.",
+        "description": "Locals shadow packs on a slug collision, which is the same precedence the\nrunner resolves with — so what is listed here is what would actually run.\n\nSummaries only. A persona's system prompt is most of its bytes and none of an\nindex's job; `GET /personas/{slug}` is the whole document.",
+        "operationId": "list_personas",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PersonaSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/personas/{slug}": {
       "get": {
         "tags": [
@@ -3242,6 +3267,31 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OctaweaveConnection"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/skills": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Every skill on this pod: the pod's own, plus those an enabled pack vendors.",
+        "description": "Summaries only — a skill *is* its markdown body, so an index that carried it\nwould be the whole skills directory in one response. `GET /skills/{slug}` has\nthe body.",
+        "operationId": "list_skills",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SkillSummary"
+                  }
                 }
               }
             }

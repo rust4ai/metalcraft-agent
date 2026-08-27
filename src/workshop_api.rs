@@ -485,8 +485,8 @@ async fn auth_middleware(
         get_agent_instance_flows,
         patch_agent_instance, delete_agent_instance,
         get_agent_instance_memory, post_instance_conversation,
-        get_persona, put_persona, delete_persona,
-        get_skill, put_skill, delete_skill,
+        list_personas, get_persona, put_persona, delete_persona,
+        list_skills, get_skill, put_skill, delete_skill,
         list_flows, get_flow, put_flow, delete_flow, post_run_flow, post_install_flow,
         get_flow_schedules, put_flow_schedules, post_flow_schedule, delete_flow_schedule,
         get_flow_binding, put_flow_binding, post_arm_schedule, delete_arm_schedule,
@@ -706,6 +706,8 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/agent-presets/{slug}", get(get_agent_preset))
         .route("/api/v1/agent-presets/{slug}", put(put_agent_preset))
         .route("/api/v1/agent-presets/{slug}", delete(delete_agent_preset))
+        .route("/api/v1/personas", get(list_personas))
+        .route("/api/v1/skills", get(list_skills))
         .route("/api/v1/personas/{slug}", get(get_persona))
         .route("/api/v1/personas/{slug}", put(put_persona))
         .route("/api/v1/personas/{slug}", delete(delete_persona))
@@ -2161,6 +2163,30 @@ async fn delete_agent_preset(Path(slug): Path<String>) -> Response {
         Ok(()) => Json(serde_json::json!({ "deleted": slug })).into_response(),
         Err(e) => err_json(StatusCode::NOT_FOUND, e),
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/personas",
+    tag = "personas",
+    summary = "Every persona on this pod: the pod's own, plus those an enabled pack vendors.",
+    description = "Locals shadow packs on a slug collision, which is the same precedence the\nrunner resolves with — so what is listed here is what would actually run.\n\nSummaries only. A persona's system prompt is most of its bytes and none of an\nindex's job; `GET /personas/{slug}` is the whole document.",
+    responses((status = 200, body = Vec<PersonaSummary>)),
+)]
+async fn list_personas() -> Json<Vec<PersonaSummary>> {
+    Json(list_persona_summaries())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/skills",
+    tag = "skills",
+    summary = "Every skill on this pod: the pod's own, plus those an enabled pack vendors.",
+    description = "Summaries only — a skill *is* its markdown body, so an index that carried it\nwould be the whole skills directory in one response. `GET /skills/{slug}` has\nthe body.",
+    responses((status = 200, body = Vec<SkillSummary>)),
+)]
+async fn list_skills() -> Json<Vec<SkillSummary>> {
+    Json(list_skill_summaries())
 }
 
 #[utoipa::path(
