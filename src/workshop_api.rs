@@ -4816,6 +4816,27 @@ fn continue_unless_stopped(interrupt: &AtomicBool) -> GuardAction {
     }
 }
 
+/// Wrap a guard so the stop button reaches a turn that built its own.
+///
+/// The workshop chat's guard checks the flag itself (it is built inline, per
+/// turn, around this chat's event sender). The headless paths — a scheduled
+/// follow-up, an inbound gateway message — share the general agent guard, and
+/// they run against the *same chat*, which a client can be watching with the
+/// same stop button. `/interrupt` answers `stopping: true` for any of them
+/// because the chat is busy; this is what makes that answer true.
+fn stoppable(guard: StepGuard<AgentState>, interrupt: Arc<AtomicBool>) -> StepGuard<AgentState> {
+    Arc::new(move |state: &AgentState, ev| {
+        // The inner guard runs first and unconditionally: it is what writes the
+        // turn's diagnostics, and a stopped turn should be as legible afterwards
+        // as any other.
+        let action = guard(state, ev);
+        match continue_unless_stopped(&interrupt) {
+            GuardAction::Stop(reason) => GuardAction::Stop(reason),
+            GuardAction::Continue => action,
+        }
+    })
+}
+
 /// Ask a running turn to stop — the client's stop button.
 ///
 /// Returns as soon as the request is recorded, not when the turn ends: the
@@ -5225,6 +5246,10 @@ async fn post_chat_turn(
                 prompt_extras: crate::persona::PromptExtras::load().await,
                 preset_personas: None,
                 instance_id: None,
+                // Delegation runs a whole agent inside one tool call, where the
+                // step guard above cannot reach. `sub_agent` reads this flag so
+                // stop lands there too.
+                interrupt: Some(interrupt.clone()),
             },
             Some(phase_sink),
         )
@@ -5434,12 +5459,15 @@ pub async fn deliver_followup_to_chat(
 
     // Snapshot what we need and stamp the session busy, refusing to run
     // concurrently with a user turn.
-    let (persona_slug, model_name, cwd, agent_state, diagnostics) = {
+    let (persona_slug, model_name, cwd, agent_state, diagnostics, interrupt) = {
         let mut s = session.lock().await;
         if s.busy {
             return FollowupDelivery::ChatBusy;
         }
         s.busy = true;
+        // Start clean, exactly as a user turn does: a stop pressed on the last
+        // turn must not kill this one before it takes a step.
+        s.interrupt.store(false, Ordering::Relaxed);
         let next_state = match s.state.take() {
             Some(prev) => prev.continue_with(task.to_string()),
             None => AgentState::new(task.to_string()),
@@ -5450,6 +5478,7 @@ pub async fn deliver_followup_to_chat(
             s.cwd.clone(),
             next_state,
             s.diagnostics.clone(),
+            s.interrupt.clone(),
         )
     };
 
@@ -5468,8 +5497,10 @@ pub async fn deliver_followup_to_chat(
         })
     };
 
-    let step_guard =
-        crate::guard::build_agent_guard(crate::guard::GuardConfig::default(), diagnostics.clone());
+    let step_guard = stoppable(
+        crate::guard::build_agent_guard(crate::guard::GuardConfig::default(), diagnostics.clone()),
+        interrupt.clone(),
+    );
     let llm_call_hook: Option<metalcraft::LlmCallHook> = diagnostics.as_ref().map(|d| {
         let logger = d.clone();
         Arc::new(move |snapshot: &metalcraft::LlmCallSnapshot| {
@@ -5505,6 +5536,7 @@ pub async fn deliver_followup_to_chat(
             prompt_extras: crate::persona::PromptExtras::load().await,
             preset_personas: None,
             instance_id: None,
+            interrupt: Some(interrupt.clone()),
         },
         // A follow-up fires with nobody necessarily watching, which is exactly
         // when a silent four-minute compaction is hardest to explain later.
@@ -6765,7 +6797,7 @@ async fn run_one_gateway_turn(
     sink: crate::tools::ReplySink,
     body: String,
 ) {
-    let (chat_id, persona_slug, model_name, cwd, agent_state, diagnostics) = {
+    let (chat_id, persona_slug, model_name, cwd, agent_state, diagnostics, interrupt) = {
         let mut s = session.lock().await;
         let next_state = match s.state.take() {
             Some(prev) => prev.continue_with(body.clone()),
@@ -6793,6 +6825,7 @@ async fn run_one_gateway_turn(
                 s.diagnostics = Some(logger);
             }
         }
+        s.interrupt.store(false, Ordering::Relaxed);
         (
             s.id.clone(),
             s.persona_slug.clone(),
@@ -6800,6 +6833,7 @@ async fn run_one_gateway_turn(
             s.cwd.clone(),
             next_state,
             s.diagnostics.clone(),
+            s.interrupt.clone(),
         )
     };
 
@@ -6811,8 +6845,10 @@ async fn run_one_gateway_turn(
             logger.log_llm_request(snapshot);
         }) as metalcraft::LlmCallHook
     });
-    let step_guard =
-        crate::guard::build_agent_guard(crate::guard::GuardConfig::default(), diagnostics.clone());
+    let step_guard = stoppable(
+        crate::guard::build_agent_guard(crate::guard::GuardConfig::default(), diagnostics.clone()),
+        interrupt.clone(),
+    );
 
     let outcome = run_chat_turn(
         context,
@@ -6836,6 +6872,7 @@ async fn run_one_gateway_turn(
             prompt_extras: crate::persona::PromptExtras::load().await,
             preset_personas: None,
             instance_id: None,
+            interrupt: Some(interrupt.clone()),
         },
         // This path emits no frames at all — a gateway turn answers over its
         // adapter — so there is nobody to tell.

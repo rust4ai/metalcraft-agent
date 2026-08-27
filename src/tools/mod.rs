@@ -59,6 +59,11 @@ pub struct ToolConfig {
     /// The agent instance this turn runs as. Scopes the `mem_*` tools to that
     /// agent's own memory. `None` ⇒ the pod-global store.
     pub instance_id: Option<String>,
+    /// The turn's stop flag, for tools that are long-running enough to have to
+    /// honour it themselves. Only `sub_agent` does today — a delegated run is a
+    /// whole agent inside one tool call, and the step guard that stops the turn
+    /// cannot fire until that call returns. `None` ⇒ nothing to stop for.
+    pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Register only the tools listed by name.
@@ -203,7 +208,8 @@ pub fn create_registry_for_with_config(
                             cfg.system_prompt.clone(),
                         )
                         .with_preset_personas(cfg.preset_personas.clone())
-                        .with_instance(cfg.instance_id.clone()),
+                        .with_instance(cfg.instance_id.clone())
+                        .with_interrupt(cfg.interrupt.clone()),
                     )
                 } else {
                     log::warn!("sub_agent tool requires ToolConfig, skipping");

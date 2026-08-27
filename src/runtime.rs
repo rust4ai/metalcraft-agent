@@ -765,6 +765,11 @@ pub struct RuntimeOptions {
     /// on the pod), which is the pre-preset behaviour and stays the default for
     /// callers that have no preset in hand.
     pub preset_personas: Option<Vec<String>>,
+    /// The stop flag for this turn — set by the chat's interrupt endpoint and
+    /// read by the step guard. Passed on to the tools that have to honour it
+    /// themselves (`sub_agent`, whose call *is* an agent run). `None` for turns
+    /// nobody can press stop on: flows, one-shot tasks, the CLI.
+    pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 pub fn build_agent_runtime<M>(
@@ -794,6 +799,7 @@ where
         reply_sink: options.reply_sink,
         session_binding: options.session_binding,
         reschedule_depth: options.reschedule_depth,
+        interrupt: options.interrupt.clone(),
     };
 
     // Resolve the persona's full tool set (explicit tools + any pack-scoped

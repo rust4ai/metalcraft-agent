@@ -897,6 +897,8 @@ impl<'a> FlowExecutor<'a> {
             reply_sink: None,
             session_binding: None,
             reschedule_depth: 0,
+            // A flow node has no stop button behind it.
+            interrupt: None,
         };
         let mut registry =
             crate::tools::create_registry_for_with_config(&persona_tools, Some(&tool_config));

@@ -1,5 +1,8 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use async_trait::async_trait;
-use metalcraft::{AgentState, Executor, RunOutcome, create_react_agent};
+use metalcraft::{AgentState, Executor, GuardAction, RunOutcome, StepGuard, create_react_agent};
 use rig::client::CompletionClient;
 
 /// How long a delegated sub-agent may run before it is cut off.
@@ -47,6 +50,15 @@ pub struct SubAgentTool {
     /// The agent instance the parent turn runs as. A delegated subtask remembers
     /// into the same place, rather than opening a second store nobody reads.
     instance_id: Option<String>,
+    /// The parent turn's stop flag — the one the chat's stop button sets.
+    ///
+    /// Delegation is the one tool call that is itself a whole agent run, so
+    /// without this a stop pressed during it lands nowhere: the parent's step
+    /// guard cannot fire until the tool returns, and the sub-agent runs on to
+    /// its step limit or its timeout, spending the whole way. Sharing the flag
+    /// is what makes the promise "stop stops the agent" true through a
+    /// delegation rather than only outside one.
+    interrupt: Option<Arc<AtomicBool>>,
 }
 
 impl SubAgentTool {
@@ -62,6 +74,14 @@ impl SubAgentTool {
         self
     }
 
+    /// Share the parent turn's stop flag, so pressing stop ends the delegated
+    /// run too. `None` ⇒ nothing can stop this delegation early (a flow run, a
+    /// one-shot task: nobody is watching a button).
+    pub fn with_interrupt(mut self, interrupt: Option<Arc<AtomicBool>>) -> Self {
+        self.interrupt = interrupt;
+        self
+    }
+
     pub fn new(api_key: String, model_name: String, system_prompt: String) -> Self {
         Self {
             api_key,
@@ -69,6 +89,7 @@ impl SubAgentTool {
             system_prompt,
             preset_personas: None,
             instance_id: None,
+            interrupt: None,
         }
     }
 }
@@ -102,6 +123,33 @@ pub fn missing_integrations(persona: &crate::persona::Persona) -> Vec<String> {
         .filter(|p| !crate::integrations::is_enabled(p))
         .cloned()
         .collect()
+}
+
+impl SubAgentTool {
+    /// Has the parent turn been asked to stop?
+    fn stopped(&self) -> bool {
+        self.interrupt
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+    }
+
+    /// The parent turn's stop button, as a guard the nested executor can hold.
+    ///
+    /// Same contract as the chat's own guard: checked at step boundaries, so the
+    /// step in flight finishes and the sub-agent stops between steps rather than
+    /// mid-call. `None` when there is no flag to watch — a flow node or a
+    /// one-shot run has no button behind it, and an always-continue guard would
+    /// only cost a closure per step.
+    fn stop_guard(&self) -> Option<StepGuard<AgentState>> {
+        let flag = self.interrupt.clone()?;
+        Some(Arc::new(move |_state: &AgentState, _ev| {
+            if flag.load(Ordering::Relaxed) {
+                GuardAction::Stop("Stopped by the user.".into())
+            } else {
+                GuardAction::Continue
+            }
+        }))
+    }
 }
 
 #[async_trait]
@@ -154,6 +202,18 @@ impl metalcraft::Tool for SubAgentTool {
     }
 
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        // Already stopped before this delegation began — one LLM call can return
+        // several tool calls, and they all run inside the one node the guard has
+        // not been asked about yet. Starting a whole agent run there would be the
+        // most expensive way to ignore the button.
+        if self.stopped() {
+            return Ok(serde_json::json!({
+                "result": "Delegation not started: stopped by the user.",
+                "stopped": true,
+                "error": true,
+            }));
+        }
+
         let task = args["task"]
             .as_str()
             .ok_or_else(|| metalcraft::GraphError::ToolCallFailed {
@@ -229,6 +289,9 @@ impl metalcraft::Tool for SubAgentTool {
                 // from inside a sub-agent is unbound.
                 session_binding: None,
                 reschedule_depth: 0,
+                // A sub-agent that delegates again is still this turn: the stop
+                // has to reach all the way down, not just one level.
+                interrupt: self.interrupt.clone(),
             };
             let registry = crate::tools::create_registry_for_with_config(
                 &persona.resolved_tool_names(),
@@ -314,7 +377,12 @@ impl metalcraft::Tool for SubAgentTool {
             }
         })?;
 
-        let executor = Executor::new(graph).max_steps(90);
+        let mut executor = Executor::new(graph).max_steps(90);
+
+        // The parent turn's stop button, reaching into the delegated run.
+        if let Some(guard) = self.stop_guard() {
+            executor = executor.with_step_guard(guard);
+        }
 
         // Run with timeout to prevent runaway sub-agents
         let timeout = sub_agent_timeout(persona_max_run_secs);
@@ -332,10 +400,28 @@ impl metalcraft::Tool for SubAgentTool {
                     "turns": turn_count,
                 }))
             }
-            Ok(Ok(RunOutcome::Interrupted { reason, .. })) => Ok(serde_json::json!({
-                "result": format!("Sub-agent interrupted: {reason}"),
-                "error": true,
-            })),
+            Ok(Ok(RunOutcome::Interrupted { state, reason, .. })) => {
+                // A user stop is not a delegation that went wrong. Say so plainly,
+                // and hand back whatever the sub-agent had reached: the parent's
+                // own guard ends the turn on the next step either way, and a
+                // resumed conversation should not pretend the work never happened.
+                if self.stopped() {
+                    let partial = state.final_answer().unwrap_or("").to_string();
+                    return Ok(serde_json::json!({
+                        "result": if partial.is_empty() {
+                            "Delegation stopped by the user before the sub-agent answered.".to_string()
+                        } else {
+                            format!("Delegation stopped by the user. Partial result: {partial}")
+                        },
+                        "stopped": true,
+                        "error": true,
+                    }));
+                }
+                Ok(serde_json::json!({
+                    "result": format!("Sub-agent interrupted: {reason}"),
+                    "error": true,
+                }))
+            }
             Ok(Ok(RunOutcome::Failed { node, error, .. })) => Ok(serde_json::json!({
                 "result": format!("Sub-agent failed at {node}: {error}"),
                 "error": true,
@@ -379,6 +465,64 @@ mod tests {
         assert_eq!(resolve_timeout_secs(Some(0), None), DEFAULT_SUB_AGENT_TIMEOUT_SECS);
         assert_eq!(resolve_timeout_secs(Some(0), Some(900)), 900);
         assert_eq!(resolve_timeout_secs(None, Some(0)), DEFAULT_SUB_AGENT_TIMEOUT_SECS);
+    }
+
+    /// A stop pressed before the delegation starts must not start it. This is the
+    /// cheap half of the guarantee; the other half is the step guard below, which
+    /// ends a sub-agent already running.
+    #[tokio::test]
+    async fn a_stopped_turn_does_not_start_a_delegation() {
+        use metalcraft::Tool;
+        let flag = Arc::new(AtomicBool::new(true));
+        let tool = SubAgentTool::new("k".into(), "gpt-5.4".into(), "p".into())
+            .with_interrupt(Some(flag.clone()));
+        let out = tool
+            .call(serde_json::json!({"task": "count to a million"}))
+            .await
+            .expect("the tool answers rather than failing");
+        assert_eq!(out["stopped"], true, "{out}");
+        assert!(
+            out["result"].as_str().unwrap().contains("stopped by the user"),
+            "the parent needs to read why it got nothing: {out}"
+        );
+    }
+
+    /// The other half: a delegation already running ends at the sub-agent's next
+    /// step boundary, which is what the nested executor's guard is for.
+    #[test]
+    fn a_running_delegation_is_stopped_at_the_next_step() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let tool = SubAgentTool::new("k".into(), "m".into(), "p".into())
+            .with_interrupt(Some(flag.clone()));
+        let guard = tool.stop_guard().expect("a flag means a guard");
+        let state = AgentState::new("count".to_string());
+        let event = metalcraft::StepEvent {
+            node: "agent".into(),
+            next: "tools".into(),
+            duration: std::time::Duration::from_millis(1),
+            outcome: metalcraft::StepOutcome::Success,
+        };
+        assert!(
+            matches!(guard(&state, &event), GuardAction::Continue),
+            "nothing pressed: the sub-agent runs"
+        );
+        flag.store(true, Ordering::Relaxed);
+        assert!(
+            matches!(guard(&state, &event), GuardAction::Stop(_)),
+            "stop pressed: the sub-agent stops instead of running on to its step limit"
+        );
+    }
+
+    /// Without a flag, delegation is unstoppable by construction — flows and
+    /// one-shot runs have no button — and must not be short-circuited.
+    #[test]
+    fn no_flag_means_nothing_is_stopped() {
+        let tool = SubAgentTool::new("k".into(), "m".into(), "p".into());
+        assert!(!tool.stopped());
+        assert!(tool.stop_guard().is_none());
+        let running = SubAgentTool::new("k".into(), "m".into(), "p".into())
+            .with_interrupt(Some(Arc::new(AtomicBool::new(false))));
+        assert!(!running.stopped());
     }
 
     #[test]
