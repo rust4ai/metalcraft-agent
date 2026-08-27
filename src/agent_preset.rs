@@ -530,7 +530,10 @@ mod tests {
                 "default_persona":"metalcraft-packs-agent","skills":["metalcraft-packs"],
                 "personas":[{"slug":"metalcraft-packs-agent","role":"default"}]}"#,
         );
-        assert!(p.validate().is_ok(), "a library preset is still a valid preset");
+        assert!(
+            p.validate().is_ok(),
+            "a library preset is still a valid preset"
+        );
         assert_eq!(p.callable_personas(), vec!["metalcraft-packs-agent"]);
         assert!(p.allows_persona("metalcraft-packs-agent"));
 
