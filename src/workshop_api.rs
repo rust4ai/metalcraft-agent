@@ -4062,8 +4062,9 @@ struct ChatSummary {
     /// way round for the question a session list answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     updated_at: Option<String>,
-    /// The opening line, trimmed — what makes a row identifiable as *this*
-    /// conversation rather than a timestamp beside an id.
+    /// The start of the *last* thing said, trimmed to one line — what makes a
+    /// row identifiable as *this* conversation rather than a timestamp beside an
+    /// id, and what tells you where it got to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preview: Option<String>,
 }
@@ -4076,17 +4077,32 @@ fn turns_in(messages: &[ChatMessageWire]) -> usize {
         .count()
 }
 
-/// The first thing the user said, as a one-line label.
+/// The start of the last thing said in a conversation, as a one-line label.
 ///
-/// Taken from the *user's* words rather than the agent's: the opening line is
-/// what someone remembers a conversation by, and an agent's first reply is
-/// usually a greeting that reads the same in every thread.
+/// The *last* rather than the first: a row is read to answer "where did this
+/// get to", and an opening line stops describing a conversation the moment it
+/// moves on — every long-running thread ends up labelled by a question answered
+/// hours ago, and the gateway and flow conversations that all open with the same
+/// boilerplate become indistinguishable from each other.
+///
+/// Either speaker counts, because either can be the last word — a row that only
+/// followed the user would show nothing until they replied, and the thing worth
+/// seeing after an agent works alone for a while is what it came back with.
+/// Tool calls, reasoning and reset dividers are skipped: they are machinery, not
+/// something said.
 fn preview_of(messages: &[ChatMessageWire]) -> Option<String> {
-    let first = messages.iter().find_map(|m| match m {
-        ChatMessageWire::User { content } => Some(content.as_str()),
+    messages.iter().rev().find_map(|m| match m {
+        ChatMessageWire::User { content } | ChatMessageWire::Assistant { content } => {
+            one_line(content)
+        }
         _ => None,
-    })?;
-    let line: String = first.split_whitespace().collect::<Vec<_>>().join(" ");
+    })
+}
+
+/// Collapse whitespace and cut to a row's worth of characters, or `None` when
+/// there is nothing left to show.
+fn one_line(text: &str) -> Option<String> {
+    let line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if line.is_empty() {
         return None;
     }
@@ -7942,19 +7958,42 @@ mod summary_tests {
     }
 
     #[test]
-    fn a_preview_is_the_first_thing_the_user_said() {
+    fn a_preview_is_the_last_thing_said() {
         let messages = vec![
-            ChatMessageWire::Assistant {
-                content: "Good morning!".into(),
-            },
             user("what is on my calendar"),
+            ChatMessageWire::Assistant {
+                content: "Two things: standup at 9, and the dentist at 4.".into(),
+            },
         ];
-        // Deliberately not the assistant's greeting, which reads identically in
-        // every thread and would make every row look the same.
+        // Deliberately not the opening line: a row is read to find out where a
+        // conversation got to, and the question that started it stops answering
+        // that on the second turn.
         assert_eq!(
             preview_of(&messages).as_deref(),
-            Some("what is on my calendar")
+            Some("Two things: standup at 9, and the dentist at 4.")
         );
+    }
+
+    #[test]
+    fn machinery_after_the_last_word_does_not_become_the_preview() {
+        let messages = vec![
+            user("deploy it"),
+            ChatMessageWire::ToolCall {
+                id: "t".into(),
+                call_id: None,
+                name: "bash".into(),
+                args: serde_json::Value::Null,
+            },
+            ChatMessageWire::ToolResult {
+                id: "t".into(),
+                call_id: None,
+                name: "bash".into(),
+                result: "ok".into(),
+            },
+        ];
+        // A turn still mid-flight ends in tool traffic. Labelling the row with a
+        // tool's output would show the user shell noise they never wrote.
+        assert_eq!(preview_of(&messages).as_deref(), Some("deploy it"));
     }
 
     #[test]
@@ -7971,6 +8010,13 @@ mod summary_tests {
     fn a_conversation_with_nothing_said_has_no_preview() {
         assert_eq!(preview_of(&[]), None);
         assert_eq!(preview_of(&[user("   ")]), None);
+        // An empty last message falls back to the last one with words in it,
+        // rather than blanking a row that has plenty to show.
+        assert_eq!(
+            preview_of(&[user("still here"), ChatMessageWire::Assistant { content: String::new() }])
+                .as_deref(),
+            Some("still here")
+        );
     }
 }
 

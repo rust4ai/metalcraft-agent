@@ -4613,7 +4613,7 @@
               "string",
               "null"
             ],
-            "description": "The opening line, trimmed — what makes a row identifiable as *this*\nconversation rather than a timestamp beside an id."
+            "description": "The start of the *last* thing said, trimmed to one line — what makes a\nrow identifiable as *this* conversation rather than a timestamp beside an\nid, and what tells you where it got to."
           },
           "turn_count": {
             "type": "integer",
