@@ -177,6 +177,10 @@ impl AgentUnderTest for GatewayPersonaAgent {
             prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
             preset_personas: None,
             instance_id: None,
+            // A real flag, never raised — `dispatch_inbound` passes one (a
+            // gateway turn is stoppable), so a `None` here would quietly stop
+            // mirroring the config this suite exists to reproduce.
+            interrupt: Some(Arc::new(std::sync::atomic::AtomicBool::new(false))),
         };
 
         let persona = Persona::load(&self.persona_slug, &self.context.personas_dir)
