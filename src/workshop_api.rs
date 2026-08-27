@@ -200,6 +200,7 @@ pub async fn flow_conversation(
         busy: false,
         interrupt: Arc::new(AtomicBool::new(false)),
         pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        plan: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
     store
         .lock()
@@ -319,6 +320,18 @@ struct ChatSession {
     /// mailbox is what lets a message join the turn already running instead of
     /// waiting for it, so the queue has to be reachable from inside the run.
     pending: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    /// The plan of the turn running right now, as `update_plan` last wrote it.
+    ///
+    /// Held here so a client that arrives mid-turn — reconnecting, or opening
+    /// the same chat on a second device — can be shown the plan it missed the
+    /// frames for. Sync-locked for the same reason as [`Self::pending`]: the
+    /// plan sink is a sync closure.
+    ///
+    /// Deliberately **not** persisted to disk. A plan belongs to one turn, and a
+    /// restart ends every turn it had — so a plan reloaded from disk would
+    /// describe work that is no longer happening, which is the exact thing the
+    /// empty-plan frame at turn start exists to prevent.
+    plan: Arc<std::sync::Mutex<Vec<crate::turn_plan::PlanStep>>>,
 }
 
 /// Build a [`TraceLogger`] keyed to a diagnostics logger's session-dir name, so
@@ -4080,6 +4093,10 @@ struct ChatDetail {
     model_name: String,
     created_at: String,
     messages: Vec<ChatMessageWire>,
+    /// The plan of the turn running right now, empty when none is. Lets a client
+    /// that arrives mid-turn render the plan it missed the frames for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    plan: Vec<crate::turn_plan::PlanStep>,
 }
 
 /// Wire form for `metalcraft::AgentMessage` — the in-memory enum isn't
@@ -4427,6 +4444,7 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
             // finished cleanly; reset so the user can retry.
             interrupt: Arc::new(AtomicBool::new(false)),
             pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        plan: Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         out.insert(pc.id.clone(), Arc::new(Mutex::new(session)));
     }
@@ -4682,6 +4700,7 @@ async fn post_create_chat(
         busy: false,
         interrupt: Arc::new(AtomicBool::new(false)),
         pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        plan: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
     let session_arc = Arc::new(Mutex::new(session));
     {
@@ -4751,6 +4770,7 @@ async fn get_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) ->
         model_name: s.model_name.clone(),
         created_at: s.created_at.clone(),
         messages,
+        plan: s.plan.lock().unwrap_or_else(|e| e.into_inner()).clone(),
     })
     .into_response()
 }
@@ -5285,6 +5305,7 @@ async fn post_chat_turn(
         trace,
         interrupt,
         pending_for_mailbox,
+        plan_for_sink,
     ) = {
         let mut s = session.lock().await;
         if s.busy {
@@ -5367,6 +5388,7 @@ async fn post_chat_turn(
             s.trace.clone(),
             s.interrupt.clone(),
             s.pending.clone(),
+            s.plan.clone(),
         )
     };
 
@@ -5660,12 +5682,12 @@ async fn post_chat_turn(
                 // step guard above cannot reach. `sub_agent` reads this flag so
                 // stop lands there too.
                 interrupt: Some(interrupt.clone()),
-                plan_sink: Some({
+                plan_sink: Some(plan_sink(plan_for_sink.clone(), {
                     let tx = tx.clone();
-                    Arc::new(move |steps: &[crate::turn_plan::PlanStep]| {
-                        let _ = tx.try_send(ChatEvent::Plan { steps: steps.to_vec() });
+                    Arc::new(move |ev| {
+                        let _ = tx.try_send(ev);
                     })
-                }),
+                })),
             },
             Some(phase_sink),
             // What the person types while this turn runs, delivered at the
@@ -5872,6 +5894,23 @@ async fn delete_scheduled_task(
 /// Loops rather than recursing, because a queue that refills while it is being
 /// drained is the normal case — someone typing three things in a row — and the
 /// alternative is one task per message, each waiting on the last.
+/// Record the plan on the session and announce it, in that order.
+///
+/// Both halves matter and they are not the same audience: the frame reaches
+/// whoever is watching *now*, and the recorded copy is what a client arriving
+/// late is handed by `GET /chats/{id}`. A sink that only sent the frame would
+/// leave a reconnecting client with no plan until the next `update_plan` call,
+/// which on a long step is minutes.
+fn plan_sink(
+    held: Arc<std::sync::Mutex<Vec<crate::turn_plan::PlanStep>>>,
+    announce: Arc<dyn Fn(ChatEvent) + Send + Sync>,
+) -> crate::turn_plan::PlanSink {
+    Arc::new(move |steps: &[crate::turn_plan::PlanStep]| {
+        *held.lock().unwrap_or_else(|e| e.into_inner()) = steps.to_vec();
+        announce(ChatEvent::Plan { steps: steps.to_vec() });
+    })
+}
+
 /// The mailbox for a chat turn: hand the run whatever the person typed while it
 /// was going, at a boundary where doing so is safe.
 ///
@@ -5958,6 +5997,7 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
             // The same queue, kept past the lock: a message typed during *this*
             // drained turn should join it, not wait for yet another one.
             pending_for_mailbox,
+            plan_for_sink,
         ) = {
             let mut s = session.lock().await;
             // Busy means a user turn started first; it drains the rest when it
@@ -5984,6 +6024,7 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
                 s.diagnostics.clone(),
                 s.interrupt.clone(),
                 pending,
+                s.plan.clone(),
             )
         };
         let sender = chat_event_sender(chat_id).await;
@@ -6040,12 +6081,12 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
                 preset_personas: None,
                 instance_id: None,
                 interrupt: Some(interrupt.clone()),
-                plan_sink: Some({
+                plan_sink: Some(plan_sink(plan_for_sink.clone(), {
                     let sender = sender.clone();
-                    Arc::new(move |steps: &[crate::turn_plan::PlanStep]| {
-                        let _ = sender.send(ChatEvent::Plan { steps: steps.to_vec() });
+                    Arc::new(move |ev| {
+                        let _ = sender.send(ev);
                     })
-                }),
+                })),
             },
             Some({
                 let sender = sender.clone();
@@ -6109,7 +6150,7 @@ pub async fn deliver_followup_to_chat(
 
     // Snapshot what we need and stamp the session busy, refusing to run
     // concurrently with a user turn.
-    let (persona_slug, model_name, cwd, agent_state, diagnostics, interrupt) = {
+    let (persona_slug, model_name, cwd, agent_state, diagnostics, interrupt, plan_for_sink) = {
         let mut s = session.lock().await;
         if s.busy {
             return FollowupDelivery::ChatBusy;
@@ -6129,6 +6170,7 @@ pub async fn deliver_followup_to_chat(
             next_state,
             s.diagnostics.clone(),
             s.interrupt.clone(),
+            s.plan.clone(),
         )
     };
 
@@ -6191,12 +6233,12 @@ pub async fn deliver_followup_to_chat(
             preset_personas: None,
             instance_id: None,
             interrupt: Some(interrupt.clone()),
-            plan_sink: Some({
+            plan_sink: Some(plan_sink(plan_for_sink.clone(), {
                 let sender = sender.clone();
-                Arc::new(move |steps: &[crate::turn_plan::PlanStep]| {
-                    let _ = sender.send(ChatEvent::Plan { steps: steps.to_vec() });
+                Arc::new(move |ev| {
+                    let _ = sender.send(ev);
                 })
-            }),
+            })),
         },
         // A follow-up fires with nobody necessarily watching, which is exactly
         // when a silent four-minute compaction is hardest to explain later.
@@ -7562,6 +7604,7 @@ async fn get_or_create_gateway_session(
         busy: false,
         interrupt: Arc::new(AtomicBool::new(false)),
         pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        plan: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
     let arc = Arc::new(Mutex::new(session));
     {
@@ -7910,6 +7953,7 @@ mod transcript_tests {
             busy: false,
             interrupt: Arc::new(AtomicBool::new(false)),
             pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        plan: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -8104,6 +8148,7 @@ mod gateway_tests {
                     busy: false,
                     interrupt: Arc::new(AtomicBool::new(false)),
                     pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        plan: Arc::new(std::sync::Mutex::new(Vec::new())),
                 };
                 ((*id).to_string(), Arc::new(Mutex::new(s)))
             })
@@ -8195,7 +8240,8 @@ mod consent_tests {
 
 #[cfg(test)]
 mod queue_tests {
-    use super::{ChatEvent, chat_mailbox, claim_next_queued, queue_message};
+    use super::{ChatEvent, chat_mailbox, claim_next_queued, plan_sink, queue_message};
+    use crate::turn_plan::{PlanStep, StepStatus};
     use metalcraft::{AgentState, AgentUpdate, StepEvent, StepOutcome};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -8264,6 +8310,43 @@ mod queue_tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
         assert!(matches!(&seen[0], ChatEvent::Injected { message } if message == "hurry up"));
+    }
+
+    /// The frame reaches whoever is watching now; the recorded copy is what a
+    /// client arriving late is handed. A sink doing only the first leaves a
+    /// reconnecting client with no plan until the next `update_plan`.
+    #[test]
+    fn a_plan_is_both_recorded_and_announced() {
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let seen: Arc<Mutex<Vec<ChatEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = plan_sink(held.clone(), {
+            let seen = seen.clone();
+            Arc::new(move |ev| seen.lock().unwrap().push(ev))
+        });
+
+        let steps = vec![PlanStep {
+            step: "read the repo".into(),
+            persona: Some("research-agent".into()),
+            status: StepStatus::InProgress,
+        }];
+        sink(&steps);
+
+        assert_eq!(held.lock().unwrap().len(), 1, "the session holds the plan");
+        assert!(matches!(&seen.lock().unwrap()[0], ChatEvent::Plan { steps } if steps.len() == 1));
+    }
+
+    /// A turn starting clears what the last one left, so a reconnecting client
+    /// is never handed a finished turn's plan as though it were live.
+    #[test]
+    fn an_empty_plan_clears_what_was_held() {
+        let held = Arc::new(Mutex::new(vec![PlanStep {
+            step: "stale".into(),
+            persona: None,
+            status: StepStatus::Done,
+        }]));
+        let sink = plan_sink(held.clone(), Arc::new(|_| {}));
+        sink(&[]);
+        assert!(held.lock().unwrap().is_empty());
     }
 
     /// The common case: nothing typed, so the hook costs one call and changes

@@ -46,6 +46,25 @@ fn all_seed_flow_templates_parse_and_validate() {
             f.display(),
             errs
         );
+
+        // Parsing must not quietly edit. An editor loads a flow through exactly
+        // this type and writes it back, so anything the round trip drops here is
+        // something a save would delete from a flow somebody only opened —
+        // vendor node payloads above all, which SPEC §5.2 requires be preserved
+        // verbatim and which no validation error would ever mention.
+        //
+        // Compared as parsed JSON rather than as text: key order and whitespace
+        // are the serializer's business, and pinning those would fail on
+        // formatting rather than on loss.
+        let before: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&flow).unwrap()).unwrap();
+        assert_eq!(
+            before,
+            after,
+            "{} does not survive a load/save round trip — something was dropped",
+            f.display()
+        );
     }
 
     // Templates ship at the current spec version — and, since v3, carry no

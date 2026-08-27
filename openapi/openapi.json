@@ -4051,6 +4051,13 @@
           },
           "persona_slug": {
             "type": "string"
+          },
+          "plan": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanStep"
+            },
+            "description": "The plan of the turn running right now, empty when none is. Lets a client\nthat arrives mid-turn render the plan it missed the frames for."
           }
         }
       },
