@@ -193,6 +193,28 @@ pub fn instance_for(flow_id: &str, schedule_id: &str) -> Option<String> {
     get(flow_id).instances.get(schedule_id).cloned()
 }
 
+/// Whether this flow has a schedule by that id — asked the same way a *reader*
+/// would ask it.
+///
+/// Pulled out of [`arm`] because the answer being wrong is a whole class of bug
+/// rather than one line. `effective_schedules` resolves three tiers: the
+/// top-level `schedules` array, else a spec synthesized from a legacy entry
+/// node, else a single manual `default`. Every read goes through it —
+/// `GET /flows`, `GET /flows/{id}/schedules`, and the daemon deciding what to
+/// fire — so validating an arm against the raw array instead meant the pod
+/// offered a schedule it would then refuse to bind, for every flow whose
+/// schedules are synthesized rather than stored.
+///
+/// Manual triggers answer `true` deliberately. Nothing fires on its own from
+/// one ([`crate::flows::parse_schedules`] drops them), so arming a manual
+/// schedule starts no background work — it names the agent a hand-run resolves
+/// to, which is the only way to say "when I run this myself, remember it".
+fn has_schedule(flow: &metalcraft_flows::SavedFlow, schedule_id: &str) -> bool {
+    flow.effective_schedules()
+        .iter()
+        .any(|s| s.id == schedule_id)
+}
+
 /// Arm a schedule: bind it to a persistent agent, minting one if needed.
 ///
 /// **Arming is what creates the agent.** Installing a pack ships flows disabled, so
@@ -213,7 +235,22 @@ pub fn arm(
     let preset = AgentPreset::load(&preset_slug, &paths::agent_presets_dir())?;
     check_personas(flow, &preset)?;
 
-    if !flow.schedules.iter().any(|s| s.id == schedule_id) {
+    // Validated against `effective_schedules()` — the same function every *read*
+    // of this flow's schedules goes through — and not against the raw
+    // `schedules` array.
+    //
+    // The array is only the first of three tiers. A flow that predates the
+    // top-level `schedules` block has its schedule synthesized from its entry
+    // node, and a flow with neither gets a single manual `default`. Both are
+    // listed by `GET /flows` and `GET /flows/{id}/schedules`, so checking the
+    // array here meant offering a schedule and then refusing to arm it — for
+    // every legacy flow, not just the manual case.
+    //
+    // Manual triggers are deliberately armable. Nothing fires on its own from
+    // one — `flows::parse_schedules` drops them — so arming names the agent a
+    // hand-run resolves to, and nothing else. That is the only way to say "when
+    // I run this myself, remember it", which an unarmed flow cannot do.
+    if !has_schedule(flow, schedule_id) {
         return Err(format!(
             "flow '{}' has no schedule '{schedule_id}'",
             flow.id
@@ -367,6 +404,82 @@ mod tests {
             "morning-briefer",
         );
         check_personas(&f, &p).expect("both personas are in the roster");
+    }
+
+    // ── has_schedule ────────────────────────────────────────────────────
+    //
+    // The invariant these pin: **anything the pod lists, the pod can arm.**
+    // Validating against the raw `schedules` array broke that for the two tiers
+    // `effective_schedules` synthesizes, and both are ordinary flows rather than
+    // edge cases — one is every flow written before the top-level array existed.
+
+    #[test]
+    fn a_stored_schedule_can_be_armed() {
+        let f = flow(
+            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
+                "schedules":[{"id":"morning","type":"cron","cron":"0 8 * * *"}],
+                "flow":{"nodes":[],"edges":[]}}"#,
+        );
+        assert!(has_schedule(&f, "morning"));
+        assert!(!has_schedule(&f, "evening"));
+    }
+
+    #[test]
+    fn a_legacy_entry_node_schedule_can_be_armed() {
+        // No top-level `schedules`, a cron on the entry node. The pod lists this
+        // as a real schedule and used to refuse to arm it — the bug, on every
+        // flow that predates the array.
+        let f = flow(
+            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
+                "flow":{"nodes":[{"id":"entry","node_type":"entry",
+                    "data":{"schedule_type":"cron","cron":"0 8 * * *"},"position":[0,0]}],"edges":[]}}"#,
+        );
+        let listed = f.effective_schedules();
+        assert_eq!(listed.len(), 1, "the pod lists one schedule for this flow");
+        assert!(
+            has_schedule(&f, &listed[0].id),
+            "the pod must be able to arm the schedule it just listed"
+        );
+    }
+
+    #[test]
+    fn the_synthesized_manual_default_can_be_armed() {
+        // Neither tier: the pod synthesizes `{id: "default", manual}`. Arming it
+        // starts nothing — manual triggers never fire on their own — it names
+        // the agent a hand-run resolves to.
+        let f = flow(
+            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
+                "flow":{"nodes":[],"edges":[]}}"#,
+        );
+        assert!(f.schedules.is_empty(), "nothing is stored");
+        assert!(has_schedule(&f, "default"));
+        assert!(!has_schedule(&f, "not-a-schedule"));
+    }
+
+    /// The property behind all three, stated once: every id the pod would show
+    /// is an id the pod would accept.
+    #[test]
+    fn every_listed_schedule_is_armable() {
+        for json in [
+            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
+                "schedules":[{"id":"a","type":"cron","cron":"0 8 * * *"},
+                             {"id":"b","type":"minutes","interval":5}],
+                "flow":{"nodes":[],"edges":[]}}"#,
+            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
+                "flow":{"nodes":[{"id":"entry","node_type":"entry",
+                    "data":{"schedule_type":"hours","interval":6},"position":[0,0]}],"edges":[]}}"#,
+            r#"{"spec_version":"2","id":"f","name":"F","created_at":"x","updated_at":"x",
+                "flow":{"nodes":[],"edges":[]}}"#,
+        ] {
+            let f = flow(json);
+            for spec in f.effective_schedules() {
+                assert!(
+                    has_schedule(&f, &spec.id),
+                    "flow lists '{}' but would refuse to arm it",
+                    spec.id
+                );
+            }
+        }
     }
 
     #[test]
