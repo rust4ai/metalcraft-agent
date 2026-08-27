@@ -202,6 +202,41 @@ answer or `MAX_TURN_STEPS` (90) is hit.
 `AgentState.messages` is a vector of `AgentMessage`:
 `User`, `Assistant`, `ToolCall { name, args }`, `ToolResult { name, result }`.
 
+### How a turn ends, and what can hold it open (`src/turn_plan.rs`)
+
+In a daemon session the loop is **tool-only**: `tool_choice: Required`, and the turn ends
+when the model calls a *terminal* tool — `say_to_user` (an answer) or `ask_user` (a
+question). That is what makes ending a turn a decision the model makes, and it used to be a
+decision nothing could question: after one `sub_agent` returned something plausible,
+`say_to_user` was always the cheapest next move, so a four-step job routinely ended one step
+in and looked finished.
+
+Three pieces make the plan checkable instead:
+
+- **`update_plan`** writes this turn's steps into a shared `TurnPlan` (`src/turn_plan.rs`),
+  created per runtime by `build_agent_runtime` and cleared by `TurnRunner::run` at the start
+  of every turn — the CLI reuses one runtime for a whole session, so the plan must not.
+- **`sub_agent`** asks every delegate to end its report with a ```` ```handoff ```` block
+  (`{completed, not_done, suggest_persona}`), strips it from the prose, and records a
+  `Handoff` in the plan when a delegation comes back unfinished. An absent or unparseable
+  block reads as complete, so a model that ignores the protocol behaves exactly as before.
+- **`say_to_user`** asks `TurnPlan::blocking_reason()` before delivering. Open steps or an
+  unacknowledged handoff mean the call returns an **error** listing what is still owed.
+
+That last step only works because of a matching change in `metalcraft` 0.10:
+`invoked_terminal_tool` now requires the terminal call to have *succeeded*. A failed
+`say_to_user` returns control to the agent node instead of ending the turn — which also
+fixes a real silent failure, where a reply whose sink errored ended the turn with nothing
+delivered and the agent believing it had answered.
+
+The gate is bounded (`MAX_GATE_REFUSALS = 2`): after two refusals the plan stops blocking
+and the turn closes with the outstanding work visible in the answer. A rail that can trap a
+turn is worse than the behaviour it corrects. `ask_user` is never gated — being stuck
+mid-plan is precisely when asking is the right move.
+
+A delegated sub-agent gets `turn_plan: None`: it runs its own turn and must be unable to
+satisfy or block its parent's plan.
+
 ---
 
 ## 5. The CLI: interactive and one-shot modes (`src/main.rs`)
@@ -267,14 +302,17 @@ The persona's `tools` array selects which tools are registered, by name, in
 | `web_fetch` | Fetch a URL (HTML→markdown via `htmd`). |
 | `load_skill` | Load a skill markdown body on demand (enum-restricted to the persona's skills). |
 | `sub_agent` | Spawn a nested agent for a delegated subtask. |
+| `update_plan` | Record this turn's steps; the reply tool is held to them (§4). |
+| `ask_user` | Ask one clarifying question and end the turn waiting for the answer. |
 
 Beyond these core built-ins, the registry also natively provides delivery tools
-(`say_to_user`, `gateway_send_message`, `schedule_followup`), meta tools that manage the
+(`say_to_user`, `ask_user`, `gateway_send_message`, `schedule_followup`), meta tools that manage the
 agent's own files (`persona_*`, `skill_*`, `flow_*`, `pack_*`, `key_*`, `diagnostics_*`), and
 integration tools (`spaces_*` for S3/Spaces, `email_*` for IMAP). See `src/tools/mod.rs`.
 
-Four tools need extra runtime config (`ToolConfig`: api_key, model name, system prompt,
-skills dir, available skills, plus `reply_sink`, `session_binding`, and `reschedule_depth`):
+Several tools need extra runtime config (`ToolConfig`: api_key, model name, system prompt,
+skills dir, available skills, plus `reply_sink`, `session_binding`, `reschedule_depth`,
+`interrupt`, and `turn_plan`):
 
 - **`load_skill`** — needs the skills dir + the persona's allowed skill list, so its
   parameter schema can restrict `skill` to a known `enum`. It reads
@@ -283,9 +321,17 @@ skills dir, available skills, plus `reply_sink`, `session_binding`, and `resched
   a `task`, a `tool_set` (`read_only` default, `full`, or `all`, with an optional `pack`
   scope and a `persona` mode), builds its own registry and ReAct graph, runs it with a
   **120-second timeout** and `max_steps(90)`, and returns the child's final answer plus which
-  tools it used and how many turns it took.
+  tools it used and how many turns it took — and a `completed` flag (plus `not_done` /
+  `suggest_persona`) parsed out of the delegate's handoff block, which it also records in the
+  turn plan.
 - **`say_to_user`** — routes a reply through the session's `reply_sink` (SSE for workshop
-  chat, adapter send for gateway); it's the terminal tool for tool-only sessions.
+  chat, adapter send for gateway); it's the terminal tool for tool-only sessions, and the
+  one the turn plan gates (§4).
+- **`ask_user`** — the other terminal tool: delivers a question (with optional `options` a
+  client can render as choices) and ends the turn waiting on the user, whose reply arrives as
+  the next turn with the conversation intact. Never gated by the plan.
+- **`update_plan`** — replaces this turn's plan wholesale; needs `turn_plan`, and is not
+  registered without one (a sub-agent, a flow node, a one-shot run).
 - **`schedule_followup`** — arms a persisted follow-up bound to the session (`session_binding`,
   `reschedule_depth`); the daemon fires it later (see §10).
 

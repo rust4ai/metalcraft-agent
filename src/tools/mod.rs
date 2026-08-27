@@ -1,3 +1,4 @@
+pub mod ask_user;
 pub mod bash;
 pub mod edit_file;
 pub mod email_imap;
@@ -20,6 +21,7 @@ pub mod say_to_user;
 pub mod schedule_followup;
 pub mod sub_agent;
 pub mod twilio;
+pub mod update_plan;
 pub mod web_fetch;
 pub mod write_file;
 
@@ -28,12 +30,50 @@ use metalcraft::ToolRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// One user-facing message on its way out of a turn.
+///
+/// It carries more than text because the two ways a turn can end are not the
+/// same event. An answer closes the conversation; a question leaves it open and
+/// the client should say so — invite a reply, and offer the choices if there are
+/// any. A channel that cannot express the difference (SMS, WhatsApp) simply
+/// ignores the extra fields and sends the text, which is why they live here as
+/// hints rather than as a separate sink only some channels implement.
+pub struct ReplyEnvelope {
+    pub text: String,
+    /// The turn is ending on a question and the agent is waiting on the user.
+    pub awaiting_reply: bool,
+    /// Suggested answers, for a client that can render them as choices. Never
+    /// exhaustive — the user may always answer in their own words.
+    pub options: Vec<String>,
+}
+
+impl ReplyEnvelope {
+    /// A final answer: the turn is over and nothing is expected back.
+    pub fn message(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            awaiting_reply: false,
+            options: Vec::new(),
+        }
+    }
+
+    /// A question: the turn ends, but the conversation is mid-sentence.
+    pub fn question(text: impl Into<String>, options: Vec<String>) -> Self {
+        Self {
+            text: text.into(),
+            awaiting_reply: true,
+            options,
+        }
+    }
+}
+
 /// Where a session's user-facing reply is delivered. The agent always replies
-/// through the channel-agnostic `say_to_user` tool; the *caller* that builds the
-/// runtime supplies this closure to route that text to the right place — the SSE
-/// stream for a workshop chat, or a gateway adapter (gateway/Twilio) for a
-/// gateway session. Takes the message text, returns Ok on delivery.
-pub type ReplySink = Arc<dyn Fn(String) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
+/// through the channel-agnostic `say_to_user` / `ask_user` tools; the *caller*
+/// that builds the runtime supplies this closure to route that message to the
+/// right place — the SSE stream for a workshop chat, or a gateway adapter
+/// (gateway/Twilio) for a gateway session. Returns Ok on delivery.
+pub type ReplySink =
+    Arc<dyn Fn(ReplyEnvelope) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
 /// Configuration for tools that need runtime parameters.
 pub struct ToolConfig {
@@ -64,6 +104,13 @@ pub struct ToolConfig {
     /// whole agent inside one tool call, and the step guard that stops the turn
     /// cannot fire until that call returns. `None` ⇒ nothing to stop for.
     pub interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// This turn's plan, shared by the three tools that read or write it:
+    /// `update_plan` records the steps, `sub_agent` records what a delegation
+    /// left unfinished, and `say_to_user` refuses to close the turn while
+    /// either is outstanding. `None` ⇒ no plan gate — right for a delegated
+    /// sub-agent (it runs its own turn and must not satisfy its parent's plan),
+    /// a flow node, or a one-shot task.
+    pub turn_plan: Option<crate::turn_plan::SharedTurnPlan>,
 }
 
 /// Register only the tools listed by name.
@@ -185,9 +232,24 @@ pub fn create_registry_for_with_config(
             // (e.g. Twilio's HTTP Basic auth from two key-store secrets). It
             // dispatches by the channel type's `adapter`. See `tools::gateway`.
             "gateway_send_message" => registry.register(gateway::GatewaySendMessageTool),
-            "say_to_user" => registry.register(say_to_user::SayToUserTool::new(
+            "say_to_user" => registry.register(
+                say_to_user::SayToUserTool::new(config.and_then(|c| c.reply_sink.clone()))
+                    .with_turn_plan(config.and_then(|c| c.turn_plan.clone())),
+            ),
+            "ask_user" => registry.register(ask_user::AskUserTool::new(
                 config.and_then(|c| c.reply_sink.clone()),
             )),
+            "update_plan" => {
+                if let Some(plan) = config.and_then(|c| c.turn_plan.clone()) {
+                    registry.register(update_plan::UpdatePlanTool::new(plan))
+                } else {
+                    // No shared plan means nothing would read what this tool
+                    // wrote — a sub-agent, a flow node, a one-shot run. Dropping
+                    // it is better than registering a tool whose writes vanish.
+                    log::debug!("update_plan tool requires a turn plan, skipping");
+                    registry
+                }
+            }
             "schedule_followup" => {
                 if let Some(cfg) = config {
                     registry.register(schedule_followup::ScheduleFollowupTool::new(
@@ -209,7 +271,8 @@ pub fn create_registry_for_with_config(
                         )
                         .with_preset_personas(cfg.preset_personas.clone())
                         .with_instance(cfg.instance_id.clone())
-                        .with_interrupt(cfg.interrupt.clone()),
+                        .with_interrupt(cfg.interrupt.clone())
+                        .with_turn_plan(cfg.turn_plan.clone()),
                     )
                 } else {
                     log::warn!("sub_agent tool requires ToolConfig, skipping");

@@ -175,6 +175,52 @@ fn retire_obsolete_seeds() {
     // line in the lockfile; unlinking its directory would leave all three pointing at
     // nothing. `agent_packs::uninstall` unwinds them in order.
     retire_agent_pack("metalcraft-code");
+    // `metalcraft-assistant` — a seeded preset that duplicated the `metalcraft-packs`
+    // agent pack. Its roster was the orchestrator plus `metalcraft-packs-agent`, and
+    // that pack ships its own `metalcraft-packs` preset with the same specialist; the
+    // packs agent also stays reachable from `general-agent`, which delegates to any
+    // installed persona. Two presets for one capability is a choice the picker made
+    // the user resolve for no reason.
+    retire_seed_preset("metalcraft-assistant");
+}
+
+/// Delete a retired seed preset, unless an agent is still built on it.
+///
+/// Same reasoning as [`retire_agent_pack`]: a preset is not regenerated content the
+/// way `<data>/integrations/` was. An instance names its preset (`AgentInstance::
+/// agent_preset`) and resolves its persona roster through it, so deleting one out
+/// from under a live agent would leave a conversation with memories and history
+/// pointing at nothing. If any instance still uses it the file stays and the pod says
+/// which agent is holding it; every other pod cleans itself on the next start.
+fn retire_seed_preset(slug: &str) {
+    let path = paths::agent_presets_dir().join(format!("{slug}.json"));
+    if !path.is_file() {
+        return;
+    }
+    let holders = preset_holders(slug, &crate::agent_instance::list());
+    if !holders.is_empty() {
+        eprintln!(
+            "Warning: keeping retired '{slug}' preset — still used by: {}",
+            holders.join(", ")
+        );
+        return;
+    }
+    retire_file(path, &format!("'{slug}' agent preset"));
+}
+
+/// The agents still built on `slug`, named so an operator can find them.
+///
+/// Split out from reading the data dir so the rule that decides whether a preset
+/// may be deleted is testable without an ambient install — the case that matters
+/// is the one that is hardest to reproduce on purpose: a pod that *does* have an
+/// agent on the retired preset, where the wrong answer silently breaks a
+/// conversation with real history behind it.
+fn preset_holders(slug: &str, instances: &[crate::agent_instance::AgentInstance]) -> Vec<String> {
+    instances
+        .iter()
+        .filter(|i| i.agent_preset == slug)
+        .map(|i| format!("{} ({})", i.name, i.id))
+        .collect()
 }
 
 /// Uninstall a retired agent pack, if this pod still has it.
@@ -440,6 +486,42 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    fn instance_on(preset_slug: &str, name: &str) -> crate::agent_instance::AgentInstance {
+        let preset: crate::agent_preset::AgentPreset = serde_json::from_str(&format!(
+            r#"{{"slug":"{preset_slug}","name":"{name}","default_persona":"orchestrator-agent",
+                 "personas":[{{"slug":"orchestrator-agent","role":"default"}}]}}"#
+        ))
+        .unwrap();
+        crate::agent_instance::AgentInstance::new(
+            &preset,
+            crate::agent_instance::InstanceOrigin::Workshop,
+        )
+    }
+
+    #[test]
+    fn a_retired_preset_with_no_agents_on_it_is_free_to_go() {
+        let others = [instance_on("general-agent", "General Agent")];
+        assert!(preset_holders("metalcraft-assistant", &others).is_empty());
+        assert!(preset_holders("metalcraft-assistant", &[]).is_empty());
+    }
+
+    /// The case that must never delete: an agent is still built on it, and its
+    /// conversations resolve their persona roster through that preset.
+    #[test]
+    fn an_agent_still_on_the_preset_holds_it() {
+        let live = [
+            instance_on("metalcraft-assistant", "Ecosystem"),
+            instance_on("general-agent", "General Agent"),
+        ];
+        let holders = preset_holders("metalcraft-assistant", &live);
+        assert_eq!(holders.len(), 1, "only the agent on that preset counts");
+        assert!(
+            holders[0].starts_with("Ecosystem (inst_"),
+            "an operator has to be able to find it: {}",
+            holders[0]
+        );
     }
 
     #[test]

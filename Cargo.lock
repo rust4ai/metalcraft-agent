@@ -4964,9 +4964,9 @@ dependencies = [
 
 [[package]]
 name = "metalcraft"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99d442a53738c767eb21ee0e085ab815425a72e3e844158ea6e57c3c6d4f4d0d"
+checksum = "0bd509f8145b5ee8e187c00475ad1331b8fc3bf40ff1d87316858aadd1ed2d1c"
 dependencies = [
  "async-trait",
  "futures",
@@ -4981,7 +4981,7 @@ dependencies = [
 
 [[package]]
 name = "metalcraft-agent"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "async-trait",
  "atty",

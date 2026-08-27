@@ -36,5 +36,6 @@ pub mod session_io;
 pub mod skill;
 pub mod tools;
 pub mod trace;
+pub mod turn_plan;
 pub mod ui;
 pub mod workshop_api;

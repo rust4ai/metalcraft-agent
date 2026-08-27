@@ -91,6 +91,11 @@ pub type SharedAgentGraph = Arc<metalcraft::CompiledGraph<AgentState>>;
 pub struct BuiltAgentRuntime<M: CompletionModel + 'static> {
     pub graph: SharedAgentGraph,
     pub compaction_model: M,
+    /// The plan this runtime's tools share (see [`crate::turn_plan`]). Held here
+    /// so [`TurnRunner`] can clear it at the start of every turn — the runtime
+    /// may be reused across turns (the CLI builds one and keeps it), but the
+    /// plan must not be.
+    pub turn_plan: crate::turn_plan::SharedTurnPlan,
 }
 
 /// Owns the one operation every agent turn performs: **compact the context to
@@ -159,6 +164,8 @@ pub struct TurnRunner<M: CompletionModel + 'static> {
     /// Where to announce the pre-model phases. `None` for callers with nobody
     /// watching — the CLI, one-shot runs, a flow step.
     phase_sink: Option<PhaseSink>,
+    /// This turn's plan, cleared at the start of each [`run`](Self::run).
+    turn_plan: crate::turn_plan::SharedTurnPlan,
 }
 
 impl<M: CompletionModel + 'static> TurnRunner<M> {
@@ -168,6 +175,7 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
         Self {
             graph: runtime.graph,
             compaction_model: runtime.compaction_model,
+            turn_plan: runtime.turn_plan,
             compaction_config: CompactionConfig::default(),
             max_steps: MAX_TURN_STEPS,
             recall: crate::memory::recall_enabled(),
@@ -226,6 +234,10 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
         mut state: AgentState,
         step_guard: StepGuard<AgentState>,
     ) -> (bool, Result<RunOutcome<AgentState>, GraphError>) {
+        // A turn starts owing nothing. See `TurnPlan::reset` — the runtime can be
+        // older than this turn, so last turn's steps must not gate this one.
+        crate::turn_plan::lock(&self.turn_plan).reset();
+
         // Asked before announcing: compaction is the expensive silent phase, but
         // it only runs on the turns that cross the threshold, and a phase frame
         // that fires on every turn is one nobody reads.
@@ -788,6 +800,9 @@ where
 {
     let system_prompt =
         persona.build_system_prompt_with(&context.skills_dir, cwd, &options.prompt_extras);
+    // One plan per runtime, shared by `update_plan`, `sub_agent` and
+    // `say_to_user`; `TurnRunner::run` clears it before each turn.
+    let turn_plan = crate::turn_plan::new_shared();
     let tool_config = crate::tools::ToolConfig {
         preset_personas: options.preset_personas.clone(),
         instance_id: options.instance_id.clone(),
@@ -800,6 +815,7 @@ where
         session_binding: options.session_binding,
         reschedule_depth: options.reschedule_depth,
         interrupt: options.interrupt.clone(),
+        turn_plan: Some(turn_plan.clone()),
     };
 
     // Resolve the persona's full tool set (explicit tools + any pack-scoped
@@ -842,6 +858,7 @@ where
     Ok(BuiltAgentRuntime {
         graph,
         compaction_model,
+        turn_plan,
     })
 }
 

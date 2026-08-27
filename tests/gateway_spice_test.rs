@@ -80,10 +80,10 @@ fn init() {
 /// Build a `ReplySink` that records every delivered message into `buf` — the
 /// test-double for a real adapter send (`pipestreamr::send`/`twilio::send_whatsapp`).
 fn capturing_sink(buf: Arc<tokio::sync::Mutex<Vec<String>>>) -> ReplySink {
-    Arc::new(move |content: String| {
+    Arc::new(move |reply: metalcraft_agent::tools::ReplyEnvelope| {
         let buf = buf.clone();
         Box::pin(async move {
-            buf.lock().await.push(content);
+            buf.lock().await.push(reply.text);
             Ok(())
         })
     })

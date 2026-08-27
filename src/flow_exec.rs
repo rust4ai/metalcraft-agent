@@ -899,6 +899,10 @@ impl<'a> FlowExecutor<'a> {
             reschedule_depth: 0,
             // A flow node has no stop button behind it.
             interrupt: None,
+            // Nor a plan: a flow already IS the plan — its steps are the graph,
+            // and a node that gated its own reply would be second-guessing the
+            // structure the flow author wrote down.
+            turn_plan: None,
         };
         let mut registry =
             crate::tools::create_registry_for_with_config(&persona_tools, Some(&tool_config));

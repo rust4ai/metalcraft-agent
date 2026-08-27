@@ -632,7 +632,7 @@ Runs in `src/bin/migrate.rs`, **never on boot**.
 | Today | Becomes |
 |---|---|
 | `seed/personas/*.json`, `seed/skills/*.md`, `seed/flow_templates/*` | **`metalcraft-core`**, providing **`general-agent`** (§1.3) |
-| `seed/integrations/metalcraft-{calendar,notes,email,drive,contacts,code,packs}` + their personas/skills | **`metalcraft-ecosystem`**: a `metalcraft-assistant` preset, those personas/skills, the packs vendored, plus `agent-registry` |
+| `seed/integrations/metalcraft-{calendar,notes,email,drive,contacts,code,packs}` + their personas/skills | **`metalcraft-ecosystem`**: an ecosystem preset, those personas/skills, the packs vendored, plus `agent-registry` (the `metalcraft-assistant` preset this named was removed 2026-08-27) |
 | `seed/integrations/email` (IMAP) | into `metalcraft-ecosystem` |
 
 Both are embedded seeds written on first run (`seed.rs:58` `ensure_defaults`, `:141`

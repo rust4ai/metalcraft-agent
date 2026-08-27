@@ -233,10 +233,9 @@ phase work rather than emit a 15-step plan.
   It sets `delegates_to_any_persona: true`, so delegation would work without
   this — but the roster is what shows up in the UI and in the preset's own
   documentation of itself.
-- `metalcraft-assistant` 3.0.0 → **3.1.0**: add the same entry. This preset has
-  an explicit roster and **no** `delegates_to_any_persona`, so without the edit
-  the whole Metalcraft ecosystem agent simply cannot reach the planner. Easy to
-  miss.
+  (`metalcraft-assistant`, which used to need the same entry and had no
+  `delegates_to_any_persona`, was removed on 2026-08-27 — it duplicated the
+  `metalcraft-packs` agent pack's own preset.)
 
 ---
 
@@ -248,7 +247,6 @@ phase work rather than emit a 15-step plan.
 | `seed/skills/decomposition.md` | new |
 | `seed/personas/orchestrator-agent.json` | prompt section + v1.6.0 |
 | `seed/agent_presets/general-agent.json` | roster + v1.3.0 |
-| `seed/agent_presets/metalcraft-assistant.json` | roster + v3.1.0 |
 | `tests/planner_spice_test.rs` | new (§9) |
 
 No Rust source changes. `include_dir!` picks the new seed files up

@@ -35,8 +35,8 @@ fn a_flow_is_bound_to_a_preset_that_can_reach_its_personas() {
     );
     // A bigger one that can reach the briefer.
     write(
-        &presets.join("metalcraft-assistant.json"),
-        r#"{"slug":"metalcraft-assistant","name":"Metalcraft Assistant","default_persona":"orchestrator-agent",
+        &presets.join("briefing-agent.json"),
+        r#"{"slug":"briefing-agent","name":"Briefing Agent","default_persona":"orchestrator-agent",
             "personas":[{"slug":"orchestrator-agent","role":"default"},
                         {"slug":"morning-briefer","role":"subagent"}]}"#,
     );
@@ -62,12 +62,12 @@ fn a_flow_is_bound_to_a_preset_that_can_reach_its_personas() {
     let chosen = metalcraft_agent::flow_bindings::bind_to_a_capable_preset(&briefing);
     assert_eq!(
         chosen.as_deref(),
-        Some("metalcraft-assistant"),
+        Some("briefing-agent"),
         "the default cannot reach 'morning-briefer', so the installer must pick one that can"
     );
     assert_eq!(
         metalcraft_agent::flow_bindings::preset_for("morning-brief"),
-        "metalcraft-assistant"
+        "briefing-agent"
     );
 
     // And it can now be armed, which is the whole point.

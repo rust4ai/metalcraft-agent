@@ -251,6 +251,8 @@ pub async fn record_flow_turn(chat_id: &str, prompt: &str, answer: &str) {
 
     let _ = sender.send(ChatEvent::Reply {
         content: answer.to_string(),
+        awaiting_reply: false,
+        options: Vec::new(),
     });
     let _ = sender.send(ChatEvent::Done {
         status: "completed".into(),
@@ -4789,12 +4791,25 @@ enum ChatEvent {
         duration_ms: u64,
         result: ChatMessageWire,
     },
-    /// The agent's user-facing reply, produced by a `say_to_user` tool call.
-    /// In tool-only mode this — not free-text `LlmCompleted` content — is the
-    /// assistant's message; the workshop renders it as the reply bubble. The
-    /// underlying `say_to_user` tool start/finish events are suppressed so the
-    /// reply isn't also shown as a raw tool card.
-    Reply { content: String },
+    /// The agent's user-facing message, produced by a `say_to_user` or
+    /// `ask_user` tool call. In tool-only mode this — not free-text
+    /// `LlmCompleted` content — is the assistant's message; the workshop renders
+    /// it as the reply bubble. The underlying tool start/finish events are
+    /// suppressed so the reply isn't also shown as a raw tool card.
+    ///
+    /// `awaiting_reply` distinguishes the two ways a turn ends: an answer closes
+    /// the exchange, a question leaves it open and the client should invite a
+    /// response (and may render `options` as tappable choices). Both are omitted
+    /// when unset, so a client written before `ask_user` existed still sees a
+    /// perfectly ordinary reply — which is the correct degradation, since the
+    /// question is in the text either way.
+    Reply {
+        content: String,
+        #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+        awaiting_reply: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<String>,
+    },
     /// What the turn is doing *before* the model is called — work that emits no
     /// other frame and that a client would otherwise render as an
     /// undifferentiated wait.
@@ -5184,9 +5199,9 @@ async fn post_chat_turn(
                         if let Some(t) = &trace {
                             t.on_tool_start(&tool_call_id, &name, &args);
                         }
-                        // `say_to_user` is surfaced as a `Reply` (emitted by the
-                        // reply sink during execution), not as a tool card.
-                        if name != "say_to_user" {
+                        // The reply tools are surfaced as a `Reply` (emitted by
+                        // the reply sink during execution), not as a tool card.
+                        if !is_reply_tool(&name) {
                             let _ = tx.try_send(ChatEvent::ToolStarted {
                                 tool_call_id,
                                 name,
@@ -5206,8 +5221,12 @@ async fn post_chat_turn(
                     if let Some(t) = &trace {
                         t.on_tool_complete(&tool_call_id, &raw_result);
                     }
-                    // See the matching suppression for `ToolStarted`.
-                    if name != "say_to_user" {
+                    // See the matching suppression for `ToolStarted`. A reply
+                    // tool that was *refused* (the plan gate turning down an
+                    // early `say_to_user`) is suppressed too: nothing was
+                    // delivered, the model is about to carry on working, and a
+                    // red tool card for a rail doing its job reads as a failure.
+                    if !is_reply_tool(&name) {
                         let _ = tx.try_send(ChatEvent::ToolCompleted {
                             tool_call_id,
                             name,
@@ -5232,12 +5251,16 @@ async fn post_chat_turn(
         // is also terminal, so the turn ends once the reply is sent.
         let reply_sink: crate::tools::ReplySink = {
             let tx = tx.clone();
-            Arc::new(move |content: String| {
+            Arc::new(move |reply: crate::tools::ReplyEnvelope| {
                 let tx = tx.clone();
                 Box::pin(async move {
-                    tx.send(ChatEvent::Reply { content })
-                        .await
-                        .map_err(|e| e.to_string())
+                    tx.send(ChatEvent::Reply {
+                        content: reply.text,
+                        awaiting_reply: reply.awaiting_reply,
+                        options: reply.options,
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
                 })
             })
         };
@@ -5267,7 +5290,7 @@ async fn post_chat_turn(
             RuntimeOptions {
                 reply_sink: Some(reply_sink),
                 tool_choice: metalcraft::ToolChoice::Required,
-                terminal_tools: vec!["say_to_user".to_string()],
+                terminal_tools: vec!["say_to_user".to_string(), "ask_user".to_string()],
                 // A follow-up armed during this turn is delivered back to this
                 // chat when it fires.
                 session_binding: Some(crate::scheduled_tasks::IoBinding::WorkshopChat {
@@ -5517,12 +5540,16 @@ pub async fn deliver_followup_to_chat(
     let sender = chat_event_sender(chat_id).await;
     let reply_sink: crate::tools::ReplySink = {
         let sender = sender.clone();
-        Arc::new(move |content: String| {
+        Arc::new(move |reply: crate::tools::ReplyEnvelope| {
             let sender = sender.clone();
             Box::pin(async move {
                 // A send error just means no live subscriber; the reply is still
                 // persisted below, so that's not a failure.
-                let _ = sender.send(ChatEvent::Reply { content });
+                let _ = sender.send(ChatEvent::Reply {
+                    content: reply.text,
+                    awaiting_reply: reply.awaiting_reply,
+                    options: reply.options,
+                });
                 Ok(())
             })
         })
@@ -5558,7 +5585,7 @@ pub async fn deliver_followup_to_chat(
         RuntimeOptions {
             reply_sink: Some(reply_sink),
             tool_choice: metalcraft::ToolChoice::Required,
-            terminal_tools: vec!["say_to_user".to_string()],
+            terminal_tools: vec!["say_to_user".to_string(), "ask_user".to_string()],
             session_binding: Some(crate::scheduled_tasks::IoBinding::WorkshopChat {
                 chat_id: chat_id.to_string(),
             }),
@@ -6682,9 +6709,39 @@ fn gateway_session_is_stale(chat_id: &str, ttl: std::time::Duration) -> bool {
         .unwrap_or(false)
 }
 
-/// Build the reply sink for a gateway session: `say_to_user` text is sent back
+/// The tools whose output the user sees as a message rather than as a tool card.
+fn is_reply_tool(name: &str) -> bool {
+    matches!(name, "say_to_user" | "ask_user")
+}
+
+/// Flatten a reply envelope for a channel that can only carry text.
+///
+/// Options become a numbered list because a plain-text user answering "2" is
+/// unambiguous in a way that echoing a phrase is not, and the numbering survives
+/// SMS, WhatsApp, and anything else with no notion of a choice control.
+fn render_for_text_channel(reply: &crate::tools::ReplyEnvelope) -> String {
+    if reply.options.is_empty() {
+        return reply.text.clone();
+    }
+    let choices = reply
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, o)| format!("{}. {o}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{}\n\n{choices}", reply.text)
+}
+
+/// Build the reply sink for a gateway session: the agent's message is sent back
 /// out through the bound adapter to the original sender, and the send is logged
 /// to the gateway activity feed (mirroring `gateway::record_outbound`).
+///
+/// A text channel has no way to render a question differently from an answer, so
+/// `ask_user`'s options are appended to the body as a numbered list and the
+/// `awaiting_reply` marker is dropped. The user replies as they would to any
+/// other message, and the next inbound message continues the conversation —
+/// which is exactly what `ask_user` needs.
 fn gateway_reply_sink(
     adapter: String,
     recipient: String,
@@ -6692,13 +6749,14 @@ fn gateway_reply_sink(
     channel_slug: String,
     channel_name: String,
 ) -> crate::tools::ReplySink {
-    Arc::new(move |content: String| {
+    Arc::new(move |reply: crate::tools::ReplyEnvelope| {
         let adapter = adapter.clone();
         let recipient = recipient.clone();
         let from = from.clone();
         let channel_slug = channel_slug.clone();
         let channel_name = channel_name.clone();
         Box::pin(async move {
+            let content = render_for_text_channel(&reply);
             let result = match adapter.as_str() {
                 // Reply back out through the channel the message arrived on.
                 "twilio" => {
@@ -6894,7 +6952,7 @@ async fn run_one_gateway_turn(
         RuntimeOptions {
             reply_sink: Some(sink.clone()),
             tool_choice: metalcraft::ToolChoice::Required,
-            terminal_tools: vec!["say_to_user".to_string()],
+            terminal_tools: vec!["say_to_user".to_string(), "ask_user".to_string()],
             // Gateway follow-up delivery (rebuilding the adapter sink at fire
             // time from the channel binding) is wired in the delivery pass; for
             // now a follow-up armed in a gateway turn is unbound (logged).
@@ -6955,7 +7013,7 @@ async fn run_one_gateway_turn(
         }
     };
     if let Some(ce) = terminal_error {
-        let _ = sink(ce.user_message).await;
+        let _ = sink(crate::tools::ReplyEnvelope::message(ce.user_message)).await;
     }
     persist_chat(session).await;
 }

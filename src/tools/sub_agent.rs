@@ -40,6 +40,36 @@ fn resolve_timeout_secs(configured: Option<u64>, persona_max_run_secs: Option<u6
         .min(MAX_SUB_AGENT_TIMEOUT_SECS)
 }
 
+/// Appended to every sub-agent's system prompt.
+///
+/// The handoff block is the part that matters. A sub-agent that did 40% of the
+/// job and one that finished return the same shape — prose — so the orchestrator
+/// reads both as done, answers, and the turn ends three steps short. The
+/// sub-agent that just read the code is the best-placed party in the system to
+/// say what is left, so it is asked to say it in a form the parent can act on
+/// rather than have to infer.
+///
+/// It is a fenced JSON block rather than a schema on the tool because the
+/// sub-agent is a whole nested agent whose output is free text; asking for one
+/// well-known block at the end is the cheapest contract that survives a model
+/// that ignores it. An absent or unparseable block reads as `completed: true`
+/// (see [`split_handoff`]) — a delegation that says nothing is treated exactly
+/// as it was before this existed, so nothing regresses into false alarms.
+const SUB_AGENT_PROMPT_SUFFIX: &str = "\n\nYou are a sub-agent. Complete the given task efficiently and report your findings. \
+Be concise in your final answer.\n\n\
+You have NONE of the parent conversation — only the task above. If it is missing something \
+you need, say so rather than guessing.\n\n\
+End your reply with this block, always:\n\n\
+```handoff\n\
+{\"completed\": true, \"not_done\": [], \"suggest_persona\": null}\n\
+```\n\n\
+Set `completed` to false if ANY part of the task is still outstanding — including work you \
+could not do because you lack the tools for it (a read-only delegate cannot edit files; a \
+delegate without an integration's tools cannot call it). List each outstanding item in \
+`not_done` as a concrete one-liner naming files or targets, and name the persona best suited \
+to finish it in `suggest_persona` if you know one. Reporting honestly that work remains is \
+worth far more than a tidy-looking answer; the orchestrator will delegate the rest.";
+
 pub struct SubAgentTool {
     api_key: String,
     model_name: String,
@@ -59,6 +89,11 @@ pub struct SubAgentTool {
     /// is what makes the promise "stop stops the agent" true through a
     /// delegation rather than only outside one.
     interrupt: Option<Arc<AtomicBool>>,
+    /// The parent turn's plan. A delegation that comes back reporting unfinished
+    /// work records a handoff here, which stops the parent from closing the turn
+    /// until it has acted on it. `None` ⇒ nobody is tracking obligations (a flow
+    /// node, a one-shot run, a nested sub-agent).
+    turn_plan: Option<crate::turn_plan::SharedTurnPlan>,
 }
 
 impl SubAgentTool {
@@ -82,6 +117,12 @@ impl SubAgentTool {
         self
     }
 
+    /// Report unfinished delegations into the parent turn's plan.
+    pub fn with_turn_plan(mut self, plan: Option<crate::turn_plan::SharedTurnPlan>) -> Self {
+        self.turn_plan = plan;
+        self
+    }
+
     pub fn new(api_key: String, model_name: String, system_prompt: String) -> Self {
         Self {
             api_key,
@@ -90,6 +131,7 @@ impl SubAgentTool {
             preset_personas: None,
             instance_id: None,
             interrupt: None,
+            turn_plan: None,
         }
     }
 }
@@ -150,6 +192,88 @@ impl SubAgentTool {
             }
         }))
     }
+}
+
+/// What a sub-agent reported about its own completeness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HandoffReport {
+    completed: bool,
+    not_done: Vec<String>,
+    suggest_persona: Option<String>,
+}
+
+/// Split a sub-agent's final answer into (prose, report).
+///
+/// Looks for the LAST ```handoff fence, because a sub-agent explaining the
+/// protocol mid-answer — or quoting a nested delegate's block — would otherwise
+/// have its example parsed as its own status. The block is stripped from the
+/// prose either way, so the parent never re-reads JSON it has already turned
+/// into fields.
+///
+/// Every failure mode returns `None`: no fence, an unterminated fence,
+/// unparseable JSON. `None` means "said nothing", and the caller treats that as
+/// completed — a model that ignores the instruction gets exactly the behaviour
+/// it had before the protocol existed, rather than a false report of unfinished
+/// work that would hold the turn open for nothing.
+fn split_handoff(answer: &str) -> (String, Option<HandoffReport>) {
+    const FENCE: &str = "```handoff";
+
+    let Some(start) = answer.rfind(FENCE) else {
+        return (answer.trim().to_string(), None);
+    };
+    let after = &answer[start + FENCE.len()..];
+    let Some(end_rel) = after.find("```") else {
+        // An unterminated fence is a truncated answer, not a report. Leave the
+        // prose whole rather than silently swallowing the tail.
+        return (answer.trim().to_string(), None);
+    };
+
+    let body = &after[..end_rel];
+    let prose = format!(
+        "{}{}",
+        &answer[..start],
+        &after[end_rel + 3..]
+    );
+    let prose = prose.trim().to_string();
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body.trim()) else {
+        return (prose, None);
+    };
+
+    let not_done = value
+        .get("not_done")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    // `completed: false` with an empty `not_done` is a sub-agent that knows it
+    // fell short but did not say how. Believe the flag — the orchestrator can
+    // still see the prose — but there is nothing specific to hand off.
+    let completed = value
+        .get("completed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(not_done.is_empty());
+
+    (
+        prose,
+        Some(HandoffReport {
+            completed,
+            not_done,
+            suggest_persona: value
+                .get("suggest_persona")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+        }),
+    )
 }
 
 #[async_trait]
@@ -230,6 +354,16 @@ impl metalcraft::Tool for SubAgentTool {
         //      parent's system prompt.
         let persona_slug = args["persona"].as_str().filter(|s| !s.is_empty());
 
+        // What to call this delegate when reporting an unfinished handoff back to
+        // the parent. The persona slug when there is one; otherwise the tool set,
+        // which is the only identity an ad-hoc delegation has.
+        let delegate_label = persona_slug.map(String::from).unwrap_or_else(|| {
+            format!(
+                "tool_set:{}",
+                args["tool_set"].as_str().unwrap_or("read_only")
+            )
+        });
+
         // Containment. The schema enum guides the model; this is the rule. An agent
         // must not be able to reach a persona its preset never declared.
         if let (Some(slug), Some(roster)) = (persona_slug, self.preset_personas.as_ref()) {
@@ -293,15 +427,17 @@ impl metalcraft::Tool for SubAgentTool {
                 // A sub-agent that delegates again is still this turn: the stop
                 // has to reach all the way down, not just one level.
                 interrupt: self.interrupt.clone(),
+                // The plan belongs to the parent turn. A sub-agent must not be
+                // able to satisfy it (by writing steps it never did) or inherit
+                // obligations it cannot see, so delegation stops here and the
+                // nested run answers on its own terms.
+                turn_plan: None,
             };
             let registry = crate::tools::create_registry_for_with_config(
                 &persona.resolved_tool_names(),
                 Some(&config),
             );
-            let sub_prompt = format!(
-                "{base_prompt}\n\nYou are a sub-agent. Complete the given task efficiently and \
-                 report your findings. Be concise in your final answer."
-            );
+            let sub_prompt = format!("{base_prompt}{SUB_AGENT_PROMPT_SUFFIX}");
             (registry, sub_prompt)
         } else {
             let tool_set = args["tool_set"].as_str().unwrap_or("read_only");
@@ -351,11 +487,7 @@ impl metalcraft::Tool for SubAgentTool {
             }
 
             let registry = crate::tools::create_registry_for(&tool_names);
-            let sub_prompt = format!(
-                "{}\n\nYou are a sub-agent. Complete the given task efficiently and report your \
-                 findings. Be concise in your final answer.",
-                self.system_prompt
-            );
+            let sub_prompt = format!("{}{SUB_AGENT_PROMPT_SUFFIX}", self.system_prompt);
             (registry, sub_prompt)
         };
 
@@ -392,14 +524,41 @@ impl metalcraft::Tool for SubAgentTool {
 
         match result {
             Ok(Ok(RunOutcome::Completed(state))) => {
-                let answer = state.final_answer().unwrap_or("(no answer)").to_string();
+                let raw = state.final_answer().unwrap_or("(no answer)").to_string();
                 let tools_used = state.tools_called();
                 let turn_count = state.turns().len();
-                Ok(serde_json::json!({
+
+                // Split the machine-readable tail off the prose, so the parent
+                // reads a clean answer and a separate, actionable status.
+                let (answer, handoff) = split_handoff(&raw);
+
+                let mut out = serde_json::json!({
                     "result": answer,
                     "tools_used": tools_used,
                     "turns": turn_count,
-                }))
+                    "completed": handoff.as_ref().is_none_or(|h| h.completed),
+                });
+                if let Some(report) = handoff.filter(|h| !h.completed) {
+                    out["not_done"] = serde_json::json!(report.not_done);
+                    if let Some(next) = &report.suggest_persona {
+                        out["suggest_persona"] = serde_json::json!(next);
+                    }
+                    // Record the obligation where the reply tool will see it. A
+                    // delegation that reported unfinished work now holds the turn
+                    // open until the orchestrator does something about it.
+                    if !report.not_done.is_empty() {
+                        if let Some(plan) = &self.turn_plan {
+                            crate::turn_plan::lock(plan).record_handoff(
+                                crate::turn_plan::Handoff {
+                                    from: delegate_label.clone(),
+                                    not_done: report.not_done.clone(),
+                                    suggest_persona: report.suggest_persona.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
+                Ok(out)
             }
             Ok(Ok(RunOutcome::Interrupted { state, reason, .. })) => {
                 // A user stop is not a delegation that went wrong. Say so plainly,
@@ -443,6 +602,61 @@ impl metalcraft::Tool for SubAgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_answer_with_no_block_is_treated_as_complete() {
+        let (prose, report) = split_handoff("I read the file and it looks fine.");
+        assert_eq!(prose, "I read the file and it looks fine.");
+        assert!(report.is_none());
+    }
+
+    #[test]
+    fn an_unfinished_delegation_is_parsed_and_stripped() {
+        let answer = "The page claims 4 features the repo no longer has.\n\n\
+```handoff\n\
+{\"completed\": false, \"not_done\": [\"edit Hero.tsx to drop the 4 stale claims\"], \"suggest_persona\": \"coding-agent\"}\n\
+```";
+        let (prose, report) = split_handoff(answer);
+        assert_eq!(prose, "The page claims 4 features the repo no longer has.");
+        let report = report.expect("block should parse");
+        assert!(!report.completed);
+        assert_eq!(report.not_done, vec!["edit Hero.tsx to drop the 4 stale claims"]);
+        assert_eq!(report.suggest_persona.as_deref(), Some("coding-agent"));
+    }
+
+    /// A sub-agent that quotes the protocol before filling it in must not have
+    /// its example read as its status.
+    #[test]
+    fn the_last_block_wins() {
+        let answer = "I was told to end with ```handoff\n{\"completed\": true}\n``` \
+so here it is.\n```handoff\n{\"completed\": false, \"not_done\": [\"the edits\"]}\n```";
+        let (_, report) = split_handoff(answer);
+        let report = report.expect("block should parse");
+        assert!(!report.completed);
+        assert_eq!(report.not_done, vec!["the edits"]);
+    }
+
+    #[test]
+    fn a_malformed_block_never_invents_unfinished_work() {
+        let (prose, report) = split_handoff("done\n```handoff\nnot json at all\n```");
+        assert_eq!(prose, "done");
+        assert!(report.is_none(), "unparseable means silent, not unfinished");
+
+        let (_, report) = split_handoff("done\n```handoff\n{\"completed\": false");
+        assert!(report.is_none(), "an unterminated fence is truncation, not a report");
+    }
+
+    /// `completed` omitted: infer it from whether anything was listed, so a model
+    /// that reports only `not_done` still holds the turn open.
+    #[test]
+    fn completed_is_inferred_from_not_done_when_absent() {
+        let (_, report) = split_handoff("x\n```handoff\n{\"not_done\": [\"the tests\"]}\n```");
+        let report = report.expect("block should parse");
+        assert!(!report.completed);
+
+        let (_, report) = split_handoff("x\n```handoff\n{\"not_done\": []}\n```");
+        assert!(report.expect("block should parse").completed);
+    }
 
     #[test]
     fn nothing_declared_uses_the_default() {

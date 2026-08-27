@@ -119,6 +119,7 @@ fn sub_agent_registered_with_config() {
         // Nothing to stop for: this asserts what gets registered, not what a
         // delegated run does when the turn is stopped.
         interrupt: None,
+        turn_plan: None,
     };
 
     let tools: Vec<String> = vec!["read_file", "sub_agent"]
