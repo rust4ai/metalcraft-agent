@@ -161,7 +161,8 @@ impl metalcraft::Tool for SubAgentTool {
     fn description(&self) -> &str {
         "Spawn a sub-agent to handle an independent subtask. Sub-agents run autonomously \
          with their own tool set and return a result. Use this for research, exploration, \
-         or any task that can be delegated. Multiple sub-agents run concurrently."
+         or any task that can be delegated. Sub-agents run one at a time, in the order \
+         you call them, so a turn costs the sum of its delegations."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
