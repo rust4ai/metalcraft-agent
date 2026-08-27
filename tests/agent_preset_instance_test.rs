@@ -43,6 +43,18 @@ const PACK_PRESET: &str = r#"{
   "default_persona": "orchestrator-agent"
 }"#;
 
+/// A pack whose value is the specialist it ships, not an agent to talk to — the
+/// shape `metalcraft-packs` has. It resolves like any other preset so its persona
+/// and skills install; it is simply not something anyone can be.
+const LIBRARY_PRESET: &str = r#"{
+  "slug": "packs-lib",
+  "name": "Packs Library",
+  "description": "personas and skills, no agent",
+  "library": true,
+  "default_persona": "lib-persona",
+  "personas": [{ "slug": "lib-persona", "role": "default" }]
+}"#;
+
 #[test]
 fn presets_resolve_and_instances_group_conversations() {
     let data_dir = std::env::temp_dir().join(format!("mc-preset-test-{}", std::process::id()));
@@ -108,6 +120,38 @@ fn presets_resolve_and_instances_group_conversations() {
     assert!(
         AgentPreset::load("shared", &presets_dir).is_ok(),
         "a local file must resolve the ambiguity, not inherit it"
+    );
+
+    // ── a library preset resolves, but nothing can be started as it ─────────
+    write(&presets_dir.join("packs-lib.json"), LIBRARY_PRESET);
+    let lib = AgentPreset::load("packs-lib", &presets_dir).expect("a library preset still loads");
+    assert!(lib.library);
+    assert_eq!(
+        lib.callable_personas(),
+        vec!["lib-persona"],
+        "its roster is intact — that is what the pack ships it for"
+    );
+    let err = lib.ensure_spawnable().expect_err("must not be startable");
+    assert!(err.contains("packs-lib"), "{err}");
+
+    assert!(
+        AgentPreset::list_summaries(&presets_dir)
+            .iter()
+            .find(|s| s.slug == "packs-lib")
+            .expect("still listed — a picker filters it, the list does not hide it")
+            .library
+    );
+
+    // The gateway door: a channel pointed at a library preset gets an error, not an
+    // agent that exists and cannot work.
+    let err = agent_instance::for_gateway_sender("sms-lib", "gw-lib-1", "Lib", "packs-lib")
+        .expect_err("gateway must refuse a library preset");
+    assert!(err.contains("packs-lib"), "{err}");
+    assert!(
+        !agent_instance::list()
+            .iter()
+            .any(|i| i.agent_preset == "packs-lib"),
+        "a refused mint must not leave an agent behind"
     );
 
     // ── instances ────────────────────────────────────────────────────────────
@@ -186,6 +230,26 @@ fn presets_resolve_and_instances_group_conversations() {
     let again = agent_instance::backfill_from_chats(&chats_dir).expect("backfill again");
     assert_eq!(again.migrated, 0);
     assert_eq!(again.already_bound, 1);
+
+    // A chat whose persona is only declared by a *library* preset falls back to the
+    // default agent. Binding it to the library would mint the instance the library
+    // exists not to have.
+    write(
+        &chats_dir.join("legacy-2.json"),
+        r#"{"id":"legacy-2","persona_slug":"lib-persona","model_name":"gpt-5.4",
+            "cwd":".","created_at":"2026-01-02T00:00:00Z","messages":[]}"#,
+    );
+    let third = agent_instance::backfill_from_chats(&chats_dir).expect("backfill lib chat");
+    assert_eq!(third.migrated, 1);
+    let doc2: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(chats_dir.join("legacy-2.json")).unwrap())
+            .unwrap();
+    let bound2 = doc2["instance_id"].as_str().expect("bound");
+    assert_eq!(
+        agent_instance::load(bound2).unwrap().agent_preset,
+        "general-agent",
+        "a library preset must never be what a legacy chat lands on"
+    );
 
     // ── delete keeps transcripts ─────────────────────────────────────────────
     agent_instance::delete(&chat.id).expect("delete");

@@ -86,6 +86,10 @@ pub fn preset_for(flow_id: &str) -> String {
 /// preset cannot reach — better to fail here than at 3am when the cron fires.
 pub fn bind_preset(flow: &metalcraft_flows::SavedFlow, preset_slug: &str) -> Result<(), String> {
     let preset = AgentPreset::load(preset_slug, &paths::agent_presets_dir())?;
+    // A binding is a promise that this flow can be armed, and arming mints an
+    // instance — so a library preset fails here rather than at 3am, same as a
+    // roster it cannot reach.
+    preset.ensure_spawnable()?;
     check_personas(flow, &preset)?;
     let mut b = load();
     b.flows.entry(flow.id.clone()).or_default().preset = Some(preset_slug.to_string());
@@ -110,7 +114,7 @@ pub fn bind_to_a_capable_preset(flow: &metalcraft_flows::SavedFlow) -> Option<St
     let fits = |slug: &str| {
         AgentPreset::load(slug, &dir)
             .ok()
-            .is_some_and(|p| named.iter().all(|n| p.allows_persona(n)))
+            .is_some_and(|p| !p.library && named.iter().all(|n| p.allows_persona(n)))
     };
 
     let chosen = if fits(DEFAULT_PRESET) {

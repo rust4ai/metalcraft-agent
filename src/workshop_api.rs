@@ -1854,6 +1854,9 @@ async fn post_create_agent_instance(Json(req): Json<CreateInstanceRequest>) -> R
         Ok(p) => p,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
     };
+    if let Err(e) = preset.ensure_spawnable() {
+        return err_json(StatusCode::BAD_REQUEST, e);
+    }
     let mut instance = AgentInstance::new(&preset, InstanceOrigin::Workshop);
     if let Some(name) = req.name {
         instance.name = name;
@@ -2531,8 +2534,9 @@ async fn post_validate_flow(Json(flow): Json<metalcraft_flows::SavedFlow>) -> Re
     params(("id" = String, Path, description = "Flow id")),
     request_body = metalcraft_flows::SavedFlow,
     responses(
-        (status = 200, description = "Saved", body = metalcraft_flows::SavedFlow),
+        (status = 200, description = "Saved, with the server-stamped `updated_at`", body = metalcraft_flows::SavedFlow),
         (status = 400, description = "The graph is invalid; the body lists why", body = ErrorResponse),
+        (status = 409, description = "The flow changed since it was loaded — `updated_at` does not match", body = ErrorResponse),
     ),
 )]
 async fn put_flow(
@@ -2540,6 +2544,37 @@ async fn put_flow(
     Json(mut flow): Json<metalcraft_flows::SavedFlow>,
 ) -> Response {
     flow.id = id;
+
+    // Refuse a save built on a version of this flow that is no longer the
+    // current one.
+    //
+    // `updated_at` is the precondition: a client sends back the document it
+    // loaded, so a mismatch means somebody else saved in between and this save
+    // would erase their work without either person seeing anything. Two people —
+    // or one person on a phone and a desktop — editing the same automation is
+    // the ordinary case now that both clients can edit, and last-writer-wins is
+    // only invisible until it costs somebody an afternoon.
+    //
+    // Absent for a flow that does not exist yet, because there is nothing to
+    // conflict with. Every *other* writer on this pod (pack install, the agent's
+    // own `flow_*` tools, schedule migration) calls `save_flow` directly and is
+    // deliberately not subject to this: they are not editing somebody's draft,
+    // they are installing or migrating, and failing those on a timestamp would
+    // break an install for a reason nobody could act on.
+    if let Some(current) = metalcraft_flows::load_flow(&paths::flows_dir(), &flow.id)
+        && current.updated_at != flow.updated_at
+    {
+        return err_json(
+            StatusCode::CONFLICT,
+            format!(
+                "This flow changed since you opened it (it was last saved at {}, \
+                 and you started from {}). Reload it and make the change again — \
+                 saving now would erase whatever the other edit did.",
+                current.updated_at, flow.updated_at
+            ),
+        );
+    }
+
     // Saving a graph can no longer break a timer: the schedules pointing at this
     // flow are separate documents and are not touched here. What a bad save can
     // still do is make the flow unrunnable, which the daemon reports when the
@@ -2555,6 +2590,14 @@ async fn put_flow(
                 .join("; "),
         );
     }
+
+    // Stamped here, not by the client. The precondition above is only meaningful
+    // if this value is the pod's to set — a client that could choose its own
+    // could hand back the one it read and defeat the check without meaning to.
+    // The saved document comes back in the response, so the caller has the new
+    // value to base its next save on.
+    flow.updated_at = chrono::Utc::now().to_rfc3339();
+
     match metalcraft_flows::save_flow(&paths::flows_dir(), &flow) {
         Ok(()) => Json(flow).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e.to_string()),
@@ -4623,7 +4666,10 @@ async fn post_create_chat(
         None => {
             let slug = req.agent_preset.as_deref().unwrap_or(DEFAULT_PRESET);
             match AgentPreset::load(slug, &paths::agent_presets_dir()) {
-                Ok(preset) => AgentInstance::new(&preset, InstanceOrigin::Workshop),
+                Ok(preset) => match preset.ensure_spawnable() {
+                    Ok(()) => AgentInstance::new(&preset, InstanceOrigin::Workshop),
+                    Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
+                },
                 Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
             }
         }

@@ -185,10 +185,10 @@ fn retire_obsolete_seeds() {
     retire_agent_pack("metalcraft-code");
     // `metalcraft-assistant` — a seeded preset that duplicated the `metalcraft-packs`
     // agent pack. Its roster was the orchestrator plus `metalcraft-packs-agent`, and
-    // that pack ships its own `metalcraft-packs` preset with the same specialist; the
-    // packs agent also stays reachable from `general-agent`, which delegates to any
+    // the packs agent stays reachable from `general-agent`, which delegates to any
     // installed persona. Two presets for one capability is a choice the picker made
-    // the user resolve for no reason.
+    // the user resolve for no reason. (The packs pack's own preset is a library —
+    // `AgentPreset::library` — so it is not a third entry in that picker either.)
     retire_seed_preset("metalcraft-assistant");
 }
 
@@ -649,6 +649,42 @@ mod tests {
                 "{id} ships no skill: {names:?}"
             );
         }
+    }
+
+    /// The `metalcraft-packs` pack is a **library**: it ships the registry-discovery
+    /// persona, its skill and its `mpack_*` tools so the orchestrator can reach them,
+    /// and nothing else. It used to also put a "Metalcraft Packs" entry in the
+    /// new-agent picker, which is not a thing anyone wanted to be.
+    ///
+    /// Guards the flag against a re-authored preset that quietly drops it, and the
+    /// persona and skill against a "cleanup" that takes the capability with it.
+    #[test]
+    fn the_packs_pack_is_a_library_that_still_ships_its_specialist() {
+        use crate::agent_preset::AgentPreset;
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let pack = repo.join("seed/agent_packs/metalcraft-packs");
+
+        let preset: AgentPreset = serde_json::from_str(
+            &fs::read_to_string(pack.join("agent_presets/metalcraft-packs.json"))
+                .expect("seeded preset"),
+        )
+        .expect("seeded preset parses");
+        assert!(
+            preset.library,
+            "the packs preset must stay a library — it is not an agent to start"
+        );
+        assert!(preset.ensure_spawnable().is_err());
+
+        // …and the reason to keep the pack at all is still in it.
+        assert!(
+            pack.join("personas/metalcraft-packs-agent.json").is_file(),
+            "the specialist the orchestrator delegates to"
+        );
+        assert!(
+            pack.join("skills/metalcraft-packs.md").is_file(),
+            "the skill that specialist loads"
+        );
+        assert_eq!(preset.default_persona, "metalcraft-packs-agent");
     }
 
     /// Every first-party `metalcraft-*` pack must carry the ecosystem tag —

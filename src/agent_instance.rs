@@ -274,6 +274,7 @@ pub fn for_gateway_sender(
         return Ok(found);
     }
     let preset = crate::agent_preset::AgentPreset::load(preset_slug, &paths::agent_presets_dir())?;
+    preset.ensure_spawnable()?;
     let mut instance = AgentInstance::new(&preset, origin);
     instance.name = format!("{} — {label}", preset.name);
     instance.save()?;
@@ -316,8 +317,12 @@ pub fn backfill_from_chats(chats_dir: &Path) -> Result<BackfillReport, String> {
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         // Prefer a preset that actually declares this persona; fall back to the default.
+        // A library preset can be the one that declares it — a pack's specialist has
+        // to live somewhere — but binding a chat to one would mint the instance the
+        // library exists not to have.
         let preset_slug = summaries
             .iter()
+            .filter(|s| !s.library)
             .find(|s| s.default_persona == persona)
             .map(|s| s.slug.clone())
             .unwrap_or_else(|| crate::agent_preset::DEFAULT_PRESET.to_string());

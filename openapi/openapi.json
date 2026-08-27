@@ -2113,7 +2113,7 @@
         },
         "responses": {
           "200": {
-            "description": "Saved",
+            "description": "Saved, with the server-stamped `updated_at`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2124,6 +2124,16 @@
           },
           "400": {
             "description": "The graph is invalid; the body lists why",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow changed since it was loaded — `updated_at` does not match",
             "content": {
               "application/json": {
                 "schema": {
@@ -3668,6 +3678,10 @@
               "type": "string"
             },
             "description": "Reads `integration_packs` too — the pre-0.30 name, still present in every\npreset authored before the rename."
+          },
+          "library": {
+            "type": "boolean",
+            "description": "**A library, not an agent.** The preset exists to carry a persona roster,\nskills and integrations into the pod; nothing about it is startable. No\ninstance may be minted from it, it is not offered in a picker, and no flow\nmay be bound to it.\n\nThis is what an agent pack sets when its value is the specialist it ships\nrather than a dedicated agent to talk to. Nothing is lost by it: the\npersonas and skills install exactly as before, and `general-agent`\n([`Self::delegates_to_any_persona`]) reaches every persona on the pod — so\nthe orchestrator can still hand work to the specialist. What goes away is\nthe \"start a new agent as this\" entry that nobody wanted to pick.\n\nEnforced at the doors that mint an [`AgentInstance`] rather than in\n[`Self::load`], because resolving a persona or skill through this preset is\nprecisely what must keep working.\n\n[`AgentInstance`]: crate::agent_instance::AgentInstance"
           },
           "manifest_version": {
             "type": "integer",
@@ -7111,6 +7125,10 @@
           },
           "description": {
             "type": "string"
+          },
+          "library": {
+            "type": "boolean",
+            "description": "Not startable — see [`AgentPreset::library`]. Summaries still carry library\npresets (installing over one is still a slug collision, and the UI has a\nreason to show what a pack brought); a picker filters on this."
           },
           "name": {
             "type": "string"

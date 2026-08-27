@@ -223,6 +223,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &presets_dir,
     )
     .ok();
+    // A library preset is not something you can be, and `--preset` is a door like any
+    // other. Refusing here beats starting a session whose default persona resolves
+    // fine but whose roster was never meant to be an agent.
+    if let Some(p) = &active_preset
+        && let Err(e) = p.ensure_spawnable()
+    {
+        eprintln!("{} {}", ui::error("Error:"), e);
+        std::process::exit(1);
+    }
 
     // Persona resolution: explicit `--persona/-p` wins, then METALCRAFT_PERSONA, then
     // the active preset's default persona, then the Orchestrator — the agent that
@@ -511,7 +520,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!();
             println!("{}", ui::heading("Available agents:"));
-            for summary in AgentPreset::list_summaries(&presets_dir) {
+            for summary in AgentPreset::list_summaries(&presets_dir)
+                .into_iter()
+                .filter(|s| !s.library)
+            {
                 println!(
                     "  {:<20} {}",
                     ui::accent(&summary.slug),

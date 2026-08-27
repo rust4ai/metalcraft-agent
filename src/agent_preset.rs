@@ -97,6 +97,26 @@ pub struct AgentPreset {
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub delegates_to_any_persona: bool,
 
+    /// **A library, not an agent.** The preset exists to carry a persona roster,
+    /// skills and integrations into the pod; nothing about it is startable. No
+    /// instance may be minted from it, it is not offered in a picker, and no flow
+    /// may be bound to it.
+    ///
+    /// This is what an agent pack sets when its value is the specialist it ships
+    /// rather than a dedicated agent to talk to. Nothing is lost by it: the
+    /// personas and skills install exactly as before, and `general-agent`
+    /// ([`Self::delegates_to_any_persona`]) reaches every persona on the pod — so
+    /// the orchestrator can still hand work to the specialist. What goes away is
+    /// the "start a new agent as this" entry that nobody wanted to pick.
+    ///
+    /// Enforced at the doors that mint an [`AgentInstance`] rather than in
+    /// [`Self::load`], because resolving a persona or skill through this preset is
+    /// precisely what must keep working.
+    ///
+    /// [`AgentInstance`]: crate::agent_instance::AgentInstance
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub library: bool,
+
     #[serde(default)]
     pub skills: Vec<String>,
     /// Reads `integration_packs` too — the pre-0.30 name, still present in every
@@ -146,6 +166,11 @@ pub struct PresetSummary {
     pub pack_id: Option<String>,
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub read_only: bool,
+    /// Not startable — see [`AgentPreset::library`]. Summaries still carry library
+    /// presets (installing over one is still a slug collision, and the UI has a
+    /// reason to show what a pack brought); a picker filters on this.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub library: bool,
 }
 
 impl AgentPreset {
@@ -347,6 +372,23 @@ impl AgentPreset {
             || self.personas.iter().any(|p| p.slug == slug)
     }
 
+    /// Refuse a preset nobody can be. See [`Self::library`].
+    ///
+    /// Called at every door that mints an instance, so the refusal reaches the
+    /// caller as a message about *this* preset rather than as an agent that exists
+    /// but has nothing to say.
+    pub fn ensure_spawnable(&self) -> Result<(), String> {
+        if self.library {
+            return Err(format!(
+                "Agent preset '{}' is a library: it provides personas and skills for other \
+                 agents to use, and no agent can be started as it. Start '{DEFAULT_PRESET}' \
+                 instead — it can delegate to every persona installed on this pod.",
+                self.slug
+            ));
+        }
+        Ok(())
+    }
+
     pub fn list_available(presets_dir: &Path) -> Vec<String> {
         let mut slugs: Vec<String> =
             crate::integrations::list_files_layered(presets_dir, "agent_presets", "json")
@@ -378,6 +420,7 @@ impl AgentPreset {
                     persona_count: p.personas.len(),
                     pack_id: origin.pack_id().map(str::to_string),
                     read_only: origin.is_read_only(),
+                    library: p.library,
                 })
             })
             .collect()
@@ -476,6 +519,57 @@ mod tests {
 
     fn preset(json: &str) -> AgentPreset {
         serde_json::from_str(json).expect("parse")
+    }
+
+    /// A library preset still *resolves* — that is the whole point of keeping it.
+    /// What it must not do is mint an agent.
+    #[test]
+    fn a_library_preset_resolves_but_cannot_be_started() {
+        let p = preset(
+            r#"{"slug":"metalcraft-packs","name":"Metalcraft Packs","library":true,
+                "default_persona":"metalcraft-packs-agent","skills":["metalcraft-packs"],
+                "personas":[{"slug":"metalcraft-packs-agent","role":"default"}]}"#,
+        );
+        assert!(p.validate().is_ok(), "a library preset is still a valid preset");
+        assert_eq!(p.callable_personas(), vec!["metalcraft-packs-agent"]);
+        assert!(p.allows_persona("metalcraft-packs-agent"));
+
+        let err = p.ensure_spawnable().unwrap_err();
+        assert!(err.contains("metalcraft-packs"), "{err}");
+        assert!(err.contains("library"), "{err}");
+    }
+
+    /// The default: every preset written before the field existed, and every one
+    /// written since that did not ask to be a library.
+    #[test]
+    fn a_preset_without_the_flag_is_spawnable() {
+        let p = preset(r#"{"slug":"a","name":"A","default_persona":"x"}"#);
+        assert!(!p.library);
+        assert!(p.ensure_spawnable().is_ok());
+        // …and round-trips without growing a field nobody set.
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("library"), "{json}");
+    }
+
+    /// The picker reads summaries, so the flag has to survive that hop — a library
+    /// preset that looks startable in the list is the bug this guards.
+    #[test]
+    fn summaries_carry_the_library_flag() {
+        let dir = std::env::temp_dir().join(format!("preset-library-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        preset(r#"{"slug":"lib","name":"Lib","library":true,"default_persona":"x"}"#)
+            .save(&dir)
+            .expect("save");
+        preset(r#"{"slug":"real","name":"Real","default_persona":"x"}"#)
+            .save(&dir)
+            .expect("save");
+
+        let summaries = AgentPreset::list_summaries(&dir);
+        let lib = summaries.iter().find(|s| s.slug == "lib").expect("listed");
+        let real = summaries.iter().find(|s| s.slug == "real").expect("listed");
+        assert!(lib.library, "a library preset is still listed, but flagged");
+        assert!(!real.library);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
