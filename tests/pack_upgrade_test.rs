@@ -7,7 +7,7 @@
 //! in `agent_packs::install`: a higher bundled version upgrades, an equal one is
 //! skipped, and a *newer* install is never silently downgraded.
 //!
-//! Uses the bundled `metalcraft-email` pack as the vehicle (any seeded agent pack
+//! Uses the bundled `metalcraft-packs` pack as the vehicle (any seeded agent pack
 //! would do).
 //!
 //! Everything runs inside ONE `#[test]` so the process-global
@@ -15,7 +15,7 @@
 
 use std::fs;
 
-const PACK_ID: &str = "metalcraft-email";
+const PACK_ID: &str = "metalcraft-packs";
 
 #[test]
 fn seeding_installs_the_bundled_pack_and_never_downgrades_a_newer_one() {
@@ -33,12 +33,39 @@ fn seeding_installs_the_bundled_pack_and_never_downgrades_a_newer_one() {
     let installed = metalcraft_agent::agent_packs::find(PACK_ID).expect("seeded pack installs");
     let bundled_version = installed.manifest.version.clone();
 
+    // Compared against the manifest checked into `seed/`, field by field: the bug
+    // this descends from was an *installed* manifest that had gone stale against the
+    // bundled one, and only reading both catches that.
     let integration =
         metalcraft_agent::integrations::find_installed(PACK_ID).expect("vendored integration");
+    let bundled: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("seed/agent_packs")
+                .join(PACK_ID)
+                .join("integrations")
+                .join(PACK_ID)
+                .join("integration.json"),
+        )
+        .expect("bundled integration.json"),
+    )
+    .expect("bundled integration.json parses");
     assert_eq!(
-        integration.manifest.requires_env,
-        vec!["METALCRAFT_TOKEN".to_string()],
+        integration.manifest.version,
+        bundled["version"].as_str().unwrap(),
         "the installed manifest is the bundled one, not a stale copy"
+    );
+    let declared: Vec<String> = bundled["requires_env"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        integration.manifest.requires_env, declared,
+        "the installed manifest's requires_env is the bundled one, not a stale copy"
     );
 
     // 2. Seeding again is a no-op: same version in, same version out. (The skip is

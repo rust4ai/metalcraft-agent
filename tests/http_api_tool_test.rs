@@ -5,20 +5,25 @@
 //! had been failing against a directory that no longer exists — six red tests
 //! guarding nothing.
 //!
-//! What is worth guarding is the invariant that actually breaks silently: a seeded
-//! api-tool config that doesn't parse, or that parses but is malformed in a way the
-//! runtime only discovers when the model calls it. So sweep the seed tree.
+//! What is worth guarding is the invariant that actually breaks silently: a
+//! first-party api-tool config that doesn't parse, or that parses but is malformed
+//! in a way the runtime only discovers when the model calls it. So sweep the seed
+//! tree — and `unbundled_packs/` with it, since a pack that ships in this repo but
+//! not in the binary is still a pack we publish, and nobody would notice it rotting.
 
 use metalcraft_agent::tools::http_api::HttpApiToolConfig;
 use std::path::{Path, PathBuf};
 
-/// The directory each seeded agent pack vendors its integration in:
-/// `seed/agent_packs/<id>/integrations/<id>/`.
+/// The directory each first-party agent pack vendors its integration in:
+/// `<root>/<id>/integrations/<id>/`, across both pack roots — `seed/agent_packs`
+/// (embedded in the binary) and `unbundled_packs` (shipped by registry only).
 fn seeded_integration_dirs() -> Vec<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/agent_packs");
-    let packs =
-        std::fs::read_dir(&root).unwrap_or_else(|e| panic!("reading {}: {e}", root.display()));
-    packs
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    [repo.join("seed/agent_packs"), repo.join("unbundled_packs")]
+        .iter()
+        .flat_map(|root| {
+            std::fs::read_dir(root).unwrap_or_else(|e| panic!("reading {}: {e}", root.display()))
+        })
         .filter_map(|e| e.ok())
         .filter_map(|pack| {
             let id = pack.file_name().to_str()?.to_string();

@@ -407,6 +407,63 @@ pub fn collect_pack_files(
     out
 }
 
+/// Build an archive from a pack **directory** — a tree laid out exactly like the
+/// archive, with `agent_pack.json` at its root.
+///
+/// The counterpart to unpacking, and the only correct way to turn a checked-in
+/// pack (see `unbundled_packs/`) into something a registry can serve: the
+/// manifest's `content_sha256` and consent summary are computed here from the
+/// bytes, by the same code the pod verifies them with. A hand-rolled `zip -r`
+/// produces an archive whose manifest disagrees with its contents, and install
+/// rejects it.
+pub fn from_dir(dir: &std::path::Path) -> Result<Vec<u8>, String> {
+    let manifest_path = dir.join("agent_pack.json");
+    let raw = std::fs::read(&manifest_path)
+        .map_err(|e| format!("reading {}: {e}", manifest_path.display()))?;
+    let manifest: AgentPackManifest = serde_json::from_slice(&raw)
+        .map_err(|e| format!("{} does not parse: {e}", manifest_path.display()))?;
+
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    collect_dir(dir, dir, &mut files)?;
+    // `write` takes the manifest as a value and refuses a file map that also
+    // carries it — one source for the manifest, never two that can disagree.
+    files.remove("agent_pack.json");
+    write(manifest, files)
+}
+
+fn collect_dir(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("reading {}: {e}", dir.display()))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // Editor leftovers and `.DS_Store` are not pack content, and shipping one
+        // changes the content hash of an otherwise identical pack.
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_dir(&path, root, files)?;
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|e| format!("{} is not under {}: {e}", path.display(), root.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let bytes =
+            std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+        files.insert(rel, bytes);
+    }
+    Ok(())
+}
+
 /// Build an archive from a file map, computing and embedding the content hash.
 pub fn write(
     mut manifest: AgentPackManifest,

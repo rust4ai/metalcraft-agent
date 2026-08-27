@@ -2,8 +2,8 @@
   "manifest_version": 2,
   "slug": "metalcraft-assistant",
   "name": "Metalcraft Assistant",
-  "tagline": "Your email and packs — one agent.",
-  "description": "The ecosystem agent: an orchestrator that delegates to the specialist persona for each Metalcraft service, authenticated by a single account token.",
+  "tagline": "Your Metalcraft services — one agent.",
+  "description": "The ecosystem agent: an orchestrator that delegates to the specialist persona for each Metalcraft service it has a pack for. Install more from a registry and their specialists join it.",
   "default_persona": "orchestrator-agent",
   "personas": [
     {
@@ -12,26 +12,16 @@
       "description": "Delegates each job to the specialist built for it"
     },
     {
-      "slug": "metalcraft-email-agent",
-      "role": "subagent",
-      "description": "Reads a Metalcraft user's email — lists connected mailboxes, searches and lists messages, reads full messages and threads. Read-only: it can find and summarize mail but never sends, replies, deletes, or modifies it."
-    },
-    {
       "slug": "metalcraft-packs-agent",
       "role": "subagent",
       "description": "Helps a user discover integrations in the Metalcraft Packs registry — searches and browses the catalog, explains what a pack does and which keys it needs, and points the user to install it on their agent."
     }
   ],
   "skills": [
-    "metalcraft-email",
     "metalcraft-packs"
   ],
   "integration_packs": [
-    "metalcraft-email",
     "metalcraft-packs"
   ],
-  "requires_env": [
-    "METALCRAFT_TOKEN"
-  ],
-  "version": "2.1.0"
+  "version": "3.0.0"
 }

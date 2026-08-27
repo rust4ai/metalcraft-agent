@@ -296,10 +296,20 @@ mod native_tools_drift {
 
     #[test]
     fn seed_manifests_match_native_integration_tool_names() {
-        let seed = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed/agent_packs");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // `unbundled_packs/` too: `email` is where the native tools actually are,
+        // and unbundling it stopped it shipping on every pod — it did not stop it
+        // being installable, so its manifest still has to match the binary.
+        let roots = [root.join("seed/agent_packs"), root.join("unbundled_packs")];
         let mut checked = 0;
-        for entry in std::fs::read_dir(&seed).expect("seed/agent_packs must exist") {
+        for entry in roots
+            .iter()
+            .flat_map(|dir| std::fs::read_dir(dir).expect("pack root must exist"))
+        {
             let pack = entry.unwrap().path();
+            if !pack.is_dir() {
+                continue;
+            }
             let id = pack
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -328,11 +338,11 @@ mod native_tools_drift {
             );
             checked += 1;
         }
-        // `email` is seeded with native tools, so at least one pack must be checked;
-        // a zero here means the guard silently stopped covering anything.
+        // `email` ships native tools, so at least one pack must be checked; a zero
+        // here means the guard silently stopped covering anything.
         assert!(
             checked > 0,
-            "expected at least one seeded pack with native tools"
+            "expected at least one pack with native tools"
         );
     }
 }

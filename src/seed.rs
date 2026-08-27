@@ -499,7 +499,9 @@ mod tests {
     /// The embedded `seed/` tree resolves and contains the expected top-level
     /// dirs and at least the first-party packs we ship — guards against an
     /// empty/mis-rooted `include_dir!`. (The external-service packs now live in
-    /// the `metalcraft-agent-external-packs` repo and are no longer embedded.)
+    /// the `metalcraft-agent-external-packs` repo and are no longer embedded;
+    /// the two email packs live in `unbundled_packs/` — see its README — so a
+    /// pod does not arrive holding the keys to somebody's mailbox.)
     #[test]
     fn embedded_seed_tree_has_expected_contents() {
         assert!(
@@ -515,19 +517,21 @@ mod tests {
             .dirs()
             .filter_map(|d| d.path().file_name().and_then(|s| s.to_str()))
             .collect();
-        for expected in ["email", "metalcraft-email", "metalcraft-packs"] {
+        assert!(
+            ids.contains(&"metalcraft-packs"),
+            "pack 'metalcraft-packs' should be embedded, got {ids:?}"
+        );
+        for unbundled in ["email", "metalcraft-email"] {
             assert!(
-                ids.contains(&expected),
-                "pack '{expected}' should be embedded, got {ids:?}"
+                !ids.contains(&unbundled),
+                "pack '{unbundled}' lives in unbundled_packs/ and must not be seeded — \
+                 a fresh pod is not supposed to arrive with mailbox access"
             );
         }
         // A seeded agent pack is a real archive: a manifest, exactly one preset, and
         // the persona, skill and vendored integration that preset needs. Anything
         // missing here is caught by `Bundle::validate` at boot instead — on the pod,
         // where the operator can do nothing about it.
-        //
-        // (The email pack vendors a manifest and no `api_tools/`: its tools are
-        // native Rust, compiled into the agent and declared in `native_tools`.)
         for id in ids {
             let dir = SEED.get_dir(format!("agent_packs/{id}")).expect("pack dir");
             let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
@@ -560,34 +564,37 @@ mod tests {
     /// Every first-party `metalcraft-*` pack must carry the ecosystem tag —
     /// `ecosystem_pack_ids` is what marks a pack as ours rather than a stranger's.
     /// This guards a new subapp pack shipped without the tag.
+    ///
+    /// Reads the repo rather than the embedded tree, so it covers the packs in
+    /// `unbundled_packs/` too: not shipping in the binary does not make a pack
+    /// less ours, and the tag is what says so once it arrives from a registry.
     #[test]
     fn metalcraft_packs_are_tagged_ecosystem() {
         use crate::integrations::{IntegrationManifest, is_ecosystem};
-        let packs = SEED.get_dir("agent_packs").expect("agent packs embedded");
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut checked = 0;
-        for item in packs.dirs() {
-            let id = item
-                .path()
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            if !id.starts_with("metalcraft-") {
-                continue;
+        for root in [repo.join("seed/agent_packs"), repo.join("unbundled_packs")] {
+            for entry in fs::read_dir(&root).expect("pack root must exist") {
+                let pack = entry.expect("readable entry").path();
+                let id = pack
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !id.starts_with("metalcraft-") {
+                    continue;
+                }
+                let manifest_path = pack.join(format!("integrations/{id}/integration.json"));
+                let manifest_json = fs::read_to_string(&manifest_path)
+                    .unwrap_or_else(|e| panic!("{id} missing integration.json: {e}"));
+                let manifest: IntegrationManifest = serde_json::from_str(&manifest_json)
+                    .unwrap_or_else(|e| panic!("{id} integration.json invalid: {e}"));
+                assert!(
+                    is_ecosystem(&manifest),
+                    "pack '{id}' must carry the metalcraft-ecosystem tag"
+                );
+                checked += 1;
             }
-            let manifest_json = item
-                .get_file(
-                    item.path()
-                        .join(format!("integrations/{id}/integration.json")),
-                )
-                .and_then(|f| f.contents_utf8())
-                .unwrap_or_else(|| panic!("{id} missing integration.json"));
-            let manifest: IntegrationManifest = serde_json::from_str(manifest_json)
-                .unwrap_or_else(|e| panic!("{id} integration.json invalid: {e}"));
-            assert!(
-                is_ecosystem(&manifest),
-                "pack '{id}' must carry the metalcraft-ecosystem tag"
-            );
-            checked += 1;
         }
         assert!(
             checked >= 2,

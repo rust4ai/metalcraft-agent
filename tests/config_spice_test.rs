@@ -12,8 +12,9 @@
 //!
 //!   2. `configuring_a_pack_via_meta_tools_works` — always runs, no network and
 //!      NO LLM. Calls the meta tools directly (exactly what the agent would do
-//!      for "set up X with key Y") against the `email` pack and proves the side
-//!      effects actually land: the key is stored, reported configured, and never
+//!      for "set up X with key Y") against the `email` pack — installed by this
+//!      file's fixture from `unbundled_packs/`, since it is no longer seeded —
+//!      and proves the side effects actually land: the key is stored, reported configured, and never
 //!      echoed back. This is the deterministic proof that the meta tools *do the
 //!      thing*.
 //!
@@ -89,7 +90,29 @@ fn init() {
         // so the install tiers below start from a clean slate and prove they do
         // the enabling themselves.
         seed::ensure_defaults();
+
+        // The two email packs are no longer seeded — they live in
+        // `unbundled_packs/` so a pod does not arrive holding mailbox access —
+        // but they are still what these tiers configure, and a pack with a
+        // required key is exactly the fixture the meta-tool tiers need. Install
+        // them the way a user would after finding them on a registry, which also
+        // proves the unbundled directory still builds into a valid archive.
+        for id in ["email", "metalcraft-email"] {
+            install_unbundled_pack(id);
+        }
     });
+}
+
+/// Install a pack from `unbundled_packs/<id>` — the checked-in tree built into a
+/// real archive by the same code a registry upload would use.
+fn install_unbundled_pack(id: &str) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("unbundled_packs")
+        .join(id);
+    let bytes = metalcraft_agent::agent_packs::bundle::from_dir(&dir)
+        .unwrap_or_else(|e| panic!("building the '{id}' pack from {}: {e}", dir.display()));
+    metalcraft_agent::agent_packs::install(&bytes, "test-fixture")
+        .unwrap_or_else(|e| panic!("installing the '{id}' pack: {e}"));
 }
 
 /// Serialize tests that touch global key state. All tiers share one data dir per
@@ -301,12 +324,19 @@ fn config_agent_wires_up() {
         "config-agent should reference the managing-integrations skill"
     );
 
-    // A seeded integration is simply present — there is no off state to turn on.
+    // An installed integration is simply present — there is no off state to turn on.
+    assert!(
+        integrations::list_installed()
+            .iter()
+            .any(|p| p.manifest.id == "metalcraft-packs"),
+        "metalcraft-packs pack should be installed (seeded)"
+    );
     assert!(
         integrations::list_installed()
             .iter()
             .any(|p| p.manifest.id == "metalcraft-email"),
-        "metalcraft-email pack should be installed (seeded)"
+        "metalcraft-email pack should be installed (by this file's fixture, \
+         from unbundled_packs/ — it is not seeded)"
     );
 }
 

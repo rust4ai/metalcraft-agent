@@ -467,15 +467,23 @@ built-in id; no downgrading an installed pack; and an optional `expected_sha256`
 
 **Packs on master — seven, all first-party:**
 
-| id | What it is |
-|---|---|
-| `metalcraft-calendar` | Calendars, events, guest invites; timezone-aware (`mcal_now`) |
-| `metalcraft-contacts` | Address book / CRM, birthdays, tags |
-| `metalcraft-notes` | Markdown notes with categories |
-| `metalcraft-drive` | Drive-style file and folder store |
-| `metalcraft-email` | The hosted read-only IMAP cache service |
-| `metalcraft-packs` | Read-only discovery and search over the pack registry |
-| `email` | Generic read-only IMAP against any provider — **native Rust tools**, not HTTP |
+| id | What it is | Bundled? |
+|---|---|---|
+| `metalcraft-calendar` | Calendars, events, guest invites; timezone-aware (`mcal_now`) | yes |
+| `metalcraft-contacts` | Address book / CRM, birthdays, tags | yes |
+| `metalcraft-notes` | Markdown notes with categories | yes |
+| `metalcraft-drive` | Drive-style file and folder store | yes |
+| `metalcraft-packs` | Read-only discovery and search over the pack registry | yes |
+| `metalcraft-email` | The hosted read-only IMAP cache service | **no** — `unbundled_packs/` |
+| `email` | Generic read-only IMAP against any provider — **native Rust tools**, not HTTP | **no** — `unbundled_packs/` |
+
+The two email packs ship in the agent repo but **not in the agent binary**: they
+live in `unbundled_packs/`, outside the `include_dir!` tree that
+`seed::install_seed_agent_packs` installs on every boot. Reading somebody's
+mailbox is not a capability a pod should arrive holding, so they are distributed
+like anyone else's pack — published to a registry and installed on request. The
+`email` pack's `email_*` tools are still compiled into the binary, so installing
+it later needs no special build.
 
 Third-party packs are not bundled. Thirteen of them — `calcom`, `cloudflare`, `s3`, `discord`,
 `discord_admin`, `github`, `linear`, `railway`, `render`, `sentry`, `solarabase`, `sprite_builder`,
@@ -485,9 +493,9 @@ Third-party packs are not bundled. Thirteen of them — `calcom`, `cloudflare`, 
 **Native tools.** `native_pack_tool_names()` covers exactly two packs: `s3`
 (`s3_list_buckets|list_objects|get_object|put_object|delete_object`, which need SigV4 request
 signing) and `email` (`email_list_mailboxes|search|list_recent|get_message`, which speak IMAP).
-Everything else is declarative JSON. A unit test, `native_tools_drift`, cross-checks every seeded
-manifest against that map so enable/disable state can never diverge from the tools that actually
-exist.
+Everything else is declarative JSON. A unit test, `native_tools_drift`, cross-checks every
+first-party manifest — `seed/agent_packs/` and `unbundled_packs/` both — against that map, so an
+unbundled pack cannot drift from the tools the binary actually has.
 
 ### 3.2 Declarative HTTP tools
 
