@@ -3890,7 +3890,9 @@ struct RunFlowRequest {
     #[serde(default)]
     model_name: Option<String>,
     /// Values for the flow's declared entry `inputs`. Object of `{ name: value }`;
-    /// missing inputs fall back to their declared defaults. Ignored by v1 flows.
+    /// an input not named here falls back to its declared default, and a required
+    /// one with no default is left unset — a warning on the run rather than a
+    /// refusal to start it, so a flow can always be tried. Ignored by v1 flows.
     #[serde(default)]
     inputs: Option<serde_json::Value>,
     /// Run as this agent, so the run recalls from and writes to its memory and

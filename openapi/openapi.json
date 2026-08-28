@@ -7599,7 +7599,7 @@
         "type": "object",
         "properties": {
           "inputs": {
-            "description": "Values for the flow's declared entry `inputs`. Object of `{ name: value }`;\nmissing inputs fall back to their declared defaults. Ignored by v1 flows."
+            "description": "Values for the flow's declared entry `inputs`. Object of `{ name: value }`;\nan input not named here falls back to its declared default, and a required\none with no default is left unset — a warning on the run rather than a\nrefusal to start it, so a flow can always be tried. Ignored by v1 flows."
           },
           "instance_id": {
             "type": [

@@ -157,8 +157,16 @@ fn roster_for(flow_id: &str) -> Option<Vec<String>> {
 
 impl<'a> FlowExecutor<'a> {
     /// Build an executor for `flow`, seeding state from the entry node's declared
-    /// `inputs` and the caller-supplied `args` object. Returns an error naming any
-    /// missing required inputs.
+    /// `inputs` and the caller-supplied `args` object.
+    ///
+    /// A required input nobody supplied is a **warning, not a refusal**. Pressing
+    /// Run on an automation should show you what it does, and refusing the whole
+    /// run left the person who pressed it with an error and nothing to look at —
+    /// while every template worth shipping declares inputs, so the refusal landed
+    /// on exactly the flows someone was trying to learn from. The run proceeds
+    /// with the input unset (`{{it}}` renders empty, as any missing path does)
+    /// and the warning rides in the summary, the log and the diagnostics trace,
+    /// so a nonsense-looking prompt has its cause attached.
     pub fn new(
         context: &'a AgentRuntimeContext,
         flow: SavedFlow,
@@ -177,15 +185,14 @@ impl<'a> FlowExecutor<'a> {
             .map(str::to_string);
 
         // Seed variables from typed inputs, if any.
+        let mut unsupplied = Vec::new();
         let variables = match serde_json::from_value::<EntryData>(entry.data.clone()) {
             Ok(EntryData {
                 inputs: Some(inputs),
                 ..
             }) => {
                 let (vars, missing) = Variables::seed_from_inputs(&inputs, args);
-                if !missing.is_empty() {
-                    return Err(format!("missing required inputs: {}", missing.join(", ")));
-                }
+                unsupplied = missing;
                 vars
             }
             _ => Variables::from_value(if args.is_object() {
@@ -196,7 +203,14 @@ impl<'a> FlowExecutor<'a> {
         };
 
         let step_budget = step_budget_for(&flow);
-        let warnings = crate::flow_install::runtime_warnings(&flow);
+        let mut warnings = crate::flow_install::runtime_warnings(&flow);
+        if !unsupplied.is_empty() {
+            warnings.push(format!(
+                "Required inputs not supplied: {} — they are unset for this run, so \
+                 anything reading them gets an empty value.",
+                unsupplied.join(", ")
+            ));
+        }
         let flow_id = flow.id.clone();
         Ok(Self {
             context,
