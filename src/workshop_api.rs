@@ -4336,15 +4336,31 @@ fn turns_in(messages: &[ChatMessageWire]) -> usize {
 /// Either speaker counts, because either can be the last word — a row that only
 /// followed the user would show nothing until they replied, and the thing worth
 /// seeing after an agent works alone for a while is what it came back with.
-/// Tool calls, reasoning and reset dividers are skipped: they are machinery, not
-/// something said.
+/// Reasoning and reset dividers are skipped: they are machinery, not something
+/// said. So are tool calls — except the *reply* tools, which are how the agent
+/// speaks here at all. A chat session runs tool-only output (`tool_choice`
+/// required, `say_to_user`/`ask_user` terminal), so the agent's answer is never
+/// an `Assistant` message: it is the `message`/`question` argument of a reply
+/// tool call. Skipping those made every row fall back to the last thing the
+/// *user* typed, which is exactly the label this function exists not to show.
 fn preview_of(messages: &[ChatMessageWire]) -> Option<String> {
     messages.iter().rev().find_map(|m| match m {
         ChatMessageWire::User { content } | ChatMessageWire::Assistant { content } => {
             one_line(content)
         }
+        ChatMessageWire::ToolCall { name, args, .. } if is_reply_tool(name) => {
+            one_line(reply_tool_text(args)?)
+        }
         _ => None,
     })
+}
+
+/// The user-facing text carried by a reply tool call: `say_to_user` puts it in
+/// `message`, `ask_user` in `question`.
+fn reply_tool_text(args: &serde_json::Value) -> Option<&str> {
+    args.get("message")
+        .or_else(|| args.get("question"))
+        .and_then(|v| v.as_str())
 }
 
 /// Collapse whitespace and cut to a row's worth of characters, or `None` when
@@ -8399,6 +8415,67 @@ mod summary_tests {
         // A turn still mid-flight ends in tool traffic. Labelling the row with a
         // tool's output would show the user shell noise they never wrote.
         assert_eq!(preview_of(&messages).as_deref(), Some("deploy it"));
+    }
+
+    #[test]
+    fn the_agents_reply_is_a_preview_even_though_it_arrives_as_a_tool_call() {
+        let messages = vec![
+            user("deploy it"),
+            ChatMessageWire::ToolCall {
+                id: "t".into(),
+                call_id: None,
+                name: "bash".into(),
+                args: serde_json::Value::Null,
+            },
+            ChatMessageWire::ToolResult {
+                id: "t".into(),
+                call_id: None,
+                name: "bash".into(),
+                result: "ok".into(),
+            },
+            ChatMessageWire::ToolCall {
+                id: "r".into(),
+                call_id: None,
+                name: "say_to_user".into(),
+                args: serde_json::json!({ "message": "Deployed — build 41 is live." }),
+            },
+            ChatMessageWire::ToolResult {
+                id: "r".into(),
+                call_id: None,
+                name: "say_to_user".into(),
+                result: "{\"delivered\":true}".into(),
+            },
+        ];
+        // A chat runs tool-only output, so the agent never emits an `Assistant`
+        // message: its answer is the argument of the terminal reply tool. While
+        // that counted as machinery, every row was labelled with the user's last
+        // line no matter how much the agent had said since.
+        assert_eq!(
+            preview_of(&messages).as_deref(),
+            Some("Deployed — build 41 is live.")
+        );
+    }
+
+    #[test]
+    fn a_question_back_to_the_user_previews_the_question() {
+        let messages = vec![
+            user("book me a flight"),
+            ChatMessageWire::ToolCall {
+                id: "q".into(),
+                call_id: None,
+                name: "ask_user".into(),
+                args: serde_json::json!({
+                    "question": "Which airport — JFK or LGA?",
+                    "options": ["JFK", "LGA"],
+                }),
+            },
+        ];
+        // `ask_user` carries its text under a different key, and a row waiting on
+        // an answer is exactly the one worth reading the question off.
+        assert_eq!(
+            preview_of(&messages).as_deref(),
+            Some("Which airport — JFK or LGA?")
+        );
     }
 
     #[test]
