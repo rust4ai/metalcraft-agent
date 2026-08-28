@@ -97,6 +97,11 @@ The **only required variable is `OPENAI_API_KEY`**. See [Configuration](#configu
 See [docs/architecture.md](docs/architecture.md) and the docs at
 [metalcraftai.com/docs](https://metalcraftai.com/docs) for the full model.
 
+Anything with a face — a web UI, a native client, a marketing page — is built to
+[docs/design-system.md](docs/design-system.md): the palette, type, geometry and
+component language of the landing hero, written down so a second surface can be
+built without looking at the first.
+
 ## Running it
 
 **Interactive / one-shot CLI** — `metalcraft-agent [--auto-approve] [--persona <slug>] [task]`
