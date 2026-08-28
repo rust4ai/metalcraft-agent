@@ -91,7 +91,9 @@ async fn validating_reports_what_is_wrong_and_writes_nothing() {
     let errors = body["errors"].as_array().unwrap();
     assert!(!errors.is_empty(), "{body:#}");
     assert!(
-        errors.iter().any(|e| e.as_str().unwrap().contains("nowhere")),
+        errors
+            .iter()
+            .any(|e| e.as_str().unwrap().contains("nowhere")),
         "the reason should name the node it could not find: {body:#}"
     );
 
@@ -108,7 +110,10 @@ async fn validating_reports_what_is_wrong_and_writes_nothing() {
     // SPEC §5.2: any `vendor:name` is valid and must round-trip. An editor that
     // reported someone's `slack:send_message` as broken would be telling them to
     // delete a node the runtime is perfectly happy with.
-    let vendor = GOOD.replace(r#""node_type": "prompt""#, r#""node_type": "slack:send_message""#);
+    let vendor = GOOD.replace(
+        r#""node_type": "prompt""#,
+        r#""node_type": "slack:send_message""#,
+    );
     let (_, body) = post("/api/v1/flows/validate", &vendor).await;
     assert_eq!(body["valid"], true, "{body:#}");
 

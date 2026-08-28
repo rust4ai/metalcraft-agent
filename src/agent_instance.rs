@@ -49,7 +49,9 @@ pub enum InstanceOrigin {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender: Option<String>,
     },
-    Flow { flow_id: String },
+    Flow {
+        flow_id: String,
+    },
 }
 
 impl Default for InstanceOrigin {

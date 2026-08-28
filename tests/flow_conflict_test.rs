@@ -98,10 +98,9 @@ async fn a_save_from_a_stale_copy_is_refused_and_the_first_edit_survives() {
     // ── and the first edit is still there ───────────────────────────────────
     // The whole point. A last-writer-wins save would have replaced it with the
     // second person's copy and told nobody.
-    let saved: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(paths::flows_dir().join("brief.json")).unwrap(),
-    )
-    .unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(paths::flows_dir().join("brief.json")).unwrap())
+            .unwrap();
     assert_eq!(
         saved["flow"]["nodes"][1]["data"]["prompt"],
         "edited by the first"

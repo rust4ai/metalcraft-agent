@@ -74,10 +74,7 @@ pub fn load_due_candidates() -> Vec<RunnableSchedule> {
 /// The graph is validated here too: a schedule is only as runnable as the flow it
 /// points at, and finding out at 3am that the flow was malformed is worse than
 /// finding out on the poll that skips it.
-pub fn parse_schedule(
-    scheduled: &ScheduledFlow,
-    flow: &SavedFlow,
-) -> Result<FlowSchedule, String> {
+pub fn parse_schedule(scheduled: &ScheduledFlow, flow: &SavedFlow) -> Result<FlowSchedule, String> {
     let validation_errors = validate(flow);
     if !validation_errors.is_empty() {
         let joined = validation_errors
@@ -108,7 +105,10 @@ pub fn parse_schedule(
         }
         metalcraft_flows::ScheduleTrigger::Cron { cron } => {
             cron::Schedule::from_str(cron).map_err(|e| {
-                format!("schedule '{}' has invalid cron expression '{cron}': {e}", scheduled.id)
+                format!(
+                    "schedule '{}' has invalid cron expression '{cron}': {e}",
+                    scheduled.id
+                )
             })?;
             Ok(FlowSchedule::Cron(cron.clone()))
         }

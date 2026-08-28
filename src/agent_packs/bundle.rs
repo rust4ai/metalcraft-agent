@@ -436,8 +436,7 @@ fn collect_dir(
     root: &std::path::Path,
     files: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), String> {
-    let entries =
-        std::fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("reading {}: {e}", dir.display()))?;
         let path = entry.path();
@@ -457,8 +456,7 @@ fn collect_dir(
             .map_err(|e| format!("{} is not under {}: {e}", path.display(), root.display()))?
             .to_string_lossy()
             .replace('\\', "/");
-        let bytes =
-            std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
         files.insert(rel, bytes);
     }
     Ok(())

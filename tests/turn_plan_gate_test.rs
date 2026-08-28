@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use metalcraft::ToolRegistry;
-use metalcraft_agent::tools::{ReplyEnvelope, ReplySink, ToolConfig, create_registry_for_with_config};
+use metalcraft_agent::tools::{
+    ReplyEnvelope, ReplySink, ToolConfig, create_registry_for_with_config,
+};
 use tokio::sync::Mutex;
 
 type Delivered = Arc<Mutex<Vec<(String, bool)>>>;

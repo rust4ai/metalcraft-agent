@@ -229,11 +229,7 @@ fn split_handoff(answer: &str) -> (String, Option<HandoffReport>) {
     };
 
     let body = &after[..end_rel];
-    let prose = format!(
-        "{}{}",
-        &answer[..start],
-        &after[end_rel + 3..]
-    );
+    let prose = format!("{}{}", &answer[..start], &after[end_rel + 3..]);
     let prose = prose.trim().to_string();
 
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body.trim()) else {
@@ -598,7 +594,6 @@ impl metalcraft::Tool for SubAgentTool {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,7 +615,10 @@ mod tests {
         assert_eq!(prose, "The page claims 4 features the repo no longer has.");
         let report = report.expect("block should parse");
         assert!(!report.completed);
-        assert_eq!(report.not_done, vec!["edit Hero.tsx to drop the 4 stale claims"]);
+        assert_eq!(
+            report.not_done,
+            vec!["edit Hero.tsx to drop the 4 stale claims"]
+        );
         assert_eq!(report.suggest_persona.as_deref(), Some("coding-agent"));
     }
 
@@ -643,7 +641,10 @@ so here it is.\n```handoff\n{\"completed\": false, \"not_done\": [\"the edits\"]
         assert!(report.is_none(), "unparseable means silent, not unfinished");
 
         let (_, report) = split_handoff("done\n```handoff\n{\"completed\": false");
-        assert!(report.is_none(), "an unterminated fence is truncation, not a report");
+        assert!(
+            report.is_none(),
+            "an unterminated fence is truncation, not a report"
+        );
     }
 
     /// `completed` omitted: infer it from whether anything was listed, so a model
@@ -660,7 +661,10 @@ so here it is.\n```handoff\n{\"completed\": false, \"not_done\": [\"the edits\"]
 
     #[test]
     fn nothing_declared_uses_the_default() {
-        assert_eq!(resolve_timeout_secs(None, None), DEFAULT_SUB_AGENT_TIMEOUT_SECS);
+        assert_eq!(
+            resolve_timeout_secs(None, None),
+            DEFAULT_SUB_AGENT_TIMEOUT_SECS
+        );
     }
 
     #[test]
@@ -677,9 +681,15 @@ so here it is.\n```handoff\n{\"completed\": false, \"not_done\": [\"the edits\"]
 
     #[test]
     fn zero_and_garbage_fall_back_rather_than_disabling_the_guard() {
-        assert_eq!(resolve_timeout_secs(Some(0), None), DEFAULT_SUB_AGENT_TIMEOUT_SECS);
+        assert_eq!(
+            resolve_timeout_secs(Some(0), None),
+            DEFAULT_SUB_AGENT_TIMEOUT_SECS
+        );
         assert_eq!(resolve_timeout_secs(Some(0), Some(900)), 900);
-        assert_eq!(resolve_timeout_secs(None, Some(0)), DEFAULT_SUB_AGENT_TIMEOUT_SECS);
+        assert_eq!(
+            resolve_timeout_secs(None, Some(0)),
+            DEFAULT_SUB_AGENT_TIMEOUT_SECS
+        );
     }
 
     /// A stop pressed before the delegation starts must not start it. This is the
@@ -697,7 +707,10 @@ so here it is.\n```handoff\n{\"completed\": false, \"not_done\": [\"the edits\"]
             .expect("the tool answers rather than failing");
         assert_eq!(out["stopped"], true, "{out}");
         assert!(
-            out["result"].as_str().unwrap().contains("stopped by the user"),
+            out["result"]
+                .as_str()
+                .unwrap()
+                .contains("stopped by the user"),
             "the parent needs to read why it got nothing: {out}"
         );
     }
@@ -742,7 +755,13 @@ so here it is.\n```handoff\n{\"completed\": false, \"not_done\": [\"the edits\"]
 
     #[test]
     fn no_declaration_can_escape_the_ceiling() {
-        assert_eq!(resolve_timeout_secs(None, Some(u64::MAX)), MAX_SUB_AGENT_TIMEOUT_SECS);
-        assert_eq!(resolve_timeout_secs(Some(u64::MAX), None), MAX_SUB_AGENT_TIMEOUT_SECS);
+        assert_eq!(
+            resolve_timeout_secs(None, Some(u64::MAX)),
+            MAX_SUB_AGENT_TIMEOUT_SECS
+        );
+        assert_eq!(
+            resolve_timeout_secs(Some(u64::MAX), None),
+            MAX_SUB_AGENT_TIMEOUT_SECS
+        );
     }
 }

@@ -786,7 +786,10 @@ pub fn build_router(api_key: String) -> Router {
         )
         .route("/api/v1/scheduled-flows/{id}", get(get_scheduled_flow))
         .route("/api/v1/scheduled-flows/{id}", put(put_scheduled_flow))
-        .route("/api/v1/scheduled-flows/{id}", delete(delete_scheduled_flow))
+        .route(
+            "/api/v1/scheduled-flows/{id}",
+            delete(delete_scheduled_flow),
+        )
         .route(
             "/api/v1/flows/{id}/check-dependencies",
             post(post_check_flow_dependencies),
@@ -1885,9 +1888,7 @@ async fn delete_agent_instance(Path(id): Path<String>) -> Response {
             .map(|row| {
                 format!(
                     "{} ({})",
-                    row.flow_name
-                        .as_deref()
-                        .unwrap_or(&row.scheduled.flow_id),
+                    row.flow_name.as_deref().unwrap_or(&row.scheduled.flow_id),
                     row.scheduled.schedule.display_name()
                 )
             })
@@ -2941,10 +2942,7 @@ async fn put_scheduled_flow(
         // Checked, not created: moving a schedule onto an agent that does not
         // exist would leave it firing into nothing every morning, silently.
         if crate::agent_instance::load(&instance_id).is_err() {
-            return err_json(
-                StatusCode::BAD_REQUEST,
-                format!("no agent '{instance_id}'"),
-            );
+            return err_json(StatusCode::BAD_REQUEST, format!("no agent '{instance_id}'"));
         }
         sf.instance_id = Some(instance_id);
     }
@@ -4197,7 +4195,10 @@ fn one_line(text: &str) -> Option<String> {
 
 /// When a chat was last written, RFC-3339.
 fn chat_updated_at(id: &str) -> Option<String> {
-    let modified = std::fs::metadata(chat_file_path(id)).ok()?.modified().ok()?;
+    let modified = std::fs::metadata(chat_file_path(id))
+        .ok()?
+        .modified()
+        .ok()?;
     Some(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
 }
 
@@ -4292,7 +4293,6 @@ enum ChatMessageWire {
         reason: String,
     },
 }
-
 
 impl ChatMessageWire {
     /// The model-facing form of this message, or `None` when it has none.
@@ -4585,7 +4585,7 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
             // finished cleanly; reset so the user can retry.
             interrupt: Arc::new(AtomicBool::new(false)),
             pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
-        plan: Arc::new(std::sync::Mutex::new(Vec::new())),
+            plan: Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         out.insert(pc.id.clone(), Arc::new(Mutex::new(session)));
     }
@@ -5287,7 +5287,9 @@ enum ChatEvent {
     /// This turn's plan, as `update_plan` wrote it. Sent on every change,
     /// including the empty list a new turn starts with, so a client renders the
     /// plan as it stands rather than accumulating every version of it.
-    Plan { steps: Vec<crate::turn_plan::PlanStep> },
+    Plan {
+        steps: Vec<crate::turn_plan::PlanStep>,
+    },
     /// A queued message joined the turn that was already running, rather than
     /// waiting for it to end. The client should stop showing it as pending.
     Injected { message: String },
@@ -6051,7 +6053,9 @@ fn plan_sink(
 ) -> crate::turn_plan::PlanSink {
     Arc::new(move |steps: &[crate::turn_plan::PlanStep]| {
         *held.lock().unwrap_or_else(|e| e.into_inner()) = steps.to_vec();
-        announce(ChatEvent::Plan { steps: steps.to_vec() });
+        announce(ChatEvent::Plan {
+            steps: steps.to_vec(),
+        });
     })
 }
 
@@ -6187,7 +6191,10 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
             })
         };
         let step_guard = stoppable(
-            crate::guard::build_agent_guard(crate::guard::GuardConfig::default(), diagnostics.clone()),
+            crate::guard::build_agent_guard(
+                crate::guard::GuardConfig::default(),
+                diagnostics.clone(),
+            ),
             interrupt.clone(),
         );
         let llm_call_hook: Option<metalcraft::LlmCallHook> = diagnostics.as_ref().map(|d| {
@@ -6240,13 +6247,13 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
                     });
                 })
             }),
-        chat_mailbox(pending_for_mailbox.clone(), {
-            let sender = sender.clone();
-            Arc::new(move |ev| {
-                let _ = sender.send(ev);
+            chat_mailbox(pending_for_mailbox.clone(), {
+                let sender = sender.clone();
+                Arc::new(move |ev| {
+                    let _ = sender.send(ev);
+                })
             })
-        })
-        .into(),
+            .into(),
         )
         .await;
 
@@ -7502,7 +7509,10 @@ fn new_gateway_chat_id(sender_key: &str, started_at: i64) -> String {
 /// so it survives a restart, and it never takes a session lock while holding the
 /// store's (the pod locks store-then-session everywhere, and reversing it here
 /// would be the one place a deadlock could come from).
-fn latest_gateway_session(chats: &HashMap<String, Arc<Mutex<ChatSession>>>, key: &str) -> Option<String> {
+fn latest_gateway_session(
+    chats: &HashMap<String, Arc<Mutex<ChatSession>>>,
+    key: &str,
+) -> Option<String> {
     let prefix = format!("{key}-");
     chats
         .keys()
@@ -8084,7 +8094,11 @@ mod summary_tests {
         let preview = preview_of(&[user(&format!("line one\n\n  line two {long}"))]).unwrap();
         assert!(!preview.contains('\n'), "a row is one line");
         assert!(preview.starts_with("line one line two"));
-        assert_eq!(preview.chars().count(), 81, "80 characters plus the ellipsis");
+        assert_eq!(
+            preview.chars().count(),
+            81,
+            "80 characters plus the ellipsis"
+        );
         assert!(preview.ends_with('…'));
     }
 
@@ -8095,8 +8109,13 @@ mod summary_tests {
         // An empty last message falls back to the last one with words in it,
         // rather than blanking a row that has plenty to show.
         assert_eq!(
-            preview_of(&[user("still here"), ChatMessageWire::Assistant { content: String::new() }])
-                .as_deref(),
+            preview_of(&[
+                user("still here"),
+                ChatMessageWire::Assistant {
+                    content: String::new()
+                }
+            ])
+            .as_deref(),
             Some("still here")
         );
     }
@@ -8127,7 +8146,7 @@ mod transcript_tests {
             busy: false,
             interrupt: Arc::new(AtomicBool::new(false)),
             pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
-        plan: Arc::new(std::sync::Mutex::new(Vec::new())),
+            plan: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -8264,8 +8283,7 @@ mod transcript_tests {
 #[cfg(test)]
 mod gateway_tests {
     use super::{
-        ChatSession, SessionPreset, gateway_sender_key, latest_gateway_session,
-        new_gateway_chat_id,
+        ChatSession, SessionPreset, gateway_sender_key, latest_gateway_session, new_gateway_chat_id,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -8322,7 +8340,7 @@ mod gateway_tests {
                     busy: false,
                     interrupt: Arc::new(AtomicBool::new(false)),
                     pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
-        plan: Arc::new(std::sync::Mutex::new(Vec::new())),
+                    plan: Arc::new(std::sync::Mutex::new(Vec::new())),
                 };
                 ((*id).to_string(), Arc::new(Mutex::new(s)))
             })
@@ -8460,8 +8478,15 @@ mod queue_tests {
         // About to run tools: the history is mid-batch. Deliver nothing, and
         // leave the message queued rather than dropping it.
         assert!(mailbox(&state, &step_to("tools")).is_empty());
-        assert_eq!(pending.lock().unwrap().len(), 1, "a held message is not a lost one");
-        assert!(seen.lock().unwrap().is_empty(), "nothing was delivered to announce");
+        assert_eq!(
+            pending.lock().unwrap().len(),
+            1,
+            "a held message is not a lost one"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "nothing was delivered to announce"
+        );
 
         // The turn is ending: too late to be answered, so it stays queued for
         // `drain_queued_turns` to run as its own turn.
@@ -8471,8 +8496,13 @@ mod queue_tests {
         // Back to the agent: now it is safe, and the queue empties.
         let updates = mailbox(&state, &step_to("agent"));
         assert_eq!(updates.len(), 1);
-        assert!(matches!(&updates[0], AgentUpdate::UserMessage(m) if m == "actually, do X instead"));
-        assert!(pending.lock().unwrap().is_empty(), "a delivered message must not be redelivered");
+        assert!(
+            matches!(&updates[0], AgentUpdate::UserMessage(m) if m == "actually, do X instead")
+        );
+        assert!(
+            pending.lock().unwrap().is_empty(),
+            "a delivered message must not be redelivered"
+        );
     }
 
     /// The client showed the message as pending when it was queued; it has to
@@ -8547,7 +8577,10 @@ mod queue_tests {
         let mut busy = false;
         let mut pending = VecDeque::from(["first".to_string(), "second".to_string()]);
 
-        assert_eq!(claim_next_queued(&mut busy, &mut pending).as_deref(), Some("first"));
+        assert_eq!(
+            claim_next_queued(&mut busy, &mut pending).as_deref(),
+            Some("first")
+        );
         assert!(busy, "claiming a message must also claim the turn");
 
         // A second drain arriving while the first holds the turn gets nothing,
@@ -8556,7 +8589,10 @@ mod queue_tests {
         assert_eq!(pending.len(), 1, "a refused claim must not eat a message");
 
         busy = false;
-        assert_eq!(claim_next_queued(&mut busy, &mut pending).as_deref(), Some("second"));
+        assert_eq!(
+            claim_next_queued(&mut busy, &mut pending).as_deref(),
+            Some("second")
+        );
     }
 
     /// An empty queue leaves the turn unclaimed — otherwise a drain that found
@@ -8566,7 +8602,10 @@ mod queue_tests {
         let mut busy = false;
         let mut pending = VecDeque::new();
         assert_eq!(claim_next_queued(&mut busy, &mut pending), None);
-        assert!(!busy, "nothing ran, so nothing may be left holding the chat");
+        assert!(
+            !busy,
+            "nothing ran, so nothing may be left holding the chat"
+        );
     }
 }
 

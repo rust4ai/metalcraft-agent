@@ -11,12 +11,12 @@
 //! every session in it. Same reason `pack_resolution_test` and
 //! `memory_layers_test` are each a single test.
 
+use axum::body::Body;
+use axum::http::Request;
 use metalcraft_agent::agent_instance::{AgentInstance, InstanceOrigin};
 use metalcraft_agent::agent_preset::AgentPreset;
 use metalcraft_agent::memory::types::{MemoryKind, Source};
 use metalcraft_agent::memory::{self, RememberRequest, instance};
-use axum::body::Body;
-use axum::http::Request;
 use std::fs;
 
 /// Deleting an agent must take its memory with it, and must not leave it answering

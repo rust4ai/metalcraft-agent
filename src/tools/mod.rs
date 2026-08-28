@@ -406,10 +406,7 @@ mod native_tools_drift {
         }
         // `email` ships native tools, so at least one pack must be checked; a zero
         // here means the guard silently stopped covering anything.
-        assert!(
-            checked > 0,
-            "expected at least one pack with native tools"
-        );
+        assert!(checked > 0, "expected at least one pack with native tools");
     }
 }
 

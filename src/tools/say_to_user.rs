@@ -59,9 +59,7 @@ impl SayToUserTool {
         if plan.note_refusal() {
             Some(reason)
         } else {
-            log::info!(
-                "say_to_user gate: refusals exhausted, delivering with open plan steps"
-            );
+            log::info!("say_to_user gate: refusals exhausted, delivering with open plan steps");
             None
         }
     }

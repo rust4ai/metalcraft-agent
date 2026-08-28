@@ -71,8 +71,8 @@ fn a_flow_is_bound_to_a_preset_that_can_reach_its_personas() {
     // And it can now be scheduled, which is the whole point.
     metalcraft_flows::save_flow(&metalcraft_agent::paths::flows_dir(), &briefing)
         .expect("save the flow a schedule will point at");
-    let scheduled = metalcraft_agent::scheduled_flows::arm(
-        metalcraft_agent::scheduled_flows::NewSchedule {
+    let scheduled =
+        metalcraft_agent::scheduled_flows::arm(metalcraft_agent::scheduled_flows::NewSchedule {
             flow: &briefing,
             schedule: metalcraft_flows::ScheduleSpec {
                 trigger: metalcraft_flows::ScheduleTrigger::Cron {
@@ -87,9 +87,8 @@ fn a_flow_is_bound_to_a_preset_that_can_reach_its_personas() {
             instance: None,
             from_suggestion: None,
             id: None,
-        },
-    )
-    .expect("a bound flow arms");
+        })
+        .expect("a bound flow arms");
     let agent =
         metalcraft_agent::agent_instance::load(scheduled.instance_id.as_deref().unwrap()).unwrap();
     assert!(

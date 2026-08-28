@@ -197,8 +197,8 @@ async fn a_hand_triggered_run_is_the_agent_the_schedule_armed() {
     )
     .unwrap();
     flow_bindings::bind_preset(&armable, "amy").expect("bind");
-    let armed_schedule = metalcraft_agent::scheduled_flows::arm(
-        metalcraft_agent::scheduled_flows::NewSchedule {
+    let armed_schedule =
+        metalcraft_agent::scheduled_flows::arm(metalcraft_agent::scheduled_flows::NewSchedule {
             flow: &armable,
             schedule: metalcraft_flows::ScheduleSpec {
                 trigger: metalcraft_flows::ScheduleTrigger::Cron {
@@ -213,9 +213,8 @@ async fn a_hand_triggered_run_is_the_agent_the_schedule_armed() {
             instance: None,
             from_suggestion: None,
             id: None,
-        },
-    )
-    .expect("arm");
+        })
+        .expect("arm");
     let agent =
         metalcraft_agent::agent_instance::load(armed_schedule.instance_id.as_deref().unwrap())
             .expect("arming minted the agent");

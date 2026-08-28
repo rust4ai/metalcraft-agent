@@ -163,7 +163,11 @@ fn pre_v3_flows_migrate_without_starting_or_stopping_anything() {
         morning.schedule.inputs,
         Some(serde_json::json!({ "depth": "short" }))
     );
-    assert!(morning.id.starts_with("sf_"), "ids are generated: {}", morning.id);
+    assert!(
+        morning.id.starts_with("sf_"),
+        "ids are generated: {}",
+        morning.id
+    );
 
     // The flow itself is now a graph and nothing else.
     let doc = read_flow_json("brief");
@@ -212,10 +216,9 @@ fn pre_v3_flows_migrate_without_starting_or_stopping_anything() {
     assert_eq!(read_flow_json("plain")["spec_version"], "3");
 
     // ── the legacy arming record is drained, and the preset kept ─────────────
-    let bindings: serde_json::Value = serde_json::from_slice(
-        &fs::read(paths::data_dir().join("flow_bindings.json")).unwrap(),
-    )
-    .unwrap();
+    let bindings: serde_json::Value =
+        serde_json::from_slice(&fs::read(paths::data_dir().join("flow_bindings.json")).unwrap())
+            .unwrap();
     assert_eq!(bindings["flows"]["brief"]["preset"], "amy");
     assert!(
         bindings["flows"]["brief"].get("instances").is_none(),
@@ -223,12 +226,21 @@ fn pre_v3_flows_migrate_without_starting_or_stopping_anything() {
     );
 
     // ── 6. running it again changes nothing ──────────────────────────────────
-    let before: Vec<String> = scheduled_flows::list().into_iter().map(|sf| sf.id).collect();
+    let before: Vec<String> = scheduled_flows::list()
+        .into_iter()
+        .map(|sf| sf.id)
+        .collect();
     let again = scheduled_flows::migrate_from_flows();
     assert_eq!(again.created, 0, "a second pass must mint nothing");
     assert_eq!(again.failed, 0);
-    let after: Vec<String> = scheduled_flows::list().into_iter().map(|sf| sf.id).collect();
-    assert_eq!(before, after, "ids are generated, so a re-run must not duplicate");
+    let after: Vec<String> = scheduled_flows::list()
+        .into_iter()
+        .map(|sf| sf.id)
+        .collect();
+    assert_eq!(
+        before, after,
+        "ids are generated, so a re-run must not duplicate"
+    );
 
     // ── 7. an unnamed schedule keeps its old id as a label ───────────────────
     // `evening` shipped without a `name`; without this it would migrate into a

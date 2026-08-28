@@ -120,9 +120,7 @@ impl metalcraft::Tool for UpdatePlanTool {
             let open = plan
                 .steps()
                 .iter()
-                .filter(|s| {
-                    matches!(s.status, StepStatus::Pending | StepStatus::InProgress)
-                })
+                .filter(|s| matches!(s.status, StepStatus::Pending | StepStatus::InProgress))
                 .count();
             (plan.render(), open)
         };
