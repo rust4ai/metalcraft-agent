@@ -16,6 +16,8 @@ pub mod flow_exec;
 pub mod flow_install;
 pub mod flow_runs;
 pub mod flows;
+pub mod pod_settings;
+pub mod schedule_timing;
 pub mod gateway_activity;
 pub mod guard;
 pub mod hub_auth;

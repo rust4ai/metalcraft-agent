@@ -541,6 +541,7 @@ async fn auth_middleware(
         list_diagnostics, get_diagnostics_session, get_diagnostics_trace,
         list_api_tools, get_api_tool, put_api_tool, delete_api_tool,
         list_keys, list_recommended_keys, put_key, delete_key, reveal_key,
+        get_pod_settings, put_pod_settings, list_timezones,
         get_inference_status,
         list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
         post_chat_reset,
@@ -619,6 +620,7 @@ async fn auth_middleware(
         (name = "diagnostics", description = "Diagnostics session browsing"),
         (name = "api-tools", description = "HTTP-API tool configs"),
         (name = "keys", description = "The agent key/secret store"),
+        (name = "settings", description = "Pod-wide preferences, and the timezones they can name"),
         (name = "chats", description = "Interactive chat sessions"),
         (name = "scheduled-tasks", description = "Scheduled follow-ups"),
         (name = "integrations", description = "Installable integrations"),
@@ -809,6 +811,11 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/api-tools/{name}", get(get_api_tool))
         .route("/api/v1/api-tools/{name}", put(put_api_tool))
         .route("/api/v1/api-tools/{name}", delete(delete_api_tool))
+        .route(
+            "/api/v1/settings",
+            get(get_pod_settings).put(put_pod_settings),
+        )
+        .route("/api/v1/timezones", get(list_timezones))
         .route("/api/v1/keys", get(list_keys))
         .route("/api/v1/inference", get(get_inference_status))
         .route("/api/v1/keys/recommended", get(list_recommended_keys))
@@ -3605,6 +3612,53 @@ async fn get_inference_status() -> Json<InferenceStatus> {
         base_url: crate::runtime::inference_base_url(),
         gateway: crate::runtime::inference_at_gateway(),
     })
+}
+
+/// What this pod is set to prefer.
+#[utoipa::path(
+    get,
+    path = "/api/v1/settings",
+    tag = "settings",
+    responses((status = 200, body = crate::pod_settings::PodSettings)),
+)]
+async fn get_pod_settings() -> Json<crate::pod_settings::PodSettings> {
+    Json(crate::pod_settings::load())
+}
+
+/// Replace them. The whole document, so clearing a preference is expressible.
+#[utoipa::path(
+    put,
+    path = "/api/v1/settings",
+    tag = "settings",
+    request_body = crate::pod_settings::PodSettings,
+    responses(
+        (status = 200, body = crate::pod_settings::PodSettings),
+        (status = 400, description = "A preference this pod cannot honour, e.g. an unknown timezone", body = ErrorResponse),
+    ),
+)]
+async fn put_pod_settings(
+    Json(settings): Json<crate::pod_settings::PodSettings>,
+) -> Response {
+    match crate::pod_settings::save(&settings) {
+        Ok(()) => Json(settings).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// Every timezone this pod can resolve, grouped by region — the list a picker
+/// should offer.
+///
+/// Published rather than left to each client's own platform list, because the
+/// two drift: a zone the phone knows and this build of the tz database does not
+/// is a save that fails *after* somebody chose it.
+#[utoipa::path(
+    get,
+    path = "/api/v1/timezones",
+    tag = "settings",
+    responses((status = 200, body = Vec<crate::pod_settings::TimezoneRegion>)),
+)]
+async fn list_timezones() -> Json<Vec<crate::pod_settings::TimezoneRegion>> {
+    Json(crate::pod_settings::known_zones())
 }
 
 /// Keys recommended by enabled packs, each flagged configured/missing. Lets the

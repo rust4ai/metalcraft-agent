@@ -110,6 +110,20 @@ pub fn parse_schedule(scheduled: &ScheduledFlow, flow: &SavedFlow) -> Result<Flo
                     scheduled.id
                 )
             })?;
+            // A zone this pod cannot resolve is refused rather than fallen back
+            // on. Falling back means the pod's own clock — UTC in the cluster —
+            // so a mistyped zone fires at an hour nobody chose, and firing at
+            // the wrong time is harder to notice than not firing at all. `save`
+            // rejects these at the door; this catches what was written before.
+            if let Some(zone) = scheduled.schedule.timezone.as_deref()
+                && zone.parse::<chrono_tz::Tz>().is_err()
+            {
+                return Err(format!(
+                    "schedule '{}' names timezone '{zone}', which this pod cannot \
+                     resolve; use an IANA name like 'America/Detroit'",
+                    scheduled.id
+                ));
+            }
             Ok(FlowSchedule::Cron(cron.clone()))
         }
     }

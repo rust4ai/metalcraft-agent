@@ -248,6 +248,24 @@ pub fn inbound_dedup_file() -> PathBuf {
     data_dir().join("inbound_dedup.json")
 }
 
+/// Pod-wide preferences at `<data>/pod_settings.json` — see
+/// [`crate::pod_settings`]. Distinct from `keys.json`, which holds secrets, and
+/// from the environment, which holds deployment facts: this is what the person
+/// using the pod chose.
+pub fn pod_settings_file() -> PathBuf {
+    data_dir().join("pod_settings.json")
+}
+
+/// Where each scheduled flow last fired: `{ "<scheduled flow id>": "<rfc3339>" }`
+/// at `<data>/schedule_state.json`. See [`crate::schedule_timing`].
+///
+/// On disk rather than in the daemon's memory because a restart used to erase
+/// it, and a schedule with no record of a previous run fires immediately — so
+/// "every 24 hours" ran again on every pod roll.
+pub fn schedule_state_file() -> PathBuf {
+    data_dir().join("schedule_state.json")
+}
+
 /// Persisted scheduled follow-up tasks — deferred subagent jobs the agent
 /// arms via `schedule_followup`, fired by the daemon when due. A JSON array at
 /// `<data>/scheduled_tasks.json`. See [`crate::scheduled_tasks`].

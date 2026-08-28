@@ -1733,7 +1733,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_inputs_seed_state_and_missing_required_errors() {
+    async fn entry_inputs_seed_state_and_a_missing_one_warns() {
         let flow = saved(
             vec![
                 node(
@@ -1753,17 +1753,16 @@ mod tests {
         assert_eq!(summary.status, "completed");
         assert_eq!(summary.variables["city"], json!("Madrid"));
 
-        // Missing the required input fails construction.
-        let ctx = AgentRuntimeContext {
-            personas_dir: ".".into(),
-            skills_dir: ".".into(),
-            api_key: String::new(),
-        };
-        let err = match FlowExecutor::new(&ctx, flow, ".", "coding-agent", "m", &json!({}), None) {
-            Ok(_) => panic!("expected missing-input error"),
-            Err(e) => e,
-        };
-        assert!(err.contains("city"), "{err}");
+        // Missing the required input is a warning, not a refusal: a flow whose
+        // inputs nobody filled in is still worth running once to see what it
+        // does, and the run says which ones were unset.
+        let summary = run_pure(flow, json!({})).await;
+        assert_eq!(summary.status, "completed");
+        assert!(
+            summary.warnings.iter().any(|w| w.contains("city")),
+            "{:?}",
+            summary.warnings
+        );
     }
 
     #[test]

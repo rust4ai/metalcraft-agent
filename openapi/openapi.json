@@ -3283,6 +3283,66 @@
         }
       }
     },
+    "/api/v1/settings": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "What this pod is set to prefer.",
+        "operationId": "get_pod_settings",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PodSettings"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Replace them. The whole document, so clearing a preference is expressible.",
+        "operationId": "put_pod_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PodSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PodSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A preference this pod cannot honour, e.g. an unknown timezone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/skills": {
       "get": {
         "tags": [
@@ -3416,6 +3476,31 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ProjectSnapshot"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/timezones": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Every timezone this pod can resolve, grouped by region — the list a picker\nshould offer.",
+        "description": "Published rather than left to each client's own platform list, because the\ntwo drift: a zone the phone knows and this build of the tz database does not\nis a save that fails *after* somebody chose it.",
+        "operationId": "list_timezones",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TimezoneRegion"
+                  }
                 }
               }
             }
@@ -7071,6 +7156,19 @@
           }
         }
       },
+      "PodSettings": {
+        "type": "object",
+        "description": "Everything a pod is configured to prefer.\n\nEvery field optional and every absence meaningful, because this file is\nwritten by whichever client last saved and read by a pod that may be newer\nthan it: an unknown field must not become an opinion.",
+        "properties": {
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "IANA timezone this pod's people live in — `\"America/Detroit\"`.\n\nUsed for a cron schedule that names no zone of its own. `None` falls back\nto the host clock, which is what every pod did before this existed and is\nalmost never what anybody meant."
+          }
+        }
+      },
       "PresetDetail": {
         "type": "object",
         "description": "A preset with its roster resolved against what this pod actually has.\n\nTyped rather than assembled ad hoc so it reaches `openapi.json`: both Workshop\nfrontends generate their client types from the spec, and a response described only\nby a prose `description` gives them nothing to generate.",
@@ -8030,6 +8128,27 @@
           }
         }
       },
+      "TimezoneRegion": {
+        "type": "object",
+        "description": "One region's worth of timezones, for a picker that groups them.",
+        "required": [
+          "region",
+          "zones"
+        ],
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "The IANA area — `\"America\"`, `\"Europe\"` — or `\"UTC\"`."
+          },
+          "zones": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Full zone names in that area, sorted: `\"America/Detroit\"`."
+          }
+        }
+      },
       "Trust": {
         "type": "string",
         "description": "How much a host's word is worth.",
@@ -8208,6 +8327,10 @@
     {
       "name": "keys",
       "description": "The agent key/secret store"
+    },
+    {
+      "name": "settings",
+      "description": "Pod-wide preferences, and the timezones they can name"
     },
     {
       "name": "chats",

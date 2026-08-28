@@ -83,6 +83,19 @@ pub fn save(sf: &ScheduledFlow) -> Result<(), String> {
         use std::str::FromStr;
         cron::Schedule::from_str(cron)
             .map_err(|e| format!("invalid cron expression '{cron}': {e}"))?;
+        // And the zone it is read in. An unparseable name used to mean "the
+        // pod's clock", which in the cluster is UTC — so `America/detroit`, or
+        // `PST`, or a typo, quietly moved a morning brief to the middle of the
+        // night and nothing anywhere said so. A wrong hour is harder to notice
+        // than a rejected save, so this is rejected.
+        if let Some(zone) = &sf.schedule.timezone {
+            zone.parse::<chrono_tz::Tz>().map_err(|_| {
+                format!(
+                    "unknown timezone '{zone}': use an IANA name like 'America/Detroit' \
+                     (case-sensitive), not an abbreviation or a UTC offset"
+                )
+            })?;
+        }
     }
     metalcraft_flows::save_scheduled_flow(&dir(), sf).map_err(|e| e.to_string())
 }
@@ -235,11 +248,41 @@ pub struct SchedulePreview {
 
 /// Project the next `N` firings of a schedule.
 pub fn preview(spec: &ScheduleSpec) -> SchedulePreview {
+    preview_in(spec, crate::pod_settings::default_timezone().as_deref())
+}
+
+/// [`preview`], with the pod default supplied — so the projection a client sees
+/// is computed in the same zone the daemon will fire in, rather than in
+/// whichever zone the pod's own clock happens to be.
+fn preview_in(spec: &ScheduleSpec, pod_zone: Option<&str>) -> SchedulePreview {
     use metalcraft_flows::ScheduleTrigger;
     use std::str::FromStr;
     const N: usize = 3;
 
     let mut description = spec.describe();
+    // A zone name this pod cannot resolve is the same class of failure as a cron
+    // it cannot parse, and reads worse: the schedule fires, on the pod's clock,
+    // at an hour nobody asked for. Say so here, where the arming screen shows it.
+    if let Some(zone) = spec.timezone.as_deref()
+        && matches!(spec.trigger, ScheduleTrigger::Cron { .. })
+        && zone.parse::<chrono_tz::Tz>().is_err()
+    {
+        return SchedulePreview {
+            description: format!(
+                "Unknown timezone `{zone}` — use an IANA name like `America/Detroit`"
+            ),
+            next_runs: vec![],
+        };
+    }
+    // Say which zone a schedule that names none will actually be read in. It is
+    // the pod's now, not the host clock, and a description that stays silent
+    // about it leaves "08:00" meaning whatever the reader assumes.
+    if let Some(zone) = pod_zone
+        && spec.timezone.is_none()
+        && matches!(spec.trigger, ScheduleTrigger::Cron { .. })
+    {
+        description = format!("{description} ({zone} — this pod's timezone)");
+    }
     let next_runs = match &spec.trigger {
         ScheduleTrigger::Manual => vec![],
         ScheduleTrigger::Minutes { interval } => project_every(*interval * 60, N),
@@ -248,6 +291,7 @@ pub fn preview(spec: &ScheduleSpec) -> SchedulePreview {
             Ok(schedule) => match spec
                 .timezone
                 .as_deref()
+                .or(pod_zone)
                 .and_then(|name| name.parse::<chrono_tz::Tz>().ok())
             {
                 Some(zone) => schedule
@@ -447,6 +491,79 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.starts_with("sf_"), "{a}");
         assert_eq!(a.len(), 11);
+    }
+
+    #[test]
+    fn a_cron_with_no_zone_of_its_own_is_read_in_the_pods() {
+        // "08:00" from something that never thought about timezones — the
+        // agent's own scheduling tool, a pack suggestion — used to mean 08:00
+        // wherever the pod happened to run, which in the cluster is UTC.
+        let p = preview_in(
+            &spec(
+                ScheduleTrigger::Cron {
+                    cron: "0 0 8 * * *".into(),
+                },
+                None,
+            ),
+            Some("Asia/Tokyo"),
+        );
+        assert_eq!(p.next_runs.len(), 3);
+        for run in &p.next_runs {
+            assert!(
+                run.contains("T08:00:00+09:00"),
+                "projected {run}, which is not 08:00 in Tokyo"
+            );
+        }
+    }
+
+    #[test]
+    fn a_borrowed_zone_says_whose_it_is() {
+        let p = preview_in(
+            &spec(
+                ScheduleTrigger::Cron {
+                    cron: "0 0 8 * * *".into(),
+                },
+                None,
+            ),
+            Some("Asia/Tokyo"),
+        );
+        assert_eq!(
+            p.description,
+            "Cron `0 0 8 * * *` (Asia/Tokyo — this pod's timezone)"
+        );
+    }
+
+    #[test]
+    fn a_schedules_own_zone_beats_the_pods() {
+        let p = preview_in(
+            &spec(
+                ScheduleTrigger::Cron {
+                    cron: "0 0 8 * * *".into(),
+                },
+                Some("Asia/Tokyo"),
+            ),
+            Some("America/Detroit"),
+        );
+        for run in &p.next_runs {
+            assert!(run.contains("T08:00:00+09:00"), "{run}");
+        }
+    }
+
+    #[test]
+    fn a_timezone_this_pod_cannot_resolve_reads_as_broken() {
+        // The failure it replaces: an unknown name fell back to the pod's clock,
+        // so `America/detroit` (lowercase d), `PST`, and every typo fired at an
+        // hour nobody chose, with nothing anywhere saying so.
+        for name in ["america/detroit", "PST", "GMT-5", "America/Detroitt"] {
+            let p = preview(&spec(
+                ScheduleTrigger::Cron {
+                    cron: "0 0 8 * * *".into(),
+                },
+                Some(name),
+            ));
+            assert!(p.description.starts_with("Unknown timezone"), "{name}: {}", p.description);
+            assert!(p.next_runs.is_empty(), "{name} must not project firings");
+        }
     }
 
     #[test]

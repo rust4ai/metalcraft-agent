@@ -9,19 +9,17 @@
 
 use crate::approval::ApprovalMode;
 use crate::diagnostics::{DiagnosticsLogger, SessionInfo};
-use crate::flows::{self, FlowSchedule};
+use crate::flows;
 use crate::paths;
 use crate::persona::Persona;
 use crate::runtime::{self, AgentRuntimeContext, RunOneShotRequest};
 use crate::workshop_api;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Local, Utc};
+use chrono::Utc;
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -195,11 +193,16 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     }
     println!("──────────────────────────────────────────────");
 
-    // Flow polling loop. Tracks the last start time per scheduled-flow id, so each
-    // schedule fires independently — including two schedules of the same flow.
-    // Runs execute inline and sequentially within an iteration, so no concurrency
-    // guard is needed.
-    let mut last_started: HashMap<String, DateTime<Local>> = HashMap::new();
+    // Flow polling loop. Each schedule carries its own bookmark — the occurrence
+    // it last reached — so schedules fire independently, including two schedules
+    // of the same flow. Runs execute inline and sequentially within an iteration,
+    // so no concurrency guard is needed.
+    //
+    // The bookmarks are read from disk and written back on every change. Held
+    // only in memory, as they were, a restart erased them — and an interval
+    // schedule with no record of a previous run fires immediately, so "every 24
+    // hours" fired again on every pod roll. See `crate::schedule_timing`.
+    let mut bookmarks = crate::schedule_timing::bookmarks::load();
 
     loop {
         // Run one polling iteration, but let Ctrl+C cancel it. The workshop API
@@ -210,14 +213,34 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
         let iteration = async {
             for candidate in flows::load_due_candidates() {
                 let sid = candidate.scheduled.id.clone();
-                if !is_due(
-                    last_started.get(&sid),
+                // A schedule that names no zone is read in the pod's, and only
+                // then in the host clock. Before this the host clock was the
+                // only fallback, and in the cluster that is UTC — so an 08:00
+                // brief armed by anything that did not think to state a zone
+                // (the agent's own scheduling tool, a pack suggestion, a
+                // hand-written document) arrived in the middle of the night.
+                let zone = candidate
+                    .scheduled
+                    .schedule
+                    .timezone
+                    .clone()
+                    .or_else(crate::pod_settings::default_timezone);
+                let Some(decision) = crate::schedule_timing::decide(
+                    bookmarks.get(&sid).copied(),
                     &candidate.trigger,
-                    candidate.scheduled.schedule.timezone.as_deref(),
-                ) {
+                    zone.as_deref(),
+                    Utc::now(),
+                ) else {
+                    continue;
+                };
+                // Bookmark first, and persist before running: a flow that
+                // crashes the pod mid-run must not come back owed the same
+                // firing forever.
+                bookmarks.insert(sid.clone(), decision.occurrence);
+                crate::schedule_timing::bookmarks::save(&bookmarks);
+                if !decision.run {
                     continue;
                 }
-                last_started.insert(sid.clone(), Local::now());
 
                 let flow = candidate.flow;
                 let scheduled = candidate.scheduled;
@@ -594,67 +617,3 @@ fn env_flag(key: &str, default: bool) -> bool {
     }
 }
 
-/// Whether a schedule is due to fire, given when it last started. `tz` is the
-/// IANA timezone a `Cron` trigger is evaluated in; `None` (or an unparseable
-/// name) falls back to the host's local time.
-fn is_due(
-    last_started: Option<&DateTime<Local>>,
-    schedule: &FlowSchedule,
-    tz: Option<&str>,
-) -> bool {
-    match schedule {
-        FlowSchedule::Manual => false,
-        FlowSchedule::EveryMinutes(minutes) => {
-            elapsed_due(last_started, Duration::from_secs(minutes * 60))
-        }
-        FlowSchedule::EveryHours(hours) => {
-            elapsed_due(last_started, Duration::from_secs(hours * 60 * 60))
-        }
-        FlowSchedule::Cron(expr) => {
-            let schedule = match cron::Schedule::from_str(expr) {
-                Ok(s) => s,
-                Err(e) => {
-                    log::error!("Invalid cron expression '{}': {}", expr, e);
-                    return false;
-                }
-            };
-            // Evaluate the cron in its declared timezone when one is given and
-            // parses; otherwise use the host's local zone (legacy behavior).
-            match tz.and_then(|name| name.parse::<chrono_tz::Tz>().ok()) {
-                Some(zone) => {
-                    let now = Utc::now().with_timezone(&zone);
-                    let after = last_started
-                        .map(|t| t.with_timezone(&zone))
-                        .unwrap_or(now - chrono::TimeDelta::seconds(1));
-                    schedule
-                        .after(&after)
-                        .next()
-                        .map_or(false, |next| next <= now)
-                }
-                None => {
-                    let now = Local::now();
-                    let after = last_started
-                        .copied()
-                        .unwrap_or(now - chrono::TimeDelta::seconds(1));
-                    schedule
-                        .after(&after)
-                        .next()
-                        .map_or(false, |next| next <= now)
-                }
-            }
-        }
-    }
-}
-
-fn elapsed_due(last_started: Option<&DateTime<Local>>, interval: Duration) -> bool {
-    match last_started {
-        None => true,
-        Some(last) => {
-            let elapsed = Local::now() - *last;
-            match chrono::TimeDelta::from_std(interval) {
-                Ok(td) => elapsed >= td,
-                Err(_) => true,
-            }
-        }
-    }
-}
