@@ -79,11 +79,11 @@ fn is_injected(text: &str) -> bool {
 /// inform the answer, not displace the question.
 ///
 /// Returns whether anything was injected.
-pub async fn inject(state: &mut AgentState, opts: RecallOptions) -> bool {
+pub async fn inject(state: &mut AgentState, instance_id: &str, opts: RecallOptions) -> bool {
     let Some(query) = latest_user_message(state) else {
         return false;
     };
-    let results = super::recall(&query, opts).await;
+    let results = super::recall(instance_id, &query, opts).await;
     if results.is_empty() {
         return false;
     }

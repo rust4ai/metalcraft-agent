@@ -49,8 +49,7 @@ async fn a_learned_memory_survives_eviction() {
         Source::Turn,
     );
     req.summary = Some("shellfish allergy".into());
-    req.instance_id = Some(id.clone());
-    let remembered = memory::remember(req).await.expect("remember");
+    let remembered = memory::remember(&id, req).await.expect("remember");
     assert!(!remembered.deduplicated);
     let learned_id = remembered.memory.id.clone();
 

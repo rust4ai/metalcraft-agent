@@ -212,8 +212,6 @@ mod tests {
         let snap = Snapshot {
             seq: 42,
             written_at: Utc::now(),
-            embed_model: Some("text-embedding-3-small".into()),
-            embed_dims: Some(384),
             memories: vec![Memory::new(
                 MemoryKind::Preference,
                 "prefers rust",
@@ -227,7 +225,6 @@ mod tests {
 
         let back = read_snapshot(&p).unwrap();
         assert_eq!(back.seq, 42);
-        assert_eq!(back.embed_dims, Some(384));
         assert_eq!(back.memories.len(), 1);
         assert_eq!(back.memories[0].content, "prefers rust");
         std::fs::remove_dir_all(&dir).ok();

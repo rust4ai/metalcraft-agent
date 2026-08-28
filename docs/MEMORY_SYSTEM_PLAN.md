@@ -1,5 +1,42 @@
 # Memory & Dreaming — Implementation Plan (master)
 
+> ## Status — read this before the rest
+>
+> This is the **original plan**, kept for its reasoning. Three things it
+> describes are no longer what the code does. The sections below are otherwise
+> still accurate.
+>
+> **1. There is no pod-global store.** Memory is per agent instance, always:
+> a shared immutable **base** shipped by the agent's preset plus the **delta** it
+> learns, under `<data>/memory/instances/<id>/`. The `static MEMORY` handle, the
+> pod-root `wal.jsonl`/`snapshot.json`, and the global `remember`/`recall`/
+> `get`/`forget`/`stats`/`compact` entry points are gone. Every public function
+> in `memory` takes an `instance_id`. A caller with no agent — the CLI, a v1
+> flow — has **no memory** rather than a shared one, and is not given the `mem_*`
+> tools at all.
+>
+> **2. There are no embeddings.** `embed.rs`, `vectors.rs`, `vectors.bin`, the
+> `Embedder` trait, `backfill_embeddings`, and `Mode::Vector` are all deleted, and
+> §4.3 below is obsolete. Recall is **BM25 + graph**, fused with RRF. The reason
+> is in §4.3's own terms: vectors were only ever produced and read on the
+> pod-global path, so from the moment every real turn became instance-scoped the
+> vector leg had stopped returning results. It was removed rather than left as
+> decoration that reported itself "Ready".
+>
+> Note the consequence for fusion: `graph_expand` skips anything already in its
+> seed set, so text hits and graph hits are now disjoint populations. RRF orders
+> them; it no longer sees two retrievers agree on one memory.
+>
+> **3. The dream (§5) was never built.** There is no `dream.rs`, no nightly loop,
+> no decay, no consolidation, no `mem_dream_now`, and no dream journal. Capture
+> still runs on every turn and appends to
+> `<data>/memory/instances/<id>/capture.jsonl` — and **nothing consumes it**, so
+> that file only grows. `mem_stats` reports `pending_captures` to keep this
+> visible. Only `mem_remember` creates memories today. §5 remains a plan.
+>
+> Everything the plan says about decay, `exempt_from_decay`, contradiction
+> handling, and episode consolidation is likewise unbuilt.
+
 Persistent, cross-session memory for the agent: hybrid recall (BM25 + embeddings
 + graph) injected automatically into every turn, and a **nightly dream cycle**
 that indexes, consolidates, abstracts, associates, and forgets while nobody is
@@ -72,39 +109,48 @@ Grounded against verified line numbers on `master`:
 
 ```
 src/memory/
-  mod.rs      public API: init(), recall(), capture(), the global handle
-  types.rs    Memory, MemoryKind, Link, LinkKind, Episode, Capture, DreamRun
-  log.rs      append-only event log: append(), replay(), compact()
+  mod.rs      public API, instance-scoped: remember(), recall(), get(), forget(),
+              profile_block(), instance_view() — every one takes an instance_id
+  instance.rs the base + delta + tombstone layering, and the resident-set LRU
+  types.rs    Memory, MemoryKind, Link, LinkKind, Capture
+  wal.rs      append-only event log: append(), replay(), write_snapshot()
   index.rs    in-memory MemoryIndex: map + inverted index (BM25) + link adjacency
-  vectors.rs  vectors.bin codec (append-only f32 records), cosine, top-k
-  embed.rs    Embedder trait, OpenAiEmbedder (384-dim), NullEmbedder (tests), availability state
-  recall.rs   RecallEngine — BM25 + vector + graph, RRF fusion, token budget
-  capture.rs  turn-end + compaction capture (append to capture.jsonl)
-  dream.rs    the nightly cycle: stages, cron gating, run reports
+  recall.rs   BM25 + graph, RRF fusion, token budget, per-layer budget split
+  capture.rs  turn-end + compaction capture (append to the instance's capture.jsonl)
   redact.rs   secret scrubbing before any write
   tools.rs    the mem_* tools
 ```
+
+> As built. `log.rs` is `wal.rs` (a `pub mod log` would shadow the `log` logging
+> facade for every sibling), and `vectors.rs`/`embed.rs`/`dream.rs` do not exist.
 
 On disk, under `<data>/memory/` (all paths via new `src/paths.rs` functions,
 matching the existing one-function-per-concern convention at `paths.rs:131`):
 
 ```
 <data>/memory/
-  snapshot.json     full state as of seq N — written by the dream (tmp+rename)
-  log.jsonl         append-only events with seq > N; replayed on boot
-  vectors.bin       append-only [u16 dims][u8 id_len][id][f32 * dims] records
-  capture.jsonl     raw turn material awaiting the dream
-  dreams/<ts>.json  one report per dream run
+  presets/<slug>@<version>/
+    snapshot.json   the shared, immutable base a preset ships — built once per
+                    preset@version at pack install, refcounted, never written to
+  instances/<id>/
+    snapshot.json   this agent's delta as of seq N (tmp+rename)
+    wal.jsonl       append-only events with seq > N; replayed on load
+    tombstones.json base ids this agent has forgotten
+    capture.jsonl   raw turn material — written every turn, read by nothing yet
 ```
 
-**Boot:** read `snapshot.json`, replay `log.jsonl` from `snapshot.seq`, then
-stream `vectors.bin`. A torn final line (crash mid-append) fails to parse and is
-skipped with a `warn` — the same tolerance `scheduled_tasks::load_unlocked`
-(`src/scheduled_tasks.rs:161`) already shows for a corrupt file.
+**Load:** read the instance's `snapshot.json`, replay `wal.jsonl` from
+`snapshot.seq`, and resolve the base by the *installed* pack version. A torn
+final line (crash mid-append) fails to parse and is skipped with a `warn` — the
+same tolerance `scheduled_tasks::load_unlocked` (`src/scheduled_tasks.rs:161`)
+already shows for a corrupt file. Past 200 replayed events the delta folds back
+into its snapshot and the log truncates.
 
-**Global handle:** `static MEMORY: OnceLock<Arc<RwLock<MemoryIndex>>>`, the same
-process-global shape as `key_store` and `scheduled_tasks`. `tokio::sync::RwLock`
-because recall is `async` and reads vastly outnumber writes.
+**No global handle.** Instead a process-wide LRU of 8 resident instance deltas
+(`METALCRAFT_MEMORY_RESIDENT_LIMIT`), each an `Arc<RwLock<MemoryIndex>>`;
+`tokio::sync::RwLock` because recall is `async` and reads vastly outnumber
+writes. Bases are shared across every instance of a preset, so creating an agent
+copies nothing.
 
 ---
 
@@ -324,6 +370,11 @@ a separate refactor, not a prerequisite.
 
 ### 4.3 Embedding availability — detected, never configured
 
+> **Obsolete — embeddings were removed.** Nothing below is in the code: there is
+> no `Embedder`, no availability state, no `degraded` field on `mem_search`.
+> Recall is BM25 + graph. Kept for the reasoning about degrading rather than
+> failing, which the rest of the system still follows.
+
 Embeddings have **no enable/disable setting**. There is nothing for an operator
 to decide: either the endpoint answers or it doesn't, and the agent can tell.
 
@@ -370,6 +421,10 @@ migration — never a silent comparison of incompatible float arrays.
 ---
 
 ## 5. Dreaming — the nightly cycle
+
+> **Never built.** No `dream.rs`, no loop, no decay, no journal. Capture writes
+> the queue this section would drain; nothing reads it. This is a plan, not a
+> description.
 
 `src/memory/dream.rs`. One `tokio` loop ticking every 60 s, firing when a
 6-field `cron::Schedule` says it is due — the exact `is_due` shape the daemon

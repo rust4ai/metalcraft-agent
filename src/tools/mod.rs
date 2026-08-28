@@ -157,21 +157,29 @@ pub fn create_registry_for_with_config(
                 registry.register(crate::agent_packs::tools::AgentPackUninstallTool)
             }
             "agentpack_export" => registry.register(crate::agent_packs::tools::AgentPackExportTool),
-            "mem_remember" => registry.register(crate::memory::tools::MemRememberTool::new(
-                config.and_then(|c| c.instance_id.clone()),
-            )),
-            "mem_search" => registry.register(crate::memory::tools::MemSearchTool::new(
-                config.and_then(|c| c.instance_id.clone()),
-            )),
-            "mem_get" => registry.register(crate::memory::tools::MemGetTool::new(
-                config.and_then(|c| c.instance_id.clone()),
-            )),
-            "mem_forget" => registry.register(crate::memory::tools::MemForgetTool::new(
-                config.and_then(|c| c.instance_id.clone()),
-            )),
-            "mem_stats" => registry.register(crate::memory::tools::MemStatsTool::new(
-                config.and_then(|c| c.instance_id.clone()),
-            )),
+            // Memory belongs to an agent. A caller with no agent instance — the
+            // CLI, a v1 flow — is given no memory tools at all, rather than tools
+            // that would write somewhere nobody reads.
+            "mem_remember" => match config.and_then(|c| c.instance_id.clone()) {
+                Some(id) => registry.register(crate::memory::tools::MemRememberTool::new(id)),
+                None => registry,
+            },
+            "mem_search" => match config.and_then(|c| c.instance_id.clone()) {
+                Some(id) => registry.register(crate::memory::tools::MemSearchTool::new(id)),
+                None => registry,
+            },
+            "mem_get" => match config.and_then(|c| c.instance_id.clone()) {
+                Some(id) => registry.register(crate::memory::tools::MemGetTool::new(id)),
+                None => registry,
+            },
+            "mem_forget" => match config.and_then(|c| c.instance_id.clone()) {
+                Some(id) => registry.register(crate::memory::tools::MemForgetTool::new(id)),
+                None => registry,
+            },
+            "mem_stats" => match config.and_then(|c| c.instance_id.clone()) {
+                Some(id) => registry.register(crate::memory::tools::MemStatsTool::new(id)),
+                None => registry,
+            },
             // Meta tools: author/manage the metalcraft project itself (the
             // workshop's CRUD surface, by prompt). They operate on the global
             // `paths::*` dirs, so they need no ToolConfig.

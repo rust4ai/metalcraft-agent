@@ -294,16 +294,17 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
 
         // Recall is spliced in AFTER compaction, so the summarizer never sees
         // (and never bakes in) a block that is about to be removed again.
-        let injected = if self.recall {
-            self.announce(phase::RECALLING);
-            let opts = crate::memory::recall::RecallOptions {
-                token_budget: Some(crate::memory::recall_token_budget()),
-                instance_id: self.instance_id.clone(),
-                ..Default::default()
-            };
-            crate::memory::inject::inject(&mut state, opts).await
-        } else {
-            false
+        // No instance means no agent to own the memory — the CLI recalls nothing.
+        let injected = match (self.recall, self.instance_id.as_deref()) {
+            (true, Some(instance_id)) => {
+                self.announce(phase::RECALLING);
+                let opts = crate::memory::recall::RecallOptions {
+                    token_budget: Some(crate::memory::recall_token_budget()),
+                    ..Default::default()
+                };
+                crate::memory::inject::inject(&mut state, instance_id, opts).await
+            }
+            _ => false,
         };
 
         let mut executor = Executor::new_from_arc(self.graph.clone())
@@ -907,7 +908,8 @@ pub async fn run_one_shot_task(
         None, // one-shot runs don't emit OTLP traces
         RuntimeOptions {
             // free-text agent; no session reply sink
-            prompt_extras: crate::persona::PromptExtras::load().await,
+            prompt_extras: crate::persona::PromptExtras::load(request.instance_id.as_deref())
+                .await,
             instance_id: request.instance_id.clone(),
             preset_personas: request.preset_personas.clone(),
             ..Default::default()

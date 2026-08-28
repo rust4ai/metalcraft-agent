@@ -293,33 +293,16 @@ pub fn memory_dir() -> PathBuf {
     data_dir().join("memory")
 }
 
-/// Periodic full-state file, `<data>/memory/snapshot.json`. Written atomically
-/// (tmp + rename) by the compaction pass; read first on boot.
-pub fn memory_snapshot_file() -> PathBuf {
-    memory_dir().join("snapshot.json")
-}
-
-/// Append-only event log, `<data>/memory/wal.jsonl`. Holds everything written
-/// since the last snapshot; replayed on boot and folded back into the snapshot by
-/// compaction. Append-only because recall bumps access times on every turn, and
-/// rewriting the whole store for that would be O(n) per turn.
-pub fn memory_wal_file() -> PathBuf {
-    memory_dir().join("wal.jsonl")
-}
-
-/// Embedding sidecar, `<data>/memory/vectors.bin`. Append-only fixed-shape
-/// binary records rather than JSON, because a 384-dim `f32` vector is 1.5 KB of
-/// data no human reads and base64 in the log would roughly double it. Rewritten
-/// (compacted) alongside the snapshot.
-pub fn memory_vectors_file() -> PathBuf {
-    memory_dir().join("vectors.bin")
-}
-
-/// Raw turn material awaiting distillation, `<data>/memory/capture.jsonl`.
-/// Written at turn time (one appended line, no LLM call) and drained by the
-/// nightly dream. See [`crate::memory::capture`].
-pub fn memory_capture_file() -> PathBuf {
-    memory_dir().join("capture.jsonl")
+/// Raw turn material awaiting distillation,
+/// `<data>/memory/instances/<id>/capture.jsonl`. Written at turn time (one
+/// appended line, no LLM call).
+///
+/// Per-instance, like everything else under `memory/`: the material is *about*
+/// the agent that produced it, and a distillation pass would have to split a
+/// shared file back apart before it could use a single line of it. See
+/// [`crate::memory::capture`].
+pub fn memory_capture_file(instance_id: &str) -> PathBuf {
+    memory_instance_dir(instance_id).join("capture.jsonl")
 }
 
 /// Root directory that document-upload tools (multipart HTTP-API tools) may

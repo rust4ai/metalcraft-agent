@@ -8,6 +8,12 @@ You have a memory that outlives this conversation. `mem_search` reads it,
 `mem_remember` writes to it, `mem_get` opens one record in full, `mem_forget`
 removes one.
 
+The memory is **yours** — it belongs to you as an agent, not to the machine you
+run on and not to this conversation. Nothing you save leaks to another agent, and
+nothing another agent saves reaches you. A conversation ending does not cost you
+any of it: the next one starts with everything you have learned, and only the
+transcript is gone.
+
 ## Search before you assume
 
 Search when the user refers to something you'd only know from an earlier
@@ -47,11 +53,15 @@ save it.
 
 ## Forgetting
 
-`mem_forget` archives by default — reversible, hidden from search. That is the
-right choice when something has merely gone stale.
+`mem_forget` stops you recalling something. What it costs depends on where the
+memory came from, and the result tells you which happened:
 
-Pass `purge: true` **only** when the user explicitly asks for something to be
-deleted. It is permanent.
+- `status: "purged"` — it was something **you learned**, and it is gone.
+- `status: "tombstoned"` — it **came with your agent pack**. You will not recall
+  it again, but the shared copy every other agent of your kind uses is untouched.
+
+Either way it is not reversible from your side, so forget on purpose rather than
+to tidy up.
 
 When the user corrects a fact you have stored, don't just save the correction —
 `mem_search` for the old version and forget it, or you will keep recalling both

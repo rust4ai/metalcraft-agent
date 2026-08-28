@@ -325,7 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(llm_call_hook.clone()),
         None, // CLI runs don't emit OTLP traces
         runtime::RuntimeOptions {
-            prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
+            prompt_extras: metalcraft_agent::persona::PromptExtras::load(None).await,
             // sub_agent may only delegate inside the active preset's roster.
             preset_personas: active_preset
                 .as_ref()
@@ -466,7 +466,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Some(llm_call_hook.clone()),
                         None, // CLI runs don't emit OTLP traces
                         runtime::RuntimeOptions {
-                            prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
+                            prompt_extras: metalcraft_agent::persona::PromptExtras::load(None).await,
                             preset_personas: active_preset.as_ref().map(|p| {
                                 p.delegation_roster(&metalcraft_agent::paths::personas_dir())
                             }),
@@ -578,7 +578,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Some(llm_call_hook.clone()),
                         None, // CLI runs don't emit OTLP traces
                         runtime::RuntimeOptions {
-                            prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
+                            prompt_extras: metalcraft_agent::persona::PromptExtras::load(None).await,
                             preset_personas: active_preset.as_ref().map(|p| {
                                 p.delegation_roster(&metalcraft_agent::paths::personas_dir())
                             }),
@@ -674,7 +674,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(llm_call_hook.clone()),
                 None, // CLI runs don't emit OTLP traces
                 runtime::RuntimeOptions {
-                    prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
+                    prompt_extras: metalcraft_agent::persona::PromptExtras::load(None).await,
                     preset_personas: active_preset
                         .as_ref()
                         .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),

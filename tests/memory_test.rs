@@ -1,31 +1,30 @@
 //! End-to-end test of the memory store's public API and its on-disk format.
 //!
-//! Deliberately a **single** test function in its own binary. `crate::memory`
-//! hangs off process-global `OnceLock`s (the store and the embedder), and
-//! `paths::data_dir()` resolves once per process, so two tests sharing this
-//! binary would share one store and race. One linear test also lets the
-//! assertions build on each other the way real usage does.
+//! Deliberately a **single** test function in its own binary. `paths::data_dir()`
+//! resolves once per process and the instance layer keeps a process-wide resident
+//! set, so two tests sharing this binary would share state and race. One linear
+//! test also lets the assertions build on each other the way real usage does.
 //!
-//! The embedder is [`NullEmbedder`] — a deterministic hashed bag-of-words
-//! projection. It exercises the real vector path (persistence, dimensionality,
-//! fusion, backfill) without a network call, which is the point: everything here
-//! is about the machinery around embeddings, not about embedding quality.
-use std::sync::Arc;
-
+//! Everything is scoped to an agent instance, because that is the only scope
+//! there is: memory belongs to an agent, and a caller without one (the CLI) has
+//! no memory rather than a shared one.
 use metalcraft::{AgentMessage, AgentState};
 use metalcraft_agent::memory::{
     self, RememberRequest,
     capture::{self, CaptureContext, CaptureKind},
-    embed::{Availability, NullEmbedder},
     index::MemoryIndex,
     inject,
     recall::{Mode, RecallOptions},
-    types::{LinkKind, MemoryKind, Source},
-    vectors, wal,
+    types::MemoryKind,
+    types::Source,
+    wal,
 };
 use metalcraft_agent::persona::PromptExtras;
 
-const DIMS: usize = 64;
+/// The agent everything here belongs to. No `AgentInstance` record is created:
+/// an id with no record resolves to no preset base, which is exactly the
+/// "agent that only knows what it learns" case.
+const INST: &str = "inst_memorytest";
 
 fn text_opts() -> RecallOptions {
     RecallOptions {
@@ -41,27 +40,22 @@ async fn memory_store_round_trip() {
     // the first `data_dir()` call, which caches the value in a OnceLock.
     unsafe {
         std::env::set_var("METALCRAFT_DATA_DIR", dir.path());
-        std::env::set_var("MEMORY_EMBED_DIMS", DIMS.to_string());
     }
-    assert!(
-        memory::set_embedder(Arc::new(NullEmbedder::new(DIMS))),
-        "embedder installs once"
-    );
-    assert_eq!(memory::embedding_availability(), Availability::Ready);
 
     assert!(memory::enabled(), "memory is on by default");
-    assert_eq!(
-        memory::stats().await.total,
-        0,
-        "a fresh pod has an empty store"
-    );
+    let fresh = memory::instance_view(INST, 0).await;
+    assert_eq!(fresh.learned, 0, "a fresh agent has learned nothing");
+    assert_eq!(fresh.shipped, 0, "and this one ships nothing either");
 
     // ── write ────────────────────────────────────────────────────────────────
-    let saved = memory::remember(RememberRequest::new(
-        MemoryKind::Preference,
-        "Andrew prefers Rust over Go for pod services.",
-        Source::User,
-    ))
+    let saved = memory::remember(
+        INST,
+        RememberRequest::new(
+            MemoryKind::Preference,
+            "Andrew prefers Rust over Go for pod services.",
+            Source::User,
+        ),
+    )
     .await
     .expect("remember");
     assert!(!saved.deduplicated);
@@ -75,17 +69,20 @@ async fn memory_store_round_trip() {
     );
     req.entity = Some("metalcraft-inference".into());
     req.importance = Some(8.0);
-    let fact = memory::remember(req).await.expect("remember");
+    let fact = memory::remember(INST, req).await.expect("remember");
     let fact_id = fact.memory.id.clone();
     assert_eq!(fact.memory.entity.as_deref(), Some("metalcraft-inference"));
     assert_eq!(fact.memory.importance, 8.0);
 
     // ── secrets never reach the store ────────────────────────────────────────
-    let leaky = memory::remember(RememberRequest::new(
-        MemoryKind::Semantic,
-        "the deploy key is sk-proj-abcdefghijklmnopqrstuvwxyz012345 for now",
-        Source::Turn,
-    ))
+    let leaky = memory::remember(
+        INST,
+        RememberRequest::new(
+            MemoryKind::Semantic,
+            "the deploy key is sk-proj-abcdefghijklmnopqrstuvwxyz012345 for now",
+            Source::Turn,
+        ),
+    )
     .await
     .expect("remember");
     assert_eq!(leaky.redactions, 1, "the key must have been scrubbed");
@@ -93,11 +90,14 @@ async fn memory_store_round_trip() {
     assert!(leaky.memory.content.contains("[REDACTED:openai-key]"));
 
     // ── exact duplicates reinforce rather than pile up ───────────────────────
-    let again = memory::remember(RememberRequest::new(
-        MemoryKind::Preference,
-        "Andrew   prefers rust over GO for pod services.", // reformatted + recased
-        Source::User,
-    ))
+    let again = memory::remember(
+        INST,
+        RememberRequest::new(
+            MemoryKind::Preference,
+            "Andrew   prefers rust over GO for pod services.", // reformatted + recased
+            Source::User,
+        ),
+    )
     .await
     .expect("remember");
     assert!(
@@ -108,10 +108,10 @@ async fn memory_store_round_trip() {
         again.memory.id, pref_id,
         "and reinforce the original record"
     );
-    assert_eq!(memory::stats().await.total, 3);
+    assert_eq!(memory::instance_view(INST, 0).await.learned, 3);
 
     // ── keyword recall ───────────────────────────────────────────────────────
-    let hits = memory::recall("embeddings proxy", text_opts()).await;
+    let hits = memory::recall(INST, "embeddings proxy", text_opts()).await;
     assert_eq!(
         hits.len(),
         1,
@@ -126,141 +126,50 @@ async fn memory_store_round_trip() {
         kind: Some(MemoryKind::Preference),
         ..text_opts()
     };
-    assert_eq!(memory::recall("rust", pref_only).await.len(), 1);
+    assert_eq!(memory::recall(INST, "rust", pref_only).await.len(), 1);
     let episodic_only = RecallOptions {
         kind: Some(MemoryKind::Episodic),
         ..text_opts()
     };
-    assert_eq!(memory::recall("rust", episodic_only).await.len(), 0);
+    assert_eq!(memory::recall(INST, "rust", episodic_only).await.len(), 0);
     assert!(
-        memory::recall("nothing matches this at all", text_opts())
+        memory::recall(INST, "nothing matches this at all", text_opts())
             .await
             .is_empty()
     );
 
-    // Recall records the access — that is what feeds decay later.
-    let (touched, _, _) = memory::get(&fact_id).await.expect("get");
-    assert!(touched.access_count >= 1, "recall must record access");
-
-    // ── embeddings ───────────────────────────────────────────────────────────
-    let embedded = memory::backfill_embeddings(100).await.expect("backfill");
+    // One agent cannot read another's memory, even given a real id.
     assert!(
-        embedded >= 3,
-        "every live memory should get a vector, got {embedded}"
-    );
-    let s = memory::stats().await;
-    assert_eq!(s.vectors, s.live, "full coverage after backfill");
-    assert_eq!(
-        memory::backfill_embeddings(100).await.expect("backfill"),
-        0,
-        "backfill is idempotent"
-    );
-
-    let vectors_path = metalcraft_agent::paths::memory_vectors_file();
-    assert!(vectors_path.exists());
-    let (on_disk, torn) = vectors::load(&vectors_path);
-    assert_eq!(torn, 0, "the vector file we wrote must be fully parseable");
-    assert!(on_disk.contains_key(&fact_id));
-    assert_eq!(
-        on_disk[&fact_id].len(),
-        DIMS,
-        "vectors are written at the configured size"
-    );
-
-    // Hybrid retrieves what keyword search alone finds, and reports which
-    // retriever matched.
-    let hybrid = memory::recall("embeddings proxy", RecallOptions::default()).await;
-    assert!(!hybrid.is_empty());
-    let fact_hit = hybrid
-        .iter()
-        .find(|h| h.memory.id == fact_id)
-        .expect("fact recalled");
-    assert!(
-        fact_hit.signals.text_rank.is_some() || fact_hit.signals.vector_rank.is_some(),
-        "a hit must record where it came from: {}",
-        fact_hit.signals.describe()
-    );
-
-    // Vector-only mode runs with no keyword leg at all.
-    //
-    // NOTE: `NullEmbedder` projects a *bag of words*, so it only scores above
-    // zero on shared vocabulary. This asserts the vector path is wired end to end
-    // — query embedded, cosine ranked, signals recorded — and deliberately does
-    // NOT claim anything about paraphrase matching, which only a real embedding
-    // model provides. `recall.rs`'s unit tests cover paraphrase with hand-built
-    // vectors, where the geometry is under the test's control.
-    let vector_only = memory::recall(
-        "proxies embeddings",
-        RecallOptions {
-            mode: Mode::Vector,
-            ..Default::default()
-        },
-    )
-    .await;
-    assert!(
-        !vector_only.is_empty(),
-        "vector mode should return something"
+        memory::get("inst_someone_else", &fact_id).await.is_none(),
+        "memory is scoped to the agent that wrote it"
     );
     assert!(
-        vector_only.iter().all(|h| h.signals.text_rank.is_none()),
-        "no keyword leg in vector mode"
-    );
-    assert!(
-        vector_only
-            .iter()
-            .all(|h| h.signals.vector_similarity.is_some())
-    );
-    assert!(vector_only.iter().any(|h| h.memory.id == fact_id));
-
-    // ── graph ────────────────────────────────────────────────────────────────
-    memory::link(&pref_id, &fact_id, LinkKind::RelatesTo, "test")
-        .await
-        .expect("link");
-    assert!(
-        memory::link(&pref_id, &pref_id, LinkKind::RelatesTo, "test")
+        memory::recall("inst_someone_else", "embeddings proxy", text_opts())
             .await
-            .is_err(),
-        "no self-links"
-    );
-    assert!(
-        memory::link(&pref_id, "nonexistent", LinkKind::RelatesTo, "test")
-            .await
-            .is_err()
+            .is_empty()
     );
 
-    let (_, out_links, _) = memory::get(&pref_id).await.expect("get");
-    assert_eq!(out_links.len(), 1);
-    let (_, _, in_links) = memory::get(&fact_id).await.expect("get");
-    assert_eq!(in_links.len(), 1);
-
-    // ── forget: archive is soft, purge is not ────────────────────────────────
-    memory::forget(&leaky.memory.id, false)
-        .await
-        .expect("archive");
+    // ── forget ───────────────────────────────────────────────────────────────
+    // This agent has no preset base, so everything it holds is its own and is
+    // purged outright. Tombstoning a *shipped* memory is covered by
+    // `memory_layers_test`, which builds a base to tombstone against.
+    assert!(matches!(
+        memory::forget(INST, &leaky.memory.id).await.expect("forget"),
+        memory::instance::Forgotten::Purged
+    ));
     assert!(
-        memory::get(&leaky.memory.id).await.is_some(),
-        "archived records stay readable by id"
+        memory::get(INST, &leaky.memory.id).await.is_none(),
+        "a purge is permanent"
     );
     assert!(
-        memory::recall("REDACTED", text_opts()).await.is_empty(),
-        "archived memories drop out of recall"
+        memory::recall(INST, "REDACTED", text_opts()).await.is_empty(),
+        "and it drops out of recall"
     );
-    let s = memory::stats().await;
-    assert_eq!(s.total, 3);
-    assert_eq!(s.live, 2);
-    assert_eq!(s.archived, 1);
-
-    memory::forget(&leaky.memory.id, true).await.expect("purge");
-    assert!(
-        memory::get(&leaky.memory.id).await.is_none(),
-        "purge is permanent"
-    );
-    assert_eq!(memory::stats().await.total, 2);
-    assert!(memory::forget("nonexistent", false).await.is_err());
+    assert_eq!(memory::instance_view(INST, 0).await.learned, 2);
+    assert!(memory::forget(INST, "nonexistent").await.is_err());
 
     // ── the on-disk format is what the loader expects ────────────────────────
-    let wal_path = metalcraft_agent::paths::memory_wal_file();
-    let snapshot_path = metalcraft_agent::paths::memory_snapshot_file();
+    let wal_path = metalcraft_agent::paths::memory_instance_dir(INST).join("wal.jsonl");
     assert!(wal_path.exists(), "writes must have produced a log");
 
     let (events, skipped) = wal::replay(&wal_path);
@@ -281,69 +190,11 @@ async fn memory_store_round_trip() {
     assert_eq!(rebuilt.search("embeddings proxy", 10, None).len(), 1);
     assert!(rebuilt.get(&pref_id).is_some());
 
-    // Vectors reattach from the sidecar, and one for a purged memory is dropped.
-    let (from_disk, _) = vectors::load(&vectors_path);
-    let attached = rebuilt.load_vectors(from_disk);
-    assert_eq!(
-        attached, 2,
-        "only vectors whose memory still exists are kept"
-    );
-    assert_eq!(rebuilt.vector_count(), 2);
-
-    // ── compaction: snapshot, rewritten vectors, truncated log ───────────────
-    let folded = memory::compact().await.expect("compact");
-    assert!(
-        folded > 0,
-        "compaction should have folded the events it reported"
-    );
-    assert!(snapshot_path.exists());
-    assert_eq!(wal::count(&wal_path), 0, "the log is emptied after folding");
-    assert!(
-        !snapshot_path.with_extension("json.tmp").exists(),
-        "no stray tmp file"
-    );
-    assert!(
-        !vectors_path.with_extension("bin.tmp").exists(),
-        "no stray tmp file"
-    );
-
-    // Compaction collapses the vector file to exactly the live set.
-    let (compacted_vectors, torn) = vectors::load(&vectors_path);
-    assert_eq!(torn, 0);
-    assert_eq!(
-        compacted_vectors.len(),
-        2,
-        "purged and superseded vectors are dropped"
-    );
-
-    // The snapshot alone reconstructs the store — the other half of boot — and
-    // records what produced the vectors, so a model change is detectable.
-    let snap = wal::read_snapshot(&snapshot_path).expect("snapshot parses");
-    assert_eq!(
-        snap.embed_dims,
-        Some(DIMS),
-        "the snapshot records the vector geometry"
-    );
-    assert!(snap.embed_model.is_some());
-    let from_snap = MemoryIndex::from_snapshot(snap);
-    assert_eq!(from_snap.len(), 2);
-    assert_eq!(from_snap.search("rust", 10, None).len(), 1);
-    assert_eq!(
-        from_snap.links_from(&pref_id).len(),
-        1,
-        "links survive compaction"
-    );
-
-    // Compaction is safe to repeat and does not lose state.
-    memory::compact().await.expect("compact again");
-    assert_eq!(memory::stats().await.total, 2);
-    assert_eq!(memory::stats().await.vectors, 2);
-
     // ── the system-prompt profile ────────────────────────────────────────────
     // The profile is the stable half: pinned memories and preferences, in a
     // fixed order, so it stays byte-identical across turns and inside the
     // provider's cached prompt prefix.
-    let profile = memory::profile_block().await;
+    let profile = memory::profile_block(INST).await;
     assert!(
         profile.contains("Andrew prefers Rust"),
         "preferences belong in the profile: {profile}"
@@ -354,8 +205,12 @@ async fn memory_store_round_trip() {
     );
     assert_eq!(
         profile,
-        memory::profile_block().await,
+        memory::profile_block(INST).await,
         "the profile must be stable between calls"
+    );
+    assert!(
+        memory::profile_block("inst_someone_else").await.is_empty(),
+        "the profile is one agent's, not the pod's"
     );
 
     let mut pinned = RememberRequest::new(
@@ -364,8 +219,12 @@ async fn memory_store_round_trip() {
         Source::User,
     );
     pinned.pinned = true;
-    let pinned_id = memory::remember(pinned).await.expect("remember").memory.id;
-    let profile = memory::profile_block().await;
+    let pinned_id = memory::remember(INST, pinned)
+        .await
+        .expect("remember")
+        .memory
+        .id;
+    let profile = memory::profile_block(INST).await;
     assert!(
         profile.contains("k3s behind Caddy"),
         "pinned memories are always in the profile"
@@ -405,11 +264,16 @@ async fn memory_store_round_trip() {
     let prompt =
         p.build_system_prompt_with(&dir.path().join("skills"), ".", &PromptExtras::default());
     assert!(!prompt.contains("What You Remember"));
+    // A caller with no agent — the CLI — gets no profile at all.
+    assert!(
+        PromptExtras::load(None).await.memory_profile.is_empty(),
+        "no agent, no memory"
+    );
 
     // ── per-turn injection is ephemeral ──────────────────────────────────────
     let mut state = AgentState::new("what do you know about the inference gateway proxying?");
     let before = state.messages.len();
-    let injected = inject::inject(&mut state, RecallOptions::default()).await;
+    let injected = inject::inject(&mut state, INST, RecallOptions::default()).await;
     assert!(
         injected,
         "a matching memory exists, so something should be injected"
@@ -453,22 +317,22 @@ async fn memory_store_round_trip() {
 
     // A query nothing matches injects nothing at all.
     let mut empty = AgentState::new("zzzz nothing in this store resembles this query zzzz");
-    assert!(!inject::inject(&mut empty, RecallOptions::default()).await);
+    assert!(!inject::inject(&mut empty, INST, RecallOptions::default()).await);
     assert_eq!(empty.messages.len(), 1);
 
     // Cleanup so the pinned memory does not skew the final counts.
-    memory::forget(&pinned_id, true).await.expect("purge");
+    memory::forget(INST, &pinned_id).await.expect("purge");
 
     // ── capture: the cheap half of remembering ───────────────────────────────
-    // A turn appends one line and does nothing else. Nothing here calls an LLM,
-    // embeds, or summarizes — that is the whole point, and it is why this can run
-    // on every turn.
-    assert!(capture::pending().is_empty(), "nothing captured yet");
+    // A turn appends one line and does nothing else. Nothing here calls an LLM
+    // or summarizes — that is the whole point, and it is why this can run on
+    // every turn.
+    assert!(capture::pending(INST).is_empty(), "nothing captured yet");
 
     let ctx = CaptureContext {
         chat_id: Some("chat-42".into()),
         persona: Some("orchestrator-agent".into()),
-        instance_id: None,
+        instance_id: Some(INST.into()),
     };
     capture::record_turn(
         &ctx,
@@ -477,7 +341,7 @@ async fn memory_store_round_trip() {
         vec!["read_file".into(), "bash".into()],
     );
 
-    let pending = capture::pending();
+    let pending = capture::pending(INST);
     assert_eq!(pending.len(), 1);
     let c = &pending[0];
     assert_eq!(c.kind, CaptureKind::Turn);
@@ -491,6 +355,19 @@ async fn memory_store_round_trip() {
     assert!(c.has_content());
     assert!(c.processed_at.is_none());
 
+    // A turn with no agent has no queue to go in.
+    let anonymous = CaptureContext {
+        chat_id: Some("chat-43".into()),
+        persona: None,
+        instance_id: None,
+    };
+    capture::record_turn(&anonymous, "a CLI question", "a CLI answer", vec![]);
+    assert_eq!(
+        capture::pending(INST).len(),
+        1,
+        "a turn with no agent is not captured anywhere"
+    );
+
     // Secrets are scrubbed on the way into the queue, not at distillation time —
     // the queue is a file on disk like any other.
     capture::record_turn(
@@ -499,7 +376,7 @@ async fn memory_store_round_trip() {
         "ok",
         vec![],
     );
-    let leaked = capture::pending();
+    let leaked = capture::pending(INST);
     assert!(
         leaked.iter().all(|c| !c.user_text.contains("abcdefghijkl")),
         "a key must never reach the capture queue"
@@ -512,7 +389,7 @@ async fn memory_store_round_trip() {
 
     // A compaction summary is rescued rather than discarded.
     capture::record_compaction(&ctx, "Earlier: set up the pod, fixed TLS, deployed to k3s.");
-    let compactions: Vec<_> = capture::pending()
+    let compactions: Vec<_> = capture::pending(INST)
         .into_iter()
         .filter(|c| c.kind == CaptureKind::Compaction)
         .collect();
@@ -523,10 +400,10 @@ async fn memory_store_round_trip() {
         "a summary has no user side"
     );
 
-    // An end-of-conversation marker carries no content — it exists so the dream
-    // knows an episode is closed without waiting for a time gap.
-    capture::record_session_end("chat-42");
-    let ends: Vec<_> = capture::pending()
+    // An end-of-conversation marker carries no content — it exists so a later
+    // distillation pass knows an episode is closed without waiting for a gap.
+    capture::record_session_end(INST, "chat-42");
+    let ends: Vec<_> = capture::pending(INST)
         .into_iter()
         .filter(|c| c.kind == CaptureKind::SessionEnd)
         .collect();
@@ -534,31 +411,31 @@ async fn memory_store_round_trip() {
     assert!(!ends[0].has_content());
 
     // Empty turns are not worth a line.
-    let before = capture::pending_count();
+    let before = capture::pending_count(INST);
     capture::record_turn(&ctx, "   ", "", vec![]);
     assert_eq!(
-        capture::pending_count(),
+        capture::pending_count(INST),
         before,
         "an empty exchange is not captured"
     );
 
-    // Captures are ordered oldest-first, which is the order the dream wants.
-    let ordered = capture::pending();
+    // Captures are ordered oldest-first.
+    let ordered = capture::pending(INST);
     assert!(ordered.windows(2).all(|w| w[0].at <= w[1].at));
 
-    // Draining keeps everything the dream has not claimed.
+    // Draining keeps everything not yet claimed.
     let processed: Vec<String> = ordered.iter().take(2).map(|c| c.id.clone()).collect();
-    let removed = capture::retain_pending(&processed).expect("retain");
+    let removed = capture::retain_pending(INST, &processed).expect("retain");
     assert_eq!(removed, 2);
-    assert_eq!(capture::pending_count(), before - 2);
-    let remaining_ids: Vec<String> = capture::pending().into_iter().map(|c| c.id).collect();
+    assert_eq!(capture::pending_count(INST), before - 2);
+    let remaining_ids: Vec<String> = capture::pending(INST).into_iter().map(|c| c.id).collect();
     assert!(
         processed.iter().all(|p| !remaining_ids.contains(p)),
         "drained captures are gone"
     );
 
     // And the queue survives a reread from disk unscathed.
-    let (all, skipped) = capture::read_all();
+    let (all, skipped) = capture::read_all(INST);
     assert_eq!(skipped, 0, "everything written must parse back");
-    assert_eq!(all.len(), capture::pending_count());
+    assert_eq!(all.len(), capture::pending_count(INST));
 }

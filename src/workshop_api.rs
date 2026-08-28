@@ -226,7 +226,7 @@ async fn prune_run_conversations(instance_id: &str) {
         match std::fs::remove_file(chat_file_path(&id)) {
             Ok(()) => {
                 chats.remove(&id);
-                crate::memory::capture::record_session_end(&id);
+                crate::memory::capture::record_session_end(instance_id, &id);
             }
             Err(e) => log::warn!("could not prune run conversation {id}: {e}"),
         }
@@ -4769,6 +4769,27 @@ fn touch_instance(instance_id: Option<&str>) {
     }
 }
 
+/// Which agent a conversation belonged to, for a caller that is about to end it.
+///
+/// A session-end marker goes in *that agent's* capture queue, so it has to be
+/// read before the chat is dropped from the store — after that the only record of
+/// the pairing is gone. Falls back to the persisted file for a chat that was
+/// never resident, and yields `None` for a legacy chat that predates instances.
+async fn instance_of_chat(id: &str) -> Option<String> {
+    let store = chat_store();
+    let session = { store.lock().await.get(id).cloned() };
+    if let Some(s) = session {
+        let resident = s.lock().await.instance_id.clone();
+        if resident.is_some() {
+            return resident;
+        }
+    }
+    std::fs::read_to_string(chat_file_path(id))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<PersistedChat>(&raw).ok())
+        .and_then(|c| c.instance_id)
+}
+
 fn remove_chat_file(id: &str) {
     let path = chat_file_path(id);
     if path.exists() {
@@ -4958,13 +4979,23 @@ pub async fn reap_stale_chats() -> ChatReapReport {
         return report;
     }
 
+    // Resolve owners *before* taking the store lock: `instance_of_chat` reads the
+    // same store, so asking inside the loop would deadlock against our own guard.
+    let mut owners: Vec<(String, Option<String>)> = Vec::with_capacity(stale.len());
+    for id in stale {
+        let owner = instance_of_chat(&id).await;
+        owners.push((id, owner));
+    }
+
     let store = chat_store();
     let mut chats = store.lock().await;
-    for id in stale {
+    for (id, owner) in owners {
         match std::fs::remove_file(chat_file_path(&id)) {
             Ok(()) => {
                 chats.remove(&id);
-                crate::memory::capture::record_session_end(&id);
+                if let Some(instance_id) = &owner {
+                    crate::memory::capture::record_session_end(instance_id, &id);
+                }
                 report.reaped.push(id);
             }
             Err(e) => report.failed.push((id, e.to_string())),
@@ -5185,11 +5216,14 @@ async fn get_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) ->
     responses((status = 200, description = "Deleted")),
 )]
 async fn delete_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    let owner = instance_of_chat(&id).await;
     let mut chats = state.chats.lock().await;
     if chats.remove(&id).is_some() {
         drop(chats);
         remove_chat_file(&id);
-        crate::memory::capture::record_session_end(&id);
+        if let Some(instance_id) = &owner {
+            crate::memory::capture::record_session_end(instance_id, &id);
+        }
         StatusCode::NO_CONTENT.into_response()
     } else {
         err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"))
@@ -6085,7 +6119,7 @@ async fn post_chat_turn(
                     chat_id: id.clone(),
                 }),
                 reschedule_depth: 0,
-                prompt_extras: crate::persona::PromptExtras::load().await,
+                prompt_extras: crate::persona::PromptExtras::default(),
                 preset_personas: None,
                 instance_id: None,
                 // Delegation runs a whole agent inside one tool call, where the
@@ -6505,7 +6539,7 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
                     chat_id: chat_id.to_string(),
                 }),
                 reschedule_depth: 0,
-                prompt_extras: crate::persona::PromptExtras::load().await,
+                prompt_extras: crate::persona::PromptExtras::default(),
                 preset_personas: None,
                 instance_id: None,
                 interrupt: Some(interrupt.clone()),
@@ -6684,7 +6718,7 @@ pub async fn deliver_followup_to_chat(
             }),
             // A follow-up may schedule one more; the tool caps the chain depth.
             reschedule_depth: 0,
-            prompt_extras: crate::persona::PromptExtras::load().await,
+            prompt_extras: crate::persona::PromptExtras::default(),
             preset_personas: None,
             instance_id: None,
             interrupt: Some(interrupt.clone()),
@@ -6779,6 +6813,17 @@ async fn run_chat_turn(
         }
         _ => None,
     };
+
+    // The memory profile is the agent's, so it can only be built once the agent is
+    // known — which is here, not at the call site. Callers leave it empty and this
+    // fills it in; otherwise every turn path would have to resolve the instance
+    // itself just to read a block it does not otherwise care about.
+    let mut options = options;
+    options.instance_id = instance_id.clone();
+    if options.prompt_extras.memory_profile.is_empty() {
+        options.prompt_extras =
+            crate::persona::PromptExtras::load(instance_id.as_deref()).await;
+    }
 
     let persona = Persona::load(persona_slug, &context.personas_dir)
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
@@ -7984,7 +8029,9 @@ async fn gateway_session_for(
     // right place to let memory distill the episode instead of waiting for a
     // later gap to prove it. The memory belongs to the agent, not the session, so
     // the next conversation still starts knowing this person.
-    crate::memory::capture::record_session_end(&latest);
+    if let Some(instance_id) = instance_of_chat(&latest).await {
+        crate::memory::capture::record_session_end(&instance_id, &latest);
+    }
     new_gateway_chat_id(sender_key, chrono::Utc::now().timestamp())
 }
 
@@ -8182,7 +8229,7 @@ async fn run_one_gateway_turn(
             // now a follow-up armed in a gateway turn is unbound (logged).
             session_binding: None,
             reschedule_depth: 0,
-            prompt_extras: crate::persona::PromptExtras::load().await,
+            prompt_extras: crate::persona::PromptExtras::default(),
             preset_personas: None,
             instance_id: None,
             interrupt: Some(interrupt.clone()),

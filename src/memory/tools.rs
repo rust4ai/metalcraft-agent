@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use super::recall::{Mode, RecallOptions};
 use super::types::{Memory, MemoryKind, Source};
-use super::{RememberRequest, forget, get, recall, remember, stats};
+use super::{RememberRequest, forget, get, recall, remember};
 
 /// Every tool name this module contributes, for registry wiring.
 pub const TOOL_NAMES: &[&str] = &[
@@ -92,13 +92,13 @@ fn full(m: &Memory) -> Value {
 // ── mem_remember ─────────────────────────────────────────────────────────────
 
 pub struct MemRememberTool {
-    /// The agent whose memory this tool acts on. `None` targets the
-    /// pod-global store — the CLI and any pre-instance caller.
-    instance_id: Option<String>,
+    /// The agent whose memory this tool acts on. Required: memory belongs to an
+    /// agent, so a caller with no agent (the CLI) is not given these tools at all.
+    instance_id: String,
 }
 
 impl MemRememberTool {
-    pub fn new(instance_id: Option<String>) -> Self {
+    pub fn new(instance_id: String) -> Self {
         Self { instance_id }
     }
 }
@@ -156,8 +156,6 @@ impl metalcraft::Tool for MemRememberTool {
             .unwrap_or(MemoryKind::Semantic);
 
         let mut req = RememberRequest::new(kind, content, Source::Tool);
-        // An agent that recalls from its own memory must write there too.
-        req.instance_id = self.instance_id.clone();
         req.entity = args["entity"]
             .as_str()
             .map(str::to_string)
@@ -165,7 +163,7 @@ impl metalcraft::Tool for MemRememberTool {
         req.importance = args["importance"].as_f64().map(|v| v as f32);
         req.pinned = args["pinned"].as_bool().unwrap_or(false);
 
-        match remember(req).await {
+        match remember(&self.instance_id, req).await {
             Ok(r) => Ok(json!({
                 "id": r.memory.id,
                 "kind": r.memory.kind.as_str(),
@@ -188,13 +186,13 @@ impl metalcraft::Tool for MemRememberTool {
 // ── mem_search ───────────────────────────────────────────────────────────────
 
 pub struct MemSearchTool {
-    /// The agent whose memory this tool acts on. `None` targets the
-    /// pod-global store — the CLI and any pre-instance caller.
-    instance_id: Option<String>,
+    /// The agent whose memory this tool acts on. Required: memory belongs to an
+    /// agent, so a caller with no agent (the CLI) is not given these tools at all.
+    instance_id: String,
 }
 
 impl MemSearchTool {
-    pub fn new(instance_id: Option<String>) -> Self {
+    pub fn new(instance_id: String) -> Self {
         Self { instance_id }
     }
 }
@@ -207,8 +205,9 @@ impl metalcraft::Tool for MemSearchTool {
     fn description(&self) -> &str {
         "Search long-term memory for things learned in earlier conversations. Use proactively when \
          the user refers to past decisions, their preferences, or anything you might already have \
-         been told. Combines keyword, semantic, and connection-based search, so it finds relevant \
-         memories even when the wording differs. Returns ranked snippets — call mem_get with an id \
+         been told. Matching is on words, not meaning, so search the distinctive nouns rather than \
+         a whole sentence; memories linked to a match come back with it. Returns ranked snippets — \
+         call mem_get with an id \
          for the full text."
     }
     fn parameters_schema(&self) -> Value {
@@ -219,9 +218,9 @@ impl metalcraft::Tool for MemSearchTool {
                 "limit": { "type": "integer", "description": "Max results (default 10, max 50)." },
                 "mode": {
                     "type": "string",
-                    "enum": ["hybrid", "text", "vector"],
-                    "description": "hybrid (default) combines keyword, semantic, and linked-memory search. \
-                                    text is exact-keyword only. vector is meaning-only. Leave unset unless debugging."
+                    "enum": ["hybrid", "text"],
+                    "description": "hybrid (default) combines keyword search with linked memories. \
+                                    text is keyword-only, without following links. Leave unset unless debugging."
                 },
                 "kind": {
                     "type": "string",
@@ -245,14 +244,10 @@ impl metalcraft::Tool for MemSearchTool {
             mode,
             limit,
             kind: args["kind"].as_str().and_then(MemoryKind::parse),
-            // Search where this agent writes. Without it an agent would remember
-            // something and then be unable to find it.
-            instance_id: self.instance_id.clone(),
             ..Default::default()
         };
 
-        let results = recall(query, opts).await;
-        let availability = super::embedding_availability();
+        let results = recall(&self.instance_id, query, opts).await;
         let mut out = json!({
             "query": query,
             "mode": mode.as_str(),
@@ -262,14 +257,6 @@ impl metalcraft::Tool for MemSearchTool {
         if results.is_empty() {
             out["note"] = json!("Nothing in memory matches. This may simply be new.");
         }
-        // Say so when semantic matching is unavailable, rather than letting a
-        // thin result set look like a confident "nothing is known".
-        if mode != Mode::Text && availability != super::embed::Availability::Ready {
-            out["degraded"] = json!(format!(
-                "Semantic search is {} — these results are keyword and connection matches only.",
-                availability.as_str()
-            ));
-        }
         Ok(out)
     }
 }
@@ -277,13 +264,13 @@ impl metalcraft::Tool for MemSearchTool {
 // ── mem_get ──────────────────────────────────────────────────────────────────
 
 pub struct MemGetTool {
-    /// The agent whose memory this tool acts on. `None` targets the
-    /// pod-global store — the CLI and any pre-instance caller.
-    instance_id: Option<String>,
+    /// The agent whose memory this tool acts on. Required: memory belongs to an
+    /// agent, so a caller with no agent (the CLI) is not given these tools at all.
+    instance_id: String,
 }
 
 impl MemGetTool {
-    pub fn new(instance_id: Option<String>) -> Self {
+    pub fn new(instance_id: String) -> Self {
         Self { instance_id }
     }
 }
@@ -308,35 +295,8 @@ impl metalcraft::Tool for MemGetTool {
         let id = args["id"]
             .as_str()
             .ok_or_else(|| crate::tools::missing_param("mem_get", "id"))?;
-        let scoped = match &self.instance_id {
-            Some(inst) => super::instance_get(inst, id)
-                .await
-                .map(|m| (m, Vec::new(), Vec::new())),
-            None => None,
-        };
-        match match scoped {
-            Some(hit) => Some(hit),
-            None if self.instance_id.is_none() => get(id).await,
-            // An agent must not read another agent's memory just because the
-            // pod-global store happens to hold that id.
-            None => None,
-        } {
-            Some((m, out_links, in_links)) => {
-                let mut v = full(&m);
-                v["links_out"] = json!(
-                    out_links
-                        .iter()
-                        .map(|l| json!({"kind": l.kind.as_str(), "to": l.dst}))
-                        .collect::<Vec<_>>()
-                );
-                v["links_in"] = json!(
-                    in_links
-                        .iter()
-                        .map(|l| json!({"kind": l.kind.as_str(), "from": l.src}))
-                        .collect::<Vec<_>>()
-                );
-                Ok(v)
-            }
+        match get(&self.instance_id, id).await {
+            Some(m) => Ok(full(&m)),
             None => Err(metalcraft::GraphError::ToolCallFailed {
                 tool: "mem_get".into(),
                 message: format!("no memory with id '{id}'"),
@@ -348,13 +308,13 @@ impl metalcraft::Tool for MemGetTool {
 // ── mem_forget ───────────────────────────────────────────────────────────────
 
 pub struct MemForgetTool {
-    /// The agent whose memory this tool acts on. `None` targets the
-    /// pod-global store — the CLI and any pre-instance caller.
-    instance_id: Option<String>,
+    /// The agent whose memory this tool acts on. Required: memory belongs to an
+    /// agent, so a caller with no agent (the CLI) is not given these tools at all.
+    instance_id: String,
 }
 
 impl MemForgetTool {
-    pub fn new(instance_id: Option<String>) -> Self {
+    pub fn new(instance_id: String) -> Self {
         Self { instance_id }
     }
 }
@@ -365,19 +325,16 @@ impl metalcraft::Tool for MemForgetTool {
         "mem_forget"
     }
     fn description(&self) -> &str {
-        "Forget a memory. By default this archives it (reversible, hidden from search). Pass \
-         purge=true only when the user explicitly asks for something to be deleted — that is \
-         permanent."
+        "Forget a memory, so you stop recalling it. What this costs depends on where the \
+         memory came from: one you learned is deleted outright, while one your agent pack \
+         shipped is only hidden from you — the shared copy other agents of your preset use \
+         is untouched. The result says which happened."
     }
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "Memory id from mem_search." },
-                "purge": {
-                    "type": "boolean",
-                    "description": "Delete permanently instead of archiving. Only on an explicit user request."
-                }
+                "id": { "type": "string", "description": "Memory id from mem_search." }
             },
             "required": ["id"]
         })
@@ -386,40 +343,20 @@ impl metalcraft::Tool for MemForgetTool {
         let id = args["id"]
             .as_str()
             .ok_or_else(|| crate::tools::missing_param("mem_forget", "id"))?;
-        let purge = args["purge"].as_bool().unwrap_or(false);
-
-        // An agent forgetting inside its own memory is a different operation: its
-        // own memories are purged, but a memory its pack shipped is only tombstoned,
+        // Forgetting inside an agent's own memory is two operations: its own
+        // memories are purged, but a memory its pack shipped is only tombstoned,
         // because that copy is shared with every other agent of the same preset.
-        if let Some(inst) = &self.instance_id {
-            return match super::instance_forget(inst, id).await {
-                Ok(super::instance::Forgotten::Purged) => Ok(json!({
-                    "id": id,
-                    "status": "purged",
-                    "note": "This was your own memory; it is gone.",
-                })),
-                Ok(super::instance::Forgotten::Tombstoned) => Ok(json!({
-                    "id": id,
-                    "status": "tombstoned",
-                    "note": "This came with your agent pack. You will no longer recall it; \
-                             the shared copy other agents use is untouched.",
-                })),
-                Err(e) => Err(metalcraft::GraphError::ToolCallFailed {
-                    tool: "mem_forget".into(),
-                    message: e,
-                }),
-            };
-        }
-
-        match forget(id, purge).await {
-            Ok(()) => Ok(json!({
+        match forget(&self.instance_id, id).await {
+            Ok(super::instance::Forgotten::Purged) => Ok(json!({
                 "id": id,
-                "status": if purge { "purged" } else { "archived" },
-                "note": if purge {
-                    "Permanently deleted."
-                } else {
-                    "Archived — hidden from search, still recoverable."
-                },
+                "status": "purged",
+                "note": "This was your own memory; it is gone.",
+            })),
+            Ok(super::instance::Forgotten::Tombstoned) => Ok(json!({
+                "id": id,
+                "status": "tombstoned",
+                "note": "This came with your agent pack. You will no longer recall it; \
+                         the shared copy other agents use is untouched.",
             })),
             Err(e) => Err(metalcraft::GraphError::ToolCallFailed {
                 tool: "mem_forget".into(),
@@ -432,13 +369,13 @@ impl metalcraft::Tool for MemForgetTool {
 // ── mem_stats ────────────────────────────────────────────────────────────────
 
 pub struct MemStatsTool {
-    /// The agent whose memory this tool acts on. `None` targets the
-    /// pod-global store — the CLI and any pre-instance caller.
-    instance_id: Option<String>,
+    /// The agent whose memory this tool acts on. Required: memory belongs to an
+    /// agent, so a caller with no agent (the CLI) is not given these tools at all.
+    instance_id: String,
 }
 
 impl MemStatsTool {
-    pub fn new(instance_id: Option<String>) -> Self {
+    pub fn new(instance_id: String) -> Self {
         Self { instance_id }
     }
 }
@@ -456,48 +393,18 @@ impl metalcraft::Tool for MemStatsTool {
         json!({ "type": "object", "properties": {} })
     }
     async fn call(&self, _args: Value) -> metalcraft::Result<Value> {
-        if let Some(inst) = &self.instance_id {
-            let v = super::instance_view(inst, 0).await;
-            return Ok(json!({
-                "scope": "agent",
-                "instance_id": v.instance_id,
-                "base": v.base,
-                "shipped": v.shipped,
-                "learned": v.learned,
-                "forgotten": v.forgotten,
-                "total": v.shipped + v.learned,
-                "enabled": super::enabled(),
-                "embeddings": {
-                    "availability": super::embedding_availability().as_str(),
-                    "model": super::embed::configured_model(),
-                    "dims": super::embed::configured_dims(),
-                },
-                "pending_captures": super::capture::pending_count(),
-            }));
-        }
-        let s = stats().await;
+        let v = super::instance_view(&self.instance_id, 0).await;
         Ok(json!({
-            "total": s.total,
-            "live": s.live,
-            "archived": s.archived,
-            "superseded": s.superseded,
-            "pinned": s.pinned,
-            "by_kind": s.by_kind.iter().map(|(k, n)| json!({"kind": k, "count": n})).collect::<Vec<_>>(),
-            "links": s.links,
-            "pending_log_events": s.log_events,
-            // A queue that stops draining means the dream is not running — worth
-            // being able to see rather than silently accumulating.
-            "pending_captures": super::capture::pending_count(),
-            "approx_kb": s.approx_bytes / 1024,
+            "instance_id": v.instance_id,
+            "base": v.base,
+            "shipped": v.shipped,
+            "learned": v.learned,
+            "forgotten": v.forgotten,
+            "total": v.shipped + v.learned,
             "enabled": super::enabled(),
-            "embeddings": {
-                "availability": super::embedding_availability().as_str(),
-                "model": super::embed::configured_model(),
-                "dims": super::embed::configured_dims(),
-                "vectors": s.vectors,
-                // An empty store is trivially fully covered.
-                "coverage_pct": (s.vectors * 100).checked_div(s.live).unwrap_or(100),
-            },
+            // Captures are written every turn and nothing consumes them yet, so
+            // this only ever grows. Surfaced rather than silently accumulating.
+            "pending_captures": super::capture::pending_count(&self.instance_id),
         }))
     }
 }
@@ -510,11 +417,11 @@ mod tests {
     #[test]
     fn every_declared_tool_name_has_an_implementation() {
         let (remember, search, get, forget, stats) = (
-            MemRememberTool::new(None),
-            MemSearchTool::new(None),
-            MemGetTool::new(None),
-            MemForgetTool::new(None),
-            MemStatsTool::new(None),
+            MemRememberTool::new("inst_test".into()),
+            MemSearchTool::new("inst_test".into()),
+            MemGetTool::new("inst_test".into()),
+            MemForgetTool::new("inst_test".into()),
+            MemStatsTool::new("inst_test".into()),
         );
         let built: Vec<&str> = vec![
             remember.name(),
@@ -533,12 +440,12 @@ mod tests {
     fn schemas_are_objects_and_mark_their_required_params() {
         for (schema, required) in [
             (
-                MemRememberTool::new(None).parameters_schema(),
+                MemRememberTool::new("inst_test".into()).parameters_schema(),
                 vec!["content"],
             ),
-            (MemSearchTool::new(None).parameters_schema(), vec!["query"]),
-            (MemGetTool::new(None).parameters_schema(), vec!["id"]),
-            (MemForgetTool::new(None).parameters_schema(), vec!["id"]),
+            (MemSearchTool::new("inst_test".into()).parameters_schema(), vec!["query"]),
+            (MemGetTool::new("inst_test".into()).parameters_schema(), vec!["id"]),
+            (MemForgetTool::new("inst_test".into()).parameters_schema(), vec!["id"]),
         ] {
             assert_eq!(schema["type"], "object");
             let got: Vec<String> = schema["required"]
@@ -551,7 +458,7 @@ mod tests {
         }
         // mem_stats takes no parameters at all.
         assert_eq!(
-            MemStatsTool::new(None).parameters_schema()["type"],
+            MemStatsTool::new("inst_test".into()).parameters_schema()["type"],
             "object"
         );
     }

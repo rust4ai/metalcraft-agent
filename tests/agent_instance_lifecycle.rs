@@ -46,8 +46,7 @@ async fn deleting_agents_and_reaping_their_sessions() {
     let id = inst.id.clone();
 
     let mut req = RememberRequest::new(MemoryKind::Semantic, "A private thing.", Source::Turn);
-    req.instance_id = Some(id.clone());
-    memory::remember(req).await.expect("remember");
+    memory::remember(&id, req).await.expect("remember");
 
     let mem_dir = metalcraft_agent::paths::memory_instance_dir(&id);
     assert!(mem_dir.is_dir(), "the agent should have a memory directory");

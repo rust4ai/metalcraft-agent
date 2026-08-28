@@ -71,9 +71,6 @@ pub struct MemoryIndex {
     in_links: HashMap<String, Vec<Link>>,
     /// content hash → memory id, for the exact-duplicate guard
     hashes: HashMap<String, String>,
-    /// memory id → embedding. Persisted separately in `vectors.bin`, not in the
-    /// JSON log — see [`super::vectors`].
-    vectors: HashMap<String, Vec<f32>>,
 }
 
 impl MemoryIndex {
@@ -200,7 +197,6 @@ impl MemoryIndex {
             self.unindex(&m);
             self.hashes.remove(&m.content_hash);
         }
-        self.vectors.remove(id);
         self.out_links.remove(id);
         self.in_links.remove(id);
         for v in self.out_links.values_mut() {
@@ -211,106 +207,6 @@ impl MemoryIndex {
         }
     }
 
-    // ── vectors ──────────────────────────────────────────────────────────────
-
-    /// Attach an embedding to a memory. Persistence is the caller's job — the
-    /// index is in-memory state, `vectors.bin` is how it survives a restart.
-    pub fn set_vector(&mut self, id: &str, vec: Vec<f32>) {
-        self.vectors.insert(id.to_string(), vec);
-    }
-
-    /// Load many vectors at once (boot path), keeping only those whose memory
-    /// still exists — a vector for a purged memory is dead weight.
-    pub fn load_vectors(&mut self, vectors: HashMap<String, Vec<f32>>) -> usize {
-        let before = self.vectors.len();
-        for (id, v) in vectors {
-            if self.memories.contains_key(&id) {
-                self.vectors.insert(id, v);
-            }
-        }
-        self.vectors.len() - before
-    }
-
-    pub fn vector(&self, id: &str) -> Option<&Vec<f32>> {
-        self.vectors.get(id)
-    }
-
-    pub fn vector_count(&self) -> usize {
-        self.vectors.len()
-    }
-
-    pub fn vectors_iter(&self) -> impl Iterator<Item = (&String, &Vec<f32>)> {
-        self.vectors.iter()
-    }
-
-    /// Drop every vector. Used when the embedding model or dimensionality
-    /// changes: vectors from different models are not comparable, so mixing them
-    /// would silently corrupt ranking. Better to have none and re-embed.
-    pub fn clear_vectors(&mut self) -> usize {
-        let n = self.vectors.len();
-        self.vectors.clear();
-        n
-    }
-
-    /// Live memories that have no embedding yet, oldest first, with the text to
-    /// embed. Oldest-first so a backlog drains in a stable order instead of
-    /// re-picking whatever happens to hash first.
-    pub fn missing_vectors(&self, limit: usize) -> Vec<(String, String)> {
-        let mut out: Vec<&Memory> = self
-            .memories
-            .values()
-            .filter(|m| m.is_live() && !self.vectors.contains_key(&m.id))
-            .collect();
-        out.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        out.into_iter()
-            .take(limit)
-            .map(|m| (m.id.clone(), m.indexable()))
-            .collect()
-    }
-
-    /// Brute-force cosine search over resident vectors.
-    ///
-    /// Linear in the corpus, which is the right trade at this scale: 384 floats
-    /// times a few tens of thousands of memories is a handful of milliseconds of
-    /// contiguous `f32` math, and an ANN index would add a dependency, a build
-    /// step, and a staleness problem to save time that isn't being spent.
-    pub fn vector_search(&self, query: &[f32], limit: usize, kind: Option<MemoryKind>) -> Vec<Hit> {
-        if query.is_empty() {
-            return Vec::new();
-        }
-        let mut hits: Vec<Hit> = self
-            .vectors
-            .iter()
-            .filter_map(|(id, v)| {
-                let m = self.memories.get(id)?;
-                if !m.is_live() {
-                    return None;
-                }
-                if let Some(k) = kind
-                    && m.kind != k
-                {
-                    return None;
-                }
-                let score = super::vectors::cosine(query, v);
-                (score > 0.0).then(|| Hit {
-                    id: id.clone(),
-                    score,
-                })
-            })
-            .collect();
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        hits.truncate(limit);
-        hits
-    }
 
     /// One-hop graph expansion from a seed set, ranked by total edge weight back
     /// to the seeds. Query-aware: this surfaces what the matches are *connected
@@ -463,12 +359,10 @@ impl MemoryIndex {
     }
 
     /// Materialize current state for the snapshot writer.
-    pub fn snapshot(&self, embed_model: Option<String>, embed_dims: Option<usize>) -> Snapshot {
+    pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             seq: self.seq,
             written_at: Utc::now(),
-            embed_model,
-            embed_dims,
             memories: self.memories.values().cloned().collect(),
             links: self.out_links.values().flatten().cloned().collect(),
         }
@@ -496,11 +390,6 @@ impl MemoryIndex {
                 .inverted
                 .iter()
                 .map(|(t, p)| t.len() + p.len() * 48)
-                .sum::<usize>()
-            + self
-                .vectors
-                .values()
-                .map(|v| v.len() * 4 + 48)
                 .sum::<usize>();
 
         Stats {
@@ -522,7 +411,6 @@ impl MemoryIndex {
             seq: self.seq,
             log_events,
             approx_bytes,
-            vectors: self.vectors.len(),
         }
     }
 }
@@ -727,7 +615,7 @@ mod tests {
         });
         idx.seq = 11;
 
-        let snap = idx.snapshot(Some("m".into()), Some(384));
+        let snap = idx.snapshot();
         let rebuilt = MemoryIndex::from_snapshot(snap);
         assert_eq!(rebuilt.len(), 2);
         assert_eq!(rebuilt.seq, 11);

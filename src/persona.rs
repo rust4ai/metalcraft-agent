@@ -67,9 +67,15 @@ pub struct PromptExtras {
 
 impl PromptExtras {
     /// Build the extras for a real turn, reading the live memory profile.
-    pub async fn load() -> Self {
+    ///
+    /// `instance_id` is `None` for the CLI, which has no agent and therefore no
+    /// memory — it gets no profile block rather than someone else's.
+    pub async fn load(instance_id: Option<&str>) -> Self {
         Self {
-            memory_profile: crate::memory::profile_block().await,
+            memory_profile: match instance_id {
+                Some(id) => crate::memory::profile_block(id).await,
+                None => String::new(),
+            },
         }
     }
 }

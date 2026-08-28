@@ -1,16 +1,19 @@
-//! Hybrid recall: keyword, vector, and graph signals fused into one ranking.
+//! Hybrid recall: keyword and graph signals fused into one ranking.
 //!
-//! Three retrievers see different things. BM25 is precise on exact wording and
-//! useless on paraphrase. Vector search is the reverse. The graph sees neither —
-//! it surfaces what the matches are *connected to*, which is often the thing you
-//! actually needed. Fusing them beats any one alone, and beats a weighted sum,
-//! because the three produce scores on incomparable scales (a BM25 score of 8 and
-//! a cosine of 0.8 mean nothing to each other).
+//! Two retrievers see different things. BM25 is precise on exact wording and
+//! useless on paraphrase. The graph does not read the query at all — it surfaces
+//! what the matches are *connected to*, which is often the thing you actually
+//! needed. Fusing them beats either alone, and beats a weighted sum, because the
+//! two produce scores on incomparable scales.
 //!
 //! So this uses **Reciprocal Rank Fusion**: each retriever contributes
 //! `1 / (k + rank)`, and only the *ordering* within each list matters. It needs
 //! no score normalization and no per-corpus tuning, which is exactly right for a
 //! system whose corpus starts empty and grows to whatever it grows to.
+//!
+//! There was a third retriever — brute-force cosine over embeddings. It is gone:
+//! it only ever ran against the pod-global store, so once every turn became
+//! instance-scoped it had stopped contributing results entirely.
 //!
 //! The last step is a **token budget rather than a top-k**. A flat `LIMIT 15`
 //! either wastes context on fifteen one-liners or blows it on fifteen essays;
@@ -35,12 +38,10 @@ const GRAPH_CANDIDATES: usize = 20;
 /// Which retrievers to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// All three, fused. The default.
+    /// Keyword and graph, fused. The default.
     Hybrid,
-    /// BM25 only — deterministic, no network, no embedding cost.
+    /// BM25 only, without graph expansion. Mostly a debugging lens.
     Text,
-    /// Vector only. Mostly a debugging lens.
-    Vector,
 }
 
 impl Mode {
@@ -48,7 +49,6 @@ impl Mode {
         Some(match s.trim().to_ascii_lowercase().as_str() {
             "hybrid" | "" => Self::Hybrid,
             "text" | "fts" | "keyword" | "bm25" => Self::Text,
-            "vector" | "semantic" | "embedding" => Self::Vector,
             _ => return None,
         })
     }
@@ -57,7 +57,6 @@ impl Mode {
         match self {
             Self::Hybrid => "hybrid",
             Self::Text => "text",
-            Self::Vector => "vector",
         }
     }
 }
@@ -67,20 +66,15 @@ impl Mode {
 #[derive(Debug, Clone, Default)]
 pub struct Signals {
     pub text_rank: Option<usize>,
-    pub vector_rank: Option<usize>,
-    pub vector_similarity: Option<f32>,
     pub graph_rank: Option<usize>,
 }
 
 impl Signals {
-    /// Compact provenance, e.g. `"text#1,vector#3"`.
+    /// Compact provenance, e.g. `"text#1,graph#3"`.
     pub fn describe(&self) -> String {
         let mut parts = Vec::new();
         if let Some(r) = self.text_rank {
             parts.push(format!("text#{}", r + 1));
-        }
-        if let Some(r) = self.vector_rank {
-            parts.push(format!("vector#{}", r + 1));
         }
         if let Some(r) = self.graph_rank {
             parts.push(format!("graph#{}", r + 1));
@@ -109,9 +103,6 @@ pub struct RecallOptions {
     pub chat_id: Option<String>,
     /// Memories written under this persona are boosted.
     pub persona: Option<String>,
-    /// Recall against this agent instance's two layers rather than the pod-global
-    /// store. `None` keeps the pre-instance behaviour.
-    pub instance_id: Option<String>,
     /// Share of the token budget reserved for what this agent *learned*, as opposed
     /// to what its pack shipped. The remainder goes to the base layer.
     ///
@@ -136,7 +127,6 @@ impl Default for RecallOptions {
             kind: None,
             chat_id: None,
             persona: None,
-            instance_id: None,
             learned_share: DEFAULT_LEARNED_SHARE,
         }
     }
@@ -150,29 +140,16 @@ pub fn estimate_tokens(text: &str) -> usize {
 
 /// Run the full pipeline against an already-locked index.
 ///
-/// Sync and pure given `(index, query, query_vec)`, which is what makes the
-/// ranking testable without a network call or a global.
-pub fn search_index(
-    idx: &MemoryIndex,
-    query: &str,
-    query_vec: Option<&[f32]>,
-    opts: &RecallOptions,
-) -> Vec<Scored> {
-    let text_hits = match opts.mode {
-        Mode::Hybrid | Mode::Text => idx.search(query, CANDIDATES, opts.kind),
-        Mode::Vector => Vec::new(),
-    };
-    let vector_hits = match (opts.mode, query_vec) {
-        (Mode::Hybrid | Mode::Vector, Some(v)) => idx.vector_search(v, CANDIDATES, opts.kind),
-        _ => Vec::new(),
-    };
+/// Sync and pure given `(index, query)`, which is what makes the ranking testable
+/// without a global.
+pub fn search_index(idx: &MemoryIndex, query: &str, opts: &RecallOptions) -> Vec<Scored> {
+    let text_hits = idx.search(query, CANDIDATES, opts.kind);
 
-    // Graph expansion seeds from what the other two found, so it stays tied to
-    // the query rather than surfacing the globally best-connected memories.
+    // Graph expansion seeds from what BM25 found, so it stays tied to the query
+    // rather than surfacing the globally best-connected memories.
     let graph_hits = if opts.mode == Mode::Hybrid {
         let seeds: Vec<String> = text_hits
             .iter()
-            .chain(vector_hits.iter())
             .map(|h| h.id.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -183,7 +160,7 @@ pub fn search_index(
         Vec::new()
     };
 
-    let fused = fuse(idx, &text_hits, &vector_hits, &graph_hits, opts);
+    let fused = fuse(idx, &text_hits, &graph_hits, opts);
     apply_budget(fused, opts)
 }
 
@@ -199,7 +176,6 @@ pub fn search_layers(
     base: Option<&MemoryIndex>,
     tombstones: &std::collections::HashSet<String>,
     query: &str,
-    query_vec: Option<&[f32]>,
     opts: &RecallOptions,
 ) -> Vec<Scored> {
     let learned_share = opts.learned_share.clamp(MIN_LEARNED_SHARE, 1.0);
@@ -209,9 +185,9 @@ pub fn search_layers(
     unbounded.token_budget = None;
     unbounded.limit = opts.limit.max(1);
 
-    let learned = search_index(delta, query, query_vec, &unbounded);
+    let learned = search_index(delta, query, &unbounded);
     let shipped = match base {
-        Some(b) => search_index(b, query, query_vec, &unbounded),
+        Some(b) => search_index(b, query, &unbounded),
         None => Vec::new(),
     };
 
@@ -271,7 +247,6 @@ fn take_within(ranked: Vec<Scored>, budget: usize, limit: usize) -> Vec<Scored> 
 fn fuse(
     idx: &MemoryIndex,
     text_hits: &[Hit],
-    vector_hits: &[Hit],
     graph_hits: &[Hit],
     opts: &RecallOptions,
 ) -> Vec<Scored> {
@@ -281,12 +256,6 @@ fn fuse(
     for (rank, hit) in text_hits.iter().enumerate() {
         *scores.entry(hit.id.clone()).or_insert(0.0) += 1.0 / (RRF_K + rank as f32);
         signals.entry(hit.id.clone()).or_default().text_rank = Some(rank);
-    }
-    for (rank, hit) in vector_hits.iter().enumerate() {
-        *scores.entry(hit.id.clone()).or_insert(0.0) += 1.0 / (RRF_K + rank as f32);
-        let s = signals.entry(hit.id.clone()).or_default();
-        s.vector_rank = Some(rank);
-        s.vector_similarity = Some(hit.score);
     }
     for (rank, hit) in graph_hits.iter().enumerate() {
         *scores.entry(hit.id.clone()).or_insert(0.0) += 1.0 / (RRF_K + rank as f32);
@@ -378,7 +347,6 @@ mod tests {
         assert_eq!(Mode::parse("hybrid"), Some(Mode::Hybrid));
         assert_eq!(Mode::parse(""), Some(Mode::Hybrid));
         assert_eq!(Mode::parse("FTS"), Some(Mode::Text));
-        assert_eq!(Mode::parse("semantic"), Some(Mode::Vector));
         assert_eq!(Mode::parse("nonsense"), None);
     }
 
@@ -392,72 +360,53 @@ mod tests {
             mode: Mode::Text,
             ..Default::default()
         };
-        let out = search_index(&idx, "gateway embeddings", None, &opts);
+        let out = search_index(&idx, "gateway embeddings", &opts);
         assert_eq!(out.len(), 1);
         assert!(out[0].memory.content.contains("gateway"));
         assert_eq!(out[0].signals.text_rank, Some(0));
-        assert_eq!(out[0].signals.vector_rank, None);
+        assert_eq!(out[0].signals.graph_rank, None);
     }
 
     #[test]
-    fn vector_mode_finds_a_paraphrase_that_shares_no_keywords() {
-        let target = mem("the sky appears azure at midday");
-        let target_id = target.id.clone();
-        let other = mem("compilation times are dominated by linking");
-        let other_id = other.id.clone();
-        let mut idx = idx_with(vec![target, other]);
-        // Hand-built vectors: the query points at the target, away from the other.
-        idx.set_vector(&target_id, vec![1.0, 0.0, 0.0]);
-        idx.set_vector(&other_id, vec![0.0, 1.0, 0.0]);
-
-        let opts = RecallOptions {
-            mode: Mode::Vector,
-            ..Default::default()
-        };
-        let out = search_index(
-            &idx,
-            "no shared words whatsoever",
-            Some(&[0.9, 0.1, 0.0]),
-            &opts,
-        );
-        assert_eq!(out.len(), 2, "both have vectors, both score > 0");
-        assert_eq!(
-            out[0].memory.id, target_id,
-            "the nearer vector must rank first"
-        );
-        assert!(
-            out[0].signals.vector_similarity.unwrap() > out[1].signals.vector_similarity.unwrap()
-        );
-    }
-
-    #[test]
-    fn hybrid_rewards_agreement_between_retrievers() {
-        // `both` is found by text AND vector; `text_only` only by text and ranks
-        // higher there. Fusion should still put `both` first.
-        let both = mem("rust ownership rules for pod services");
-        let both_id = both.id.clone();
-        let text_only = mem("rust rust rust ownership ownership rules rules");
-        let text_only_id = text_only.id.clone();
-        let mut idx = idx_with(vec![both, text_only]);
-        idx.set_vector(&both_id, vec![1.0, 0.0]);
-        idx.set_vector(&text_only_id, vec![0.0, 1.0]);
+    fn text_and_graph_hits_are_disjoint() {
+        // The two retrievers cannot both find the same memory: `graph_expand`
+        // skips anything already in its seed set. So fusion here orders two
+        // separate populations rather than reinforcing agreement between them —
+        // which is why a rank-0 text hit and a rank-0 graph hit carry identical
+        // RRF weight and fall back to the id tie-break.
+        let direct = mem("rust ownership rules for pod services");
+        let direct_id = direct.id.clone();
+        let neighbour = mem("unrelated note about badger husbandry");
+        let neighbour_id = neighbour.id.clone();
+        let mut idx = idx_with(vec![direct, neighbour]);
+        idx.insert_link(Link {
+            src: direct_id.clone(),
+            dst: neighbour_id.clone(),
+            kind: LinkKind::RelatesTo,
+            weight: 1.0,
+            created_by: "test".into(),
+        });
 
         let opts = RecallOptions {
             mode: Mode::Hybrid,
             ..Default::default()
         };
-        let out = search_index(&idx, "rust ownership", Some(&[1.0, 0.0]), &opts);
+        let out = search_index(&idx, "rust ownership", &opts);
+        assert_eq!(out.len(), 2, "the neighbour comes along for the ride");
+
+        let direct_hit = out.iter().find(|s| s.memory.id == direct_id).unwrap();
+        assert_eq!(direct_hit.signals.text_rank, Some(0));
         assert_eq!(
-            out[0].memory.id, both_id,
-            "found by two retrievers, so it wins"
+            direct_hit.signals.graph_rank, None,
+            "a seed is never also a graph hit"
         );
+
+        let neighbour_hit = out.iter().find(|s| s.memory.id == neighbour_id).unwrap();
+        assert_eq!(neighbour_hit.signals.graph_rank, Some(0));
         assert_eq!(
-            out[0].signals.text_rank,
-            Some(1),
-            "even though text ranked it second"
+            neighbour_hit.signals.text_rank, None,
+            "it matched no keywords at all"
         );
-        assert_eq!(out[0].signals.vector_rank, Some(0));
-        assert_eq!(out[1].memory.id, text_only_id);
     }
 
     #[test]
@@ -479,7 +428,7 @@ mod tests {
             mode: Mode::Hybrid,
             ..Default::default()
         };
-        let out = search_index(&idx, "caddy tls", None, &opts);
+        let out = search_index(&idx, "caddy tls", &opts);
         let ids: Vec<&str> = out.iter().map(|s| s.memory.id.as_str()).collect();
         assert!(ids.contains(&hit_id.as_str()));
         assert!(
@@ -509,7 +458,7 @@ mod tests {
             mode: Mode::Text,
             ..Default::default()
         };
-        let out = search_index(&idx, "caddy tls", None, &opts);
+        let out = search_index(&idx, "caddy tls", &opts);
         assert_eq!(out.len(), 1, "text mode is exactly BM25, nothing else");
     }
 
@@ -528,7 +477,7 @@ mod tests {
             mode: Mode::Text,
             ..Default::default()
         };
-        let out = search_index(&idx, "deployment notes pod", None, &opts);
+        let out = search_index(&idx, "deployment notes pod", &opts);
         assert_eq!(
             out[0].memory.id, pinned_id,
             "pinned outranks equivalent unpinned"
@@ -549,7 +498,7 @@ mod tests {
             chat_id: Some("chat-1".into()),
             ..Default::default()
         };
-        let out = search_index(&idx, "config bot_config", None, &opts);
+        let out = search_index(&idx, "config bot_config", &opts);
         assert_eq!(out[0].memory.id, here_id);
     }
 
@@ -568,7 +517,7 @@ mod tests {
             mode: Mode::Text,
             ..Default::default()
         };
-        let out = search_index(&idx, "ingress controller configuration", None, &opts);
+        let out = search_index(&idx, "ingress controller configuration", &opts);
         assert_eq!(out[0].memory.id, strong_id);
     }
 
@@ -576,20 +525,18 @@ mod tests {
     fn archived_and_superseded_never_survive_fusion() {
         let mut archived = mem("archived note about pelicans");
         archived.archived_at = Some(chrono::Utc::now());
-        let archived_id = archived.id.clone();
+        let _archived_id = archived.id.clone();
         let mut merged = mem("merged note about pelicans");
         merged.superseded_by = Some("somewhere".into());
         let live = mem("live note about pelicans");
         let live_id = live.id.clone();
 
-        let mut idx = idx_with(vec![archived, merged, live]);
-        // Even with vectors attached, they must not come back.
-        idx.set_vector(&archived_id, vec![1.0, 0.0]);
+        let idx = idx_with(vec![archived, merged, live]);
         let opts = RecallOptions {
             mode: Mode::Hybrid,
             ..Default::default()
         };
-        let out = search_index(&idx, "pelicans", Some(&[1.0, 0.0]), &opts);
+        let out = search_index(&idx, "pelicans", &opts);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].memory.id, live_id);
     }
@@ -606,7 +553,7 @@ mod tests {
             token_budget: Some(120), // each item costs ~100 tokens
             ..Default::default()
         };
-        let out = search_index(&idx, "budget", None, &opts);
+        let out = search_index(&idx, "budget", &opts);
         assert_eq!(out.len(), 1, "only one fits in 120 tokens");
     }
 
@@ -621,7 +568,7 @@ mod tests {
             token_budget: Some(10),
             ..Default::default()
         };
-        let out = search_index(&idx, "enormous memory", None, &opts);
+        let out = search_index(&idx, "enormous memory", &opts);
         assert_eq!(
             out.len(),
             1,
@@ -641,44 +588,42 @@ mod tests {
             limit: 3,
             ..Default::default()
         };
-        assert_eq!(search_index(&idx, "limited item", None, &opts).len(), 3);
+        assert_eq!(search_index(&idx, "limited item", &opts).len(), 3);
     }
 
     #[test]
-    fn hybrid_without_a_query_vector_degrades_to_text_plus_graph() {
+    fn hybrid_on_an_unlinked_store_is_just_text() {
         let idx = idx_with(vec![mem("degraded mode still finds keywords")]);
         let opts = RecallOptions {
             mode: Mode::Hybrid,
             ..Default::default()
         };
-        let out = search_index(&idx, "degraded keywords", None, &opts);
-        assert_eq!(out.len(), 1, "no embedding available is not an error");
-        assert_eq!(out[0].signals.vector_rank, None);
+        let out = search_index(&idx, "degraded keywords", &opts);
+        assert_eq!(out.len(), 1, "nothing to expand into is not an error");
+        assert_eq!(out[0].signals.graph_rank, None);
     }
 
     #[test]
     fn empty_store_and_empty_query_return_nothing() {
         let idx = MemoryIndex::new();
         let opts = RecallOptions::default();
-        assert!(search_index(&idx, "anything", None, &opts).is_empty());
+        assert!(search_index(&idx, "anything", &opts).is_empty());
         let idx = idx_with(vec![mem("something")]);
-        assert!(search_index(&idx, "", None, &opts).is_empty());
+        assert!(search_index(&idx, "", &opts).is_empty());
     }
 
     #[test]
     fn signals_describe_their_provenance() {
         let s = Signals {
             text_rank: Some(0),
-            vector_rank: Some(2),
-            graph_rank: None,
-            vector_similarity: Some(0.9),
+            graph_rank: Some(2),
         };
-        assert_eq!(s.describe(), "text#1,vector#3");
+        assert_eq!(s.describe(), "text#1,graph#3");
         assert_eq!(Signals::default().describe(), "");
     }
 
     #[test]
-    fn kind_filter_applies_to_both_retrievers() {
+    fn kind_filter_applies_to_every_retriever() {
         let pref = Memory::new(
             MemoryKind::Preference,
             "prefers dark mode always",
@@ -690,17 +635,14 @@ mod tests {
             "dark mode is implemented in css",
             Source::Tool,
         );
-        let fact_id = fact.id.clone();
-        let mut idx = idx_with(vec![pref, fact]);
-        idx.set_vector(&pref_id, vec![1.0, 0.0]);
-        idx.set_vector(&fact_id, vec![1.0, 0.0]);
+        let idx = idx_with(vec![pref, fact]);
 
         let opts = RecallOptions {
             mode: Mode::Hybrid,
             kind: Some(MemoryKind::Preference),
             ..Default::default()
         };
-        let out = search_index(&idx, "dark mode", Some(&[1.0, 0.0]), &opts);
+        let out = search_index(&idx, "dark mode", &opts);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].memory.id, pref_id);
     }

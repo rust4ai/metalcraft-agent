@@ -4,7 +4,7 @@
 //!
 //! The obvious implementation of "an agent starts out knowing what its pack shipped"
 //! is to copy the pack's memories into the new instance. Across twenty instances of
-//! one preset that is twenty copies of every record and vector, and instance creation
+//! one preset that is twenty copies of every record, and instance creation
 //! becomes O(memories) — on the interactive path, because creating an instance *is*
 //! starting a chat.
 //!
@@ -311,7 +311,7 @@ fn deterministic_base_id(preset: &str, content: &str, occurrence: usize) -> Stri
 /// Build a preset's base index from a `memories.jsonl` and persist it as a snapshot.
 ///
 /// Runs **once per `preset@version`** at pack install — not per instance — so twenty
-/// agents share one embedding bill and one copy on disk.
+/// agents share one copy on disk.
 pub fn build_base(preset: &str, version: &str, seed_file: &Path) -> Result<usize, String> {
     let contents = std::fs::read_to_string(seed_file)
         .map_err(|e| format!("failed to read {}: {e}", seed_file.display()))?;
@@ -337,7 +337,7 @@ pub fn build_base(preset: &str, version: &str, seed_file: &Path) -> Result<usize
     let dir = crate::paths::memory_preset_dir(preset, version);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
-    let snapshot = idx.snapshot(None, None);
+    let snapshot = idx.snapshot();
     let json = serde_json::to_string(&snapshot)
         .map_err(|e| format!("failed to serialize base snapshot: {e}"))?;
     let path = dir.join("snapshot.json");
@@ -485,9 +485,8 @@ const COMPACT_AFTER_EVENTS: usize = 200;
 /// simply eight other chats pushing this one out of the LRU, made everything the
 /// agent had been told unreachable. It stayed on disk, correct and unread.
 ///
-/// Same shape as the pod-global load in [`crate::memory::handle`]: snapshot if there
-/// is one, then replay the log over it. Events already folded into the snapshot
-/// replay harmlessly — every variant is idempotent except `Touch`, which may
+/// Snapshot first if there is one, then replay the log over it. Events already
+/// folded into the snapshot replay harmlessly — every variant is idempotent except `Touch`, which may
 /// over-count an access.
 fn load_delta(instance_id: &str) -> MemoryIndex {
     let dir = crate::paths::memory_instance_dir(instance_id);
@@ -514,7 +513,7 @@ fn load_delta(instance_id: &str) -> MemoryIndex {
     // already-folded events, which is harmless because every variant is idempotent.
     // The reverse order would lose them.
     if replayed >= COMPACT_AFTER_EVENTS {
-        let snapshot = idx.snapshot(None, None);
+        let snapshot = idx.snapshot();
         match crate::memory::wal::write_snapshot(&snapshot_path, &snapshot) {
             Ok(()) => {
                 if let Err(e) = crate::memory::wal::truncate(&wal_path) {

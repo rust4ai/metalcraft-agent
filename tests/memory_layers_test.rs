@@ -117,7 +117,7 @@ async fn base_and_delta_compose_into_one_agent_memory() {
         limit: 10,
         ..Default::default()
     };
-    let hits = recall::search_layers(&delta, Some(&base_idx), &tombs, "braising", None, &opts);
+    let hits = recall::search_layers(&delta, Some(&base_idx), &tombs, "braising", &opts);
     let summaries: Vec<&str> = hits.iter().map(|h| h.memory.display_text()).collect();
     assert!(
         summaries.contains(&"sunday braising"),
@@ -136,14 +136,14 @@ async fn base_and_delta_compose_into_one_agent_memory() {
         .unwrap();
     let mut tombs2 = HashSet::new();
     tombs2.insert(braise_id.clone());
-    let hits = recall::search_layers(&delta, Some(&base_idx), &tombs2, "braising", None, &opts);
+    let hits = recall::search_layers(&delta, Some(&base_idx), &tombs2, "braising", &opts);
     assert!(
         !hits.iter().any(|h| h.memory.id == braise_id),
         "recall must respect tombstones, not just visible_count"
     );
 
     // Recall works with no base at all — an agent that only knows what it learned.
-    let hits = recall::search_layers(&delta, None, &tombs, "braising", None, &opts);
+    let hits = recall::search_layers(&delta, None, &tombs, "braising", &opts);
     assert_eq!(hits.len(), 1);
 
     // ── the budget split protects the operator's own memories ───────────────
@@ -170,7 +170,6 @@ async fn base_and_delta_compose_into_one_agent_memory() {
         Some(&fat_base),
         &tombs,
         "braising",
-        None,
         &budgeted,
     );
     assert!(
@@ -194,7 +193,6 @@ async fn base_and_delta_compose_into_one_agent_memory() {
         Some(&fat_base),
         &tombs,
         "braising",
-        None,
         &greedy,
     );
     assert!(

@@ -14,6 +14,27 @@
 > Targets `master` (`0.29.0`, `Cargo.toml:3`). Breaking; ships as **`0.30.0`**.
 > Companion doc: `axoniac-prime/PLAN.md`.
 
+> ## Status — where this diverges from the code
+>
+> The base/delta/tombstone layering (§3) and "memory follows the pack" (§5.4)
+> shipped as described. Five things did not:
+>
+> - **§2.1's `instance.json`** shows `memory: {base, delta}` and `persistent`
+>   fields that do not exist on `AgentInstance`, and puts conversations under
+>   `agent_instances/<id>/conversations/`. They live in `<data>/chats/`, pointing
+>   back by `instance_id`.
+> - **§2.3's ephemeral/persistent split and its TTL reap were built and then
+>   reverted.** Agent instances are never reaped; only sessions are (30 days).
+>   See the comment at `src/agent_instance.rs:216`.
+> - **Everything about embeddings is gone** — §3.5's precomputed `vectors.bin`,
+>   the `embed_model`/`dims` manifest fields, `backfill_embeddings`, and the
+>   "one embedding bill" argument in §3. There are no embeddings anywhere in the
+>   agent; recall is BM25 + graph. A preset base is `snapshot.json` alone.
+> - **§3.4's `[from Amy's Kitchen Agent]` provenance label** on a recalled base
+>   memory is not implemented; `Source::Seeded` carries no preset payload.
+> - **§2's "every one-shot CLI invocation mints an instance"** no longer applies:
+>   the CLI mints nothing and simply has no memory.
+
 ---
 
 ## 0. The shape
@@ -82,7 +103,6 @@ One JSON file plus a sidecar directory — shaped like a persona, not a tree, be
 ```
 agent_presets/amy-kitchen.json
 agent_presets/amy-kitchen/memories.jsonl      seed memories (§3)
-agent_presets/amy-kitchen/vectors.bin         optional precomputed embeddings (§3.5)
 agent_presets/amy-kitchen/avatar.png
 ```
 
@@ -249,9 +269,9 @@ Today memory is one process-global index: `static MEMORY: OnceLock<Arc<RwLock<Me
 ```
 <data>/memory/
   presets/<slug>@<version>/    BASE — built once at pack install, immutable, shared
-    snapshot.json · vectors.bin · manifest.json
+    snapshot.json · manifest.json
   instances/<instance-id>/     DELTA — this agent's own
-    snapshot.json · wal.jsonl · vectors.bin · capture.jsonl · tombstones.json
+    snapshot.json · wal.jsonl · capture.jsonl · tombstones.json
   dreams/<ts>.json
 ```
 
@@ -386,7 +406,7 @@ a developer audience, not social content.
 ```
 amy-kitchen-agent-1.4.0.agentpack        (zip)
   agent_pack.json
-  agent_presets/amy-kitchen.json  +  amy-kitchen/{memories.jsonl, vectors.bin, avatar.png}
+  agent_presets/amy-kitchen.json  +  amy-kitchen/{memories.jsonl, avatar.png}
   personas/{amy, amy-shopper, amy-critic}.json
   skills/{knife-skills, menu-planning, substitutions}.md
   integrations/{metalcraft-calendar, instacart}/
@@ -727,7 +747,7 @@ which is the visible half of the idea.
 - Installing an agent pack with the network disabled succeeds end to end.
 - A tampered `content_sha256` fails **before** anything is written to the data dir.
 - Two instances of one preset: independent learning, **one shared base on disk and in RAM**.
-- Creating an instance of a 5,000-memory preset is O(1) — no per-instance embedding, no copy.
+- Creating an instance of a 5,000-memory preset is O(1) — no copy.
 - Update the pack: prompts change in a live instance, its learned memories survive, a memory it
   forgot stays forgotten, and new seed memories appear.
 - Remove a persona in an update → the instance using it falls back and says so.

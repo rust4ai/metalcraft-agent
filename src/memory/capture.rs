@@ -1,7 +1,7 @@
 //! Turn capture: the cheap half of remembering.
 //!
 //! This is the central bet of the whole design. A turn appends **one line** to
-//! `capture.jsonl` — no LLM call, no embedding, no summarization at interactive
+//! `capture.jsonl` — no LLM call, no summarization at interactive
 //! latency. The raw material sits there until the nightly dream distills it into
 //! actual memories. So the agent accumulates experience continuously while the
 //! per-turn cost stays at one `O_APPEND` write.
@@ -53,9 +53,9 @@ pub struct Capture {
     pub at: DateTime<Utc>,
     #[serde(default)]
     pub chat_id: Option<String>,
-    /// Which agent produced this turn. The queue is pod-global, so without it a
-    /// later distillation pass could not tell whose memory the material belongs
-    /// in — and with per-instance memory that is the whole question.
+    /// Which agent produced this turn. Redundant with the queue's location now
+    /// that each agent has its own, but kept so a line stays self-describing if
+    /// it is ever copied out of it.
     #[serde(default)]
     pub instance_id: Option<String>,
     #[serde(default)]
@@ -101,8 +101,8 @@ pub struct CaptureContext {
 /// Append a capture. Never returns an error to the caller's critical path — a
 /// failed capture is logged and dropped, because losing raw material is a much
 /// smaller problem than failing the turn that produced it.
-fn append(capture: &Capture) {
-    let path = crate::paths::memory_capture_file();
+fn append(instance_id: &str, capture: &Capture) {
+    let path = crate::paths::memory_capture_file(instance_id);
     if let Some(parent) = path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
@@ -142,6 +142,10 @@ pub fn record_turn(ctx: &CaptureContext, user_text: &str, agent_text: &str, tool
     if user_text.trim().is_empty() && agent_text.trim().is_empty() {
         return;
     }
+    // No agent, no queue to put this in — a CLI turn belongs to nobody.
+    let Some(instance_id) = ctx.instance_id.as_deref() else {
+        return;
+    };
     let capture = Capture {
         id: uuid::Uuid::new_v4().to_string(),
         kind: CaptureKind::Turn,
@@ -154,7 +158,7 @@ pub fn record_turn(ctx: &CaptureContext, user_text: &str, agent_text: &str, tool
         tools,
         processed_at: None,
     };
-    append(&capture);
+    append(instance_id, &capture);
 }
 
 /// Record a compaction summary before it is discarded.
@@ -162,6 +166,9 @@ pub fn record_compaction(ctx: &CaptureContext, summary: &str) {
     if !super::enabled() || !capture_enabled() || summary.trim().is_empty() {
         return;
     }
+    let Some(instance_id) = ctx.instance_id.as_deref() else {
+        return;
+    };
     let capture = Capture {
         id: uuid::Uuid::new_v4().to_string(),
         kind: CaptureKind::Compaction,
@@ -174,12 +181,12 @@ pub fn record_compaction(ctx: &CaptureContext, summary: &str) {
         tools: Vec::new(),
         processed_at: None,
     };
-    append(&capture);
+    append(instance_id, &capture);
 }
 
 /// Mark a conversation as finished, so the dream can distill it without waiting
 /// for a time gap to prove it.
-pub fn record_session_end(chat_id: &str) {
+pub fn record_session_end(instance_id: &str, chat_id: &str) {
     if !super::enabled() || !capture_enabled() {
         return;
     }
@@ -188,16 +195,14 @@ pub fn record_session_end(chat_id: &str) {
         kind: CaptureKind::SessionEnd,
         at: Utc::now(),
         chat_id: Some(chat_id.to_string()),
-        // A session-end marker is a boundary, not material; the distiller reads
-        // the agent from the turns it bounds.
-        instance_id: None,
+        instance_id: Some(instance_id.to_string()),
         persona: None,
         user_text: String::new(),
         agent_text: String::new(),
         tools: Vec::new(),
         processed_at: None,
     };
-    append(&capture);
+    append(instance_id, &capture);
 }
 
 /// Whether turn capture is on (`MEMORY_CAPTURE`).
@@ -213,8 +218,8 @@ pub fn capture_enabled() -> bool {
 
 /// Read every parseable capture. Unparseable lines (a torn tail from an unclean
 /// shutdown) are counted, not fatal — same tolerance as the event log.
-pub fn read_all() -> (Vec<Capture>, usize) {
-    let path = crate::paths::memory_capture_file();
+pub fn read_all(instance_id: &str) -> (Vec<Capture>, usize) {
+    let path = crate::paths::memory_capture_file(instance_id);
     let Ok(file) = std::fs::File::open(&path) else {
         return (Vec::new(), 0);
     };
@@ -238,8 +243,8 @@ pub fn read_all() -> (Vec<Capture>, usize) {
 }
 
 /// Captures the dream has not yet distilled, oldest first.
-pub fn pending() -> Vec<Capture> {
-    let (all, skipped) = read_all();
+pub fn pending(instance_id: &str) -> Vec<Capture> {
+    let (all, skipped) = read_all(instance_id);
     if skipped > 0 {
         log::warn!("memory: {skipped} unreadable line(s) in the capture queue were skipped");
     }
@@ -253,8 +258,8 @@ pub fn pending() -> Vec<Capture> {
 
 /// How many captures are waiting. Reported by `mem_stats` so a queue that stops
 /// draining (a dream that never runs) is visible rather than silent.
-pub fn pending_count() -> usize {
-    pending().len()
+pub fn pending_count(instance_id: &str) -> usize {
+    pending(instance_id).len()
 }
 
 /// Rewrite the queue keeping only what is still undistilled.
@@ -262,9 +267,9 @@ pub fn pending_count() -> usize {
 /// Atomic (tmp + rename), like the snapshot. Called by the dream after it has
 /// turned captures into memories; separated from distillation so a crash mid-run
 /// re-reads material rather than losing it.
-pub fn retain_pending(processed_ids: &[String]) -> std::io::Result<usize> {
-    let path = crate::paths::memory_capture_file();
-    let (all, _) = read_all();
+pub fn retain_pending(instance_id: &str, processed_ids: &[String]) -> std::io::Result<usize> {
+    let path = crate::paths::memory_capture_file(instance_id);
+    let (all, _) = read_all(instance_id);
     let processed: std::collections::HashSet<&str> =
         processed_ids.iter().map(|s| s.as_str()).collect();
     let keep: Vec<&Capture> = all

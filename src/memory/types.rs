@@ -341,18 +341,17 @@ impl Event {
     }
 }
 
-/// The periodic full-state file the dream writes, so boot doesn't replay all
-/// history. `embed_model`/`embed_dims` are recorded here (unused until vectors
-/// land in Phase 2) so a model change can be *detected* rather than silently
-/// comparing incompatible vectors.
+/// The periodic full-state file a delta folds into, so boot doesn't replay all
+/// history.
+///
+/// `embed_model`/`embed_dims` used to live here to detect a model change across
+/// restarts. Embeddings are gone, but the fields are still *read* — an older
+/// snapshot on disk carries them, and `serde(default)` on the way in plus
+/// dropping them on the way out lets one deserialize without a migration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub seq: u64,
     pub written_at: DateTime<Utc>,
-    #[serde(default)]
-    pub embed_model: Option<String>,
-    #[serde(default)]
-    pub embed_dims: Option<usize>,
     pub memories: Vec<Memory>,
     #[serde(default)]
     pub links: Vec<Link>,
@@ -371,9 +370,6 @@ pub struct Stats {
     pub seq: u64,
     pub log_events: u64,
     pub approx_bytes: usize,
-    /// How many live memories have an embedding — the coverage number that says
-    /// whether hybrid recall is actually working.
-    pub vectors: usize,
 }
 
 #[cfg(test)]

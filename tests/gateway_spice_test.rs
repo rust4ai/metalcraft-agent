@@ -174,7 +174,7 @@ impl AgentUnderTest for GatewayPersonaAgent {
             terminal_tools: vec!["say_to_user".to_string()],
             session_binding: None,
             reschedule_depth: 0,
-            prompt_extras: metalcraft_agent::persona::PromptExtras::load().await,
+            prompt_extras: metalcraft_agent::persona::PromptExtras::load(None).await,
             preset_personas: None,
             instance_id: None,
             // A real flag, never raised — `dispatch_inbound` passes one (a
