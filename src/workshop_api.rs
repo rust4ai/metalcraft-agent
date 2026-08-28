@@ -2634,6 +2634,88 @@ async fn delete_flow(Path(id): Path<String>) -> Response {
 // one is arming and deleting one is disarming — there is no separate "is it on"
 // flag on the flow that could disagree with what is here.
 
+/// What a [`metalcraft_flows::ScheduledFlow`] looks like on the wire, for the
+/// OpenAPI document only.
+///
+/// **Nothing constructs one.** It exists because `ScheduledFlow` lives in the
+/// `metalcraft-flows` crate and does not derive `ToSchema`, so the only way to
+/// describe it here was `value_type = Object` — and an `Object` is not a gap in
+/// the generated client, it is a hole that swallows its neighbours. utoipa emits
+/// `Record<string, never>` for it, and TypeScript intersects that index signature
+/// with the fields beside it: `id: string` becomes `string & never`. Every client
+/// that generates from this document lost `id`, `flow_id`, `enabled` and
+/// `schedule` — the whole stored half of every scheduled-flow response, including
+/// the id needed to address one.
+///
+/// A mirror rather than a `ToSchema` derive on the real type because the real type
+/// is in a published crate, and describing our own API should not require cutting
+/// a release of somebody else's. The cost is that a mirror can drift from what it
+/// mirrors, so it does not get to: `scheduled_flow_schema_matches_the_artifact`
+/// serializes a real `ScheduledFlow` and fails if the two disagree about field
+/// names. When `metalcraft-flows` next derives `ToSchema`, delete this and point
+/// `value_type` at the real thing.
+#[derive(utoipa::ToSchema)]
+#[allow(dead_code)]
+struct ScheduledFlowDoc {
+    /// Stable identifier, opaque by convention (`sf_<random>`).
+    id: String,
+    /// The flow this runs, by its `id`. May dangle: the flow can be deleted out
+    /// from under it, which is why `flow_name` is optional on the row.
+    flow_id: String,
+    /// Whether it fires. The only switch there is — the flow no longer knows it is
+    /// scheduled, so there is no flow-level master switch to disagree with.
+    enabled: bool,
+    /// The trigger and its per-schedule overrides.
+    schedule: ScheduleSpecDoc,
+    /// The agent it runs as, so successive firings accumulate memory instead of
+    /// waking up amnesiac.
+    #[schema(nullable)]
+    instance_id: Option<String>,
+    /// The author suggestion this was created from. Provenance, not identity.
+    #[schema(nullable)]
+    from_suggestion: Option<String>,
+    /// RFC-3339 creation timestamp.
+    created_at: String,
+    /// RFC-3339 last-modified timestamp.
+    updated_at: String,
+}
+
+/// Wire shape of [`metalcraft_flows::ScheduleSpec`], for the document only. See
+/// [`ScheduledFlowDoc`] — same reason, same deal with drift.
+///
+/// The trigger is flattened onto the object and tagged by `type`, so a cron
+/// schedule is `{ "type": "cron", "cron": "0 8 * * *" }` rather than carrying a
+/// nested trigger object.
+#[derive(utoipa::ToSchema)]
+#[allow(dead_code)]
+struct ScheduleSpecDoc {
+    /// `manual` | `minutes` | `hours` | `cron`.
+    #[serde(rename = "type")]
+    r#type: String,
+    /// Present for `minutes` and `hours`. Must be positive.
+    #[schema(nullable)]
+    interval: Option<u32>,
+    /// Present for `cron`. A standard cron expression; the pod parses it, the
+    /// spec crate does not.
+    #[schema(nullable)]
+    cron: Option<String>,
+    /// Human-readable label ("Morning brief") — what a UI shows, and what the pod
+    /// names a minted agent after.
+    #[schema(nullable)]
+    name: Option<String>,
+    /// IANA timezone the `cron` trigger is evaluated in. Ignored by other
+    /// triggers, and `null` means the pod's own time.
+    #[schema(nullable)]
+    timezone: Option<String>,
+    /// Inputs handed to the flow when this fires, so one flow can run with
+    /// different parameters on different schedules.
+    #[schema(nullable)]
+    inputs: Option<serde_json::Value>,
+    /// Persona override for runs this schedule starts.
+    #[schema(nullable)]
+    persona: Option<String>,
+}
+
 /// One scheduled flow, resolved for display: the stored document plus the three
 /// things a client would otherwise have to compute or fetch.
 #[derive(Serialize, utoipa::ToSchema)]
@@ -2641,7 +2723,7 @@ struct ScheduledFlowRow {
     /// The artifact exactly as stored, so an editor can round-trip it without a
     /// second representation of the same thing.
     #[serde(flatten)]
-    #[schema(value_type = Object)]
+    #[schema(value_type = ScheduledFlowDoc)]
     scheduled: metalcraft_flows::ScheduledFlow,
     /// Name of the flow it runs. **Absent when that flow no longer exists** — a
     /// schedule that can never fire, which is worth showing as broken rather than
@@ -2735,7 +2817,7 @@ struct CreateScheduledFlowRequest {
     /// The flow to run.
     flow_id: String,
     /// When to run it: `{ "type": "cron", "cron": "…", "timezone": "…" }`.
-    #[schema(value_type = Object)]
+    #[schema(value_type = ScheduleSpecDoc)]
     schedule: metalcraft_flows::ScheduleSpec,
     /// Start firing immediately. Defaults to `true` — creating a schedule is the
     /// act of asking for it; a client staging one passes `false`.
@@ -2800,7 +2882,7 @@ async fn post_scheduled_flow(Json(req): Json<CreateScheduledFlowRequest>) -> Res
 struct UpdateScheduledFlowRequest {
     /// Replace the trigger and its overrides.
     #[serde(default)]
-    #[schema(value_type = Option<Object>)]
+    #[schema(value_type = Option<ScheduleSpecDoc>)]
     schedule: Option<metalcraft_flows::ScheduleSpec>,
     /// Pause (`false`) or resume (`true`) without deleting. The agent and its
     /// memory are untouched either way.
@@ -2898,7 +2980,7 @@ async fn delete_scheduled_flow(Path(id): Path<String>) -> Response {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct PreviewScheduleRequest {
     /// The trigger to project. Need not correspond to anything saved.
-    #[schema(value_type = Object)]
+    #[schema(value_type = ScheduleSpecDoc)]
     schedule: metalcraft_flows::ScheduleSpec,
 }
 
@@ -8508,5 +8590,130 @@ mod interrupt_tests {
         // client prints it verbatim in the transcript, so it is a sentence
         // addressed to a person — not a note about which flag was set.
         assert_eq!(reason, "Stopped by the user.");
+    }
+}
+
+#[cfg(test)]
+mod scheduled_flow_schema_tests {
+    use utoipa::PartialSchema;
+
+    /// The field names a schema advertises, so a mirror can be compared to the
+    /// thing it mirrors without hand-listing them in two places.
+    fn schema_fields(v: &serde_json::Value) -> Vec<String> {
+        let mut out: Vec<String> = v
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    fn json_of<T: PartialSchema>() -> serde_json::Value {
+        serde_json::to_value(T::schema()).expect("schema serializes")
+    }
+
+    /// A described mirror can drift from what it describes, and a mirror that has
+    /// drifted is worse than the `Object` it replaced: it states something wrong
+    /// with a straight face, and every generated client believes it.
+    ///
+    /// So the mirror is checked against the real artifact's own serialization
+    /// rather than against a list somebody remembered to update. Add a field to
+    /// `metalcraft_flows::ScheduledFlow` and this fails naming it.
+    #[test]
+    fn scheduled_flow_schema_matches_the_artifact() {
+        let real = metalcraft_flows::ScheduledFlow {
+            id: "sf_test".into(),
+            flow_id: "f1".into(),
+            enabled: true,
+            schedule: metalcraft_flows::ScheduleSpec {
+                trigger: metalcraft_flows::ScheduleTrigger::Cron {
+                    cron: "0 0 9 * * *".into(),
+                },
+                name: Some("Morning brief".into()),
+                timezone: Some("America/Detroit".into()),
+                inputs: None,
+                persona: None,
+            },
+            instance_id: Some("i1".into()),
+            from_suggestion: Some("morning".into()),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+
+        // Serialized with every optional present, because `skip_serializing_if`
+        // would otherwise hide exactly the fields most likely to be forgotten.
+        let wire = serde_json::to_value(&real).expect("artifact serializes");
+        let mut actual: Vec<String> = wire
+            .as_object()
+            .expect("an object")
+            .keys()
+            .filter(|k| *k != "type" && *k != "cron")
+            .cloned()
+            .collect();
+        actual.sort();
+
+        let mirrored = schema_fields(&json_of::<super::ScheduledFlowDoc>());
+        assert_eq!(
+            mirrored, actual,
+            "ScheduledFlowDoc has drifted from metalcraft_flows::ScheduledFlow — \
+             update the mirror (or delete it, if the crate now derives ToSchema)"
+        );
+    }
+
+    /// Same guard for the trigger, which is the half a client has to *construct*
+    /// rather than merely read — a missing field here is a request nobody can
+    /// build from the document.
+    #[test]
+    fn schedule_spec_schema_matches_the_artifact() {
+        let spec = metalcraft_flows::ScheduleSpec {
+            trigger: metalcraft_flows::ScheduleTrigger::Minutes { interval: 30 },
+            name: Some("n".into()),
+            timezone: Some("UTC".into()),
+            inputs: Some(serde_json::json!({})),
+            persona: Some("p".into()),
+        };
+        let wire = serde_json::to_value(&spec).expect("spec serializes");
+        let obj = wire.as_object().expect("an object");
+
+        // The trigger is flattened and tagged, so `type` is a real wire field and
+        // `interval`/`cron` are whichever the variant carries. The mirror declares
+        // all three; the artifact only ever shows the ones this variant uses.
+        assert_eq!(obj.get("type").and_then(|v| v.as_str()), Some("minutes"));
+        assert_eq!(obj.get("interval").and_then(|v| v.as_u64()), Some(30));
+
+        let mirrored = schema_fields(&json_of::<super::ScheduleSpecDoc>());
+        for key in obj.keys() {
+            assert!(
+                mirrored.contains(key),
+                "ScheduleSpecDoc is missing '{key}', which the artifact serializes"
+            );
+        }
+        for declared in [
+            "type", "interval", "cron", "name", "timezone", "inputs", "persona",
+        ] {
+            assert!(
+                mirrored.contains(&declared.to_string()),
+                "ScheduleSpecDoc no longer declares '{declared}'"
+            );
+        }
+    }
+
+    /// The bug that started this: `value_type = Object` generates
+    /// `Record<string, never>`, whose index signature poisons every field it is
+    /// intersected with in TypeScript. Nothing in the scheduled-flow surface may
+    /// go back to describing itself as a bare object.
+    #[test]
+    fn the_scheduled_flow_surface_describes_itself() {
+        for (name, json) in [
+            ("ScheduledFlowDoc", json_of::<super::ScheduledFlowDoc>()),
+            ("ScheduleSpecDoc", json_of::<super::ScheduleSpecDoc>()),
+        ] {
+            assert!(
+                !schema_fields(&json).is_empty(),
+                "{name} publishes no properties — a client generating from this \
+                 document would see an opaque object"
+            );
+        }
     }
 }

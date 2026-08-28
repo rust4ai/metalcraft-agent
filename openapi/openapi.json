@@ -4862,7 +4862,7 @@
             "description": "Attach to an existing agent instead of minting one — e.g. run the briefer as\nthe same agent you chat with."
           },
           "schedule": {
-            "type": "object",
+            "$ref": "#/components/schemas/ScheduleSpecDoc",
             "description": "When to run it: `{ \"type\": \"cron\", \"cron\": \"…\", \"timezone\": \"…\" }`."
           }
         }
@@ -7164,7 +7164,7 @@
         ],
         "properties": {
           "schedule": {
-            "type": "object",
+            "$ref": "#/components/schemas/ScheduleSpecDoc",
             "description": "The trigger to project. Need not correspond to anything saved."
           }
         }
@@ -7710,6 +7710,111 @@
           }
         }
       },
+      "ScheduleSpecDoc": {
+        "type": "object",
+        "description": "Wire shape of [`metalcraft_flows::ScheduleSpec`], for the document only. See\n[`ScheduledFlowDoc`] — same reason, same deal with drift.\n\nThe trigger is flattened onto the object and tagged by `type`, so a cron\nschedule is `{ \"type\": \"cron\", \"cron\": \"0 8 * * *\" }` rather than carrying a\nnested trigger object.",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "cron": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present for `cron`. A standard cron expression; the pod parses it, the\nspec crate does not."
+          },
+          "inputs": {
+            "description": "Inputs handed to the flow when this fires, so one flow can run with\ndifferent parameters on different schedules."
+          },
+          "interval": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Present for `minutes` and `hours`. Must be positive.",
+            "minimum": 0
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable label (\"Morning brief\") — what a UI shows, and what the pod\nnames a minted agent after."
+          },
+          "persona": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Persona override for runs this schedule starts."
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "IANA timezone the `cron` trigger is evaluated in. Ignored by other\ntriggers, and `null` means the pod's own time."
+          },
+          "type": {
+            "type": "string",
+            "description": "`manual` | `minutes` | `hours` | `cron`."
+          }
+        }
+      },
+      "ScheduledFlowDoc": {
+        "type": "object",
+        "description": "What a [`metalcraft_flows::ScheduledFlow`] looks like on the wire, for the\nOpenAPI document only.\n\n**Nothing constructs one.** It exists because `ScheduledFlow` lives in the\n`metalcraft-flows` crate and does not derive `ToSchema`, so the only way to\ndescribe it here was `value_type = Object` — and an `Object` is not a gap in\nthe generated client, it is a hole that swallows its neighbours. utoipa emits\n`Record<string, never>` for it, and TypeScript intersects that index signature\nwith the fields beside it: `id: string` becomes `string & never`. Every client\nthat generates from this document lost `id`, `flow_id`, `enabled` and\n`schedule` — the whole stored half of every scheduled-flow response, including\nthe id needed to address one.\n\nA mirror rather than a `ToSchema` derive on the real type because the real type\nis in a published crate, and describing our own API should not require cutting\na release of somebody else's. The cost is that a mirror can drift from what it\nmirrors, so it does not get to: `scheduled_flow_schema_matches_the_artifact`\nserializes a real `ScheduledFlow` and fails if the two disagree about field\nnames. When `metalcraft-flows` next derives `ToSchema`, delete this and point\n`value_type` at the real thing.",
+        "required": [
+          "id",
+          "flow_id",
+          "enabled",
+          "schedule",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "RFC-3339 creation timestamp."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether it fires. The only switch there is — the flow no longer knows it is\nscheduled, so there is no flow-level master switch to disagree with."
+          },
+          "flow_id": {
+            "type": "string",
+            "description": "The flow this runs, by its `id`. May dangle: the flow can be deleted out\nfrom under it, which is why `flow_name` is optional on the row."
+          },
+          "from_suggestion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The author suggestion this was created from. Provenance, not identity."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable identifier, opaque by convention (`sf_<random>`)."
+          },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent it runs as, so successive firings accumulate memory instead of\nwaking up amnesiac."
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/ScheduleSpecDoc",
+            "description": "The trigger and its per-schedule overrides."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "RFC-3339 last-modified timestamp."
+          }
+        }
+      },
       "ScheduledFlowList": {
         "type": "object",
         "required": [
@@ -7727,7 +7832,7 @@
       "ScheduledFlowRow": {
         "allOf": [
           {
-            "type": "object",
+            "$ref": "#/components/schemas/ScheduledFlowDoc",
             "description": "The artifact exactly as stored, so an editor can round-trip it without a\nsecond representation of the same thing."
           },
           {
@@ -8049,11 +8154,15 @@
             "description": "Move this schedule to a different agent."
           },
           "schedule": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "description": "Replace the trigger and its overrides."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScheduleSpecDoc",
+                "description": "Replace the trigger and its overrides."
+              }
+            ]
           }
         }
       }
