@@ -104,6 +104,11 @@ a row of highlighter pens, and none of them out-shouts Steel.
 The web is light-only. Native clients are not — a phone at 11pm is a dark-mode
 phone — so dark is a defined mode, not an inversion. **Roles hold, values move.**
 
+**Dark is opt-in, not inherited.** A client that offers both defaults to *light*
+and puts Light / Dark / System behind a setting. The system is drawn light — cold
+steel on warm paper is the whole premise — and a phone that happens to be in dark
+mode should not decide on somebody's behalf that this is a dark product.
+
 | Role | Light | Dark |
 | --- | --- | --- |
 | page ground | `#eef0f2` | `#12161d` |
