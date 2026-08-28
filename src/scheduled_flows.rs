@@ -23,7 +23,7 @@ use std::path::Path;
 use chrono::Utc;
 use metalcraft_flows::{SavedFlow, ScheduleSpec, ScheduledFlow};
 
-use crate::agent_instance::{AgentInstance, InstanceOrigin};
+use crate::agent_instance::AgentInstance;
 use crate::agent_preset::AgentPreset;
 use crate::paths;
 
@@ -173,7 +173,9 @@ pub fn arm(new: NewSchedule<'_>) -> Result<ScheduledFlow, String> {
 }
 
 /// The agent a new schedule runs as: an explicitly named one, else the one
-/// another schedule of this flow already uses, else a fresh one.
+/// another schedule of this flow already uses, else the flow's own agent
+/// ([`crate::agent_instance::for_flow`]) — minted here only if no run has
+/// already minted it.
 fn resolve_instance(
     flow: &SavedFlow,
     preset: &AgentPreset,
@@ -192,23 +194,16 @@ fn resolve_instance(
         return Ok(existing);
     }
 
-    let mut i = AgentInstance::new(
-        preset,
-        InstanceOrigin::Flow {
-            flow_id: flow.id.clone(),
-        },
-    );
-    i.name = format!(
-        "{} — {}",
-        preset.name,
-        schedule
-            .name
-            .as_deref()
-            .filter(|n| !n.trim().is_empty())
-            .unwrap_or(&flow.name)
-    );
-    i.save()?;
-    Ok(i)
+    // Not a fresh mint: the flow may already have an agent, because running it
+    // by hand once creates one now. Arming a flow somebody has already tried
+    // must continue that agent — a second one beside it would split the memory
+    // of a single automation across two rows of the fleet.
+    let label = schedule
+        .name
+        .as_deref()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or(&flow.name);
+    crate::agent_instance::for_flow(&flow.id, label, &preset.slug)
 }
 
 /// Disarm: delete the schedule. **The agent and everything it remembers are
@@ -561,7 +556,11 @@ mod tests {
                 },
                 Some(name),
             ));
-            assert!(p.description.starts_with("Unknown timezone"), "{name}: {}", p.description);
+            assert!(
+                p.description.starts_with("Unknown timezone"),
+                "{name}: {}",
+                p.description
+            );
             assert!(p.next_runs.is_empty(), "{name} must not project firings");
         }
     }

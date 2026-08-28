@@ -234,25 +234,14 @@ impl<'a> FlowExecutor<'a> {
     }
 
     /// Record one node's turn in the agent's conversation, opening one if this is
-    /// the run's first spoken node.
+    /// the run's first recorded line.
     ///
-    /// Silent when the run has no agent: an ad-hoc run of an unarmed flow stays
-    /// exactly as it was — memoryless, and leaving no transcript to mislead
-    /// anyone about whose memory it touched.
+    /// Silent when the run has no agent — there is nowhere to record into. That
+    /// is now rare rather than routine: a run resolves the flow's own agent when
+    /// no schedule armed one, so it happens only on a pod with nothing spawnable
+    /// to be.
     async fn record_turn(&mut self, prompt: &str, answer: &str) {
-        let Some(instance_id) = self.instance_id.clone() else {
-            return;
-        };
-        if self.chat_id.is_none() {
-            self.chat_id = crate::workshop_api::flow_conversation(
-                &instance_id,
-                &self.default_persona,
-                &self.model_name,
-                &self.cwd,
-            )
-            .await;
-        }
-        let Some(chat_id) = self.chat_id.clone() else {
+        let Some(chat_id) = self.conversation().await else {
             return;
         };
         let opening = if self.run_marked {
@@ -262,6 +251,81 @@ impl<'a> FlowExecutor<'a> {
             format!("▶ {}\n\n{prompt}", self.flow.name)
         };
         crate::workshop_api::record_flow_turn(&chat_id, &opening, answer).await;
+    }
+
+    /// This run's conversation, opened on first use. `None` when the run has no
+    /// agent to open one in.
+    async fn conversation(&mut self) -> Option<String> {
+        let instance_id = self.instance_id.clone()?;
+        if self.chat_id.is_none() {
+            self.chat_id = crate::workshop_api::flow_conversation(
+                &instance_id,
+                &self.default_persona,
+                &self.model_name,
+                &self.cwd,
+                crate::flow_runs::FlowRunRef {
+                    flow_id: self.flow.id.clone(),
+                    run_id: self.run_id.clone(),
+                },
+            )
+            .await;
+        }
+        self.chat_id.clone()
+    }
+
+    /// Close the run's record: make sure it left a conversation, and that the
+    /// conversation says how it ended.
+    ///
+    /// Two things this fixes, both of which made a run invisible in the surface
+    /// built to show it. A **tool-only** run — a flow that files something,
+    /// sends something, moves something, and never asks a model anything —
+    /// used to leave nothing at all, so the automation that does the most work
+    /// with the least talking was the one you could not see had run. And a run
+    /// that **failed or paused** after speaking used to end mid-sentence, with
+    /// the reason living only in the step trace.
+    ///
+    /// A successful run that already spoke gets nothing added: its last answer
+    /// is the ending, and a machine-written "Finished" under it is noise.
+    async fn record_outcome(&mut self, status: &str, note: Option<&str>) {
+        let ended_badly = matches!(status, "failed" | "paused");
+        if self.run_marked && !ended_badly {
+            return;
+        }
+        let Some(chat_id) = self.conversation().await else {
+            return;
+        };
+        let opening = if self.run_marked {
+            None
+        } else {
+            self.run_marked = true;
+            Some(format!("▶ {}", self.flow.name))
+        };
+        let steps = self.steps.len();
+        let plural = if steps == 1 { "" } else { "s" };
+        let line = match status {
+            "paused" => format!(
+                "⏸ Paused after {steps} step{plural} — {}",
+                note.unwrap_or("waiting to be resumed")
+            ),
+            "failed" => match note {
+                Some(why) => format!("⚠ Failed after {steps} step{plural}: {why}"),
+                None => format!("⚠ Failed after {steps} step{plural}."),
+            },
+            other => {
+                let ending = format!("Finished ({other}) — {steps} step{plural}.");
+                // Said only on a run that said nothing else, where it is the
+                // whole transcript and "it ran, and it never spoke" is the
+                // thing a reader needs told.
+                format!("{ending} This run did its work with tools and said nothing.")
+            }
+        };
+        match opening {
+            // The run never spoke: this line is the whole transcript, so it is a
+            // turn — the flow's name asked, the outcome answered.
+            Some(marker) => crate::workshop_api::record_flow_turn(&chat_id, &marker, &line).await,
+            // It spoke: this is a footer under what it said, not a new turn.
+            None => crate::workshop_api::record_flow_note(&chat_id, &line).await,
+        }
     }
 
     /// Run as a specific agent instance, so this run's turns recall from (and
@@ -338,11 +402,13 @@ impl<'a> FlowExecutor<'a> {
         loop {
             visits += 1;
             if visits > self.step_budget {
-                self.mark_terminal("failed");
-                return Err(format!(
+                let why = format!(
                     "flow '{}' exceeded step budget ({})",
                     self.flow.id, self.step_budget
-                ));
+                );
+                self.mark_terminal("failed");
+                self.record_outcome("failed", Some(&why)).await;
+                return Err(why);
             }
 
             let node = self
@@ -365,8 +431,7 @@ impl<'a> FlowExecutor<'a> {
             match route {
                 Ok(Route::End(status)) => {
                     self.record_step(&current, &node_type, status.clone(), None);
-                    self.mark_terminal(&status);
-                    return Ok(self.into_summary(status));
+                    return self.finish(status, None).await;
                 }
                 Ok(Route::Handle(handle)) => {
                     let next = next_by_handle(&self.flow.flow, &current, handle.as_deref());
@@ -398,13 +463,16 @@ impl<'a> FlowExecutor<'a> {
                             // the failure is unhandled — fail the run loudly
                             // rather than silently reporting success.
                             if handle.as_deref() == Some("error") {
-                                self.record_step(&current, &node_type, "failed".into(), detail);
-                                self.mark_terminal("failed");
-                                return Ok(self.into_summary("failed".into()));
+                                self.record_step(
+                                    &current,
+                                    &node_type,
+                                    "failed".into(),
+                                    detail.clone(),
+                                );
+                                return self.finish("failed".into(), detail).await;
                             }
                             self.record_step(&current, &node_type, outcome, detail);
-                            self.mark_terminal("completed");
-                            return Ok(self.into_summary("completed".into()));
+                            return self.finish("completed".into(), None).await;
                         }
                     }
                 }
@@ -415,16 +483,34 @@ impl<'a> FlowExecutor<'a> {
                         format!("paused:{}", spec.reason),
                         spec.message.clone(),
                     );
+                    // Before persisting, not after: opening the conversation is
+                    // what assigns `chat_id`, and the checkpoint has to carry it
+                    // or the resumed run answers in a different thread.
+                    self.record_outcome("paused", spec.message.as_deref()).await;
                     self.persist_paused(&current, &spec);
                     return Ok(self.into_summary("paused".into()));
                 }
                 Err(e) => {
                     self.record_step(&current, &node_type, "failed".into(), Some(e.clone()));
-                    self.mark_terminal("failed");
-                    return Ok(self.into_summary("failed".into()));
+                    return self.finish("failed".into(), Some(e)).await;
                 }
             }
         }
+    }
+
+    /// End the run: mark the record terminal, close the transcript, answer.
+    ///
+    /// One place rather than five, because every exit owes the same two things —
+    /// and the one that used to skip the transcript (a graph that ended without
+    /// speaking) was exactly the run nobody could find afterwards.
+    async fn finish(
+        mut self,
+        status: String,
+        note: Option<String>,
+    ) -> Result<FlowRunSummary, String> {
+        self.mark_terminal(&status);
+        self.record_outcome(&status, note.as_deref()).await;
+        Ok(self.into_summary(status))
     }
 
     fn into_summary(self, status: String) -> FlowRunSummary {
@@ -1320,10 +1406,9 @@ pub async fn resume_flow(
 
     match next_by_handle(&exec.flow.flow, &pause_node, Some(handle)) {
         Some(next) => exec.drive(next).await,
-        None => {
-            exec.mark_terminal("completed");
-            Ok(exec.into_summary("completed".into()))
-        }
+        // The pause node was the last one: resuming it ends the run, and that
+        // ending belongs in the thread the approval was asked in.
+        None => exec.finish("completed".into(), None).await,
     }
 }
 

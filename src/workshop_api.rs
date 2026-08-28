@@ -126,65 +126,47 @@ async fn chat_event_sender(chat_id: &str) -> tokio::sync::broadcast::Sender<Chat
 //
 // See `docs/FLOWS_AS_AGENTS_PLAN.md` §4.
 
-/// The conversation each agent's flow runs are currently recording into, with
-/// the time of the last turn written. Process-global, like the chat store.
-type FlowThreads = Arc<Mutex<HashMap<String, (String, chrono::DateTime<chrono::Utc>)>>>;
-
-fn flow_threads() -> FlowThreads {
-    static T: std::sync::OnceLock<FlowThreads> = std::sync::OnceLock::new();
-    T.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
-        .clone()
-}
-
-/// How long after its last turn a firing still joins the previous conversation.
+/// How many run conversations one flow agent keeps.
 ///
-/// "A new conversation per firing" is right for a daily briefer and wrong for a
-/// five-minute cron, which would mint 288 threads a day and bury the agent's real
-/// ones. This is the rule the pod uses everywhere else to decide whether something
-/// is still the same conversation — a gateway sender's next message
-/// ([`gateway_session_for`]) and the follow-up policy — so flows are consistent
-/// with the rest rather than special. A fast cron produces one rolling thread,
-/// which is what anyone would want to read; a daily one produces a thread per day.
+/// A conversation per run is what makes a run findable, and it is also what a
+/// five-minute cron turns into 288 rows a day. Both halves are real, so the list
+/// is bounded rather than either capped at the source (which would hide runs) or
+/// left to grow (which would bury the agent's typed conversations under machine
+/// output, and make every fleet listing read thousands of files).
 ///
-/// Note what this is *not*: it never clears a context in place. Past the window a
-/// firing starts a new session under the same agent, which has no context to
-/// clear — and the agent's memory, which lives on the instance rather than the
-/// session, carries into it. Resetting a live conversation is a separate,
-/// explicit act (`POST /chats/{id}/reset`).
-const FLOW_CONVERSATION_TTL_SECS: i64 = DEFAULT_GATEWAY_SESSION_TTL_SECS as i64;
+/// Only a flow agent's *run* conversations count, and only they are pruned —
+/// anything a person typed into the same agent is untouched, as is any run a
+/// paused flow may still resume into. Past the cap the oldest run goes; the
+/// 30-day session reap ([`reap_stale_chats`]) still applies to the rest.
+const MAX_RUN_CONVERSATIONS_PER_AGENT: usize = 100;
 
-/// The conversation this agent's next flow turn belongs in, creating one if the
-/// last is stale or gone.
+/// Open the conversation a flow run records itself into.
+///
+/// **One per run**, always new. It used to roll: a firing within the gateway
+/// session TTL joined the previous one, on the theory that a fast cron produces
+/// one readable thread. What it actually produced was a thread in which
+/// yesterday's run and this morning's are the same object — you cannot open "the
+/// 08:00 run", link to it, or say when it finished, because the unit on screen
+/// was a window of time rather than the thing that happened. A run is the unit
+/// people mean, so a run is the conversation.
+///
+/// The chat is stamped with [`FlowRunRef`] so it can say which run it is, and so
+/// [`prune_run_conversations`] can bound how many of them one agent keeps.
 ///
 /// `pub` (like [`deliver_followup_to_chat`]) because it is chat plumbing driven
 /// from outside the HTTP handlers — here, by the flow executor.
-///
-/// In memory rather than on disk on purpose: the window asks "is this still the
-/// same working session", which is a live-process question. After a restart the
-/// next firing starts a fresh conversation, which is honest — the pod is not
-/// mid-thought any more.
 pub async fn flow_conversation(
     instance_id: &str,
     persona: &str,
     model: &str,
     cwd: &str,
+    run: crate::flow_runs::FlowRunRef,
 ) -> Option<String> {
-    let store = chat_store();
-    let threads = flow_threads();
-    let mut open = threads.lock().await;
-
-    if let Some((chat_id, last)) = open.get(instance_id) {
-        let fresh = (chrono::Utc::now() - *last).num_seconds() < FLOW_CONVERSATION_TTL_SECS;
-        // A chat deleted from under us must not resurrect as a ghost id.
-        if fresh && store.lock().await.contains_key(chat_id) {
-            return Some(chat_id.clone());
-        }
-    }
-
     let id = uuid::Uuid::new_v4().to_string();
     let session = ChatSession {
         id: id.clone(),
         instance_id: Some(instance_id.to_string()),
+        flow_run: Some(run),
         persona_slug: persona.to_string(),
         model_name: model.to_string(),
         cwd: cwd.to_string(),
@@ -201,21 +183,62 @@ pub async fn flow_conversation(
         interrupt: Arc::new(AtomicBool::new(false)),
         pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         plan: Arc::new(std::sync::Mutex::new(Vec::new())),
+        running: Arc::new(std::sync::Mutex::new(None)),
     };
-    store
+    chat_store()
         .lock()
         .await
         .insert(id.clone(), Arc::new(Mutex::new(session)));
-    open.insert(instance_id.to_string(), (id.clone(), chrono::Utc::now()));
+    prune_run_conversations(instance_id).await;
     Some(id)
+}
+
+/// Drop this agent's oldest run conversations past [`MAX_RUN_CONVERSATIONS_PER_AGENT`].
+///
+/// Deliberately narrow: only chats carrying a [`FlowRunRef`], only for this
+/// agent, and never one a paused run is still waiting to resume into — an
+/// approval that arrives next week must find the thread it was asked in.
+async fn prune_run_conversations(instance_id: &str) {
+    let mut runs: Vec<(String, String)> = read_persisted_chats()
+        .into_iter()
+        .filter(|c| c.instance_id.as_deref() == Some(instance_id) && c.flow_run.is_some())
+        .map(|c| {
+            let recency = chat_updated_at(&c.id).unwrap_or_else(|| c.created_at.clone());
+            (recency, c.id)
+        })
+        .collect();
+    if runs.len() <= MAX_RUN_CONVERSATIONS_PER_AGENT {
+        return;
+    }
+    runs.sort_by(|a, b| b.0.cmp(&a.0));
+    let awaited: Vec<String> = crate::flow_runs::list_runs(&paths::runs_dir())
+        .into_iter()
+        .filter(|r| r.status == "paused")
+        .filter_map(|r| r.chat_id)
+        .collect();
+
+    let store = chat_store();
+    let mut chats = store.lock().await;
+    for (_, id) in runs.into_iter().skip(MAX_RUN_CONVERSATIONS_PER_AGENT) {
+        if awaited.contains(&id) {
+            continue;
+        }
+        match std::fs::remove_file(chat_file_path(&id)) {
+            Ok(()) => {
+                chats.remove(&id);
+                crate::memory::capture::record_session_end(&id);
+            }
+            Err(e) => log::warn!("could not prune run conversation {id}: {e}"),
+        }
+    }
 }
 
 /// Append one flow node's turn to a conversation and publish it live.
 ///
 /// `prompt` lands as the user message because that is what it is from the
 /// agent's side: the instruction it was given. The flow's own marker (`▶ …`) is
-/// prefixed by the caller on the first turn of a run, so a rolling thread still
-/// shows where each firing began.
+/// prefixed by the caller on the run's first turn, so a transcript names the run
+/// it belongs to at the top.
 pub async fn record_flow_turn(chat_id: &str, prompt: &str, answer: &str) {
     let Some(session) = chat_store().lock().await.get(chat_id).cloned() else {
         return;
@@ -266,13 +289,43 @@ pub async fn record_flow_turn(chat_id: &str, prompt: &str, answer: &str) {
         status: "completed".into(),
         reason: None,
     });
+}
 
-    if let Some(instance_id) = session.lock().await.instance_id.clone() {
-        flow_threads()
-            .lock()
-            .await
-            .insert(instance_id, (chat_id.to_string(), chrono::Utc::now()));
+/// Append a line the *run* said about itself — how it ended — rather than a
+/// turn some node ran.
+///
+/// Not a [`record_flow_turn`] with an empty prompt: that would file a blank user
+/// message, and turn counts are the number of times somebody spoke. Nothing
+/// asked for this line; the run is reporting.
+pub async fn record_flow_note(chat_id: &str, note: &str) {
+    let Some(session) = chat_store().lock().await.get(chat_id).cloned() else {
+        return;
+    };
+    {
+        let mut s = session.lock().await;
+        // No context means nothing has been recorded here at all, which is the
+        // one case the caller is expected to have handled by opening the run
+        // with a turn. Dropping the note beats inventing a turn to hang it on.
+        let Some(state) = s.state.as_mut() else {
+            return;
+        };
+        state
+            .messages
+            .push(AgentMessage::Assistant(note.to_string()));
+        state.is_done = true;
     }
+    persist_chat(&session).await;
+
+    let sender = chat_event_sender(chat_id).await;
+    let _ = sender.send(ChatEvent::Reply {
+        content: note.to_string(),
+        awaiting_reply: false,
+        options: Vec::new(),
+    });
+    let _ = sender.send(ChatEvent::Done {
+        status: "completed".into(),
+        reason: None,
+    });
 }
 
 struct ChatSession {
@@ -280,6 +333,9 @@ struct ChatSession {
     /// The agent instance this conversation belongs to. `None` only for records
     /// written before instances existed (backfilled at startup).
     instance_id: Option<String>,
+    /// Set when this conversation *is* a flow run — which run, of which flow.
+    /// `None` for anything a person typed.
+    flow_run: Option<crate::flow_runs::FlowRunRef>,
     persona_slug: String,
     model_name: String,
     cwd: String,
@@ -332,6 +388,22 @@ struct ChatSession {
     /// describe work that is no longer happening, which is the exact thing the
     /// empty-plan frame at turn start exists to prevent.
     plan: Arc<std::sync::Mutex<Vec<crate::turn_plan::PlanStep>>>,
+    /// The messages of the turn running right now, as its step guard last saw
+    /// them — `None` when no turn is in flight.
+    ///
+    /// Exists because a turn *takes* [`Self::state`] out of the session for its
+    /// whole duration (the executor owns the context while it runs) and only
+    /// writes it back at the end. Between those two moments the conversation
+    /// read as **empty**: a client that opened the chat mid-turn was told the
+    /// history had been deleted, and the list showed the chat with nothing said
+    /// in it. This is what it reads instead — the same messages, including the
+    /// one just sent, plus whatever the turn has appended so far.
+    ///
+    /// Sync-locked, and for the same reason as [`Self::plan`]: the step guard
+    /// that refreshes it is a sync closure and cannot take this session's async
+    /// lock. Not persisted — a turn does not survive a restart, and
+    /// [`persist_chat`] runs after the state is back.
+    running: Arc<std::sync::Mutex<Option<Vec<ChatMessageWire>>>>,
 }
 
 /// Build a [`TraceLogger`] keyed to a diagnostics logger's session-dir name, so
@@ -1806,10 +1878,20 @@ struct InstanceList {
     responses((status = 200, description = "Live agents on this pod", body = InstanceList)),
 )]
 async fn list_agent_instances() -> Response {
+    // Count in one pass over the chats directory, not one pass per agent.
+    // `conversations_of` reads and parses every chat file; calling it in the map
+    // made the fleet listing quadratic — and now that every flow run leaves a
+    // conversation, a pod with a few automations has thousands of them.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for chat in read_persisted_chats() {
+        if let Some(id) = chat.instance_id {
+            *counts.entry(id).or_default() += 1;
+        }
+    }
     let instances: Vec<InstanceListItem> = crate::agent_instance::list()
         .into_iter()
         .map(|i| InstanceListItem {
-            conversation_count: conversations_of(&i.id).len(),
+            conversation_count: counts.get(&i.id).copied().unwrap_or(0),
             instance: i,
         })
         .collect();
@@ -3636,9 +3718,7 @@ async fn get_pod_settings() -> Json<crate::pod_settings::PodSettings> {
         (status = 400, description = "A preference this pod cannot honour, e.g. an unknown timezone", body = ErrorResponse),
     ),
 )]
-async fn put_pod_settings(
-    Json(settings): Json<crate::pod_settings::PodSettings>,
-) -> Response {
+async fn put_pod_settings(Json(settings): Json<crate::pod_settings::PodSettings>) -> Response {
     match crate::pod_settings::save(&settings) {
         Ok(()) => Json(settings).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, e),
@@ -3950,8 +4030,8 @@ struct RunFlowRequest {
     #[serde(default)]
     inputs: Option<serde_json::Value>,
     /// Run as this agent, so the run recalls from and writes to its memory and
-    /// leaves a conversation behind. Omitted resolves from the flow's armed
-    /// schedules — see [`instance_for_manual_run`].
+    /// leaves a conversation behind. Omitted resolves to the flow's armed agent,
+    /// or to the flow's own agent — see [`instance_for_manual_run`].
     #[serde(default)]
     instance_id: Option<String>,
 }
@@ -3963,36 +4043,62 @@ struct RunFlowRequest {
 /// same act as the morning firing, not a stranger doing the same work with no
 /// memory of it.
 ///
-/// Several *different* agents (possible only when someone deliberately attached
-/// schedules to separate ones) resolves to none, plus a warning naming them.
-/// Picking one would silently write to a memory nobody chose; refusing the run
-/// outright would break every caller that ran the flow before this existed. A
-/// run that worked, said what it could not decide, and named the field that
-/// decides it is the honest middle.
+/// **A flow with no armed agent gets one anyway** — its own, keyed to the flow
+/// ([`crate::agent_instance::for_flow`]). This is the rule that changed: a run
+/// used to resolve to nobody, so pressing Run on an unarmed flow did real work
+/// that left no conversation and no row on the home screen. A run is what makes
+/// a flow worth looking at; it should be findable afterwards, and the place a
+/// person looks is the fleet.
+///
+/// Several *different* armed agents (possible only when someone deliberately
+/// attached schedules to separate ones) resolves to the flow's own agent, plus a
+/// warning naming them. Picking one of them would silently write into a memory
+/// nobody chose for this run.
 ///
 /// Returns `(instance, warning)`.
 fn instance_for_manual_run(
-    flow_id: &str,
+    flow: &metalcraft_flows::SavedFlow,
     explicit: Option<&str>,
 ) -> (Option<String>, Option<String>) {
     if let Some(id) = explicit {
         return (Some(id.to_string()), None);
     }
-    let mut armed: Vec<String> = crate::scheduled_flows::for_flow(flow_id)
+    // Only agents that still exist. A schedule can outlive the agent it names —
+    // deleting one keeps its schedules — and running "as" a deleted agent would
+    // file the conversation under an id nothing can open.
+    let mut armed: Vec<String> = crate::scheduled_flows::for_flow(&flow.id)
         .into_iter()
         .filter_map(|sf| sf.instance_id)
+        .filter(|id| crate::agent_instance::load(id).is_ok())
         .collect();
     armed.sort();
     armed.dedup();
-    match armed.len() {
-        0 => (None, None),
-        1 => (armed.into_iter().next(), None),
-        _ => (
+    if armed.len() == 1 {
+        return (armed.pop(), None);
+    }
+    let ambiguous = (armed.len() > 1).then(|| {
+        format!(
+            "flow '{}' is armed to {} different agents ({}); this run went to the flow's own agent. \
+             Pass `instance_id` to run as one of them.",
+            flow.id,
+            armed.len(),
+            armed.join(", ")
+        )
+    });
+    match crate::agent_instance::for_flow(
+        &flow.id,
+        &flow.name,
+        &crate::flow_bindings::preset_for(&flow.id),
+    ) {
+        Ok(i) => (Some(i.id), ambiguous),
+        // Nothing spawnable to run as — a pod with no presets installed, or a
+        // flow bound to a library preset. The run still happens; it just has no
+        // memory and leaves no transcript, which is what it did before this
+        // existed. Say so rather than failing the run.
+        Err(e) => (
             None,
             Some(format!(
-                "flow '{flow_id}' is armed to {} different agents ({}); ran without one.                  Pass `instance_id` to run as a specific agent.",
-                armed.len(),
-                armed.join(", ")
+                "this run has no agent, so it left no conversation: {e}"
             )),
         ),
     }
@@ -4027,9 +4133,10 @@ enum RunFlowOutput {
 )]
 // A v2 run resolves an agent (§5 of `docs/FLOWS_AS_AGENTS_PLAN.md`) so a manual
 // run of an armed automation is the same act as its scheduled firing: same
-// memory, and a conversation you can read afterwards. A flow nobody armed still
-// runs memoryless and leaves nothing behind — testing an unbound flow stays a
-// test. v1 flows are unchanged; the legacy path has no instance to thread.
+// memory, and a conversation you can read afterwards. A flow nobody armed
+// resolves to the flow's *own* agent, minted on first run — so every run of
+// every flow is findable afterwards, in the fleet, as a conversation. v1 flows
+// are unchanged; the legacy path has no instance to thread.
 async fn post_run_flow(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
@@ -4062,8 +4169,7 @@ async fn post_run_flow(
     // keep the legacy per-prompt response.
     if crate::flow_exec::is_v2_flow(&flow) {
         let inputs = req.inputs.clone().unwrap_or_else(|| serde_json::json!({}));
-        let (instance_id, ambiguous) =
-            instance_for_manual_run(&flow.id, req.instance_id.as_deref());
+        let (instance_id, ambiguous) = instance_for_manual_run(&flow, req.instance_id.as_deref());
         return match crate::flow_exec::run_flow_v2_as(
             &context,
             flow,
@@ -4203,6 +4309,12 @@ struct ChatSummary {
     /// id, and what tells you where it got to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preview: Option<String>,
+    /// Set when this conversation is a flow run rather than something typed —
+    /// which flow, and which run. A session list uses it to say so; without it a
+    /// row of an automation's output is indistinguishable from a chat, and the
+    /// agent screen of a flow agent reads as a stack of anonymous timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flow_run: Option<crate::flow_runs::FlowRunRef>,
 }
 
 /// How many times the user spoke in a transcript.
@@ -4270,6 +4382,7 @@ impl ChatSummary {
             turn_count: turns_in(&pc.messages),
             id: pc.id,
             instance_id: pc.instance_id,
+            flow_run: pc.flow_run,
             persona_slug: pc.persona_slug,
             model_name: pc.model_name,
             created_at: pc.created_at,
@@ -4295,6 +4408,15 @@ struct ChatDetail {
     /// that arrives mid-turn render the plan it missed the frames for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     plan: Vec<crate::turn_plan::PlanStep>,
+    /// Whether a turn is running right now.
+    ///
+    /// Answers the question a reopened chat cannot answer from its messages: the
+    /// last thing said is the person's own, and whether the agent is working on
+    /// it or has been idle for an hour is the difference between a composer that
+    /// offers Stop and one that offers Send. Without it a client that opened a
+    /// chat mid-turn drew a finished conversation and let someone type into it.
+    #[serde(default)]
+    busy: bool,
 }
 
 /// Wire form for `metalcraft::AgentMessage` — the in-memory enum isn't
@@ -4433,8 +4555,61 @@ impl From<&AgentMessage> for ChatMessageWire {
 /// drops are the newest ones. Concatenation cannot go wrong that way.
 fn transcript_of(s: &ChatSession) -> Vec<ChatMessageWire> {
     let mut out = s.archived.clone();
-    out.extend(live_messages(s));
+    match in_flight_messages(s) {
+        // A turn is running, so the context is out of the session and
+        // `live_messages` would say the conversation is empty. What the turn is
+        // working on is the conversation, and it is what a client arriving
+        // mid-turn has to be shown.
+        Some(running) => out.extend(running),
+        None => out.extend(live_messages(s)),
+    }
     out
+}
+
+/// The running turn's messages, when one is in flight.
+///
+/// `None` in the ordinary case — no turn, or a turn that has already written its
+/// state back — which is what makes this safe to prefer: a stale snapshot can
+/// never shadow the real context, because [`release_turn`] clears it in the same
+/// lock that restores the state.
+fn in_flight_messages(s: &ChatSession) -> Option<Vec<ChatMessageWire>> {
+    s.running.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Publish the state a turn is starting from, so the conversation stays readable
+/// while the turn owns it.
+///
+/// Called with the state the executor is about to run — which already carries
+/// the message that started the turn, so the person's own words appear the
+/// moment they are sent rather than when the answer arrives.
+fn hold_turn(s: &ChatSession, state: &AgentState) {
+    *s.running.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(state.messages.iter().map(ChatMessageWire::from).collect());
+}
+
+/// Drop the in-flight snapshot. Must run wherever the turn writes its state back
+/// — including the failure arms — or a finished turn's messages would go on
+/// shadowing the session's real context.
+fn release_turn(s: &ChatSession) {
+    *s.running.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Wrap a step guard so the chat's in-flight transcript keeps up with the turn.
+///
+/// The same shape as [`stoppable`], and for the same reason: the executor's
+/// guard is the only thing that runs *inside* a turn, so it is the only place
+/// that can see the messages as they are appended. Refreshing wholesale rather
+/// than diffing keeps this honest through compaction, which rewrites the list
+/// rather than appending to it.
+fn snapshotting(
+    guard: StepGuard<AgentState>,
+    running: Arc<std::sync::Mutex<Option<Vec<ChatMessageWire>>>>,
+) -> StepGuard<AgentState> {
+    Arc::new(move |state: &AgentState, ev| {
+        *running.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(state.messages.iter().map(ChatMessageWire::from).collect());
+        guard(state, ev)
+    })
 }
 
 /// The live context's messages in wire form.
@@ -4500,6 +4675,9 @@ struct PersistedChat {
     /// Set from v0.30. Absent on legacy chats until `backfill_from_chats` runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     instance_id: Option<String>,
+    /// Which flow run this conversation is, when it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flow_run: Option<crate::flow_runs::FlowRunRef>,
     persona_slug: String,
     model_name: String,
     cwd: String,
@@ -4528,6 +4706,7 @@ async fn persist_chat(session: &Arc<Mutex<ChatSession>>) {
         PersistedChat {
             id: s.id.clone(),
             instance_id: s.instance_id.clone(),
+            flow_run: s.flow_run.clone(),
             persona_slug: s.persona_slug.clone(),
             model_name: s.model_name.clone(),
             cwd: s.cwd.clone(),
@@ -4628,6 +4807,7 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
         let session = ChatSession {
             id: pc.id.clone(),
             instance_id: pc.instance_id.clone(),
+            flow_run: pc.flow_run.clone(),
             persona_slug: pc.persona_slug,
             model_name: pc.model_name,
             cwd: pc.cwd,
@@ -4642,6 +4822,7 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
             interrupt: Arc::new(AtomicBool::new(false)),
             pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             plan: Arc::new(std::sync::Mutex::new(Vec::new())),
+            running: Arc::new(std::sync::Mutex::new(None)),
         };
         out.insert(pc.id.clone(), Arc::new(Mutex::new(session)));
     }
@@ -4888,6 +5069,7 @@ async fn post_create_chat(
     let session = ChatSession {
         id: id.clone(),
         instance_id: Some(instance.id.clone()),
+        flow_run: None,
         persona_slug,
         model_name: model_name.clone(),
         cwd: state.cwd.clone(),
@@ -4901,6 +5083,7 @@ async fn post_create_chat(
         interrupt: Arc::new(AtomicBool::new(false)),
         pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         plan: Arc::new(std::sync::Mutex::new(Vec::new())),
+        running: Arc::new(std::sync::Mutex::new(None)),
     };
     let session_arc = Arc::new(Mutex::new(session));
     {
@@ -4942,6 +5125,8 @@ async fn post_create_chat(
         // list it was just created at the top of.
         updated_at: chat_updated_at(&s.id),
         preview: None,
+        // Typed into, by definition: this is the create-a-conversation endpoint.
+        flow_run: None,
     })
     .into_response()
 }
@@ -4971,6 +5156,7 @@ async fn get_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>) ->
         created_at: s.created_at.clone(),
         messages,
         plan: s.plan.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        busy: s.busy,
     })
     .into_response()
 }
@@ -5508,6 +5694,7 @@ async fn post_chat_turn(
         interrupt,
         pending_for_mailbox,
         plan_for_sink,
+        running_snapshot,
     ) = {
         let mut s = session.lock().await;
         if s.busy {
@@ -5548,6 +5735,10 @@ async fn post_chat_turn(
             Some(prev) => prev.continue_with(req.message.clone()),
             None => AgentState::new(req.message.clone()),
         };
+        // The context is now the executor's until the turn ends. Publish it so
+        // the conversation still reads as itself in the meantime — this is what
+        // a second device, or this one reopening the chat, is shown.
+        hold_turn(&s, &next_state);
 
         // A chat reloaded after an agent restart comes back from disk with no
         // diagnostics logger — `PersistedChat` doesn't round-trip it. Recreate
@@ -5591,6 +5782,7 @@ async fn post_chat_turn(
             s.interrupt.clone(),
             s.pending.clone(),
             s.plan.clone(),
+            s.running.clone(),
         )
     };
 
@@ -5864,7 +6056,7 @@ async fn post_chat_turn(
             &model_name,
             Some(&id),
             agent_state,
-            step_guard,
+            snapshotting(step_guard, running_snapshot),
             Some(llm_call_hook),
             Some(llm_response_hook),
             RuntimeOptions {
@@ -5911,6 +6103,10 @@ async fn post_chat_turn(
         {
             let mut s = session_for_task.lock().await;
             s.busy = false;
+            // The state is about to be real again, so the in-flight snapshot
+            // stops standing in for it. Before the match, so every arm — including
+            // the two that roll back — is covered.
+            release_turn(&s);
             match outcome {
                 Ok(RunOutcome::Completed(state)) => {
                     s.state = Some(state);
@@ -6202,6 +6398,7 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
             // drained turn should join it, not wait for yet another one.
             pending_for_mailbox,
             plan_for_sink,
+            running_snapshot,
         ) = {
             let mut s = session.lock().await;
             // Busy means a user turn started first; it drains the rest when it
@@ -6219,6 +6416,7 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
                 Some(prev) => prev.continue_with(message.clone()),
                 None => AgentState::new(message.clone()),
             };
+            hold_turn(&s, &next_state);
             (
                 message,
                 s.persona_slug.clone(),
@@ -6229,8 +6427,12 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
                 s.interrupt.clone(),
                 pending,
                 s.plan.clone(),
+                s.running.clone(),
             )
         };
+        // Kept so a turn that dies without handing a state back still leaves the
+        // conversation the one it started from.
+        let state_before_turn = agent_state.clone();
         let sender = chat_event_sender(chat_id).await;
         let reply_sink: crate::tools::ReplySink = {
             let sender = sender.clone();
@@ -6246,12 +6448,15 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
                 })
             })
         };
-        let step_guard = stoppable(
-            crate::guard::build_agent_guard(
-                crate::guard::GuardConfig::default(),
-                diagnostics.clone(),
+        let step_guard = snapshotting(
+            stoppable(
+                crate::guard::build_agent_guard(
+                    crate::guard::GuardConfig::default(),
+                    diagnostics.clone(),
+                ),
+                interrupt.clone(),
             ),
-            interrupt.clone(),
+            running_snapshot,
         );
         let llm_call_hook: Option<metalcraft::LlmCallHook> = diagnostics.as_ref().map(|d| {
             let logger = d.clone();
@@ -6315,10 +6520,19 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
 
         {
             let mut s = session.lock().await;
-            if let Ok(RunOutcome::Completed(state)) = outcome {
-                s.state = Some(state);
-            }
             s.busy = false;
+            release_turn(&s);
+            // Every outcome leaves a state behind, and every one of them has to
+            // be written back. Keeping only the completed case meant a queued
+            // turn that was stopped or failed dropped the conversation's whole
+            // context on the floor — `state` stayed `None`, and the chat read as
+            // empty from then on.
+            s.state = Some(match outcome {
+                Ok(RunOutcome::Completed(state))
+                | Ok(RunOutcome::Interrupted { state, .. })
+                | Ok(RunOutcome::Failed { state, .. }) => state,
+                Err(_) => state_before_turn,
+            });
         }
         persist_chat(&session).await;
         let _ = sender.send(ChatEvent::Done {
@@ -6357,7 +6571,16 @@ pub async fn deliver_followup_to_chat(
 
     // Snapshot what we need and stamp the session busy, refusing to run
     // concurrently with a user turn.
-    let (persona_slug, model_name, cwd, agent_state, diagnostics, interrupt, plan_for_sink) = {
+    let (
+        persona_slug,
+        model_name,
+        cwd,
+        agent_state,
+        diagnostics,
+        interrupt,
+        plan_for_sink,
+        running_snapshot,
+    ) = {
         let mut s = session.lock().await;
         if s.busy {
             return FollowupDelivery::ChatBusy;
@@ -6370,6 +6593,7 @@ pub async fn deliver_followup_to_chat(
             Some(prev) => prev.continue_with(task.to_string()),
             None => AgentState::new(task.to_string()),
         };
+        hold_turn(&s, &next_state);
         (
             s.persona_slug.clone(),
             s.model_name.clone(),
@@ -6378,8 +6602,10 @@ pub async fn deliver_followup_to_chat(
             s.diagnostics.clone(),
             s.interrupt.clone(),
             s.plan.clone(),
+            s.running.clone(),
         )
     };
+    let state_before_turn = agent_state.clone();
 
     // Reply sink: publish the agent's say_to_user text to the chat's live bus.
     let sender = chat_event_sender(chat_id).await;
@@ -6400,9 +6626,15 @@ pub async fn deliver_followup_to_chat(
         })
     };
 
-    let step_guard = stoppable(
-        crate::guard::build_agent_guard(crate::guard::GuardConfig::default(), diagnostics.clone()),
-        interrupt.clone(),
+    let step_guard = snapshotting(
+        stoppable(
+            crate::guard::build_agent_guard(
+                crate::guard::GuardConfig::default(),
+                diagnostics.clone(),
+            ),
+            interrupt.clone(),
+        ),
+        running_snapshot,
     );
     let llm_call_hook: Option<metalcraft::LlmCallHook> = diagnostics.as_ref().map(|d| {
         let logger = d.clone();
@@ -6466,13 +6698,18 @@ pub async fn deliver_followup_to_chat(
     // Write the resulting state back and clear busy, then persist + signal done.
     {
         let mut s = session.lock().await;
-        match outcome {
-            Ok(RunOutcome::Completed(state)) => s.state = Some(state),
-            // On a non-completion, keep whatever partial state came back if any;
-            // otherwise the pre-turn state was already taken, so leave None.
-            _ => {}
-        }
         s.busy = false;
+        release_turn(&s);
+        // Every outcome hands a state back, and leaving `None` behind on the
+        // ones that are not `Completed` did not "keep the partial state" — it
+        // discarded the entire conversation, since the turn took the context out
+        // of the session on the way in.
+        s.state = Some(match outcome {
+            Ok(RunOutcome::Completed(state))
+            | Ok(RunOutcome::Interrupted { state, .. })
+            | Ok(RunOutcome::Failed { state, .. }) => state,
+            Err(_) => state_before_turn,
+        });
     }
     persist_chat(&session).await;
     let _ = sender.send(ChatEvent::Done {
@@ -7797,6 +8034,7 @@ async fn get_or_create_gateway_session(
     let session = ChatSession {
         id: chat_id.to_string(),
         instance_id,
+        flow_run: None,
         persona_slug: n.persona_slug.clone(),
         model_name: n.model_name.clone(),
         cwd: state.cwd.clone(),
@@ -7815,6 +8053,7 @@ async fn get_or_create_gateway_session(
         interrupt: Arc::new(AtomicBool::new(false)),
         pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         plan: Arc::new(std::sync::Mutex::new(Vec::new())),
+        running: Arc::new(std::sync::Mutex::new(None)),
     };
     let arc = Arc::new(Mutex::new(session));
     {
@@ -7838,12 +8077,22 @@ async fn run_one_gateway_turn(
     sink: crate::tools::ReplySink,
     body: String,
 ) {
-    let (chat_id, persona_slug, model_name, cwd, agent_state, diagnostics, interrupt) = {
+    let (
+        chat_id,
+        persona_slug,
+        model_name,
+        cwd,
+        agent_state,
+        diagnostics,
+        interrupt,
+        running_snapshot,
+    ) = {
         let mut s = session.lock().await;
         let next_state = match s.state.take() {
             Some(prev) => prev.continue_with(body.clone()),
             None => AgentState::new(body.clone()),
         };
+        hold_turn(&s, &next_state);
         // A gateway chat reloaded from disk has no diagnostics logger; recreate
         // it on the first turn so the Sessions pane resumes (like post_chat_turn).
         if s.diagnostics.is_none() {
@@ -7875,6 +8124,7 @@ async fn run_one_gateway_turn(
             next_state,
             s.diagnostics.clone(),
             s.interrupt.clone(),
+            s.running.clone(),
         )
     };
 
@@ -7886,9 +8136,15 @@ async fn run_one_gateway_turn(
             logger.log_llm_request(snapshot);
         }) as metalcraft::LlmCallHook
     });
-    let step_guard = stoppable(
-        crate::guard::build_agent_guard(crate::guard::GuardConfig::default(), diagnostics.clone()),
-        interrupt.clone(),
+    let step_guard = snapshotting(
+        stoppable(
+            crate::guard::build_agent_guard(
+                crate::guard::GuardConfig::default(),
+                diagnostics.clone(),
+            ),
+            interrupt.clone(),
+        ),
+        running_snapshot,
     );
 
     let outcome = run_chat_turn(
@@ -7934,6 +8190,7 @@ async fn run_one_gateway_turn(
     // sender would get nothing at all on a failed turn.
     let terminal_error: Option<crate::runtime::ChatError> = {
         let mut s = session.lock().await;
+        release_turn(&s);
         match outcome {
             Ok(RunOutcome::Completed(st)) => {
                 s.state = Some(st);
@@ -8181,7 +8438,7 @@ mod summary_tests {
 mod transcript_tests {
     use super::{
         AgentMessage, AgentState, ChatMessageWire, ChatSession, SessionPreset,
-        context_from_transcript, mark_reset, transcript_of,
+        context_from_transcript, hold_turn, mark_reset, release_turn, transcript_of,
     };
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -8190,6 +8447,7 @@ mod transcript_tests {
         ChatSession {
             id: "c1".into(),
             instance_id: None,
+            flow_run: None,
             persona_slug: String::new(),
             model_name: String::new(),
             cwd: String::new(),
@@ -8203,6 +8461,7 @@ mod transcript_tests {
             interrupt: Arc::new(AtomicBool::new(false)),
             pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             plan: Arc::new(std::sync::Mutex::new(Vec::new())),
+            running: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -8228,6 +8487,18 @@ mod transcript_tests {
             .push(AgentMessage::Assistant(assistant.to_string()));
         st.is_done = true;
         s.state = Some(st);
+    }
+
+    /// What every turn path does on the way in: take the context out of the
+    /// session — the executor owns it for the duration — and publish it so the
+    /// conversation stays readable meanwhile.
+    fn begin_turn(s: &mut ChatSession, user: &str) -> AgentState {
+        let next = match s.state.take() {
+            Some(prev) => prev.continue_with(user.to_string()),
+            None => AgentState::new(user.to_string()),
+        };
+        hold_turn(s, &next);
+        next
     }
 
     #[test]
@@ -8322,6 +8593,59 @@ mod transcript_tests {
     }
 
     #[test]
+    fn a_turn_in_flight_is_still_the_conversation() {
+        let mut s = session();
+        turn(&mut s, "hi", "hello");
+
+        let mut running = begin_turn(&mut s, "what time is it");
+        // The context now belongs to the executor. Reading the session while a
+        // turn held it used to answer "this conversation is empty" — which is
+        // what a client that opened a chat mid-turn was shown, and it read as
+        // the history having been deleted.
+        assert!(s.state.is_none());
+        assert_eq!(
+            said(&transcript_of(&s)),
+            ["u:hi", "a:hello", "u:what time is it"],
+            "including the message that started the turn"
+        );
+
+        // What the step guard does after each step, via `snapshotting`.
+        running.messages.push(AgentMessage::Assistant("2pm".into()));
+        hold_turn(&s, &running);
+        assert_eq!(
+            said(&transcript_of(&s)),
+            ["u:hi", "a:hello", "u:what time is it", "a:2pm"]
+        );
+
+        // And the write-back changes nothing on screen: the snapshot was already
+        // saying what the state now says, so a turn ending is not a redraw.
+        release_turn(&s);
+        s.state = Some(running);
+        assert_eq!(
+            said(&transcript_of(&s)),
+            ["u:hi", "a:hello", "u:what time is it", "a:2pm"]
+        );
+    }
+
+    #[test]
+    fn a_finished_turn_stops_speaking_for_the_session() {
+        let mut s = session();
+        turn(&mut s, "hi", "hello");
+        let running = begin_turn(&mut s, "again");
+        release_turn(&s);
+        s.state = Some(running);
+
+        // The reset is the case that makes releasing load-bearing: it empties
+        // the context on purpose, and a snapshot left behind would put the
+        // messages it just archived back on screen twice.
+        mark_reset(&mut s, "reset");
+        assert_eq!(
+            said(&transcript_of(&s)),
+            ["u:hi", "a:hello", "u:again", "reset:reset"]
+        );
+    }
+
+    #[test]
     fn a_legacy_transcript_with_no_reset_loads_whole() {
         let transcript = vec![
             ChatMessageWire::User {
@@ -8384,6 +8708,7 @@ mod gateway_tests {
                 let s = ChatSession {
                     id: (*id).to_string(),
                     instance_id: None,
+                    flow_run: None,
                     persona_slug: String::new(),
                     model_name: String::new(),
                     cwd: String::new(),
@@ -8397,6 +8722,7 @@ mod gateway_tests {
                     interrupt: Arc::new(AtomicBool::new(false)),
                     pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
                     plan: Arc::new(std::sync::Mutex::new(Vec::new())),
+                    running: Arc::new(std::sync::Mutex::new(None)),
                 };
                 ((*id).to_string(), Arc::new(Mutex::new(s)))
             })

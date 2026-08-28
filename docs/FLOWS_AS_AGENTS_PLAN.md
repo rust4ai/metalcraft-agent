@@ -84,6 +84,23 @@ quietly mutate the memory of an agent you chat with* — only applies to flows s
 already armed, which is the deliberate act that said "yes, this runs as that agent".
 Testing an unbound flow stays a test.
 
+> **Superseded (2026-08-28): a run always has an agent — the flow's own.**
+>
+> The third bullet held for a year of use and was wrong in practice. "Run once" is how
+> people actually try an automation, and it did real work — sent the mail, filed the
+> thing — that then appeared on no screen: no conversation, no row in the fleet, nothing
+> to open. The trade it was protecting against (*an ad-hoc run mutating the memory of an
+> agent you chat with*) is answered better by **giving the flow its own agent** than by
+> giving it none: `agent_instance::for_flow` mints one keyed to `flow_id`, so a run
+> touches the flow's memory and nobody else's.
+>
+> One agent per flow, minted by whichever comes first — a run or an arming — and adopted
+> by the other. `POST /flows/{id}/run` still prefers a *single* armed agent when there is
+> one, so pressing Run on a scheduled automation is still the same act as its firing. A
+> pod with nothing spawnable to be (no presets, or a flow bound to a library preset)
+> falls back to the old behaviour: the run happens, memoryless, and says so in
+> `warnings`.
+
 ---
 
 ## 3. A — `GET /api/v1/flows` *(blocks the client; do first)*
@@ -169,6 +186,25 @@ converts the entire existing transcript stack — reducer, tool cards, trace col
 right rail — onto flow runs for free.
 
 ### 4.3 Conversation volume — the one thing to get right
+
+> **Superseded (2026-08-28): one conversation per run, with a cap on how many are kept.**
+>
+> The rolling window below is a rule about *time*, and it made the unit on screen a
+> window rather than a run: "the 08:00 run" was not a thing you could open, link to, or
+> say the end of, because it shared a thread with yesterday's. A run is the unit people
+> mean, so `flow_conversation` now opens one per run and stamps it with `FlowRunRef
+> { flow_id, run_id }` — which is also what lets a session list label a row as a run.
+>
+> The volume problem the window was solving is real and is solved at the other end:
+> `MAX_RUN_CONVERSATIONS_PER_AGENT` (100) bounds how many run conversations one flow
+> agent keeps, pruning oldest-first and never touching a conversation somebody typed
+> into, nor one a paused run may still resume into. A five-minute cron therefore keeps
+> its last ~8 hours of runs individually openable instead of one unreadable thread, and
+> the fleet listing counts conversations in a single pass rather than one per agent.
+>
+> The rest of this section is kept as written, because the reasoning it records is still
+> the reasoning — only its conclusion moved.
+
 
 "A new conversation per firing" is correct for a daily briefer and wrong for a
 five-minute cron, which would mint 288 chats a day and bury the agent's real threads.

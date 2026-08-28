@@ -283,6 +283,40 @@ pub fn for_gateway_sender(
     Ok(instance)
 }
 
+/// The agent a flow runs as, minting one the first time the flow needs it.
+///
+/// **One agent per flow, and it exists as soon as the flow has run once.** It
+/// used to be arming that created it, which meant a flow you only ever pressed
+/// Run on had no agent, left no conversation, and appeared nowhere — the work
+/// happened and the pod's own home screen showed nothing for it. A run is the
+/// act that says this flow does something; that is the honest moment for its
+/// agent to exist.
+///
+/// Its runs then accumulate in one memory, which is the point of the agent
+/// rather than a side effect: the flow that ran this morning can notice it said
+/// the same thing yesterday. Schedules of the same flow land here too
+/// ([`crate::scheduled_flows::arm`]), so arming a flow somebody had already run
+/// by hand adopts the agent it already had instead of minting a second.
+///
+/// `label` is what to call it when minting — the schedule's name if it has one,
+/// otherwise the flow's.
+pub fn for_flow(flow_id: &str, label: &str, preset_slug: &str) -> Result<AgentInstance, String> {
+    let origin = InstanceOrigin::Flow {
+        flow_id: flow_id.to_string(),
+    };
+    // `list()` is newest-active first, so a flow that somehow has two agents
+    // (one minted before this existed, one after) resolves to the one being used.
+    if let Some(found) = list().into_iter().find(|i| i.origin == origin) {
+        return Ok(found);
+    }
+    let preset = crate::agent_preset::AgentPreset::load(preset_slug, &paths::agent_presets_dir())?;
+    preset.ensure_spawnable()?;
+    let mut instance = AgentInstance::new(&preset, origin);
+    instance.name = format!("{} — {label}", preset.name);
+    instance.save()?;
+    Ok(instance)
+}
+
 /// One-time backfill: give every legacy chat an instance so nothing on an upgraded pod
 /// is orphaned.
 ///

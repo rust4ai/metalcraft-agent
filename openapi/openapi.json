@@ -4127,6 +4127,10 @@
           "messages"
         ],
         "properties": {
+          "busy": {
+            "type": "boolean",
+            "description": "Whether a turn is running right now.\n\nAnswers the question a reopened chat cannot answer from its messages: the\nlast thing said is the person's own, and whether the agent is working on\nit or has been idle for an hour is the difference between a composer that\noffers Stop and one that offers Send. Without it a client that opened a\nchat mid-turn drew a finished conversation and let someone type into it."
+          },
           "created_at": {
             "type": "string"
           },
@@ -4676,6 +4680,17 @@
         "properties": {
           "created_at": {
             "type": "string"
+          },
+          "flow_run": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FlowRunRef",
+                "description": "Set when this conversation is a flow run rather than something typed —\nwhich flow, and which run. A session list uses it to say so; without it a\nrow of an automation's output is indistinguishable from a chat, and the\nagent screen of a flow agent reads as a stack of anonymous timestamps."
+              }
+            ]
           },
           "id": {
             "type": "string"
@@ -5521,6 +5536,23 @@
               "type": "string"
             },
             "description": "Non-fatal warnings computed when the run started — e.g. required packs/personas\nthat aren't installed or enabled. Surfaced in flow-debug UIs so a run that can't\nfully work says why. Empty (and omitted) when the flow has everything it needs."
+          }
+        }
+      },
+      "FlowRunRef": {
+        "type": "object",
+        "description": "Which run of which flow a conversation is.\n\nStamped on the chat a run writes itself into, so a session list can say\n\"this is a run of Morning brief\" rather than showing a timestamp and a\npreview, and so the pod can tell an automation's own transcripts apart from\nthe ones a person typed into the same agent.",
+        "required": [
+          "flow_id",
+          "run_id"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string",
+            "description": "The `run_id` of [`crate::flow_exec::FlowRunSummary`] — the same id the\n`runs/{id}.json` record carries when the run paused."
           }
         }
       },
@@ -7704,7 +7736,7 @@
               "string",
               "null"
             ],
-            "description": "Run as this agent, so the run recalls from and writes to its memory and\nleaves a conversation behind. Omitted resolves from the flow's armed\nschedules — see [`instance_for_manual_run`]."
+            "description": "Run as this agent, so the run recalls from and writes to its memory and\nleaves a conversation behind. Omitted resolves to the flow's armed agent,\nor to the flow's own agent — see [`instance_for_manual_run`]."
           },
           "model_name": {
             "type": [

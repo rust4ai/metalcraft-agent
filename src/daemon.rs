@@ -259,12 +259,42 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                     scheduled.schedule.display_name()
                 );
 
-                // The agent this schedule was armed with. Every firing is a
-                // conversation inside one long-lived agent, which is what lets a
-                // recurring flow notice it said the same thing yesterday.
-                let instance_id = scheduled.instance_id.clone();
-
                 if crate::flow_exec::is_v2_flow(&flow) {
+                    // The agent this schedule was armed with. Every firing is a
+                    // conversation inside one long-lived agent, which is what lets a
+                    // recurring flow notice it said the same thing yesterday.
+                    //
+                    // A schedule written before arming bound an agent — or one whose
+                    // agent has since been deleted — falls back to the flow's own
+                    // agent rather than firing as nobody, which is what left a
+                    // nightly cron doing real work that appeared on no screen.
+                    let instance_id = scheduled
+                        .instance_id
+                        .clone()
+                        .filter(|id| crate::agent_instance::load(id).is_ok())
+                        .or_else(|| {
+                            let label = scheduled
+                                .schedule
+                                .name
+                                .as_deref()
+                                .filter(|n| !n.trim().is_empty())
+                                .unwrap_or(&flow.name);
+                            match crate::agent_instance::for_flow(
+                                &flow.id,
+                                label,
+                                &crate::flow_bindings::preset_for(&flow.id),
+                            ) {
+                                Ok(i) => Some(i.id),
+                                Err(e) => {
+                                    log::warn!(
+                                        "flow '{}' fires with no agent, so it will leave no \
+                                         conversation: {e}",
+                                        flow.id
+                                    );
+                                    None
+                                }
+                            }
+                        });
                     // v2 flows run on the stateful state-machine executor.
                     let inputs = scheduled
                         .schedule
@@ -616,4 +646,3 @@ fn env_flag(key: &str, default: bool) -> bool {
         Err(_) => default,
     }
 }
-

@@ -11,6 +11,20 @@ use std::path::Path;
 
 use crate::flow_exec::FlowStep;
 
+/// Which run of which flow a conversation is.
+///
+/// Stamped on the chat a run writes itself into, so a session list can say
+/// "this is a run of Morning brief" rather than showing a timestamp and a
+/// preview, and so the pod can tell an automation's own transcripts apart from
+/// the ones a person typed into the same agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct FlowRunRef {
+    pub flow_id: String,
+    /// The `run_id` of [`crate::flow_exec::FlowRunSummary`] — the same id the
+    /// `runs/{id}.json` record carries when the run paused.
+    pub run_id: String,
+}
+
 /// Why a run is paused and what will resume it.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PauseInfo {
