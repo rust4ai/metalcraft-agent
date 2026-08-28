@@ -78,25 +78,51 @@ delivery path cannot double-deliver.
 The private channel stays for now, fed in parallel, so today's clients keep
 working (§3.2). §6 retires it.
 
-### 3.2 Opt-in, so nothing regresses
+### 3.2 A new route, and `/events` frozen behind it
 
-`GET /chats/{id}/events` keeps its current meaning — **agent-initiated frames
-only** — and gains a query parameter:
+The full stream is a **new route**:
 
 ```
-GET /chats/{id}/events?include=all
+GET /chats/{id}/stream     everything that happens in this conversation
+GET /chats/{id}/events     agent-initiated frames only — superseded, unchanged
 ```
 
-`include=all` adds interactive turns. Default is today's behaviour.
+Back-compat is not optional here, and that is worth stating before the choice
+between a route and a flag. Two shipped clients subscribe to the bus *while*
+reading their own turn stream: iOS (`SessionStore.startWatching` + `send`) and
+workshop-web (`subscribeEvents` + `postTurn`,
+`frontend/src/lib/pod.ts:109`). Publishing turn frames onto what they are already
+reading would draw every turn twice in both — on pods that update themselves,
+under clients that ship through the App Store. Whatever this looks like, the
+frames a pre-0.39 client sees must not change.
 
-This matters because two shipped clients subscribe to the bus *while* reading
-their own turn stream: iOS (`SessionStore.startWatching` + `send`) and
-workshop-web (`subscribeEvents` + `postTurn`, `frontend/src/lib/pod.ts:109`).
-Publishing turn frames unconditionally would draw every turn twice in both, on
-pods they did not ask to be upgraded to. An opt-in cannot do that to anyone.
+`?include=all` on `/events` would satisfy that too. It is the wrong shape anyway,
+for three reasons:
 
-So the bus frame grows an origin — `interactive` vs `agent` — and the route
-filters on it. The origin is a server-side detail: it is not on the wire.
+- **The default would be permanently wrong.** `/events` would mean "the partial
+  stream" forever, and a new client would get the obvious behaviour only by
+  knowing to pass a magic parameter. Forgetting it fails *silently* — you simply
+  never see turns — which is precisely the bug this plan exists to close, rebuilt
+  as a footgun.
+- **A parameter can never be removed; a route can.** `/events` can be marked
+  superseded in the description, and deleted once nothing calls it — a condition
+  somebody can actually check. The parameter equivalent is flipping a default,
+  which is a silent behaviour change for whoever is still on the old reading.
+- **It pairs with §6.** The end state is `POST /turn` answering `202`. That gives
+  two coherent contracts — old: `/events` + SSE-from-POST; new: `/stream` + `202`
+  — where a mode flag crossed with two POST behaviours is four combinations, two
+  of them nonsense.
+
+The argument the other way was that a query parameter rides free through the
+proxies. It does — but so does a path: both pod proxies are generic wildcard
+forwarders (`metalcraft-workshop-web/backend/src/controllers/proxy.rs:71`,
+`metalcraft-ai-web/backend/src/proxy.rs:65`), so a new route costs nothing there
+either. There is no practical case left, only the naming one, and `/events`
+filtered to a subset of events is not what the word means.
+
+Either way the bus frame grows an origin — `interactive` vs `agent` — and the
+route decides what to keep. The origin is a server-side detail: it is not on the
+wire.
 
 ### 3.3 A sequence number, so "catch up" is exact
 
@@ -169,21 +195,24 @@ response is byte-identical to today's.
 The four headless paths already hold a bus sender and only need `Origin::Agent`
 threaded through.
 
-### 4.2 Filter at the route
+### 4.2 Two routes, one handler
+
+`get_chat_events` takes the filter as an argument rather than reading it from the
+request, and both routes are one line each:
 
 ```rust
-#[derive(Deserialize)]
-struct EventsQuery {
-    /// `all` adds interactive turns. Absent or anything else = agent-initiated
-    /// only, which is what every client built before this shipped expects.
-    include: Option<String>,
-}
+.route("/api/v1/chats/{id}/events", get(get_chat_events))   // Origin::Agent only
+.route("/api/v1/chats/{id}/stream", get(get_chat_stream))   // everything
 ```
 
-`get_chat_events` keeps a frame when `include=all` or `frame.origin == Agent`,
-and serializes `frame.event` with `seq` merged in (`serde_json::to_value` + insert
-— the enum is `#[serde(tag = "kind")]` and adding a field to every variant would
-be twelve copies of the same line).
+The shared body keeps a frame when the filter admits its origin, and serializes
+`frame.event` with `seq` merged in (`serde_json::to_value` + insert — the enum is
+`#[serde(tag = "kind")]` and adding a field to every variant would be twelve
+copies of the same line).
+
+`/events` keeps its `#[utoipa::path]` with its description rewritten to say what
+supersedes it, so the deprecation is visible in Scalar and in every generated
+client rather than living in this file.
 
 Capacity goes from 64 to 256 while it is being touched: a tool-heavy turn emits
 several frames per step, and a subscriber that is one paint behind should not lose
@@ -199,8 +228,8 @@ atomic. `ChatSummary` does not need it.
 
 - `chat_publisher` stamps `seq` monotonically per chat and starts at 1 for a chat
   that has never published.
-- Origin filter: two subscribers, one with `include=all`; an interactive frame
-  reaches one and an agent frame reaches both.
+- Origin filter: two subscribers, one on `/stream` and one on `/events`; an
+  interactive frame reaches only the first and an agent frame reaches both.
 - `get_chat` returns a `through_seq` that matches the frames published so far —
   the pairing this whole design rests on.
 - Existing `chat_interrupt_test` / `flow_conversation_test` must not move: they
@@ -208,8 +237,8 @@ atomic. `ChatSummary` does not need it.
 
 ### 4.5 Version
 
-Agent `0.39.0` (`Cargo.toml:3`). Additive on the wire — a new optional query
-parameter, two new fields — so `PodVersionFloor.minimum` in the app does **not**
+Agent `0.39.0` (`Cargo.toml:3`). Additive on the wire — one new route, two new
+fields, nothing changed — so `PodVersionFloor.minimum` in the app does **not**
 move; §5 says what each client does when the pod is older.
 
 ---
@@ -220,7 +249,10 @@ move; §5 says what each client does when the pod is older.
 
 `SessionStore` becomes a single-stream client:
 
-- `startWatching` subscribes with `include=all`.
+- `startWatching` subscribes to `/stream`. The app already knows what it is
+  talking to — `Pod.version`, and `through_seq` missing from the chat read says
+  the same thing — so this is a version check, not a 404 probe; falling back to
+  `/events` keeps a pre-0.39 pod exactly as good as it is today.
 - `attach` subscribes **first**, buffering, then reads the chat, then applies the
   buffer from `through_seq`. Today it reads then subscribes (§2's race).
 - `send` stops consuming the POST response — it still awaits the request to catch
@@ -238,10 +270,10 @@ Live-pod test: two `PodClient`s on one chat; one posts a turn, the other must se
 
 ### 5.2 workshop-web
 
-Same move, smaller: `subscribeEvents` passes `?include=all`, `postTurn` stops
+Same move, smaller: `subscribeEvents` points at `/stream`, `postTurn` stops
 feeding the reducer, the reducer drops frames at or below the last `seq`. Until
-then it is unaffected — it does not send the parameter and sees exactly what it
-sees today.
+then it is unaffected — it goes on calling `/events`, which goes on meaning what
+it means today.
 
 ### 5.3 metalcraft-front
 
@@ -268,10 +300,10 @@ it no longer needs to fill. That is a breaking change for any client not listed 
 
 ## 7. Risks
 
-- **Double-render on a client that opts in without dropping its POST stream.**
-  The whole failure mode §3.2 protects strangers from, reintroduced by an
-  incomplete client change. The `seq` guard in `apply` is what makes it safe, so
-  land that edit before the `include=all` edit in each client.
+- **Double-render on a client that moves to `/stream` without dropping its POST
+  stream.** The whole failure mode §3.2 protects strangers from, reintroduced by
+  an incomplete client change. The `seq` guard in `apply` is what makes it safe,
+  so land that edit before the `/stream` edit in each client.
 - **Broadcast lag under a tool-heavy turn.** Mitigated by capacity 256 and made
   *visible* by `seq`; a client that sees a gap re-reads. Silent loss is the thing
   being fixed, not introduced.
@@ -283,10 +315,11 @@ it no longer needs to fill. That is a breaking change for any client not listed 
 
 ## 8. Open questions
 
-1. Should `include=all` instead be the default on a **new route**
-   (`GET /chats/{id}/stream`), leaving `/events` frozen? Cleaner semantics, one
-   more route to keep alive. Current answer: no — the parameter is honest and the
-   old meaning is a real one clients still want.
+1. When can `/events` actually be deleted? Not on a schedule — the pod cannot see
+   which app builds are still out there, and the App Store means old ones persist.
+   The honest trigger is a client-side one: once iOS, workshop-web and front are
+   all on `/stream` and `PodVersionFloor.minimum` has moved past 0.39 for other
+   reasons, nothing left can be calling it. Until then it costs one line.
 2. Does the gateway path want `Origin::Interactive`? A WhatsApp turn is somebody
    typing, just not here. Leaning yes, since the phone's fleet view should show
    the agent working; it changes nothing for a client that does not opt in.
