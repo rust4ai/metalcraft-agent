@@ -3,8 +3,8 @@
 //! This is the central bet of the whole design. A turn appends **one line** to
 //! `capture.jsonl` — no LLM call, no summarization at interactive
 //! latency. The raw material sits there until the nightly dream distills it into
-//! actual memories. So the agent accumulates experience continuously while the
-//! per-turn cost stays at one `O_APPEND` write.
+//! actual memories ([`super::dream`]). So the agent accumulates experience
+//! continuously while the per-turn cost stays at one `O_APPEND` write.
 //!
 //! Two sources feed the queue:
 //!
@@ -15,7 +15,7 @@
 //! * **Every compaction** — [`crate::context::compact_if_needed`] already pays
 //!   an LLM call to summarize the history it is about to discard, then buries the
 //!   result in one `Assistant` message and forgets it. That summary is the
-//!   highest-value memory material in the system and it currently evaporates.
+//!   highest-value memory material in the system and would otherwise evaporate.
 //!   Capturing it costs nothing extra.
 //!
 //! There is deliberately **no episode state machine**. An episode is derived at

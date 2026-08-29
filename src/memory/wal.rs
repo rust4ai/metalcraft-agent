@@ -5,7 +5,9 @@
 //! * **Writes are one `O_APPEND` line.** A turn must be able to record something
 //!   without rewriting the store, so the hot path never pays O(n).
 //! * **Boot is snapshot + tail replay.** The dream writes a fresh snapshot and
-//!   truncates the log nightly, so the tail holds at most a day of events.
+//!   truncates the log nightly ([`super::dream`]), so the tail holds at most a
+//!   day of events. A busy agent that outgrows that between dreams compacts on
+//!   load as well — see `instance::load_delta`.
 //! * **A torn final line is skipped, not fatal.** A crash mid-append leaves a
 //!   partial JSON line; it fails to parse and is dropped with a `warn`. This is
 //!   the same tolerance `scheduled_tasks::load_unlocked` shows for a corrupt

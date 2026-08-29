@@ -166,6 +166,12 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     // number) — no-op while nothing is connected.
     tokio::spawn(async move { crate::metalcraft_gateway::heal_loop().await });
 
+    // Drain the memory capture queue nightly: distil conversations into durable
+    // memories, merge duplicates, and let unused ones decay. Its own loop rather
+    // than a flow, because the mechanical half has to run whether or not anyone
+    // has armed anything — see `crate::memory::dream::dream_loop`.
+    tokio::spawn(async move { crate::memory::dream::dream_loop().await });
+
     // Always-visible startup banner, printed regardless of RUST_LOG.
     println!("──────────────────────────────────────────────");
     println!("  metalcraft-daemon running");

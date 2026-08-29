@@ -180,6 +180,10 @@ pub fn create_registry_for_with_config(
                 Some(id) => registry.register(crate::memory::tools::MemStatsTool::new(id)),
                 None => registry,
             },
+            "mem_dream_now" => match config.and_then(|c| c.instance_id.clone()) {
+                Some(id) => registry.register(crate::memory::tools::MemDreamNowTool::new(id)),
+                None => registry,
+            },
             // Meta tools: author/manage the metalcraft project itself (the
             // workshop's CRUD surface, by prompt). They operate on the global
             // `paths::*` dirs, so they need no ToolConfig.

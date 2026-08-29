@@ -595,7 +595,8 @@ async fn auth_middleware(
         list_agent_instances, get_agent_instance, post_create_agent_instance,
         get_agent_instance_flows,
         patch_agent_instance, delete_agent_instance,
-        get_agent_instance_memory, post_instance_conversation, list_instance_conversations,
+        get_agent_instance_memory, post_agent_instance_dream, post_instance_conversation,
+        list_instance_conversations,
         list_personas, get_persona, put_persona, delete_persona,
         list_skills, get_skill, put_skill, delete_skill,
         list_flows, get_flow, put_flow, post_validate_flow, delete_flow, post_run_flow,
@@ -668,6 +669,9 @@ async fn auth_middleware(
         crate::agent_packs::manifest::Parent, crate::agent_packs::manifest::EnvRequirement,
         ExportAgentPackRequest,
         crate::memory::InstanceMemoryView, crate::memory::MemorySample,
+        crate::memory::MemorySystemStatus, crate::memory::KindCount,
+        crate::memory::DreamStatus, crate::memory::dream::DreamReport,
+        crate::memory::dream::StageReport,
         InstanceDetail, CreateInstanceRequest, PatchInstanceRequest, NewConversationRequest,
         InstanceFlows, PresetDetail, RosterPersona, InstanceList, InstanceListItem,
         AgentPackPreview, Registries, RegistryView, crate::agent_registry::Trust,
@@ -813,6 +817,10 @@ pub fn build_router(api_key: String) -> Router {
         .route(
             "/api/v1/agents/instances/{id}/memory",
             get(get_agent_instance_memory),
+        )
+        .route(
+            "/api/v1/agents/instances/{id}/memory/dream",
+            post(post_agent_instance_dream),
         )
         .route(
             "/api/v1/agents/instances/{id}/flows",
@@ -2084,6 +2092,76 @@ async fn get_agent_instance_memory(
     }
     let view = crate::memory::instance_view(&id, q.limit.unwrap_or(50).clamp(1, 500)).await;
     Json(view).into_response()
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct DreamRequest {
+    /// Which stages to run: 1 index, 2 consolidate, 3 abstract, 4 associate,
+    /// 5 decay. Omit for the configured set (all five by default); `[1, 5]` is the
+    /// fast mechanical pass with no model calls.
+    #[serde(default)]
+    stages: Option<Vec<u8>>,
+}
+
+/// Consolidate this agent's memory now instead of waiting for tonight.
+///
+/// The same engine the nightly loop runs, with the same caps — an on-demand run
+/// and a scheduled one leave the store in the same shape. It **blocks for the
+/// whole run**, which is several model calls and can be minutes: this is a button
+/// somebody presses and watches, not something to poll. Send `{"stages":[1,5]}`
+/// for the mechanical half, which returns in milliseconds.
+///
+/// Always 200 with a report. A stage that failed is named in the report rather
+/// than turned into a status code, because the stages that succeeded did real
+/// work and a 500 would throw that away.
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/instances/{id}/memory/dream",
+    tag = "agent-instances",
+    params(("id" = String, Path, description = "Instance id")),
+    request_body = DreamRequest,
+    responses(
+        (status = 200, body = crate::memory::dream::DreamReport),
+        (status = 400, description = "No valid stages requested"),
+        (status = 404, description = "No such agent"),
+    ),
+)]
+async fn post_agent_instance_dream(
+    Path(id): Path<String>,
+    body: Option<Json<DreamRequest>>,
+) -> Response {
+    if crate::agent_instance::load(&id).is_err() {
+        return err_json(
+            StatusCode::NOT_FOUND,
+            format!("agent instance '{id}' not found"),
+        );
+    }
+    let stages = match body.and_then(|Json(b)| b.stages) {
+        Some(requested) => {
+            let mut s: Vec<u8> = requested
+                .into_iter()
+                .filter(|n| (1..=5).contains(n))
+                .collect();
+            s.sort_unstable();
+            s.dedup();
+            if s.is_empty() {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    "stages must name at least one stage between 1 and 5".to_string(),
+                );
+            }
+            s
+        }
+        None => crate::memory::dream::configured_stages(),
+    };
+
+    let report = crate::memory::dream::dream_stages(
+        &id,
+        crate::memory::dream::Trigger::Manual,
+        &stages,
+    )
+    .await;
+    Json(report).into_response()
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

@@ -1,11 +1,9 @@
 //! Persistent, cross-session memory for the agent.
 //!
-//! See `docs/MEMORY_SYSTEM_PLAN.md` for the design. This module is **Phase 0–4**
-//! minus the parts that were never built: the store, the keyword index, the
-//! explicit `mem_*` tools, automatic injection into every turn, and automatic
-//! capture of raw turn material. The nightly dream (Phase 5) does not exist, so
-//! only `mem_remember` creates memories and the capture queue is written but
-//! never read.
+//! See `docs/MEMORY_SYSTEM_PLAN.md` for the design: the store, the keyword index,
+//! the explicit `mem_*` tools, automatic injection into every turn, automatic
+//! capture of raw turn material, and the nightly [`dream`] that turns that
+//! material into memory.
 //!
 //! Shape, and why:
 //!
@@ -24,6 +22,11 @@
 //!   removed rather than kept as decoration: it only ever ran against the
 //!   pod-global store, so on a real pod — where every turn is instance-scoped —
 //!   it had never contributed a single result.
+//! * **Cheap to write, expensive to sleep.** A turn appends one line to
+//!   `capture.jsonl` and pays nothing else — no LLM call at interactive latency.
+//!   The nightly [`dream`] is where distillation, merging, linking and pruning
+//!   happen. This is the central design bet, and [`capture`] is only half of it:
+//!   without the dream draining the queue, that file would just grow.
 //! * **Nothing here can fail a turn.** Every public entry point returns a
 //!   `Result` the caller is expected to discard on failure, and initialization
 //!   degrades to an empty store rather than panicking.
@@ -31,6 +34,7 @@
 //! The module is named `wal` rather than `log` on purpose: `pub mod log` inside
 //! this file would shadow the `log` logging facade for every sibling.
 pub mod capture;
+pub mod dream;
 pub mod index;
 pub mod inject;
 pub mod instance;
@@ -230,9 +234,7 @@ pub async fn profile_block(instance_id: &str) -> String {
     if !enabled() {
         return String::new();
     }
-    let base_ref = base_for_instance(instance_id);
-    let base_arg = base_ref.as_ref().map(|(p, v)| (p.as_str(), v.as_str()));
-    let mem = match instance::handle_for(instance_id, base_arg) {
+    let mem = match handle_for_instance(instance_id) {
         Ok(m) => m,
         Err(e) => {
             log::warn!("memory: profile for instance '{instance_id}' unavailable: {e}");
@@ -317,6 +319,18 @@ fn base_for_instance(instance_id: &str) -> Option<(String, String)> {
     Some((inst.agent_preset, version))
 }
 
+/// Get one agent's memory handle, resolving which preset base it should read.
+///
+/// The three lines this replaces appeared at every entry point below, and every
+/// one of them had to remember that the base is looked up by the *installed*
+/// pack version rather than the one the instance was born against — see
+/// [`base_for_instance`]. One place to get that wrong is enough.
+pub(crate) fn handle_for_instance(instance_id: &str) -> Result<instance::InstanceMemory, String> {
+    let base_ref = base_for_instance(instance_id);
+    let base_arg = base_ref.as_ref().map(|(p, v)| (p.as_str(), v.as_str()));
+    instance::handle_for(instance_id, base_arg)
+}
+
 /// Recall across one agent's layers. Degrades to the delta alone if the base can't
 /// be loaded — a missing base is a smaller agent, never a failed turn.
 async fn recall_for_instance(
@@ -324,9 +338,7 @@ async fn recall_for_instance(
     query: &str,
     opts: &RecallOptions,
 ) -> Vec<Scored> {
-    let base_ref = base_for_instance(instance_id);
-    let base_arg = base_ref.as_ref().map(|(p, v)| (p.as_str(), v.as_str()));
-    let mem = match instance::handle_for(instance_id, base_arg) {
+    let mem = match handle_for_instance(instance_id) {
         Ok(m) => m,
         Err(e) => {
             log::warn!("memory: recall for instance '{instance_id}' unavailable: {e}");
@@ -355,9 +367,7 @@ async fn remember_into_instance(
     req: RememberRequest,
     scrubbed: redact::Redaction,
 ) -> Result<Remembered, String> {
-    let base_ref = base_for_instance(instance_id);
-    let base_arg = base_ref.as_ref().map(|(p, v)| (p.as_str(), v.as_str()));
-    let mem = instance::handle_for(instance_id, base_arg)?;
+    let mem = handle_for_instance(instance_id)?;
 
     let hash = types::content_hash(&scrubbed.content);
     let mut delta = mem.delta.write().await;
@@ -446,6 +456,113 @@ pub struct InstanceMemoryView {
     /// Shipped memories this agent has been told to forget.
     pub forgotten: usize,
     pub sample: Vec<MemorySample>,
+    /// How the machinery behind those numbers is configured and when it last ran.
+    ///
+    /// Shipped with the view rather than on a route of its own because the
+    /// question it answers — "why does this agent know so little / so much?" — is
+    /// the same question the counts above provoke, and two round trips to answer
+    /// one question is two chances to show a half-loaded pane.
+    pub system: MemorySystemStatus,
+}
+
+/// The state of the memory subsystem for one agent: what is switched on, what is
+/// waiting, and what the dream did about it last.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct MemorySystemStatus {
+    /// `MEMORY_ENABLED`. Off means no recall, no capture, no dream.
+    pub enabled: bool,
+    /// `MEMORY_CAPTURE` — whether turns are being written to the queue at all.
+    pub capture_enabled: bool,
+    /// `MEMORY_RECALL` — whether recall is injected into each turn.
+    pub recall_enabled: bool,
+    /// Turns captured but not yet distilled. A number that only grows means a
+    /// dream that is not running.
+    pub pending_captures: usize,
+    /// Live memories by kind, largest first.
+    pub by_kind: Vec<KindCount>,
+    /// Edges in this agent's own memory graph.
+    pub links: usize,
+    /// Faded out by the decay pass, still on disk.
+    pub archived: usize,
+    /// Merged into another memory by the dream.
+    pub superseded: usize,
+    pub dream: DreamStatus,
+}
+
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct KindCount {
+    pub kind: String,
+    pub count: usize,
+}
+
+/// When the dream runs, and what happened the last time it did.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct DreamStatus {
+    /// Whether the nightly schedule is armed (`MEMORY_DREAM`). On-demand runs work
+    /// either way — turning off a schedule is not removing the capability.
+    pub nightly_enabled: bool,
+    /// The six-field cron it fires on.
+    pub cron: String,
+    /// The zone that cron is read in; absent means the pod's own clock.
+    pub timezone: Option<String>,
+    /// The model the thinking stages use.
+    pub model: String,
+    /// How recently an agent must have been used to be swept.
+    pub active_days: i64,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub last_run_at: Option<DateTime<Utc>>,
+    /// One line on what the last run did, ready to print.
+    pub last_summary: Option<String>,
+    /// `"nightly"`, `"catchup"` or `"manual"` — how the last run started.
+    pub last_trigger: Option<String>,
+    /// Why the last run failed, when it did.
+    pub last_error: Option<String>,
+}
+
+/// Read the memory subsystem's state for one agent. Cheap: env reads, one journal
+/// file, and counts over an index that is already resident.
+pub async fn system_status(instance_id: &str) -> MemorySystemStatus {
+    let last = dream::last_journal(instance_id);
+    let mut status = MemorySystemStatus {
+        enabled: enabled(),
+        capture_enabled: capture::capture_enabled(),
+        recall_enabled: recall_enabled(),
+        pending_captures: capture::pending_count(instance_id),
+        by_kind: Vec::new(),
+        links: 0,
+        archived: 0,
+        superseded: 0,
+        dream: DreamStatus {
+            nightly_enabled: dream::nightly_enabled(),
+            cron: dream::cron_expr(),
+            timezone: dream::timezone(),
+            model: dream::model_name(),
+            active_days: dream::active_days(),
+            next_run_at: dream::next_run_at(),
+            last_run_at: last.as_ref().map(|r| r.finished_at),
+            last_summary: last.as_ref().map(|r| r.headline()),
+            last_trigger: last.as_ref().map(|r| r.trigger.clone()),
+            last_error: last.as_ref().and_then(|r| r.error.clone()),
+        },
+    };
+
+    // Counts come from the agent's own delta only. Its base is shared and
+    // immutable, so "archived" and "superseded" there would be the pack author's
+    // numbers, not this agent's, and reporting them together would make a fresh
+    // agent look like it had already forgotten things.
+    if let Ok(mem) = handle_for_instance(instance_id) {
+        let delta = mem.delta.read().await;
+        let stats = delta.stats(0);
+        status.links = stats.links;
+        status.archived = stats.archived;
+        status.superseded = stats.superseded;
+        status.by_kind = stats
+            .by_kind
+            .into_iter()
+            .map(|(kind, count)| KindCount { kind, count })
+            .collect();
+    }
+    status
 }
 
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
@@ -463,9 +580,7 @@ pub struct MemorySample {
 /// Read one agent's memory for display. Never mutates and never touches access
 /// counts — looking at what an agent knows must not change its decay curve.
 pub async fn instance_view(instance_id: &str, sample_limit: usize) -> InstanceMemoryView {
-    let base_ref = base_for_instance(instance_id);
-    let base_arg = base_ref.as_ref().map(|(p, v)| (p.as_str(), v.as_str()));
-    let Ok(mem) = instance::handle_for(instance_id, base_arg) else {
+    let Ok(mem) = handle_for_instance(instance_id) else {
         return InstanceMemoryView {
             instance_id: instance_id.to_string(),
             base: None,
@@ -473,9 +588,14 @@ pub async fn instance_view(instance_id: &str, sample_limit: usize) -> InstanceMe
             learned: 0,
             forgotten: 0,
             sample: Vec::new(),
+            system: system_status(instance_id).await,
         };
     };
 
+    // Read the status before taking the delta lock — `system_status` takes its
+    // own, and a read guard held across that call would deadlock on a
+    // non-reentrant lock.
+    let system = system_status(instance_id).await;
     let tombs = mem.tombstones.read().await.clone();
     let delta = mem.delta.read().await;
 
@@ -513,6 +633,7 @@ pub async fn instance_view(instance_id: &str, sample_limit: usize) -> InstanceMe
         learned,
         forgotten: tombs.len(),
         sample,
+        system,
     }
 }
 
@@ -531,9 +652,7 @@ fn sample_of(m: &Memory, origin: &'static str) -> MemorySample {
 /// Read one memory from an agent's own layers — delta first, then its shipped base,
 /// and never anything a tombstone hides.
 pub async fn instance_get(instance_id: &str, id: &str) -> Option<Memory> {
-    let base_ref = base_for_instance(instance_id);
-    let base_arg = base_ref.as_ref().map(|(p, v)| (p.as_str(), v.as_str()));
-    let mem = instance::handle_for(instance_id, base_arg).ok()?;
+    let mem = handle_for_instance(instance_id).ok()?;
     if let Some(m) = mem.delta.read().await.get(id) {
         return Some(m.clone());
     }
@@ -548,8 +667,6 @@ pub async fn instance_get(instance_id: &str, id: &str) -> Option<Memory> {
 /// Forget inside one agent's memory. Its own memories are purged; a shipped memory
 /// is tombstoned, because that copy is shared with every other agent of the preset.
 pub async fn instance_forget(instance_id: &str, id: &str) -> Result<instance::Forgotten, String> {
-    let base_ref = base_for_instance(instance_id);
-    let base_arg = base_ref.as_ref().map(|(p, v)| (p.as_str(), v.as_str()));
-    let mem = instance::handle_for(instance_id, base_arg)?;
+    let mem = handle_for_instance(instance_id)?;
     mem.forget(id).await
 }

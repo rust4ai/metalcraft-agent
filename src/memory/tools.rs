@@ -1,9 +1,10 @@
 //! The `mem_*` agent tools.
 //!
 //! These are the *explicit* surface: the agent deciding, in the moment, to save
-//! or look something up. Automatic recall injection and automatic turn capture
-//! land in later phases and do not go through these tools — which is why the
-//! write tools being approval-gated is not a usability problem.
+//! or look something up. Automatic recall injection, automatic turn capture, and
+//! the nightly dream do not go through these tools — which is why the write tools
+//! being approval-gated is not a usability problem. `mem_dream_now` is the one
+//! that reaches the automatic half, and only to make it happen sooner.
 //!
 //! Conventions follow the core tools (`read_file`, `grep`), not the pack tools:
 //! a bad parameter is a `GraphError::ToolCallFailed` via
@@ -23,6 +24,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "mem_get",
     "mem_forget",
     "mem_stats",
+    "mem_dream_now",
 ];
 
 /// The compact projection of a memory used in list results — full content is
@@ -394,6 +396,7 @@ impl metalcraft::Tool for MemStatsTool {
     }
     async fn call(&self, _args: Value) -> metalcraft::Result<Value> {
         let v = super::instance_view(&self.instance_id, 0).await;
+        let last = super::dream::last_journal(&self.instance_id);
         Ok(json!({
             "instance_id": v.instance_id,
             "base": v.base,
@@ -402,9 +405,105 @@ impl metalcraft::Tool for MemStatsTool {
             "forgotten": v.forgotten,
             "total": v.shipped + v.learned,
             "enabled": super::enabled(),
-            // Captures are written every turn and nothing consumes them yet, so
-            // this only ever grows. Surfaced rather than silently accumulating.
+            // Raw turn material waiting for the next dream to distil it. Surfaced
+            // because a queue that stops draining means a dream that stopped
+            // running, and that is otherwise completely silent.
             "pending_captures": super::capture::pending_count(&self.instance_id),
+            "dream": {
+                "nightly_enabled": super::dream::nightly_enabled(),
+                "next_run_at": super::dream::next_run_at().map(|t| t.to_rfc3339()),
+                "last_run_at": last.as_ref().map(|r| r.finished_at.to_rfc3339()),
+                "last_summary": last.as_ref().map(|r| r.headline()),
+            },
+        }))
+    }
+}
+
+// ── mem_dream_now ────────────────────────────────────────────────────────────
+
+/// Consolidate memory on demand.
+///
+/// The dream normally runs overnight (`crate::memory::dream::dream_loop`), which
+/// is right for the cost and wrong for the moment somebody says "go tidy up what
+/// you know". This is that moment. It is the same engine and the same caps — not
+/// a lighter variant — so an on-demand run and a nightly one leave the store in
+/// the same shape.
+///
+/// **Slow, and honest about it.** A full run is several LLM calls; the tool
+/// blocks for as long as that takes. Passing `stages: [1, 5]` runs only the
+/// mechanical halves, which is instant and is what you want when the question is
+/// really "drain the queue".
+pub struct MemDreamNowTool {
+    instance_id: String,
+}
+
+impl MemDreamNowTool {
+    pub fn new(instance_id: String) -> Self {
+        Self { instance_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for MemDreamNowTool {
+    fn name(&self) -> &str {
+        "mem_dream_now"
+    }
+    fn description(&self) -> &str {
+        "Consolidate long-term memory right now instead of waiting for tonight: distil recent \
+         conversations into durable memories, merge duplicates, link related ones, and let \
+         unused ones fade. Slow — several model calls. Use it when asked to tidy up, reorganize, \
+         compress or reflect on what you remember. Pass stages [1,5] for the fast mechanical \
+         pass only (drain the capture queue and run decay, no thinking)."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "stages": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 1, "maximum": 5 },
+                    "description": "Which stages to run: 1 index, 2 consolidate, 3 abstract, \
+                                    4 associate, 5 decay. Omit for all five."
+                }
+            }
+        })
+    }
+    async fn call(&self, args: Value) -> metalcraft::Result<Value> {
+        let stages: Vec<u8> = match args["stages"].as_array() {
+            Some(list) => {
+                let mut s: Vec<u8> = list
+                    .iter()
+                    .filter_map(|v| v.as_u64())
+                    .filter(|n| (1..=5).contains(n))
+                    .map(|n| n as u8)
+                    .collect();
+                s.sort_unstable();
+                s.dedup();
+                s
+            }
+            None => super::dream::configured_stages(),
+        };
+        if stages.is_empty() {
+            return Err(crate::tools::missing_param("mem_dream_now", "stages"));
+        }
+
+        let report =
+            super::dream::dream_stages(&self.instance_id, super::dream::Trigger::Manual, &stages)
+                .await;
+        // A failed stage is reported, not raised: the run did real work in the
+        // stages that did succeed, and turning that into a tool error would throw
+        // it away and tell the model nothing happened.
+        Ok(json!({
+            "summary": report.headline(),
+            "trigger": report.trigger,
+            "stages": report.stages,
+            "memories_before": report.memories_before,
+            "memories_after": report.memories_after,
+            "captures_drained": report
+                .captures_pending_before
+                .saturating_sub(report.captures_pending_after),
+            "seconds": (report.finished_at - report.started_at).num_seconds(),
+            "error": report.error,
         }))
     }
 }
@@ -416,12 +515,13 @@ mod tests {
 
     #[test]
     fn every_declared_tool_name_has_an_implementation() {
-        let (remember, search, get, forget, stats) = (
+        let (remember, search, get, forget, stats, dream) = (
             MemRememberTool::new("inst_test".into()),
             MemSearchTool::new("inst_test".into()),
             MemGetTool::new("inst_test".into()),
             MemForgetTool::new("inst_test".into()),
             MemStatsTool::new("inst_test".into()),
+            MemDreamNowTool::new("inst_test".into()),
         );
         let built: Vec<&str> = vec![
             remember.name(),
@@ -429,6 +529,7 @@ mod tests {
             get.name(),
             forget.name(),
             stats.name(),
+            dream.name(),
         ];
         assert_eq!(
             built, TOOL_NAMES,
@@ -456,11 +557,15 @@ mod tests {
                 .collect();
             assert_eq!(got, required);
         }
-        // mem_stats takes no parameters at all.
-        assert_eq!(
-            MemStatsTool::new("inst_test".into()).parameters_schema()["type"],
-            "object"
-        );
+        // mem_stats takes no parameters at all, and mem_dream_now's only one is
+        // optional — a dream with no arguments is the ordinary way to ask for one.
+        for schema in [
+            MemStatsTool::new("inst_test".into()).parameters_schema(),
+            MemDreamNowTool::new("inst_test".into()).parameters_schema(),
+        ] {
+            assert_eq!(schema["type"], "object");
+            assert!(schema["required"].is_null(), "no required parameters");
+        }
     }
 
     #[test]

@@ -27,15 +27,28 @@
 > seed set, so text hits and graph hits are now disjoint populations. RRF orders
 > them; it no longer sees two retrievers agree on one memory.
 >
-> **3. The dream (§5) was never built.** There is no `dream.rs`, no nightly loop,
-> no decay, no consolidation, no `mem_dream_now`, and no dream journal. Capture
-> still runs on every turn and appends to
-> `<data>/memory/instances/<id>/capture.jsonl` — and **nothing consumes it**, so
-> that file only grows. `mem_stats` reports `pending_captures` to keep this
-> visible. Only `mem_remember` creates memories today. §5 remains a plan.
+> **3. The dream (§5) is built, with two departures.** `src/memory/dream.rs`
+> holds all five stages, the nightly loop (`dream_loop`, spawned at
+> `src/daemon.rs:172`), decay, consolidation, `mem_dream_now`, and the journal.
+> Capture is drained. The departures:
 >
-> Everything the plan says about decay, `exempt_from_decay`, contradiction
-> handling, and episode consolidation is likewise unbuilt.
+> * **Similarity is lexical, not cosine.** §5's `cosine ≥ 0.86` / `≥ 0.72` gates
+>   cannot be implemented against a store with no vectors. Near-duplicate and
+>   relatedness detection shortlist with the BM25 index and gate on Jaccard token
+>   overlap (`MEMORY_DREAM_MERGE_SIMILARITY`, default 0.6;
+>   `MEMORY_DREAM_RELATE_SIMILARITY`, 0.35). Stage 1's embedding backfill and
+>   `MEMORY_DREAM_MAX_EMBED` are gone with the vectors.
+> * **The LLM stages are plain completions, not an agent run.** §5 imagined a
+>   `memory-dreamer` persona with `mem_*` tools attached. That makes the dream's
+>   output whatever the model chose to do that night — uncapped, untyped, and
+>   impossible to journal honestly. Each stage instead asks for JSON and
+>   `dream.rs` does the writing, so every write is capped by code, carries its
+>   provenance link, and lands in the report. There is no `memory-dreamer`
+>   persona and no `seed/personas/memory-dreamer.json`.
+>
+> The dream also runs **per active agent**, which §5 does not say: the nightly
+> sweep covers instances used within `MEMORY_DREAM_ACTIVE_DAYS` (3), plus any
+> instance still holding undistilled captures. See §5's "Which agents" note.
 
 Persistent, cross-session memory for the agent: hybrid recall (BM25 + embeddings
 + graph) injected automatically into every turn, and a **nightly dream cycle**
@@ -422,15 +435,17 @@ migration — never a silent comparison of incompatible float arrays.
 
 ## 5. Dreaming — the nightly cycle
 
-> **Never built.** No `dream.rs`, no loop, no decay, no journal. Capture writes
-> the queue this section would drain; nothing reads it. This is a plan, not a
-> description.
+> **Built**, at `src/memory/dream.rs`, with the two departures named in the
+> status block at the top: similarity is lexical rather than cosine, and the
+> thinking stages are plain JSON-returning completions rather than an agent run
+> with `mem_*` attached. Read those before this section — the stage descriptions
+> below are otherwise accurate.
 
 `src/memory/dream.rs`. One `tokio` loop ticking every 60 s, firing when a
-6-field `cron::Schedule` says it is due — the exact `is_due` shape the daemon
-already uses for flows (`src/daemon.rs:574`), so timezone handling comes from
-`chrono_tz` and behaves like every other schedule in the product. Spawned with
-one line next to the gateway heal loop at `src/daemon.rs:231`:
+6-field cron says it is due — through `schedule_timing::decide`, the same
+function the flow scheduler polls, so timezone handling, DST, and the
+bookmark-the-occurrence rule are shared rather than reimplemented. Spawned with
+one line next to the gateway heal loop at `src/daemon.rs:172`:
 
 ```rust
 tokio::spawn(async move { crate::memory::dream::dream_loop().await });
@@ -442,8 +457,29 @@ flow can be turned off — but the mechanical stages (indexing, log compaction,
 decay) must run unconditionally or recall silently rots. A user-visible flow
 wrapper for the *discretionary* stages is Phase 6, optional.
 
-Missed cycles are caught up on boot: if the newest `dreams/*.json` is older than
-36 h, run once with `trigger = "catchup"`.
+Missed cycles are caught up on boot: if `<data>/memory/dream_state.json` says the
+last sweep is older than 36 h, run once with `trigger = "catchup"`. That file
+also holds the schedule bookmark, for the reason flow bookmarks are persisted —
+a bookmark held in RAM makes every pod roll look like a first sighting.
+
+### Which agents
+
+The sweep is **per instance**, and covers an agent if either is true:
+
+* it was used within `MEMORY_DREAM_ACTIVE_DAYS` (default 3), or
+* it still has undistilled captures.
+
+The first rule is the cost control: a fleet accumulates agents made once and
+abandoned, and paying for LLM stages on all of them nightly is the fastest way to
+make this a feature people switch off. The second closes the hole the first
+opens — material written the day before an agent went quiet would otherwise sit
+in the queue forever, and the queue is the one thing here that only grows. It is
+self-limiting: the run drains the queue, so the agent stops qualifying after one
+night.
+
+Agents are swept **sequentially**. A fleet of them dreaming at once would spike a
+pod's inference spend into whatever rate limit it has at 3am, for work nobody is
+waiting on.
 
 ### The five stages
 
@@ -541,7 +577,7 @@ lookup doesn't abort the turn.
 | `mem_remember` | write a memory (`kind`, `importance`, `pinned`) | gated |
 | `mem_forget` | archive or purge by id | gated |
 | `mem_link` | create/remove a typed link | gated |
-| `mem_dream_now` | run a dream immediately, optional stage subset | gated |
+| `mem_dream_now` | run a dream immediately, optional stage subset | auto |
 
 Classify arm in `src/approval.rs`, following the shape already used for the
 `mnote_`/`mcal_` prefixes:
@@ -605,16 +641,30 @@ the Workshop should browse memory. Not required for the agent to work.
 | `MEMORY_EMBED_MODEL` | `text-embedding-3-small` | changing it re-embeds the corpus (§4.3) |
 | `MEMORY_EMBED_DIMS` | `384` | via rig's `dimensions` param; changing it re-embeds |
 | `MEMORY_MAX_MEMORIES` | `100000` | refuse new writes past this; warn at 80% |
+| `MEMORY_CAPTURE` | `on` | write turns to the queue at all |
+| `MEMORY_DREAM` | `on` | the **nightly schedule**; on-demand runs work regardless |
 | `MEMORY_DREAM_CRON` | `0 30 3 * * *` | 6-field, like flow schedules |
-| `MEMORY_DREAM_TZ` | `UTC` | `chrono_tz` name |
-| `MEMORY_DREAM_MODEL` | cheap model | bulk work |
+| `MEMORY_DREAM_TZ` | pod clock | `chrono_tz` name |
+| `MEMORY_DREAM_MODEL` | the pod's model | not a cheap one — see below |
 | `MEMORY_DREAM_STAGES` | `1,2,3,4,5` | subset, for debugging |
-| `MEMORY_DREAM_MAX_EMBED` | `2000` | per night |
+| `MEMORY_DREAM_ACTIVE_DAYS` | `3` | how recently an agent must have been used |
 | `MEMORY_DREAM_MAX_MERGE` | `50` | clusters per night |
+| `MEMORY_DREAM_MAX_EPISODES` | `20` | episodes distilled per night |
+| `MEMORY_DREAM_MERGE_SIMILARITY` | `0.6` | Jaccard gate for a merge candidate |
+| `MEMORY_DREAM_RELATE_SIMILARITY` | `0.35` | Jaccard gate for a `RelatesTo` edge |
 | `MEMORY_HALF_LIFE_DAYS` | `45` | decay |
 | `MEMORY_PURGE_AFTER_DAYS` | `180` | archive → drop |
-| `MEMORY_EPISODE_IDLE_MINUTES` | `60` | episode close |
+| `MEMORY_EPISODE_IDLE_MINUTES` | `90` | episode close |
 | `MEMORY_REDACT` | `on` | secret scrubbing |
+
+`MEMORY_DREAM_MODEL` defaults to the pod's configured model rather than something
+cheaper, against the plan's original "bulk work" note. The stages that cost money
+are the ones deciding what this agent will believe for the next six months, and a
+bad merge is far more expensive than the tokens it saved.
+
+The embedding variables (`MEMORY_EMBED_*`, `MEMORY_RECALL_TIMEOUT_MS`,
+`MEMORY_DREAM_MAX_EMBED`) and `MEMORY_MAX_MEMORIES` are **not read by anything**:
+the first group went with the vectors, and the ceiling was never implemented.
 
 ---
 

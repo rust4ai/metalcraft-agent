@@ -315,3 +315,26 @@ pub fn upload_root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|_| data_dir().join("uploads"))
 }
+
+/// Where one agent's dream journals live,
+/// `<data>/memory/instances/<id>/dreams/`. One JSON file per run.
+///
+/// Per-instance, because a dream is per-instance: the nightly loop iterates
+/// active agents and each gets its own run, its own counts, and its own errors.
+/// A pod-wide journal would have to be de-interleaved before it could answer
+/// "what did *this* agent consolidate last night?", which is the only question
+/// anyone asks of it. See [`crate::memory::dream`].
+pub fn memory_dreams_dir(instance_id: &str) -> PathBuf {
+    memory_instance_dir(instance_id).join("dreams")
+}
+
+/// The nightly dream's schedule bookmark, `<data>/memory/dream_state.json`.
+///
+/// Pod-global rather than per-instance because the *schedule* is pod-global —
+/// one cron fires one sweep over every active agent. Persisted for the same
+/// reason flow schedules are (see [`schedule_state_file`]): a bookmark held only
+/// in RAM makes every pod roll look like a first sighting, and pods roll on
+/// every image upgrade.
+pub fn memory_dream_state_file() -> PathBuf {
+    memory_dir().join("dream_state.json")
+}
