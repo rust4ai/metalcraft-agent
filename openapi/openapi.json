@@ -974,6 +974,55 @@
         }
       }
     },
+    "/api/v1/agents/instances/{id}/memory/dream": {
+      "post": {
+        "tags": [
+          "agent-instances"
+        ],
+        "summary": "Consolidate this agent's memory now instead of waiting for tonight.",
+        "description": "The same engine the nightly loop runs, with the same caps — an on-demand run\nand a scheduled one leave the store in the same shape. It **blocks for the\nwhole run**, which is several model calls and can be minutes: this is a button\nsomebody presses and watches, not something to poll. Send `{\"stages\":[1,5]}`\nfor the mechanical half, which returns in milliseconds.\n\nAlways 200 with a report. A stage that failed is named in the report rather\nthan turned into a status code, because the stages that succeeded did real\nwork and a 500 would throw that away.",
+        "operationId": "post_agent_instance_dream",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DreamRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DreamReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No valid stages requested"
+          },
+          "404": {
+            "description": "No such agent"
+          }
+        }
+      }
+    },
     "/api/v1/api-tools": {
       "get": {
         "tags": [
@@ -5106,6 +5155,163 @@
           }
         }
       },
+      "DreamReport": {
+        "type": "object",
+        "description": "One run of the dream, for one agent. Written to\n`<data>/memory/instances/<id>/dreams/<ts>.json` and returned by the on-demand\nentry points.",
+        "required": [
+          "instance_id",
+          "trigger",
+          "model",
+          "started_at",
+          "finished_at",
+          "stages",
+          "memories_before",
+          "memories_after",
+          "captures_pending_before",
+          "captures_pending_after",
+          "snapshot_written"
+        ],
+        "properties": {
+          "captures_pending_after": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "captures_pending_before": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "memories_after": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "memories_before": {
+            "type": "integer",
+            "description": "Live memories before and after, so the run's net effect is one subtraction\nrather than a sum over stage counts that double-count merges.",
+            "minimum": 0
+          },
+          "model": {
+            "type": "string"
+          },
+          "snapshot_written": {
+            "type": "boolean",
+            "description": "Whether the log was folded into a fresh snapshot at the end."
+          },
+          "stages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StageReport"
+            }
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "trigger": {
+            "type": "string"
+          }
+        }
+      },
+      "DreamRequest": {
+        "type": "object",
+        "properties": {
+          "stages": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Which stages to run: 1 index, 2 consolidate, 3 abstract, 4 associate,\n5 decay. Omit for the configured set (all five by default); `[1, 5]` is the\nfast mechanical pass with no model calls."
+          }
+        }
+      },
+      "DreamStatus": {
+        "type": "object",
+        "description": "When the dream runs, and what happened the last time it did.",
+        "required": [
+          "nightly_enabled",
+          "cron",
+          "model",
+          "active_days"
+        ],
+        "properties": {
+          "active_days": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How recently an agent must have been used to be swept."
+          },
+          "cron": {
+            "type": "string",
+            "description": "The six-field cron it fires on."
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last run failed, when it did."
+          },
+          "last_run_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One line on what the last run did, ready to print."
+          },
+          "last_trigger": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`\"nightly\"`, `\"catchup\"` or `\"manual\"` — how the last run started."
+          },
+          "model": {
+            "type": "string",
+            "description": "The model the thinking stages use."
+          },
+          "next_run_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "nightly_enabled": {
+            "type": "boolean",
+            "description": "Whether the nightly schedule is armed (`MEMORY_DREAM`). On-demand runs work\neither way — turning off a schedule is not removing the capability."
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The zone that cron is read in; absent means the pod's own clock."
+          }
+        }
+      },
       "EnvRequirement": {
         "type": "object",
         "description": "One credential, attributed to what needs it — because the question a human is\nanswering at install time is \"which secrets do I have to paste in\", not \"which\npack wants what\".",
@@ -6234,7 +6440,8 @@
           "shipped",
           "learned",
           "forgotten",
-          "sample"
+          "sample",
+          "system"
         ],
         "properties": {
           "base": {
@@ -6267,6 +6474,10 @@
             "type": "integer",
             "description": "Memories the pack gave it, still visible (tombstones excluded).",
             "minimum": 0
+          },
+          "system": {
+            "$ref": "#/components/schemas/MemorySystemStatus",
+            "description": "How the machinery behind those numbers is configured and when it last ran.\n\nShipped with the view rather than on a route of its own because the\nquestion it answers — \"why does this agent know so little / so much?\" — is\nthe same question the counts above provoke, and two round trips to answer\none question is two chances to show a half-loaded pane."
           }
         }
       },
@@ -6586,6 +6797,22 @@
           }
         }
       },
+      "KindCount": {
+        "type": "object",
+        "required": [
+          "kind",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string"
+          }
+        }
+      },
       "Lock": {
         "type": "object",
         "description": "The lockfile document.",
@@ -6715,6 +6942,65 @@
           },
           "text": {
             "type": "string"
+          }
+        }
+      },
+      "MemorySystemStatus": {
+        "type": "object",
+        "description": "The state of the memory subsystem for one agent: what is switched on, what is\nwaiting, and what the dream did about it last.",
+        "required": [
+          "enabled",
+          "capture_enabled",
+          "recall_enabled",
+          "pending_captures",
+          "by_kind",
+          "links",
+          "archived",
+          "superseded",
+          "dream"
+        ],
+        "properties": {
+          "archived": {
+            "type": "integer",
+            "description": "Faded out by the decay pass, still on disk.",
+            "minimum": 0
+          },
+          "by_kind": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KindCount"
+            },
+            "description": "Live memories by kind, largest first."
+          },
+          "capture_enabled": {
+            "type": "boolean",
+            "description": "`MEMORY_CAPTURE` — whether turns are being written to the queue at all."
+          },
+          "dream": {
+            "$ref": "#/components/schemas/DreamStatus"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "`MEMORY_ENABLED`. Off means no recall, no capture, no dream."
+          },
+          "links": {
+            "type": "integer",
+            "description": "Edges in this agent's own memory graph.",
+            "minimum": 0
+          },
+          "pending_captures": {
+            "type": "integer",
+            "description": "Turns captured but not yet distilled. A number that only grows means a\ndream that is not running.",
+            "minimum": 0
+          },
+          "recall_enabled": {
+            "type": "boolean",
+            "description": "`MEMORY_RECALL` — whether recall is injected into each turn."
+          },
+          "superseded": {
+            "type": "integer",
+            "description": "Merged into another memory by the dream.",
+            "minimum": 0
           }
         }
       },
@@ -8104,6 +8390,13 @@
           },
           "slug": {
             "type": "string"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional semantic version (e.g. \"1.1.0\") for built-in/seed skills, held\nin the frontmatter beside `description`. Drives force-upgrade on startup:\nwhen a bundled seed skill's version is higher than the installed copy's\n(a missing version counts as 0), the seed overwrites it. User skills\ncarrying no version are never force-upgraded. See\n`seed::write_versioned_seeds`."
           }
         }
       },
@@ -8131,6 +8424,45 @@
           },
           "slug": {
             "type": "string"
+          }
+        }
+      },
+      "StageReport": {
+        "type": "object",
+        "description": "What one stage did. `counts` is open-ended on purpose — each stage reports the\nnumbers that mean something for it, and a fixed struct would be mostly zeros.",
+        "required": [
+          "stage",
+          "name",
+          "ran",
+          "counts",
+          "millis"
+        ],
+        "properties": {
+          "counts": {
+            "type": "object"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "millis": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "ran": {
+            "type": "boolean",
+            "description": "False when `MEMORY_DREAM_STAGES` excluded it."
+          },
+          "stage": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },

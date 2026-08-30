@@ -368,8 +368,10 @@ fn load_skill_description(name: &str, skills_dir: &Path) -> String {
     parse_frontmatter_description(&content).unwrap_or_else(|| "Specialized guidance".to_string())
 }
 
-/// Extract `description` from YAML frontmatter (between `---` delimiters).
-pub fn parse_frontmatter_description(content: &str) -> Option<String> {
+/// Extract one scalar `<field>:` value from YAML frontmatter (between `---`
+/// delimiters). The frontmatter is a flat `key: value` block — a skill declares
+/// `description:` and, optionally, `version:`.
+pub fn parse_frontmatter_field(content: &str, field: &str) -> Option<String> {
     let content = content.trim_start();
     if !content.starts_with("---") {
         return None;
@@ -377,13 +379,19 @@ pub fn parse_frontmatter_description(content: &str) -> Option<String> {
     let after_open = &content[3..];
     let close_pos = after_open.find("\n---")?;
     let yaml_block = &after_open[..close_pos];
+    let prefix = format!("{field}:");
     for line in yaml_block.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("description:") {
+        if let Some(rest) = line.strip_prefix(&prefix) {
             return Some(rest.trim().to_string());
         }
     }
     None
+}
+
+/// Extract `description` from YAML frontmatter (between `---` delimiters).
+pub fn parse_frontmatter_description(content: &str) -> Option<String> {
+    parse_frontmatter_field(content, "description")
 }
 
 /// Strip YAML frontmatter from skill content, returning just the body.

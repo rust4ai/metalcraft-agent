@@ -1,5 +1,6 @@
 ---
 description: Manage this metalcraft project (personas, skills, flows) by prompt using the meta tools
+version: 1.0.0
 ---
 
 # Workshop Overview

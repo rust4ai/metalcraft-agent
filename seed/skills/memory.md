@@ -1,5 +1,6 @@
 ---
 description: When and how to use long-term memory (mem_remember, mem_search, mem_get, mem_forget, mem_dream_now)
+version: 1.0.0
 ---
 
 # Long-Term Memory

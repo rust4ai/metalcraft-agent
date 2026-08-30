@@ -1,5 +1,6 @@
 ---
 description: CI/CD pipeline best practices
+version: 1.0.0
 ---
 
 # CI/CD

@@ -75,7 +75,8 @@ impl metalcraft::Tool for SkillWriteTool {
             "properties": {
                 "slug": { "type": "string", "description": "Skill slug to write (filename without .md)" },
                 "description": { "type": "string", "description": "One-line description (YAML frontmatter)" },
-                "body": { "type": "string", "description": "Markdown body of the skill" }
+                "body": { "type": "string", "description": "Markdown body of the skill" },
+                "version": { "type": "string", "description": "Optional semantic version, e.g. \"1.1.0\". Omit to keep whatever version the skill already has — built-in skills use it to decide whether a newer bundled copy replaces this one." }
             },
             "required": ["slug", "description", "body"]
         })
@@ -99,6 +100,13 @@ impl metalcraft::Tool for SkillWriteTool {
             slug: slug.clone(),
             description: description.to_string(),
             body: body.to_string(),
+            // No version given -> keep the installed one. Dropping it would reset
+            // a seeded skill to 0.0.0 and let the next seed bump overwrite this
+            // edit; carrying it forward means only a genuinely newer built-in wins.
+            version: args["version"]
+                .as_str()
+                .map(String::from)
+                .or_else(|| skill::installed_version(&slug)),
             pack_id: None,
             read_only: false,
         };

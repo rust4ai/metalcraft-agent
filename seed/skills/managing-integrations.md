@@ -1,5 +1,6 @@
 ---
 description: Inspect integrations, install agent packs, and manage the API key store by prompt using the meta tools
+version: 1.0.0
 ---
 
 # Managing Integrations & Keys

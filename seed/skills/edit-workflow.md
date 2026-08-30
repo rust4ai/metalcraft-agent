@@ -1,5 +1,6 @@
 ---
 description: Read-first, minimal edits, verify after changing code
+version: 1.0.0
 ---
 
 # Edit Workflow

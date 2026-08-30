@@ -1,5 +1,6 @@
 ---
 description: Split a multi-step request into self-contained sub-tasks to delegate
+version: 1.0.0
 ---
 
 # Decomposition

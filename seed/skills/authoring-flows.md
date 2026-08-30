@@ -1,5 +1,6 @@
 ---
 description: Wire format and workflow for authoring, scheduling and running metalcraft flows (spec v3)
+version: 1.0.0
 ---
 
 # Authoring Flows

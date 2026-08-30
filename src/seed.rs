@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// ```text
 /// seed/
 ///   personas/*.json          -> versioned upgrade (see write_versioned_seeds)
-///   skills/*.md              -> write-if-missing
+///   skills/*.md              -> versioned upgrade (frontmatter `version:`)
 ///   flows/*                  -> write-if-missing
 ///   api_tools/*              -> write-if-missing
 ///   flow_templates/*         -> write-if-missing
@@ -53,8 +53,9 @@ fn as_refs(v: &[(String, String)]) -> Vec<(&str, &str)> {
 
 /// Ensure default personas, skills, and integrations exist in the app data
 /// directory. Creates the data dirs, then writes the embedded seed files
-/// (personas upgrade on version bump; everything else is written only when
-/// missing — packs gate on their own `integration.json` version).
+/// (personas, presets and skills upgrade on version bump; everything else is
+/// written only when missing — packs gate on their own `integration.json`
+/// version).
 pub fn ensure_defaults() {
     // Before anything reads a path: an upgraded pod still has its data under the
     // pre-0.30 names, and reading past them costs it every tool it had installed.
@@ -91,8 +92,15 @@ pub fn ensure_defaults() {
     let presets = embedded_flat("agent_presets");
     write_versioned_seeds(&paths::agent_presets_dir(), &as_refs(&presets));
 
+    // Skills follow the same rule, on a frontmatter `version:` line. A built-in
+    // skill is documentation of a tool schema (`authoring-skills`,
+    // `authoring-personas`, `managing-integrations`); left write-if-missing, a
+    // pod seeded once keeps describing the tools as they were that day, and no
+    // correction ever reaches it.
+    let skills = embedded_flat("skills");
+    write_versioned_seeds(&paths::skills_dir(), &as_refs(&skills));
+
     for (subdir, target) in [
-        ("skills", paths::skills_dir()),
         ("flows", paths::flows_dir()),
         ("api_tools", paths::api_tools_dir()),
         ("flow_templates", paths::flow_templates_dir()),
@@ -290,15 +298,18 @@ fn write_seeds(dir: &Path, seeds: &[(&str, &str)]) {
 /// a versioned seed reaches installs that predate the version field. A seed
 /// with no bundled `version` is only written when missing (like [`write_seeds`]).
 ///
-/// This is how a prompt change to a built-in persona reaches existing data
-/// dirs — bump its `version` and it re-seeds on next start. The trade-off
-/// (shared with integrations) is that this clobbers user edits to a
-/// built-in persona on a version bump; customizations should be saved under a
-/// new slug, which is not a seeded persona and so is never touched.
+/// This is how a prompt change to a built-in persona — or a corrected built-in
+/// skill — reaches existing data dirs: bump its `version` and it re-seeds on
+/// next start. The version lives wherever that document keeps it: a JSON
+/// `"version"` field for personas and presets, a frontmatter `version:` line
+/// for skills (see [`seed_version`]). The trade-off (shared with integrations)
+/// is that this clobbers user edits to a built-in on a version bump;
+/// customizations should be saved under a new slug, which is not a seeded
+/// document and so is never touched.
 fn write_versioned_seeds(dir: &Path, seeds: &[(&str, &str)]) {
     for (filename, content) in seeds {
         let target = dir.join(filename);
-        let force_upgrade = match json_version(content) {
+        let force_upgrade = match seed_version(content) {
             Some(bundled) => bundled > installed_version(&target).unwrap_or((0, 0, 0)),
             None => false,
         };
@@ -314,7 +325,17 @@ fn write_versioned_seeds(dir: &Path, seeds: &[(&str, &str)]) {
 fn installed_version(target: &Path) -> Option<(u64, u64, u64)> {
     fs::read_to_string(target)
         .ok()
-        .and_then(|c| json_version(&c))
+        .and_then(|c| seed_version(&c))
+}
+
+/// A seed document's declared version, whichever shape it comes in: a JSON
+/// `"version"` field (personas, presets, pack manifests) or a markdown
+/// frontmatter `version:` line (skills). Neither parse can succeed on the
+/// other's format, so trying both in turn is unambiguous.
+fn seed_version(doc: &str) -> Option<(u64, u64, u64)> {
+    json_version(doc).or_else(|| {
+        crate::persona::parse_frontmatter_field(doc, "version").and_then(|v| parse_semver(&v))
+    })
 }
 
 /// Parse a JSON document's `version` field into a comparable (major, minor,
@@ -323,7 +344,12 @@ fn installed_version(target: &Path) -> Option<(u64, u64, u64)> {
 /// both pack manifests and seed personas.
 fn json_version(doc: &str) -> Option<(u64, u64, u64)> {
     let v: serde_json::Value = serde_json::from_str(doc).ok()?;
-    let s = v.get("version")?.as_str()?;
+    parse_semver(v.get("version")?.as_str()?)
+}
+
+/// Parse a `major[.minor[.patch]]` string into a comparable tuple. Returns
+/// `None` when it's malformed — callers treat that as "don't force an upgrade".
+fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
     let mut parts = s.split('.').map(|p| p.parse::<u64>().ok());
     let major = parts.next()??;
     let minor = parts.next().flatten().unwrap_or(0);
@@ -538,6 +564,69 @@ mod tests {
         assert_eq!(json_version(r#"{"version":"2"}"#), Some((2, 0, 0)));
         assert_eq!(json_version(r#"{"name":"x"}"#), None);
         assert_eq!(json_version("not json"), None);
+    }
+
+    #[test]
+    fn seed_version_reads_both_document_shapes() {
+        assert_eq!(seed_version(r#"{"version":"1.2.3"}"#), Some((1, 2, 3)));
+        assert_eq!(
+            seed_version("---\ndescription: d\nversion: 2.1\n---\n\nbody"),
+            Some((2, 1, 0))
+        );
+        // A skill with no version line stays unversioned (write-if-missing).
+        assert_eq!(seed_version("---\ndescription: d\n---\n\nbody"), None);
+        assert_eq!(seed_version("# just a body"), None);
+    }
+
+    #[test]
+    fn versioned_skill_upgrades_unversioned_install() {
+        let dir = tmp_dir("skill-upgrade");
+        // A pod seeded before skills carried versions.
+        fs::write(dir.join("s.md"), "---\ndescription: old\n---\n\nold body").unwrap();
+        write_versioned_seeds(
+            &dir,
+            &[(
+                "s.md",
+                "---\ndescription: new\nversion: 1.0.0\n---\n\nnew body",
+            )],
+        );
+        let got = fs::read_to_string(dir.join("s.md")).unwrap();
+        assert!(
+            got.contains("new body"),
+            "a versioned skill seed should correct an unversioned install, got: {got}"
+        );
+
+        // ...and an install already at that version is left alone.
+        fs::write(
+            dir.join("s.md"),
+            "---\ndescription: edited\nversion: 1.0.0\n---\n\nuser edit",
+        )
+        .unwrap();
+        write_versioned_seeds(
+            &dir,
+            &[(
+                "s.md",
+                "---\ndescription: new\nversion: 1.0.0\n---\n\nnew body",
+            )],
+        );
+        let got = fs::read_to_string(dir.join("s.md")).unwrap();
+        assert!(got.contains("user edit"), "equal version must not clobber");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Every skill the binary ships must declare a frontmatter version, or the
+    /// upgrade path silently skips it and that pod keeps stale guidance forever.
+    #[test]
+    fn every_seeded_skill_declares_a_version() {
+        let missing: Vec<String> = embedded_flat("skills")
+            .into_iter()
+            .filter(|(_, content)| seed_version(content).is_none())
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "seeded skills without a frontmatter `version:` line: {missing:?}"
+        );
     }
 
     #[test]

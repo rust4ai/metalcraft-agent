@@ -1,5 +1,6 @@
 ---
 description: Docker image best practices and patterns
+version: 1.0.0
 ---
 
 # Dockerfile Best Practices

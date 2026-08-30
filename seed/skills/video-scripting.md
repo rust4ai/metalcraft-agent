@@ -1,5 +1,6 @@
 ---
 description: YouTube video script structure and writing methodology
+version: 1.0.0
 ---
 
 # Video Scripting

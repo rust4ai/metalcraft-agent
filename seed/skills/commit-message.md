@@ -1,5 +1,6 @@
 ---
 description: Write clear, conventional commit messages
+version: 1.0.0
 ---
 
 # Commit Message

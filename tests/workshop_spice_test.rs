@@ -142,6 +142,59 @@ async fn skill_write_round_trips_to_disk() {
     );
 }
 
+/// A built-in skill's frontmatter `version:` is what lets a corrected copy reach
+/// this pod on the next start. An edit through `skill_write` that dropped it
+/// would reset the skill to 0.0.0 and hand the next seed bump a free overwrite,
+/// so the write carries the installed version forward unless one is passed.
+#[tokio::test]
+async fn skill_write_preserves_the_installed_version() {
+    init();
+
+    let seeded = paths::skills_dir().join("authoring-skills.md");
+    let before = std::fs::read_to_string(&seeded).expect("authoring-skills is seeded");
+    assert!(
+        before.contains("version:"),
+        "seeded skill should carry a frontmatter version"
+    );
+    let version = metalcraft_agent::skill::installed_version("authoring-skills")
+        .expect("seeded skill declares a version");
+
+    meta_skill::SkillWriteTool
+        .call(serde_json::json!({
+            "slug": "authoring-skills",
+            "description": "Format and conventions for authoring metalcraft skills",
+            "body": "# Authoring Skills\n\nEdited in place."
+        }))
+        .await
+        .expect("skill_write call");
+
+    let after = std::fs::read_to_string(&seeded).unwrap();
+    assert!(
+        after.contains(&format!("version: {version}")),
+        "an edit with no version must keep the installed one, got: {after}"
+    );
+
+    // An explicit version wins, so a user can version a skill of their own.
+    meta_skill::SkillWriteTool
+        .call(serde_json::json!({
+            "slug": "authoring-skills",
+            "description": "Format and conventions for authoring metalcraft skills",
+            "body": "# Authoring Skills\n\nEdited again.",
+            "version": "9.0.0"
+        }))
+        .await
+        .expect("skill_write call");
+    assert!(
+        std::fs::read_to_string(&seeded)
+            .unwrap()
+            .contains("version: 9.0.0"),
+        "an explicit version should be written"
+    );
+
+    // Leave the seeded skill as we found it — later tests read this data dir.
+    std::fs::write(&seeded, before).unwrap();
+}
+
 #[tokio::test]
 async fn persona_write_round_trips_and_reloads() {
     init();

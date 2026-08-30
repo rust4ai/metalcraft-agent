@@ -1,5 +1,6 @@
 ---
 description: Structured research and analysis approach
+version: 1.0.0
 ---
 
 # Research Methodology

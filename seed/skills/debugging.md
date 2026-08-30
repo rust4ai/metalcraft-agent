@@ -1,5 +1,6 @@
 ---
 description: Reproduce, locate, hypothesize, fix, test
+version: 1.0.0
 ---
 
 # Debugging

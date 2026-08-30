@@ -1,5 +1,6 @@
 ---
 description: Systematic codebase exploration workflow
+version: 1.0.0
 ---
 
 # Explore Codebase

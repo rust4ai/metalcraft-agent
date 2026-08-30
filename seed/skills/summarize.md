@@ -1,5 +1,6 @@
 ---
 description: Summarize code, projects, or findings concisely
+version: 1.0.0
 ---
 
 # Summarize

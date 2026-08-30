@@ -27,6 +27,14 @@ pub struct Skill {
     pub slug: String,
     pub description: String,
     pub body: String,
+    /// Optional semantic version (e.g. "1.1.0") for built-in/seed skills, held
+    /// in the frontmatter beside `description`. Drives force-upgrade on startup:
+    /// when a bundled seed skill's version is higher than the installed copy's
+    /// (a missing version counts as 0), the seed overwrites it. User skills
+    /// carrying no version are never force-upgraded. See
+    /// `seed::write_versioned_seeds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pack_id: Option<String>,
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
@@ -63,24 +71,41 @@ pub fn load_skill(slug: &str) -> Option<Skill> {
         crate::integrations::resolve_file(&paths::skills_dir(), "skills", &filename)?;
     let content = std::fs::read_to_string(&path).ok()?;
     let description = crate::persona::parse_frontmatter_description(&content).unwrap_or_default();
+    let version = crate::persona::parse_frontmatter_field(&content, "version");
     let body = crate::persona::strip_frontmatter(&content).to_string();
     Some(Skill {
         slug: slug.to_string(),
         description,
         body,
+        version,
         pack_id: origin.pack_id().map(String::from),
         read_only: origin.is_read_only(),
     })
 }
 
-/// Write a skill to the local dir, reassembling the frontmatter + body.
+/// Write a skill to the local dir, reassembling the frontmatter + body. A
+/// `version` is written back only when the skill carries one — dropping it
+/// would reset a seeded skill to 0.0.0 and hand the next seed bump a free
+/// overwrite of the user's edit.
 pub fn save_skill(slug: &str, skill: &Skill) -> Result<(), String> {
     let path = paths::skills_dir().join(format!("{slug}.md"));
+    let version_line = match &skill.version {
+        Some(v) => format!("version: {v}\n"),
+        None => String::new(),
+    };
     let content = format!(
-        "---\ndescription: {}\n---\n\n{}",
+        "---\ndescription: {}\n{version_line}---\n\n{}",
         skill.description, skill.body
     );
     std::fs::write(&path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+}
+
+/// The version currently on disk for a local skill, if it has one. Lets a write
+/// that doesn't specify a version preserve the installed one.
+pub fn installed_version(slug: &str) -> Option<String> {
+    let path = paths::skills_dir().join(format!("{slug}.md"));
+    let content = std::fs::read_to_string(path).ok()?;
+    crate::persona::parse_frontmatter_field(&content, "version")
 }
 
 /// True when `slug` is currently provided by an integration and there is

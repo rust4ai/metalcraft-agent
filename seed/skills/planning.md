@@ -1,5 +1,6 @@
 ---
 description: Break down multi-step tasks into clear plans
+version: 1.0.0
 ---
 
 # Planning

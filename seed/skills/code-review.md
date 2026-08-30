@@ -1,5 +1,6 @@
 ---
 description: Structured code review methodology
+version: 1.0.0
 ---
 
 # Code Review

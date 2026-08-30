@@ -2525,11 +2525,21 @@ async fn put_skill(Path(slug): Path<String>, Json(skill): Json<Skill>) -> Respon
             }
         }
     }
+    // A client that doesn't send a version keeps the one already on disk — a
+    // seeded skill edited through the GUI must not silently drop to 0.0.0 and
+    // hand the next seed bump a free overwrite.
+    let skill = Skill {
+        version: skill
+            .version
+            .or_else(|| crate::skill::installed_version(&slug)),
+        ..skill
+    };
     match save_skill(&slug, &skill) {
         Ok(()) => Json(Skill {
             slug,
             description: skill.description,
             body: skill.body,
+            version: skill.version,
             pack_id: None,
             read_only: false,
         })

@@ -1,5 +1,6 @@
 ---
 description: Schema and conventions for authoring metalcraft personas
+version: 1.1.0
 ---
 
 # Authoring Personas
@@ -35,8 +36,11 @@ or edit with `persona_write` (pass `slug` + a `persona` object); read with
   so you don't enumerate `<pack>_*` tools by name.
 - **skills** (optional) — skill slugs the agent can `load_skill`. Only list
   skills that exist (`skill_list`).
-- **version** (optional, semver) — set on personas you want force-upgraded on
-  startup. Omit for one-off user personas.
+- **version** (optional, semver) — how a built-in persona's prompt or tool list
+  gets corrected on pods that already have the file: when the bundled copy's
+  version is higher than the installed one, it overwrites it on the next start.
+  Omit for one-off user personas — a slug the binary doesn't ship is never
+  force-upgraded.
 
 ## System prompt template variables
 
@@ -58,3 +62,7 @@ Any list you don't reference is appended automatically with a default heading.
   `{{available_personas}}`.
 - Pack-provided personas are read-only; to customize one, `persona_write` under
   a new slug.
+- Built-in personas (`orchestrator-agent`, `coding-agent`, `workshop-agent`, …)
+  ARE writable, but **editing one in place is not durable** — it re-seeds on the
+  next version bump and your edit is gone. Customize by writing a new slug too,
+  and add it to the preset's roster.
