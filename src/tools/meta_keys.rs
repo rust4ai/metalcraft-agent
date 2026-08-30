@@ -46,7 +46,7 @@ impl metalcraft::Tool for KeyListTool {
                 serde_json::json!({
                     "name": name,
                     "packs": packs,
-                    "configured": crate::key_store::lookup(&name).is_some(),
+                    "configured": crate::key_store::lookup_present(&name).is_some(),
                     "managed": crate::key_store::is_env_authoritative(&name),
                 })
             })
@@ -83,7 +83,10 @@ impl metalcraft::Tool for KeySetTool {
         let value = args["value"]
             .as_str()
             .ok_or_else(|| missing_param("key_set", "value"))?;
-        if value.is_empty() {
+        // `trim`: a whitespace-only value passes `is_empty` and then behaves like a
+        // credential everywhere downstream — including shadowing a fallback the pod
+        // could have used. Store nothing rather than something blank.
+        if value.trim().is_empty() {
             return Ok(serde_json::json!({ "error": "key value must not be empty" }));
         }
         let path = paths::keys_file();

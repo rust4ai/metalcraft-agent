@@ -378,9 +378,10 @@ pub fn install(bytes: &[u8], source: &str) -> Result<InstallReport, String> {
 
     // 4. credentials the pod is missing
     for req in &bundle.consent.requires_env {
-        // `lookup` already resolves the store *and* the environment, so a key
-        // supplied either way counts as present.
-        if crate::key_store::lookup(&req.name).is_none() {
+        // `lookup_present` resolves the store *and* the environment, so a key supplied
+        // either way counts — but a blank one does not. A key set to "" would otherwise
+        // be reported as satisfied and then fail every call that used it.
+        if crate::key_store::lookup_present(&req.name).is_none() {
             report.missing_env.push(req.name.clone());
         }
     }

@@ -556,6 +556,33 @@ mod tests {
         assert_eq!(got.as_deref(), Some("injected"));
     }
 
+    /// The distinction `HttpApiTool::expand_env_for` depends on.
+    ///
+    /// A key that exists but holds nothing is not a credential. `resolve` reports it
+    /// anyway — that is its job, "is there an entry" — and the header expansion used to
+    /// ask *it*, so a blank `OCTAWEAVE_API_KEY` shadowed the account token the pod would
+    /// otherwise have stood in, and every call to that host 401'd while the status panel
+    /// went on saying Connected. The expansion asks `resolve_present` now, and this is
+    /// the difference it is relying on.
+    #[test]
+    fn a_blank_value_is_an_entry_but_never_a_credential() {
+        for blank in ["", "   ", "\n"] {
+            assert_eq!(
+                resolve("OCTAWEAVE_API_KEY", Some(blank.into()), None).as_deref(),
+                Some(blank),
+                "resolve answers what is stored, blank or not"
+            );
+            assert_eq!(
+                resolve_present("OCTAWEAVE_API_KEY", Some(blank.into()), None),
+                None,
+                "a blank value must not pass for a credential and block a fallback"
+            );
+        }
+        // An empty *environment* variable is the same hazard by another route — a
+        // deployment writing `OCTAWEAVE_API_KEY=` with nothing after it.
+        assert_eq!(resolve_present("OCTAWEAVE_API_KEY", None, Some("".into())), None);
+    }
+
     #[test]
     fn metalcraft_token_is_env_authoritative() {
         assert!(is_env_authoritative("METALCRAFT_TOKEN"));

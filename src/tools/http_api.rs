@@ -261,7 +261,14 @@ impl HttpApiTool {
                 break;
             }
             let var_name = &rest[..end];
-            let replacement = crate::key_store::lookup(var_name)
+            // `lookup_present`, not `lookup`: a key that exists but is empty or
+            // whitespace is not a credential, and treating it as one short-circuits the
+            // fallback below. That produced the worst shape of failure available here —
+            // `Authorization: Bearer ` on every request, a 401 from a host the pod could
+            // have reached with the account token it was already holding, and a status
+            // panel still reporting Connected because it reads a different key entirely.
+            // An `OCTAWEAVE_API_KEY=` in the pod's environment is enough to cause it.
+            let replacement = crate::key_store::lookup_present(var_name)
                 .or_else(|| ecosystem_fallback(var_name, host))
                 .unwrap_or_default();
             result = format!("{}{}{}", &result[..start], replacement, &rest[end..]);

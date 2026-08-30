@@ -1411,7 +1411,7 @@ async fn post_inspect_agent_pack(
         .consent
         .requires_env
         .iter()
-        .filter(|e| e.required && crate::key_store::lookup(&e.name).is_none())
+        .filter(|e| e.required && crate::key_store::lookup_present(&e.name).is_none())
         .map(|e| e.name.clone())
         .collect();
 
@@ -3266,7 +3266,7 @@ fn arm_consent(preset: Option<&crate::agent_preset::AgentPreset>) -> ArmConsent 
         preset_name: preset.name.clone(),
         missing_env: requires_env
             .iter()
-            .filter(|n| crate::key_store::lookup(n).is_none())
+            .filter(|n| crate::key_store::lookup_present(n).is_none())
             .cloned()
             .collect(),
         requires_env,
@@ -3849,7 +3849,7 @@ async fn list_recommended_keys() -> Json<Vec<RecommendedKey>> {
     let out = merged
         .into_iter()
         .map(|(name, packs)| RecommendedKey {
-            configured: crate::key_store::lookup(&name).is_some(),
+            configured: crate::key_store::lookup_present(&name).is_some(),
             managed: crate::key_store::is_env_authoritative(&name),
             name,
             packs,
@@ -3874,7 +3874,9 @@ async fn put_key(Path(name): Path<String>, Json(body): Json<KeyValueBody>) -> Re
     if name.trim().is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "key name must not be empty");
     }
-    if body.value.is_empty() {
+    // Trimmed, for the same reason `key_set` trims: a blank value is not a credential,
+    // and one stored anyway shadows the fallback that would have worked.
+    if body.value.trim().is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "key value must not be empty");
     }
     let path = paths::keys_file();

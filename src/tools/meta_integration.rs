@@ -32,7 +32,7 @@ fn integration_summary(integration: &crate::integrations::Integration) -> serde_
         .map(|name| {
             serde_json::json!({
                 "name": name,
-                "configured": crate::key_store::lookup(name).is_some(),
+                "configured": crate::key_store::lookup_present(name).is_some(),
             })
         })
         .collect();
