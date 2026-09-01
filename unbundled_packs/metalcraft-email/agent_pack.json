@@ -3,7 +3,7 @@
   "id": "metalcraft-email",
   "name": "Metalcraft Email",
   "description": "Persona, skill, and HTTP API tools to READ a user's email via Metalcraft Email (email.metalcraftai.com), a read-only IMAP mailbox cache. List connected mailboxes (memail_accounts), list recent messages with account/unread/date filters (memail_list), full-text search subject/sender/body (memail_search), read one message with its recipients, body, and attachment references (memail_get), and read a whole conversation (memail_thread). Read-only: this pack cannot send, delete, or modify mail. Authenticated by a single Metalcraft account token — METALCRAFT_TOKEN, sent as Authorization: Bearer — the same token that works across every Metalcraft ecosystem app. The API base is fixed to https://email.metalcraftai.com.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "tags": [
     "metalcraft-ecosystem"
   ],

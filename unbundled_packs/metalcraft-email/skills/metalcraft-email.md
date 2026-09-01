@@ -1,3 +1,7 @@
+---
+description: Read a Metalcraft user's email — search, list, and read messages and threads
+---
+
 # Metalcraft Email
 
 Read a Metalcraft user's email — search, list, and read messages and threads.

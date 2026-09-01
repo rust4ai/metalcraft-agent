@@ -1,3 +1,7 @@
+---
+description: Search the Metalcraft Packs registry, read a pack's detail and required keys, then install it
+---
+
 # Metalcraft Packs skill
 
 Discover integrations in the **Metalcraft Packs** registry

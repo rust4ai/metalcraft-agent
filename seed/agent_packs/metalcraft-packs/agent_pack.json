@@ -3,7 +3,7 @@
   "id": "metalcraft-packs",
   "name": "Metalcraft Packs",
   "description": "Discover integrations in the Metalcraft Packs registry (packs.metalcraftai.com): search and browse the catalog, read a pack's details and required keys, see featured packs, and check a pack's latest version. Read-only discovery over the registry's public API — needs no key. To actually install a pack onto this agent, use the 'My Agent' page at packs.metalcraftai.com.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "tags": [
     "metalcraft-ecosystem"
   ],

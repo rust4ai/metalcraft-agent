@@ -91,6 +91,63 @@ fn seeded_skills() -> Vec<String> {
     out
 }
 
+/// Every skill file this repo ships, as `(label, path)` — the seed tree, the
+/// packs it embeds, AND `unbundled_packs/`, which is published to the registry
+/// rather than embedded but is authored here and installs the same way.
+fn shipped_skill_files() -> Vec<(String, PathBuf)> {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut dirs = vec![seed_dir().join("skills")];
+    dirs.extend(seeded_agent_packs().into_iter().map(|p| p.join("skills")));
+    if let Ok(entries) = std::fs::read_dir(repo.join("unbundled_packs")) {
+        dirs.extend(
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.join("agent_pack.json").is_file())
+                .map(|p| p.join("skills")),
+        );
+    }
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.filter_map(|e| e.ok()) {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) == Some("md") {
+                let label = path
+                    .strip_prefix(&repo)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
+                out.push((label, path));
+            }
+        }
+    }
+    out
+}
+
+/// A skill with no frontmatter `description:` lists as "No description" — in the
+/// persona's available-skills block, which is exactly what the model reads to
+/// decide whether to load it. The pack skills shipped that way for months
+/// because nothing looked at them: the seed-side version guard only walks
+/// `seed/skills/`.
+#[test]
+fn every_shipped_skill_declares_a_description() {
+    let mut problems = Vec::new();
+    for (label, path) in shipped_skill_files() {
+        let content = std::fs::read_to_string(&path).expect("read skill");
+        match metalcraft_agent::persona::parse_frontmatter_description(&content) {
+            Some(d) if !d.trim().is_empty() => {}
+            _ => problems.push(label),
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "skills with no frontmatter `description:`: {problems:#?}"
+    );
+}
+
 /// Every integration the binary ships, which is every one an agent pack vendors.
 fn seeded_packs() -> Vec<String> {
     let mut out = Vec::new();
