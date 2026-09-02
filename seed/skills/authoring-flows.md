@@ -1,6 +1,6 @@
 ---
 description: Wire format and workflow for authoring, scheduling and running metalcraft flows (spec v3)
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Authoring Flows
@@ -115,8 +115,8 @@ is typed JSON (`50`, not `"50"`).
 
 ## Running & pause/resume
 
-`flow_run { id, persona?, model?, inputs? }` runs a v2 flow on the state-machine
-executor and returns `{ run_id, status, steps, variables }`. `status` is
+`flow_run { id, persona?, model?, inputs? }` runs a v2/v3 flow on the state-machine
+executor and returns `{ run_id, flow_id, status, steps, variables, warnings?, chat_id? }`. `status` is
 `completed` | `failed` | `paused`.
 
 When `paused` (an `approval` or `wait` node), the run is checkpointed:
@@ -124,6 +124,40 @@ When `paused` (an `approval` or `wait` node), the run is checkpointed:
 - `flow_runs_list` — list runs.
 - `flow_resume { run_id, handle, data? }` — continue: pass the approval decision
   (or `after` for a wait). `wait` runs also auto-resume when their time arrives.
+
+## Smoke-testing a new flow
+
+A flow you have only validated is a flow nobody has run. Validation is
+structural: it cannot tell you which branch a `conditional` actually takes, or
+that a `prompt` wrote a string where the next node expects an object. Run it once
+before you hand it over — and always before `scheduled_flow_create`, because
+arming an untested flow means its first real run happens unattended.
+
+1. **Validate first.** Fix every error, then read the `warnings` — unhandled
+   `error` handles, unreachable nodes, `{{vars}}` nothing sets. They predict
+   precisely what a run is about to expose.
+2. **Check what it touches before you fire it.** `flow_run` executes with tools
+   **auto-approved**: the approval gate that normally stops a send/create/delete
+   to ask does not apply inside a flow run. Scan the nodes for effectors — `tool`,
+   `http` with a non-GET method, `sub_agent`, any `vendor:` node. If one can
+   mutate something outside this pod, say so and get the user's go-ahead, or
+   point `inputs` at a harmless target. Never test-fire a flow that emails,
+   posts, or deletes without asking.
+3. **Run once with representative `inputs`,** then read the result rather than
+   just its `status`:
+   - `steps` is the per-node trace in execution order — `outcome` is `advanced`,
+     `routed:<handle>`, `completed` or `failed`, with a `detail` snippet. This is
+     where you confirm it took the branch you intended.
+   - `variables` is the final state: check each node left what the downstream
+     nodes read.
+   - `warnings` lists missing dependencies; `chat_id` links to the transcript.
+4. **`status: paused` is not a failure** — an `approval` or `wait` did its job.
+   `flow_resume { run_id, handle }` through each handle to cover the branches a
+   single run can't reach. `flow_run_status` re-reads a run at any point.
+5. **Report the trace, not a verdict.** "Routed `urgent` -> notify, left
+   `summary` set" tells the user their flow is right. "It worked" doesn't.
+6. If a step failed, `diagnostics_read` on the run's session has the turn-by-turn
+   detail behind the snippet.
 
 See the full spec (state, typed edge payloads, operators, versioning):
 `https://docs.rs/metalcraft-flows` and `SPEC.md`.
