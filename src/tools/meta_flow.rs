@@ -50,7 +50,7 @@ impl metalcraft::Tool for FlowListTool {
         "flow_list"
     }
     fn description(&self) -> &str {
-        "List all saved flows with id, name, and enabled state."
+        "List all saved flows with id and name. A flow carries no schedule and no enabled state — use scheduled_flow_list to see which of them run on a timer."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({ "type": "object", "properties": {}, "required": [] })
@@ -68,7 +68,7 @@ impl metalcraft::Tool for FlowReadTool {
         "flow_read"
     }
     fn description(&self) -> &str {
-        "Read one flow by id, returning its full document (nodes, edges, schedule)."
+        "Read one flow by id, returning its full document (spec_version, nodes, edges). The document says only WHAT the work is — when it runs lives in a separate scheduled flow (scheduled_flow_list)."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -342,7 +342,7 @@ impl metalcraft::Tool for FlowInstallTool {
         "flow_install"
     }
     fn description(&self) -> &str {
-        "Install a flow from the Metalcraft flows registry (flows.metalcraftai.com) by its slug. Downloads the flow, validates it, and saves it (disabled). Returns the installed flow plus a dependency report listing any packs/personas it still needs. Use flow_templates_list for built-in starting points; use this to pull a published flow from the registry."
+        "Install a flow from the Metalcraft flows registry (flows.metalcraftai.com) by its slug. Downloads the flow, validates it, and saves it — saving schedules nothing, so it will not run until you scheduled_flow_create or flow_run it. Returns the installed flow plus a dependency report listing any packs/personas it still needs. Use flow_templates_list for built-in starting points; use this to pull a published flow from the registry."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -425,7 +425,7 @@ impl metalcraft::Tool for FlowRunTool {
         "flow_run"
     }
     fn description(&self) -> &str {
-        "Run a saved flow now (tools auto-approved), logged to a single flow-tagged diagnostics session. v2 flows run on the stateful state-machine executor and return `{ status, steps, variables }`; legacy v1 flows run every reachable prompt and return per-prompt results. Optionally set `persona` (default coding-agent), `model`, and `inputs` (a JSON object seeding the entry node's inputs for v2 flows)."
+        "Run a saved flow now (tools auto-approved), logged to a single flow-tagged diagnostics session. v2/v3 flows run on the stateful state-machine executor and return `{ status, steps, variables }`; legacy v1 flows run every reachable prompt and return per-prompt results. Optionally set `persona` (default coding-agent), `model`, and `inputs` (a JSON object seeding the entry node's inputs for v2/v3 flows)."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({

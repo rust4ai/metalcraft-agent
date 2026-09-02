@@ -1,6 +1,6 @@
 ---
 description: Wire format and workflow for authoring, scheduling and running metalcraft flows (spec v3)
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Authoring Flows
@@ -95,6 +95,7 @@ A run carries one JSON `variables` object, threaded through every node:
 | `sub_agent`    | `{ task, persona? \| tool_set?/pack?, output_var? }` | Delegate a subtask to a scoped sub-agent. Emits `ok` / `error`. |
 | `approval`     | `{ message, choices?, timeout? }` | **Pauses** for a human decision; resume via the chosen handle. |
 | `wait`         | `{ duration?: "30m"\|"2h"\|"1d" \| until?: RFC3339 }` | **Pauses** for a durable delay; resumes via `after`. |
+| `foreach`      | `{ list, item_var, mode: "sequential"\|"concurrent", body_entry }` | Fan out over a list in `variables`: runs the sub-body starting at `body_entry` once per item, binding each to `item_var`. |
 | `end`          | `{ status?, outputs? }` | Explicit terminal. |
 
 A `node_type` with a colon (e.g. `slack:send_message`) is a custom vendor node —
