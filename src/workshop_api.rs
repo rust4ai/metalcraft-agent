@@ -167,6 +167,7 @@ pub async fn flow_conversation(
         id: id.clone(),
         instance_id: Some(instance_id.to_string()),
         flow_run: Some(run),
+        project_id: None,
         persona_slug: persona.to_string(),
         model_name: model.to_string(),
         cwd: cwd.to_string(),
@@ -191,6 +192,79 @@ pub async fn flow_conversation(
         .insert(id.clone(), Arc::new(Mutex::new(session)));
     prune_run_conversations(instance_id).await;
     Some(id)
+}
+
+/// Open the conversation a project records itself into.
+///
+/// **One per project, for its whole life** — the opposite of the flow rule
+/// above, and for the same reason. A flow's unit is the run: you want to open
+/// "the 08:00 run" and say when it finished. A project's unit is the project:
+/// what a person wants is one thread to scroll back through to see how it got
+/// here, not four hundred conversations of one tick each.
+///
+/// **A window, not a chat.** Nothing routes a person's typing into it. A project
+/// that could be interrupted mid-thought would need every tick to reconcile
+/// "what I was doing" against "what somebody just said", and the whole premise
+/// is that the person who set it has gone away. Steering is the goal string.
+///
+/// The turns are a *record*: the worker never reads this conversation back, it
+/// reads its scratchpad. So the context is reset every tick — the transcript
+/// keeps everything, the context keeps one turn — and a project that runs for a
+/// month never accumulates a context nobody will send.
+pub async fn project_conversation(
+    instance_id: &str,
+    persona: &str,
+    model: &str,
+    cwd: &str,
+    project_id: &str,
+) -> Option<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let session = ChatSession {
+        id: id.clone(),
+        instance_id: Some(instance_id.to_string()),
+        flow_run: None,
+        project_id: Some(project_id.to_string()),
+        persona_slug: persona.to_string(),
+        model_name: model.to_string(),
+        cwd: cwd.to_string(),
+        preset: SessionPreset::Workshop,
+        state: None,
+        archived: Vec::new(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        // Each tick has its own diagnostics session; a logger here would split
+        // one tick's trace across two session dirs.
+        diagnostics: None,
+        trace: None,
+        busy: false,
+        interrupt: Arc::new(AtomicBool::new(false)),
+        pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        plan: Arc::new(std::sync::Mutex::new(Vec::new())),
+        running: Arc::new(std::sync::Mutex::new(None)),
+    };
+    chat_store()
+        .lock()
+        .await
+        .insert(id.clone(), Arc::new(Mutex::new(session)));
+    Some(id)
+}
+
+/// File one tick in a project's conversation: what the conductor asked for, and
+/// what the worker came back with.
+///
+/// The context is reset first, so the transcript grows and the context does not.
+/// That is the whole trick — a month of ticks stays readable without ever
+/// becoming a month of context.
+pub async fn record_project_tick(chat_id: &str, briefing: &str, summary: &str) {
+    let Some(session) = chat_store().lock().await.get(chat_id).cloned() else {
+        return;
+    };
+    {
+        let mut s = session.lock().await;
+        if s.state.is_some() {
+            reset_context(&mut s, "next tick").await;
+        }
+    }
+    record_flow_turn(chat_id, briefing, summary).await;
 }
 
 /// Drop this agent's oldest run conversations past [`MAX_RUN_CONVERSATIONS_PER_AGENT`].
@@ -336,6 +410,13 @@ struct ChatSession {
     /// Set when this conversation *is* a flow run — which run, of which flow.
     /// `None` for anything a person typed.
     flow_run: Option<crate::flow_runs::FlowRunRef>,
+    /// Set when this conversation is a project's, and then it is the project's
+    /// whole life rather than one run of it.
+    ///
+    /// It also keeps the 30-day session reap off: a project that ticks for two
+    /// months would otherwise lose the first month of its own record, and the
+    /// record is the only place a person can read what it has been doing.
+    project_id: Option<String>,
     persona_slug: String,
     model_name: String,
     cwd: String,
@@ -4811,6 +4892,9 @@ struct PersistedChat {
     /// Which flow run this conversation is, when it is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     flow_run: Option<crate::flow_runs::FlowRunRef>,
+    /// Which project this conversation belongs to, when it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_id: Option<String>,
     persona_slug: String,
     model_name: String,
     cwd: String,
@@ -4840,6 +4924,7 @@ async fn persist_chat(session: &Arc<Mutex<ChatSession>>) {
             id: s.id.clone(),
             instance_id: s.instance_id.clone(),
             flow_run: s.flow_run.clone(),
+            project_id: None,
             persona_slug: s.persona_slug.clone(),
             model_name: s.model_name.clone(),
             cwd: s.cwd.clone(),
@@ -4962,6 +5047,7 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
             id: pc.id.clone(),
             instance_id: pc.instance_id.clone(),
             flow_run: pc.flow_run.clone(),
+            project_id: None,
             persona_slug: pc.persona_slug,
             model_name: pc.model_name,
             cwd: pc.cwd,
@@ -5066,16 +5152,36 @@ pub struct ChatReapReport {
 ///
 /// **The agent is never touched.** Reaping every session an agent has does not
 /// reap the agent: it goes on knowing what it learned, with nothing left to read.
+///
+/// **A living project's thread is never touched either** — see the exclusion
+/// below. An active project is touched every fifteen minutes and would never go
+/// stale, but a paused one would, and deleting a month of a project's own record
+/// because nobody resumed it in time is the sweep doing the opposite of its job.
+/// The thread goes when the project does (via the cutoff, a month later, which
+/// is a grace period rather than a leak: what a deleted project did stays
+/// readable for a while).
 pub async fn reap_stale_chats() -> ChatReapReport {
     let mut report = ChatReapReport::default();
     let cutoff = chrono::Utc::now() - chrono::Duration::days(SESSION_TTL_DAYS);
 
     // A run that has not finished may still resume into its conversation.
-    let awaited: Vec<String> = crate::flow_runs::list_runs(&paths::runs_dir())
+    let mut awaited: Vec<String> = crate::flow_runs::list_runs(&paths::runs_dir())
         .into_iter()
         .filter(|r| r.status == "paused")
         .filter_map(|r| r.chat_id)
         .collect();
+
+    // A living project's thread is not a stale transcript, it is the project's
+    // record. An active one is touched every fifteen minutes and would never go
+    // stale — but a *paused* one would, and losing a month of a project's own
+    // history because nobody resumed it in time is the reap doing the opposite
+    // of its job. The thread goes when the project does.
+    awaited.extend(
+        crate::projects::list()
+            .into_iter()
+            .map(|p| p.session_id)
+            .filter(|id| !id.trim().is_empty()),
+    );
 
     let stale: Vec<String> = read_persisted_chats()
         .into_iter()
@@ -5234,6 +5340,7 @@ async fn post_create_chat(
         id: id.clone(),
         instance_id: Some(instance.id.clone()),
         flow_run: None,
+        project_id: None,
         persona_slug,
         model_name: model_name.clone(),
         cwd: state.cwd.clone(),
@@ -8219,6 +8326,7 @@ async fn get_or_create_gateway_session(
         id: chat_id.to_string(),
         instance_id,
         flow_run: None,
+        project_id: None,
         persona_slug: n.persona_slug.clone(),
         model_name: n.model_name.clone(),
         cwd: state.cwd.clone(),
@@ -8694,6 +8802,7 @@ mod transcript_tests {
             id: "c1".into(),
             instance_id: None,
             flow_run: None,
+            project_id: None,
             persona_slug: String::new(),
             model_name: String::new(),
             cwd: String::new(),
@@ -8955,6 +9064,7 @@ mod gateway_tests {
                     id: (*id).to_string(),
                     instance_id: None,
                     flow_run: None,
+                    project_id: None,
                     persona_slug: String::new(),
                     model_name: String::new(),
                     cwd: String::new(),
@@ -9753,6 +9863,7 @@ async fn post_project(Json(req): Json<CreateProjectRequest>) -> Response {
         conductor_instance_id: conductor.id.clone(),
         worker_brief: String::new(),
         tick_requested: false,
+        session_id: String::new(),
         agent_preset: preset,
         workspace: crate::projects::Workspace {
             id: None,

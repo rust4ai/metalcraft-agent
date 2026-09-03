@@ -852,6 +852,28 @@ pub async fn run_tick(
     // Once per project, on its first tick rather than at creation, so making a
     // project stays instant and cannot fail on a model being down. The first
     // tick is due immediately anyway, so in practice this is boot.
+    // The project's own conversation, opened once. Alongside the brief rather
+    // than at creation for the same reason: making a project stays instant, and
+    // the first tick is due immediately anyway.
+    let project = &if project.session_id.trim().is_empty() {
+        let mut with_session = project.clone();
+        if let Some(id) = crate::workshop_api::project_conversation(
+            &project.instance_id,
+            &persona_for(project),
+            &model_for(project, TickKind::Work),
+            cwd,
+            &project.id,
+        )
+        .await
+        {
+            with_session.session_id = id;
+            let _ = projects::save(&with_session);
+        }
+        with_session
+    } else {
+        project.clone()
+    };
+
     let project = &if project.worker_brief.trim().is_empty() {
         match crate::project_conductor::compose_worker_brief(context, project, cwd, approval_mode)
             .await
@@ -1007,6 +1029,18 @@ pub async fn run_tick(
         &tasks_before,
         &tasks_after,
     );
+
+    // And into the project's own thread, so a person can read the whole run of
+    // it: what the conductor asked for, and what came back. The context is reset
+    // first, so this grows the transcript and not the context.
+    if !project.session_id.trim().is_empty() {
+        crate::workshop_api::record_project_tick(
+            &project.session_id,
+            &format!("**Tick {tick_number}** — {}", briefing.text),
+            &summary,
+        )
+        .await;
+    }
 
     project.counters.ticks = tick_number;
     project.counters.last_tick_at = Some(now.to_rfc3339());
@@ -1173,6 +1207,7 @@ mod tests {
             conductor_instance_id: String::new(),
             worker_brief: String::new(),
             tick_requested: false,
+            session_id: String::new(),
             agent_preset: "general-agent".into(),
             workspace: Workspace::default(),
             status: ProjectStatus::Active,

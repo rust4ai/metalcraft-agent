@@ -34,6 +34,7 @@ fn a_project(id: &str) -> Project {
         conductor_instance_id: String::new(),
         worker_brief: String::new(),
         tick_requested: false,
+        session_id: String::new(),
         agent_preset: "general-agent".into(),
         workspace: projects::Workspace::default(),
         status: ProjectStatus::Active,

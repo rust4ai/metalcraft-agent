@@ -285,6 +285,13 @@ pub struct Project {
     /// the one thing a project must never do.
     #[serde(default)]
     pub tick_requested: bool,
+    /// The conversation this project records itself into — one thread for its
+    /// whole life, which is what a person opens to see how it got here.
+    ///
+    /// A window, not a chat: nothing routes typing into it. Empty for a project
+    /// made before it existed, and for one whose first tick has not run yet.
+    #[serde(default)]
+    pub session_id: String,
     pub agent_preset: String,
 
     #[serde(default)]
@@ -773,6 +780,7 @@ mod tests {
             conductor_instance_id: String::new(),
             worker_brief: String::new(),
             tick_requested: false,
+            session_id: String::new(),
             agent_preset: "p".into(),
             workspace: Workspace::default(),
             status: ProjectStatus::Active,
@@ -808,6 +816,7 @@ mod tests {
             conductor_instance_id: String::new(),
             worker_brief: String::new(),
             tick_requested: false,
+            session_id: String::new(),
             agent_preset: "p".into(),
             workspace: Workspace::default(),
             status: ProjectStatus::Active,
