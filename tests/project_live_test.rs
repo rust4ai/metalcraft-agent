@@ -9,6 +9,14 @@
 //! It is the only test here that spends money, so it is gated on
 //! `OPENAI_API_KEY` and skips loudly without one.
 //!
+//! **It runs against a live model, so it can fail for reasons that are not
+//! bugs.** A call that does not land takes a fail-open path by design — the
+//! briefing falls back, the brief stays empty — and this test cannot pass on
+//! that, because proving those paths are *not* taken is most of what it is for.
+//! Every assertion says what it actually saw, so a failure is diagnosable
+//! without spending another ninety seconds reproducing it. Read the printed
+//! sections first: they are the run, not decoration.
+//!
 //! What it asserts is deliberately about *shape*, not content. A model writing a
 //! brief will not write the same brief twice, so asserting on its words would
 //! make this a test of one sampling. What must hold every time is that the
@@ -140,7 +148,9 @@ async fn a_project_boots_and_ticks_for_real() {
     // ── the conductor's first act: instructions for its worker ───────────────
     assert!(
         !after.worker_brief.trim().is_empty(),
-        "the conductor did not write the worker's brief"
+        "the conductor did not write the worker's brief. It composes on the first \
+         tick and fails open, so an empty brief means that one call did not land — \
+         which is the design working, but not something this test can pass on."
     );
     eprintln!("── worker brief ────────────────────────────────\n{}\n", after.worker_brief);
 
@@ -210,15 +220,28 @@ async fn a_project_boots_and_ticks_for_real() {
     eprintln!("\n── tick 2 ──────────────────────────────────────\n{}\n", outcome2.summary);
 
     let final_project = projects::get(&id).unwrap();
-    assert_eq!(final_project.counters.ticks, 2, "both ticks counted");
+    let journal = project_tick::read_journal(&id, 10);
+
+    // Every assertion below says what it actually saw. This test spends real
+    // money and takes a minute and a half, so a failure that has to be
+    // reproduced to be understood costs both again — and it runs against a live
+    // model, which means the failure may not reproduce at all.
+    assert_eq!(
+        final_project.counters.ticks, 2,
+        "both ticks should have counted; status is {:?}, journal has {} line(s): {:#?}",
+        final_project.status,
+        journal.len(),
+        journal.iter().map(|e| (e.tick, e.kind, e.progressed)).collect::<Vec<_>>()
+    );
     assert_eq!(
         final_project.worker_brief, after.worker_brief,
         "the brief is written once — a worker whose standing instructions are \
          rewritten under it every tick has no standing instructions"
     );
     assert_eq!(
-        project_tick::read_journal(&id, 10).len(),
+        journal.len(),
         2,
-        "two ticks, two journal lines"
+        "two ticks, two journal lines; got {:#?}",
+        journal.iter().map(|e| (e.tick, e.kind, e.conducted)).collect::<Vec<_>>()
     );
 }
