@@ -259,7 +259,8 @@ pub fn create_registry_for_with_config(
             "ask_user" => registry.register(ask_user::AskUserTool::new(
                 config.and_then(|c| c.reply_sink.clone()),
             )),
-            "goal_note" | "goal_scratchpad_write" | "goal_block" | "goal_complete" => {
+            "goal_note" | "goal_scratchpad_write" | "goal_block" | "goal_complete"
+            | "goal_await_run" => {
                 // Bound to one goal at registration. Outside a goal tick there is
                 // no goal to bind to, so the tools are absent rather than
                 // registered and failing at call time — the model is never shown
@@ -271,6 +272,9 @@ pub fn create_registry_for_with_config(
                             registry.register(goal::GoalScratchpadWriteTool::new(goal_id))
                         }
                         "goal_block" => registry.register(goal::GoalBlockTool::new(goal_id)),
+                        "goal_await_run" => {
+                            registry.register(goal::GoalAwaitRunTool::new(goal_id))
+                        }
                         _ => registry.register(goal::GoalCompleteTool::new(goal_id)),
                     },
                     None => {

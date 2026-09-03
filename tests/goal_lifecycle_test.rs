@@ -187,6 +187,44 @@ async fn a_goal_lives_through_its_scratchpad() {
         "the goal statement is restored rather than lost"
     );
 
+    // ── a long build is handed to the heartbeat, not waited on ───────────────
+    let mut running = a_goal(&goals::new_id());
+    running.title = "Awaiting".into();
+    goals::save(&running).unwrap();
+    goals::write_scratchpad(&running.id, &goals::seed_scratchpad(&running)).unwrap();
+
+    let await_run = goal_tools::GoalAwaitRunTool::new(running.id.clone());
+    await_run
+        .call(serde_json::json!({
+            "workspace_id": "ws_7",
+            "run_id": "run_42",
+            "what": "cargo test"
+        }))
+        .await
+        .expect("handed over");
+
+    let waiting = goals::get(&running.id).unwrap();
+    let pending = waiting.pending_run.as_ref().expect("recorded");
+    assert_eq!(pending.run_id, "run_42");
+    assert_eq!(
+        waiting.tick_interval_minutes(),
+        goals::MIN_HEARTBEAT_MINUTES,
+        "a goal waiting on a run looks again soon, not in half an hour"
+    );
+    assert!(
+        goals::read_scratchpad(&running.id).unwrap().contains("run_42"),
+        "the handover is in the document too, in case the record and the pad disagree"
+    );
+
+    // A second one is refused: a goal that started three builds and remembered
+    // one would silently lose the other two.
+    let second = await_run
+        .call(serde_json::json!({ "workspace_id": "ws_7", "run_id": "run_43", "what": "cargo build" }))
+        .await
+        .expect_err("one at a time");
+    assert!(format!("{second}").contains("run_42"), "{second}");
+    goals::delete(&running.id).unwrap();
+
     // ── the journal is what a person reads ───────────────────────────────────
     goal_tick::append_journal(
         &goal.id,

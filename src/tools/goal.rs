@@ -330,3 +330,103 @@ impl metalcraft::Tool for GoalCompleteTool {
         Ok(serde_json::json!({ "ok": true, "status": "done" }))
     }
 }
+
+pub struct GoalAwaitRunTool {
+    goal_id: String,
+}
+
+impl GoalAwaitRunTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for GoalAwaitRunTool {
+    fn name(&self) -> &str {
+        "goal_await_run"
+    }
+
+    fn description(&self) -> &str {
+        "Hand a long-running command back to the heartbeat instead of waiting for it. Call this \
+         straight after starting a build or a test run that will outlive this tick (buildr's \
+         build/test return a run id and keep going without you). Then finish your scratchpad and \
+         end the tick: the next wake-up reads the result for you — without spending a model on \
+         it — and hands you the outcome. Do not sit in a polling loop; that burns the tick on \
+         waiting and the run finishes after you are gone either way."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "workspace_id": {
+                    "type": "string",
+                    "description": "The buildr.space workspace the command is running in."
+                },
+                "run_id": {
+                    "type": "string",
+                    "description": "The run id the build/test call returned."
+                },
+                "what": {
+                    "type": "string",
+                    "description": "The command, for the log — 'cargo test', 'npm run build'."
+                }
+            },
+            "required": ["workspace_id", "run_id"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let workspace_id = args["workspace_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .ok_or_else(|| err("goal_await_run", "Missing required parameter: workspace_id"))?;
+        let run_id = args["run_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .ok_or_else(|| err("goal_await_run", "Missing required parameter: run_id"))?;
+        let what = args["what"].as_str().map(str::trim).unwrap_or("a command");
+
+        let mut goal = goals::get(&self.goal_id)
+            .ok_or_else(|| err("goal_await_run", "this goal no longer exists"))?;
+
+        // One at a time. A goal that started three builds and remembered one
+        // would wait on that one and silently lose the others — and a tick that
+        // needs two commands at once can await the second one next tick, which
+        // is the shape the heartbeat is for.
+        if let Some(existing) = &goal.pending_run {
+            return Err(err(
+                "goal_await_run",
+                format!(
+                    "Already waiting on `{}` (run {}). Let that one land first — the next tick \
+                     will hand you its result.",
+                    existing.what, existing.run_id
+                ),
+            ));
+        }
+
+        goal.pending_run = Some(goals::PendingRun {
+            workspace_id: workspace_id.to_string(),
+            run_id: run_id.to_string(),
+            what: what.to_string(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+        });
+        goals::save(&goal).map_err(|e| err("goal_await_run", e))?;
+
+        let current = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
+        let updated = goals::append_to_section(
+            &current,
+            "Log",
+            &format!("- Started `{what}` (run {run_id}); handed to the next tick."),
+        );
+        let _ = goals::write_scratchpad(&self.goal_id, &updated);
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "note": "Recorded. Finish your scratchpad and end the tick — the result will be waiting for the next one."
+        }))
+    }
+}
