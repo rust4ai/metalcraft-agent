@@ -165,7 +165,15 @@ impl metalcraft::Tool for ProjectScratchpadWriteTool {
         projects::write_scratchpad(&self.project_id, &markdown)
             .map_err(|e| err("project_scratchpad_write", format!("could not write scratchpad: {e}")))?;
 
-        let progress = projects::progress_of(&markdown);
+        // From the task list when there is one. Counting checkboxes in the
+        // document reported 0/0 for every project whose plan is records, which
+        // is worse than saying nothing: it told the model its plan was empty
+        // immediately after it had worked through it.
+        let progress = if crate::project_tasks::exists(&self.project_id) {
+            crate::project_tasks::progress(&crate::project_tasks::list(&self.project_id))
+        } else {
+            projects::progress_of(&markdown)
+        };
         Ok(serde_json::json!({
             "ok": true,
             "bytes": markdown.len(),

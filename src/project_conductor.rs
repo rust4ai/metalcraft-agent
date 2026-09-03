@@ -163,8 +163,11 @@ pub fn record_worker_return(
         parts.push("nothing moved".to_string());
     }
 
+    // "tick 7", never "t7": the rest of this document is full of task ids, and a
+    // tick rendered the same way is one more thing to disambiguate while reading
+    // the one section that exists to be read quickly.
     let line = format!(
-        "- **t{tick}** — {}. Worker said: {}",
+        "- **tick {tick}** — {}. Worker said: {}",
         parts.join("; "),
         summary.replace('\n', " ").chars().take(400).collect::<String>()
     );

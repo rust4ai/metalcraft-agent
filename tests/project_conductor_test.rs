@@ -134,7 +134,10 @@ async fn the_conductor_keeps_its_own_memory() {
     let tried = projects::section_body(&ledger::read(&project.id).unwrap(), "Tried")
         .unwrap()
         .to_string();
-    assert!(tried.contains("t7") || tried.contains("**t7**"), "the tick number: {tried}");
+    // "tick 7", not "t7": this section is full of task ids, and a tick rendered
+    // the same way is one more thing to disambiguate while reading it.
+    assert!(tried.contains("tick 7"), "the tick number: {tried}");
+    assert!(!tried.contains("**t7**"), "and never in the shape of a task id: {tried}");
     assert!(tried.contains("closed t1"), "{tried}");
     assert!(tried.contains("t2 (attempt 1)"), "unfinished work is on the record: {tried}");
 

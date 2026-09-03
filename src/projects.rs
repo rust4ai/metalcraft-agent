@@ -579,8 +579,19 @@ pub fn section_body<'a>(markdown: &'a str, section: &str) -> Option<&'a str> {
 }
 
 fn is_placeholder(body: &str) -> bool {
-    let t = body.trim();
-    t.is_empty() || t == "(none)" || t == "(nothing yet)"
+    let t = body.trim().trim_end_matches('.').to_lowercase();
+    // Matched loosely on purpose: these are written by a model, which says
+    // "No attempts yet." where the seed said "(nothing yet)". A placeholder that
+    // is not recognised as one sits above the first real entry forever — which
+    // is exactly what happened in the first real conductor ledger's Tried
+    // section.
+    t.is_empty()
+        || t == "(none)"
+        || t == "none"
+        || t == "(nothing yet)"
+        || t == "nothing yet"
+        || t == "no attempts yet"
+        || t == "(no attempts yet)"
 }
 
 /// Offset of a `## Heading` line, matched at the start of a line only — a
@@ -692,6 +703,19 @@ mod tests {
     use super::*;
 
     const DOC: &str = "## Goal\nShip billing\n\n## Plan\n- [x] one\n- [ ] two\n\n## Log\n- t1: did a thing\n\n## Blockers\n(none)\n";
+
+    #[test]
+    fn a_models_own_wording_still_reads_as_a_placeholder() {
+        // The seed says "(nothing yet)"; a model writing the same document says
+        // "No attempts yet." Both mean the section is empty, and a placeholder
+        // that is not recognised sits above the first real entry forever.
+        assert!(is_placeholder("(nothing yet)"));
+        assert!(is_placeholder("No attempts yet."));
+        assert!(is_placeholder("none"));
+        assert!(is_placeholder("  (none)  "));
+        assert!(!is_placeholder("- t1 landed"));
+        assert!(!is_placeholder("Nothing worked, and here is why"));
+    }
 
     #[test]
     fn progress_counts_checkboxes() {

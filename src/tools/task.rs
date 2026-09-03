@@ -350,7 +350,12 @@ impl metalcraft::Tool for TaskBlockTool {
         "Stop ONE task on something you cannot resolve, and keep working on the rest. This is \
          not project_block: the project keeps ticking and its other tasks keep moving — only this row \
          waits. Use it for a missing credential, a decision you need from a person, or an \
-         upstream that is down. Say concretely what would unblock it."
+         upstream that is down. Say concretely what would unblock it.\n\n\
+         If the task is not blocked but simply should not be open — the work turned out to be \
+         covered by another task, or the approach changed — say exactly that as the reason. You \
+         cannot retire a task yourself; the plan belongs to the conductor, and it reads this. A \
+         reason that says what happened gets the row dropped on the next tick; one that only says \
+         'cannot proceed' gets it put in front of a person."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
