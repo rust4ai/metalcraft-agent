@@ -5,6 +5,7 @@ pub mod email_imap;
 pub mod find_files;
 pub mod gateway;
 pub mod gateway_webhook;
+pub mod goal;
 pub mod grep;
 pub mod http_api;
 pub mod list_files;
@@ -111,6 +112,10 @@ pub struct ToolConfig {
     /// sub-agent (it runs its own turn and must not satisfy its parent's plan),
     /// a flow node, or a one-shot task.
     pub turn_plan: Option<crate::turn_plan::SharedTurnPlan>,
+    /// The goal whose tick this turn is. Binds the `goal_*` tools to one goal,
+    /// so the model never has to name (or mistype) which goal it is writing to.
+    /// `None` ⇒ not a goal tick, and those tools are not registered at all.
+    pub goal_id: Option<String>,
 }
 
 /// Register only the tools listed by name.
@@ -254,6 +259,26 @@ pub fn create_registry_for_with_config(
             "ask_user" => registry.register(ask_user::AskUserTool::new(
                 config.and_then(|c| c.reply_sink.clone()),
             )),
+            "goal_note" | "goal_scratchpad_write" | "goal_block" | "goal_complete" => {
+                // Bound to one goal at registration. Outside a goal tick there is
+                // no goal to bind to, so the tools are absent rather than
+                // registered and failing at call time — the model is never shown
+                // an affordance it cannot use.
+                match config.and_then(|c| c.goal_id.clone()) {
+                    Some(goal_id) => match name.as_str() {
+                        "goal_note" => registry.register(goal::GoalNoteTool::new(goal_id)),
+                        "goal_scratchpad_write" => {
+                            registry.register(goal::GoalScratchpadWriteTool::new(goal_id))
+                        }
+                        "goal_block" => registry.register(goal::GoalBlockTool::new(goal_id)),
+                        _ => registry.register(goal::GoalCompleteTool::new(goal_id)),
+                    },
+                    None => {
+                        log::debug!("{name} requires a goal, skipping");
+                        registry
+                    }
+                }
+            }
             "update_plan" => {
                 if let Some(plan) = config.and_then(|c| c.turn_plan.clone()) {
                     registry.register(update_plan::UpdatePlanTool::new(plan))

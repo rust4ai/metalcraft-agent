@@ -751,6 +751,7 @@ impl<'a> FlowExecutor<'a> {
                 diagnostics: self.logger.clone(),
                 instance_id: self.instance_id.clone(),
                 preset_personas: self.preset_personas.clone(),
+                goal_id: None,
             },
         )
         .await
@@ -1003,6 +1004,7 @@ impl<'a> FlowExecutor<'a> {
             // and a node that gated its own reply would be second-guessing the
             // structure the flow author wrote down.
             turn_plan: None,
+            goal_id: None,
         };
         let mut registry =
             crate::tools::create_registry_for_with_config(&persona_tools, Some(&tool_config));

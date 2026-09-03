@@ -359,6 +359,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 preset_personas: active_preset
                     .as_ref()
                     .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
+            goal_id: None,
             },
         )
         .await?

@@ -628,6 +628,8 @@ async fn auth_middleware(
         gateway_metalcraft_connect, gateway_metalcraft_disconnect,
         gateway_metalcraft_unregister,
         post_factory_reset,
+        list_goals, get_goal, post_goal, patch_goal, delete_goal,
+        get_goal_journal, put_goal_scratchpad,
     ),
     components(schemas(
         FactoryResetRequest, ResetReport, ResetScope, ResetFailure, RestartExpectation,
@@ -637,6 +639,14 @@ async fn auth_middleware(
         FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, RunFlowOutput, ResumeFlowRunRequest,
         InstallFlowRequest, InstallDependenciesResponse,
         crate::scheduled_flows::SchedulePreview,
+        GoalList, GoalRow, GoalDetail, GoalJournal, CreateGoalRequest, UpdateGoalRequest,
+        WriteScratchpadRequest,
+        crate::goals::Goal, crate::goals::GoalKind, crate::goals::GoalStatus,
+        crate::goals::Heartbeat, crate::goals::Workspace, crate::goals::GoalRepo,
+        crate::goals::Rails, crate::goals::Counters, crate::goals::PendingRun,
+        crate::goals::ModelTiers, crate::goals::Progress,
+        crate::goal_tick::JournalEntry, crate::goal_tick::TickKind,
+        crate::scheduled_tasks::IoBinding,
         FlowList, FlowListItem, FlowValidation,
         // The graph itself, from `metalcraft-flows` (its `schema` feature). Without
         // these a client cannot type a flow at all — which is why both clients
@@ -703,6 +713,7 @@ async fn auth_middleware(
         (name = "agent-packs", description = "Installable agent packs — an agent plus every persona, skill and integration it needs"),
         (name = "agent-presets", description = "Agents this pod can be — a default persona, its callable roster, and the skills and packs they need"),
         (name = "agent-instances", description = "Agents that exist — each with its own memory and conversations"),
+        (name = "goals", description = "Long-running goals: what this pod is working towards on its own, and how far it has got"),
         (name = "gateway", description = "Messaging gateway channels + Metalcraft connect"),
     ),
 )]
@@ -860,6 +871,13 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/flows/{id}/binding", put(put_flow_binding))
         // Scheduled flows — *when* a flow runs. The literal `preview` is
         // registered before the `{id}` param so matchit prefers the static segment.
+        .route("/api/v1/goals", get(list_goals))
+        .route("/api/v1/goals", post(post_goal))
+        .route("/api/v1/goals/{id}", get(get_goal))
+        .route("/api/v1/goals/{id}", patch(patch_goal))
+        .route("/api/v1/goals/{id}", delete(delete_goal))
+        .route("/api/v1/goals/{id}/journal", get(get_goal_journal))
+        .route("/api/v1/goals/{id}/scratchpad", put(put_goal_scratchpad))
         .route("/api/v1/scheduled-flows", get(list_scheduled_flows))
         .route("/api/v1/scheduled-flows", post(post_scheduled_flow))
         .route(
@@ -6222,6 +6240,7 @@ async fn post_chat_turn(
                         let _ = tx.try_send(ev);
                     })
                 })),
+                goal_id: None,
             },
             Some(phase_sink),
             // What the person types while this turn runs, delivered at the
@@ -6639,6 +6658,7 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
                         let _ = sender.send(ev);
                     })
                 })),
+                goal_id: None,
             },
             Some({
                 let sender = sender.clone();
@@ -6818,6 +6838,7 @@ pub async fn deliver_followup_to_chat(
                     let _ = sender.send(ev);
                 })
             })),
+            goal_id: None,
         },
         // A follow-up fires with nobody necessarily watching, which is exactly
         // when a silent four-minute compaction is hardest to explain later.
@@ -8325,6 +8346,7 @@ async fn run_one_gateway_turn(
             interrupt: Some(interrupt.clone()),
             // Nothing renders a task list over SMS.
             plan_sink: None,
+            goal_id: None,
         },
         // This path emits no frames at all — a gateway turn answers over its
         // adapter — so there is nobody to tell.
@@ -9351,4 +9373,495 @@ mod scheduled_flow_schema_tests {
             );
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Goals
+//
+// A goal is created by a person, in metalcraft-front or the iOS app, and
+// nowhere else — there is no chat command and no agent tool that mints one.
+// Committing a pod to days of unattended work is a decision someone takes
+// deliberately, on a screen built for it, and that is also what keeps a goal
+// from being able to create goals.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// How many goals may tick at once on one pod.
+///
+/// Every active goal is unattended spend and (once workspaces land) a live
+/// buildr.space box on somebody's plan, whose own ceiling is 1 free / 5 premium.
+/// Refused at creation with a message rather than discovered as a 403 on the
+/// first tick.
+pub const MAX_ACTIVE_GOALS: usize = 5;
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct GoalRow {
+    id: String,
+    title: String,
+    goal: String,
+    kind: crate::goals::GoalKind,
+    status: crate::goals::GoalStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocked_reason: Option<String>,
+    instance_id: String,
+    /// Checked/total plan steps, so a client draws a progress bar without
+    /// parsing markdown.
+    progress: crate::goals::Progress,
+    ticks: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_tick_at: Option<String>,
+    /// When the next tick is owed, absent for a goal that is not ticking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_tick_at: Option<String>,
+    every_minutes: u32,
+    created_at: String,
+}
+
+fn goal_row(goal: &crate::goals::Goal) -> GoalRow {
+    let scratchpad = crate::goals::read_scratchpad(&goal.id).unwrap_or_default();
+    GoalRow {
+        id: goal.id.clone(),
+        title: goal.title.clone(),
+        goal: goal.goal.clone(),
+        kind: goal.kind,
+        status: goal.status,
+        blocked_reason: goal.blocked_reason.clone(),
+        instance_id: goal.instance_id.clone(),
+        progress: crate::goals::progress_of(&scratchpad),
+        ticks: goal.counters.ticks,
+        last_tick_at: goal.counters.last_tick_at.clone(),
+        next_tick_at: next_tick_at(goal),
+        every_minutes: goal.tick_interval_minutes(),
+        created_at: goal.created_at.clone(),
+    }
+}
+
+/// When this goal next wakes. `None` when it is not going to.
+///
+/// A goal that has never ticked wakes on the next daemon poll, which is sooner
+/// than any interval — reported as now rather than as a time in the past.
+fn next_tick_at(goal: &crate::goals::Goal) -> Option<String> {
+    if !goal.status.ticks() {
+        return None;
+    }
+    let Some(last) = goal.counters.last_tick_at.as_deref() else {
+        return Some(chrono::Utc::now().to_rfc3339());
+    };
+    let last = chrono::DateTime::parse_from_rfc3339(last).ok()?;
+    Some(
+        (last.with_timezone(&chrono::Utc)
+            + chrono::Duration::minutes(goal.tick_interval_minutes() as i64))
+        .to_rfc3339(),
+    )
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct GoalList {
+    goals: Vec<GoalRow>,
+    /// How many are ticking, against the ceiling — what a "new goal" button
+    /// needs to know before it is pressed.
+    active: usize,
+    max_active: usize,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct GoalDetail {
+    #[serde(flatten)]
+    row: GoalRow,
+    goal_record: crate::goals::Goal,
+    /// The scratchpad as written — the goal's whole memory, verbatim.
+    scratchpad: String,
+    /// Set when the document has decayed enough that the next review tick will
+    /// groom it rather than merely audit the plan.
+    needs_groom: bool,
+}
+
+/// `GET /api/v1/goals` — what this pod is working towards on its own.
+#[utoipa::path(
+    get,
+    path = "/api/v1/goals",
+    tag = "goals",
+    responses((status = 200, description = "Goals on this pod", body = GoalList)),
+)]
+async fn list_goals() -> Response {
+    let goals = crate::goals::list();
+    let active = goals.iter().filter(|g| g.status.ticks()).count();
+    Json(GoalList {
+        goals: goals.iter().map(goal_row).collect(),
+        active,
+        max_active: MAX_ACTIVE_GOALS,
+    })
+    .into_response()
+}
+
+/// `GET /api/v1/goals/{id}` — one goal, with the scratchpad a client renders.
+#[utoipa::path(
+    get,
+    path = "/api/v1/goals/{id}",
+    tag = "goals",
+    params(("id" = String, Path, description = "Goal id")),
+    responses((status = 200, body = GoalDetail), (status = 404, body = ErrorResponse)),
+)]
+async fn get_goal(Path(id): Path<String>) -> Response {
+    let Some(goal) = crate::goals::get(&id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+    };
+    let scratchpad = crate::goals::read_scratchpad(&id).unwrap_or_default();
+    Json(GoalDetail {
+        row: goal_row(&goal),
+        needs_groom: crate::goals::needs_groom(&scratchpad),
+        scratchpad,
+        goal_record: goal,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct CreateGoalRequest {
+    /// Short handle for lists. Defaults to the first line of the goal.
+    #[serde(default)]
+    title: Option<String>,
+    /// **The goal.** Room for a paragraph: this is the whole instruction, and a
+    /// tick six days from now reads it verbatim.
+    goal: String,
+    #[serde(default = "default_goal_kind")]
+    kind: crate::goals::GoalKind,
+    /// The repo to work in, `owner/name`. Optional in this phase — a goal
+    /// without one still plans and thinks, it just has nowhere to build.
+    #[serde(default)]
+    repo: Option<String>,
+    /// The branch the goal works on. Defaults to `goal/<id>`.
+    #[serde(default)]
+    branch: Option<String>,
+    /// Minutes between ticks. Floored at 5; defaults to 30.
+    #[serde(default)]
+    every_minutes: Option<u32>,
+    #[serde(default)]
+    timezone: Option<String>,
+    /// The chat to send questions and reports to.
+    #[serde(default)]
+    chat_id: Option<String>,
+    #[serde(default)]
+    agent_preset: Option<String>,
+    #[serde(default)]
+    rails: Option<crate::goals::Rails>,
+    #[serde(default)]
+    models: Option<crate::goals::ModelTiers>,
+    /// Create it paused, to review the plan before it starts spending.
+    #[serde(default)]
+    paused: bool,
+}
+
+fn default_goal_kind() -> crate::goals::GoalKind {
+    crate::goals::GoalKind::Build
+}
+
+/// `POST /api/v1/goals` — set a goal.
+///
+/// The consent point, and the only one: this creates the goal **and** the agent
+/// that will pursue it, because "work at this while I am not here" is one
+/// decision rather than two.
+#[utoipa::path(
+    post,
+    path = "/api/v1/goals",
+    tag = "goals",
+    request_body = CreateGoalRequest,
+    responses(
+        (status = 201, description = "Created", body = GoalRow),
+        (status = 400, description = "Empty goal, or no agent preset to run it as", body = ErrorResponse),
+        (status = 409, description = "Too many goals already ticking", body = ErrorResponse),
+    ),
+)]
+async fn post_goal(Json(req): Json<CreateGoalRequest>) -> Response {
+    let goal_text = req.goal.trim();
+    if goal_text.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "a goal needs to say what it is");
+    }
+    if !req.paused && crate::goals::active_count() >= MAX_ACTIVE_GOALS {
+        return err_json(
+            StatusCode::CONFLICT,
+            format!(
+                "{MAX_ACTIVE_GOALS} goals are already running. Pause or finish one first, \
+                 or create this one paused."
+            ),
+        );
+    }
+
+    let id = crate::goals::new_id();
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            // The first line of the goal, bounded — a list needs a handle, and
+            // asking for one twice is a form to fill in rather than a decision.
+            let first = goal_text.lines().next().unwrap_or(goal_text);
+            first.chars().take(60).collect::<String>()
+        });
+
+    let preset = req
+        .agent_preset
+        .clone()
+        .unwrap_or_else(|| crate::agent_preset::DEFAULT_PRESET.to_string());
+    let instance = match crate::agent_instance::for_goal(&id, &title, &preset) {
+        Ok(i) => i,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
+    };
+
+    let goal = crate::goals::Goal {
+        id: id.clone(),
+        title,
+        goal: goal_text.to_string(),
+        kind: req.kind,
+        instance_id: instance.id.clone(),
+        agent_preset: preset,
+        workspace: crate::goals::Workspace {
+            id: None,
+            repos: req
+                .repo
+                .as_deref()
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map(|full_name| {
+                    vec![crate::goals::GoalRepo {
+                        full_name: full_name.to_string(),
+                        dir: None,
+                        branch: Some(
+                            req.branch
+                                .clone()
+                                .unwrap_or_else(|| format!("goal/{}", &id[5..])),
+                        ),
+                    }]
+                })
+                .unwrap_or_default(),
+            last_provisioned_at: None,
+        },
+        status: if req.paused {
+            crate::goals::GoalStatus::Paused
+        } else {
+            crate::goals::GoalStatus::Active
+        },
+        blocked_reason: None,
+        heartbeat: crate::goals::Heartbeat {
+            every_minutes: req
+                .every_minutes
+                .unwrap_or(crate::goals::DEFAULT_HEARTBEAT_MINUTES)
+                .max(crate::goals::MIN_HEARTBEAT_MINUTES),
+            timezone: req.timezone,
+        },
+        io: match req.chat_id {
+            Some(chat_id) => crate::scheduled_tasks::IoBinding::WorkshopChat { chat_id },
+            None => crate::scheduled_tasks::IoBinding::Unbound,
+        },
+        journal_chat_id: None,
+        rails: req.rails.unwrap_or_default(),
+        counters: crate::goals::Counters::default(),
+        pending_run: None,
+        models: req.models.unwrap_or_default(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: String::new(),
+    };
+
+    if let Err(e) = crate::goals::save(&goal) {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    // Seed the document now rather than on the first tick, so a client can show
+    // the goal as soon as it is created instead of an empty panel for half an
+    // hour.
+    let _ = crate::goals::write_scratchpad(&goal.id, &crate::goals::seed_scratchpad(&goal));
+
+    (StatusCode::CREATED, Json(goal_row(&goal))).into_response()
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct UpdateGoalRequest {
+    #[serde(default)]
+    title: Option<String>,
+    /// Restate the goal. Allowed on purpose — a goal that turned out to be the
+    /// wrong goal is better corrected than abandoned — but it does not rewrite
+    /// the scratchpad, so the next tick will notice the two disagree.
+    #[serde(default)]
+    goal: Option<String>,
+    #[serde(default)]
+    status: Option<crate::goals::GoalStatus>,
+    /// The answer to whatever it blocked on. Appended to the scratchpad's State,
+    /// which is where the next tick will look for it.
+    #[serde(default)]
+    answer: Option<String>,
+    #[serde(default)]
+    every_minutes: Option<u32>,
+    #[serde(default)]
+    rails: Option<crate::goals::Rails>,
+    #[serde(default)]
+    models: Option<crate::goals::ModelTiers>,
+}
+
+/// `PATCH /api/v1/goals/{id}` — pause, resume, retarget, or answer.
+///
+/// Answering is the important one: a blocked goal is stopped until a person
+/// says something, and this is where that lands. The answer goes into the
+/// scratchpad rather than into a message, because the tick that acts on it will
+/// have read nothing else.
+#[utoipa::path(
+    patch,
+    path = "/api/v1/goals/{id}",
+    tag = "goals",
+    params(("id" = String, Path, description = "Goal id")),
+    request_body = UpdateGoalRequest,
+    responses(
+        (status = 200, body = GoalRow),
+        (status = 404, body = ErrorResponse),
+        (status = 409, description = "Resuming would exceed the active ceiling", body = ErrorResponse),
+    ),
+)]
+async fn patch_goal(Path(id): Path<String>, Json(req): Json<UpdateGoalRequest>) -> Response {
+    let Some(mut goal) = crate::goals::get(&id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+    };
+
+    if let Some(title) = req.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        goal.title = title.to_string();
+    }
+    if let Some(text) = req.goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+        goal.goal = text.to_string();
+    }
+    if let Some(minutes) = req.every_minutes {
+        goal.heartbeat.every_minutes = minutes.max(crate::goals::MIN_HEARTBEAT_MINUTES);
+    }
+    if let Some(rails) = req.rails {
+        goal.rails = rails;
+    }
+    if let Some(models) = req.models {
+        goal.models = models;
+    }
+
+    // An answer un-blocks by itself: replying to the question is the act of
+    // saying carry on, and making someone also flip the status would be a second
+    // step whose omission looks like the goal ignoring them.
+    if let Some(answer) = req.answer.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+        let current = crate::goals::read_scratchpad(&id).unwrap_or_default();
+        let updated = crate::goals::append_to_section(
+            &current,
+            "State",
+            &format!("- Answered: {}", answer.replace('\n', " ")),
+        );
+        let cleared = crate::goals::replace_section(&updated, "Blockers", "(none)");
+        let _ = crate::goals::write_scratchpad(&id, &cleared);
+        if goal.status == crate::goals::GoalStatus::Blocked {
+            goal.status = crate::goals::GoalStatus::Active;
+            goal.blocked_reason = None;
+        }
+    }
+
+    if let Some(status) = req.status {
+        // Resuming counts against the ceiling; pausing and finishing never do.
+        if status.ticks() && !goal.status.ticks() && crate::goals::active_count() >= MAX_ACTIVE_GOALS
+        {
+            return err_json(
+                StatusCode::CONFLICT,
+                format!("{MAX_ACTIVE_GOALS} goals are already running"),
+            );
+        }
+        goal.status = status;
+        if status.ticks() {
+            goal.blocked_reason = None;
+            // A goal that has been blocked for three days should not wake owing
+            // a backlog of ticks it will never run: resuming starts its clock now.
+            goal.counters.no_progress_streak = 0;
+            goal.counters.last_tick_at = Some(chrono::Utc::now().to_rfc3339());
+        }
+    }
+
+    match crate::goals::save(&goal) {
+        Ok(()) => Json(goal_row(&goal)).into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// `DELETE /api/v1/goals/{id}` — forget a goal.
+///
+/// Its agent survives: instances are never deleted on a timer, and what this one
+/// learned about the repo outlives the errand it learned it on.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/goals/{id}",
+    tag = "goals",
+    params(("id" = String, Path, description = "Goal id")),
+    responses((status = 204, description = "Deleted"), (status = 404, body = ErrorResponse)),
+)]
+async fn delete_goal(Path(id): Path<String>) -> Response {
+    match crate::goals::delete(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err_json(StatusCode::NOT_FOUND, e),
+    }
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+struct JournalQuery {
+    /// How many of the most recent entries. Defaults to 50.
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct GoalJournal {
+    entries: Vec<crate::goal_tick::JournalEntry>,
+}
+
+/// `GET /api/v1/goals/{id}/journal` — what it has been doing, one line per tick.
+#[utoipa::path(
+    get,
+    path = "/api/v1/goals/{id}/journal",
+    tag = "goals",
+    params(("id" = String, Path, description = "Goal id"), JournalQuery),
+    responses((status = 200, body = GoalJournal), (status = 404, body = ErrorResponse)),
+)]
+async fn get_goal_journal(Path(id): Path<String>, Query(q): Query<JournalQuery>) -> Response {
+    if crate::goals::get(&id).is_none() {
+        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+    }
+    Json(GoalJournal {
+        entries: crate::goal_tick::read_journal(&id, q.limit.unwrap_or(50)),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct WriteScratchpadRequest {
+    markdown: String,
+}
+
+/// `PUT /api/v1/goals/{id}/scratchpad` — fix the goal's memory by hand.
+///
+/// The repair hatch. A groom that went wrong, or a plan that has drifted, is
+/// otherwise only correctable by asking the agent nicely and hoping. The
+/// previous version is snapshotted like any other write, so this cannot be the
+/// last copy either.
+#[utoipa::path(
+    put,
+    path = "/api/v1/goals/{id}/scratchpad",
+    tag = "goals",
+    params(("id" = String, Path, description = "Goal id")),
+    request_body = WriteScratchpadRequest,
+    responses((status = 200, body = GoalDetail), (status = 404, body = ErrorResponse)),
+)]
+async fn put_goal_scratchpad(
+    Path(id): Path<String>,
+    Json(req): Json<WriteScratchpadRequest>,
+) -> Response {
+    let Some(goal) = crate::goals::get(&id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+    };
+    if let Err(e) = crate::goals::write_scratchpad(&id, &req.markdown) {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    let scratchpad = crate::goals::read_scratchpad(&id).unwrap_or_default();
+    Json(GoalDetail {
+        row: goal_row(&goal),
+        needs_groom: crate::goals::needs_groom(&scratchpad),
+        scratchpad,
+        goal_record: goal,
+    })
+    .into_response()
 }

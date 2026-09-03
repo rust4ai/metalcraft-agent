@@ -745,6 +745,11 @@ pub struct RunOneShotRequest<'a> {
     /// The roster a `sub_agent` call may reach, when this run is bound to a
     /// preset. `None` means unrestricted, as before presets existed.
     pub preset_personas: Option<Vec<String>>,
+    /// The goal this run is a tick of. Registers the `goal_*` tools against it,
+    /// so a tick can write its own scratchpad. `None` for every other kind of
+    /// run — and the tools are then absent rather than inert, because a tool
+    /// whose writes land nowhere is worse than one that isn't offered.
+    pub goal_id: Option<String>,
 }
 
 impl<'a> RunOneShotRequest<'a> {
@@ -759,6 +764,7 @@ impl<'a> RunOneShotRequest<'a> {
             diagnostics: None,
             instance_id: None,
             preset_personas: None,
+            goal_id: None,
         }
     }
 }
@@ -804,6 +810,8 @@ pub struct RuntimeOptions {
     /// Where to announce this turn's plan as it changes, so a client can render
     /// the task list being worked. `None` ⇒ nobody is watching.
     pub plan_sink: Option<crate::turn_plan::PlanSink>,
+    /// The goal this turn is a tick of — see [`RunOneShotRequest::goal_id`].
+    pub goal_id: Option<String>,
 }
 
 pub fn build_agent_runtime<M>(
@@ -828,6 +836,7 @@ where
     let tool_config = crate::tools::ToolConfig {
         preset_personas: options.preset_personas.clone(),
         instance_id: options.instance_id.clone(),
+        goal_id: options.goal_id.clone(),
         api_key: context.api_key.clone(),
         model_name: model_name.to_string(),
         system_prompt: system_prompt.clone(),
@@ -912,6 +921,7 @@ pub async fn run_one_shot_task(
                 .await,
             instance_id: request.instance_id.clone(),
             preset_personas: request.preset_personas.clone(),
+            goal_id: request.goal_id.clone(),
             ..Default::default()
         },
         |client, model_name| client.completion_model(model_name),

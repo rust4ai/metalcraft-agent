@@ -120,6 +120,7 @@ fn sub_agent_registered_with_config() {
         // delegated run does when the turn is stopped.
         interrupt: None,
         turn_plan: None,
+    goal_id: None,
     };
 
     let tools: Vec<String> = vec!["read_file", "sub_agent"]

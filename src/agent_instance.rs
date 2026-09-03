@@ -52,6 +52,15 @@ pub enum InstanceOrigin {
     Flow {
         flow_id: String,
     },
+    /// An agent that exists to pursue one [goal](crate::goals), for as long as
+    /// that takes.
+    ///
+    /// The goal is the reason the agent was minted, and the two live and die
+    /// together in intent — but not in storage: deleting a goal leaves the
+    /// instance, because what it learned along the way outlives the errand.
+    Goal {
+        goal_id: String,
+    },
 }
 
 impl Default for InstanceOrigin {
@@ -306,6 +315,26 @@ pub fn for_flow(flow_id: &str, label: &str, preset_slug: &str) -> Result<AgentIn
     };
     // `list()` is newest-active first, so a flow that somehow has two agents
     // (one minted before this existed, one after) resolves to the one being used.
+    if let Some(found) = list().into_iter().find(|i| i.origin == origin) {
+        return Ok(found);
+    }
+    let preset = crate::agent_preset::AgentPreset::load(preset_slug, &paths::agent_presets_dir())?;
+    preset.ensure_spawnable()?;
+    let mut instance = AgentInstance::new(&preset, origin);
+    instance.name = format!("{} — {label}", preset.name);
+    instance.save()?;
+    Ok(instance)
+}
+
+/// The agent that pursues one [goal](crate::goals), minting it on first use.
+///
+/// One instance for the goal's whole life, which is what makes its memory worth
+/// having: a goal is a hundred fresh conversations, and the only thing that
+/// carries between them besides the scratchpad is what this agent knows.
+pub fn for_goal(goal_id: &str, label: &str, preset_slug: &str) -> Result<AgentInstance, String> {
+    let origin = InstanceOrigin::Goal {
+        goal_id: goal_id.to_string(),
+    };
     if let Some(found) = list().into_iter().find(|i| i.origin == origin) {
         return Ok(found);
     }

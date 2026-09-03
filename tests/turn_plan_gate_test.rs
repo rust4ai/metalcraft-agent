@@ -41,6 +41,7 @@ fn registry_with_plan(sink: ReplySink) -> ToolRegistry {
         instance_id: None,
         interrupt: None,
         turn_plan: Some(metalcraft_agent::turn_plan::new_shared()),
+    goal_id: None,
     };
     let names: Vec<String> = ["update_plan", "say_to_user", "ask_user"]
         .into_iter()
@@ -187,6 +188,7 @@ async fn no_plan_means_no_gate_and_no_plan_tool() {
         instance_id: None,
         interrupt: None,
         turn_plan: None,
+    goal_id: None,
     };
     let names: Vec<String> = ["update_plan", "say_to_user"]
         .into_iter()

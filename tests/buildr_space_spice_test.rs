@@ -897,6 +897,7 @@ impl AgentUnderTest for MetalcraftPresetAgent {
             diagnostics: None,
             instance_id: None,
             preset_personas: self.preset_personas.clone(),
+        goal_id: None,
         };
 
         let outcome = run_one_shot_task(&self.context, request)

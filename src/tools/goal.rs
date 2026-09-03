@@ -1,0 +1,332 @@
+//! The four tools a goal tick uses to write down where it got to.
+//!
+//! Each is bound to one goal at registration ([`ToolConfig::goal_id`]), so the
+//! model never names which goal it is writing to — it cannot mistype it, and it
+//! cannot write to another goal's scratchpad.
+//!
+//! The split is deliberate. [`GoalNoteTool`] is the cheap, frequent one: a line
+//! of log, a blocker, a question. [`GoalScratchpadWriteTool`] replaces the whole
+//! document and is the tick's *final* act — wholesale rather than patched, for
+//! the same reason `update_plan` is: a step silently abandoned shows up as a
+//! deletion instead of sitting there forever, and there is never a question of
+//! which write won.
+//!
+//! [`GoalBlockTool`] and [`GoalCompleteTool`] are the two ways a goal stops. Both
+//! are terminal for the *goal*, not merely for the turn, which is why they are
+//! tools rather than something inferred from what the agent said.
+//!
+//! [`ToolConfig::goal_id`]: crate::tools::ToolConfig::goal_id
+
+use async_trait::async_trait;
+
+use crate::goals;
+
+/// Sections a note may be appended to.
+///
+/// Not the full section list: `Goal` is immutable, and `Plan`/`State`/`Workspace`
+/// are rewritten wholesale by the scratchpad write rather than appended to a line
+/// at a time — appending to a plan is how a plan grows a second copy of itself.
+const NOTE_SECTIONS: &[&str] = &["Log", "Blockers", "Questions for the human"];
+
+fn err(tool: &str, message: impl Into<String>) -> metalcraft::GraphError {
+    metalcraft::GraphError::ToolCallFailed {
+        tool: tool.into(),
+        message: message.into(),
+    }
+}
+
+pub struct GoalNoteTool {
+    goal_id: String,
+}
+
+impl GoalNoteTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for GoalNoteTool {
+    fn name(&self) -> &str {
+        "goal_note"
+    }
+
+    fn description(&self) -> &str {
+        "Append one line to your goal's scratchpad. Use `Log` for what you just did (start it \
+         with what changed, not with what you intended), `Blockers` for something stopping \
+         progress that you intend to work around, and `Questions for the human` for something \
+         you want asked but are not blocking on. To rewrite the plan or the state, use \
+         goal_scratchpad_write instead — this tool only appends."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "section": {
+                    "type": "string",
+                    "enum": NOTE_SECTIONS,
+                    "description": "Which section to append to."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "One line. Concrete enough to be useful to a future tick that remembers none of this — name files, branches, run ids."
+                }
+            },
+            "required": ["section", "text"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let section = args["section"]
+            .as_str()
+            .ok_or_else(|| err("goal_note", "Missing required parameter: section"))?;
+        if !NOTE_SECTIONS.contains(&section) {
+            return Err(err(
+                "goal_note",
+                format!("Unknown section '{section}'. One of: {}", NOTE_SECTIONS.join(", ")),
+            ));
+        }
+        let text = args["text"]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| err("goal_note", "Missing required parameter: text"))?;
+
+        let current = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
+        // One line means one line: a note carrying its own newlines would end up
+        // as several list items, one of which is a fragment.
+        let line = format!("- {}", text.replace('\n', " "));
+        let updated = goals::append_to_section(&current, section, &line);
+        goals::write_scratchpad(&self.goal_id, &updated)
+            .map_err(|e| err("goal_note", format!("could not write scratchpad: {e}")))?;
+
+        Ok(serde_json::json!({ "ok": true, "section": section }))
+    }
+}
+
+pub struct GoalScratchpadWriteTool {
+    goal_id: String,
+}
+
+impl GoalScratchpadWriteTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for GoalScratchpadWriteTool {
+    fn name(&self) -> &str {
+        "goal_scratchpad_write"
+    }
+
+    fn description(&self) -> &str {
+        "Replace your goal's whole scratchpad. This is the last thing you do in a tick, and the \
+         only memory you carry to the next one — the tick that reads it will know nothing you \
+         know now. Pass the complete document, keeping every '## ' section heading: Goal, \
+         Workspace, Plan, State, Log, Blockers, Questions for the human. Never drop an unchecked \
+         plan step, an unresolved blocker or an open question; never check a box you did not \
+         verify. The previous version is snapshotted, so a mistake here is recoverable — but a \
+         tick that inherits a wrong plan will act on it."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "markdown": {
+                    "type": "string",
+                    "description": "The complete scratchpad, in markdown, with all its '## ' sections."
+                }
+            },
+            "required": ["markdown"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let markdown = args["markdown"]
+            .as_str()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .ok_or_else(|| err("goal_scratchpad_write", "Missing required parameter: markdown"))?;
+
+        // The goal statement is the one thing a rewrite may not lose: a tick that
+        // drops it leaves every later tick working towards nothing in particular,
+        // and the loss is invisible because the document still looks well-formed.
+        let mut markdown = markdown.to_string();
+        if goals::section_body(&markdown, "Goal").is_none_or(str::is_empty) {
+            let Some(goal) = goals::get(&self.goal_id) else {
+                return Err(err("goal_scratchpad_write", "this goal no longer exists"));
+            };
+            markdown = goals::replace_section(&markdown, "Goal", goal.goal.trim());
+        }
+
+        goals::write_scratchpad(&self.goal_id, &markdown)
+            .map_err(|e| err("goal_scratchpad_write", format!("could not write scratchpad: {e}")))?;
+
+        let progress = goals::progress_of(&markdown);
+        Ok(serde_json::json!({
+            "ok": true,
+            "bytes": markdown.len(),
+            "plan_done": progress.done,
+            "plan_total": progress.total,
+        }))
+    }
+}
+
+pub struct GoalBlockTool {
+    goal_id: String,
+}
+
+impl GoalBlockTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for GoalBlockTool {
+    fn name(&self) -> &str {
+        "goal_block"
+    }
+
+    fn description(&self) -> &str {
+        "Stop the heartbeat and put a question to the person who set this goal. Use it sparingly: \
+         a blocked goal makes no progress until someone happens to look, which overnight is hours \
+         of nothing. Block only when the call is irreversible (deleting data, force-pushing, \
+         anything public), spends money, or would change what the goal means. For an ordinary \
+         choice between reasonable options, decide it, write the decision and your reasoning into \
+         the scratchpad's State, and keep going."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "What you need answered, phrased so it can be answered without reading the whole scratchpad. Offer the options you see."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why you cannot decide this yourself — which of irreversible / costs money / changes the goal it is."
+                }
+            },
+            "required": ["question"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let question = args["question"]
+            .as_str()
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .ok_or_else(|| err("goal_block", "Missing required parameter: question"))?;
+        let reason = args["reason"].as_str().map(str::trim).unwrap_or_default();
+
+        let mut goal = goals::get(&self.goal_id)
+            .ok_or_else(|| err("goal_block", "this goal no longer exists"))?;
+        goal.status = goals::GoalStatus::Blocked;
+        goal.blocked_reason = Some(if reason.is_empty() {
+            question.to_string()
+        } else {
+            format!("{question}\n\n({reason})")
+        });
+        goals::save(&goal).map_err(|e| err("goal_block", e))?;
+
+        let current = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
+        let updated = goals::append_to_section(
+            &current,
+            "Questions for the human",
+            &format!("- {}", question.replace('\n', " ")),
+        );
+        let _ = goals::write_scratchpad(&self.goal_id, &updated);
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "status": "blocked",
+            "note": "The heartbeat is stopped until someone answers. Finish your scratchpad write, then end the tick."
+        }))
+    }
+}
+
+pub struct GoalCompleteTool {
+    goal_id: String,
+}
+
+impl GoalCompleteTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for GoalCompleteTool {
+    fn name(&self) -> &str {
+        "goal_complete"
+    }
+
+    fn description(&self) -> &str {
+        "Declare the goal met and stop the heartbeat. Only call this when every plan step is \
+         genuinely done and verified — not when the remaining work merely looks small. If part \
+         of it turned out to be impossible or unwanted, say so in the summary rather than \
+         quietly leaving it out."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "What was achieved, and anything deliberately left undone. Written for someone who has read none of the ticks."
+                }
+            },
+            "required": ["summary"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let summary = args["summary"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| err("goal_complete", "Missing required parameter: summary"))?;
+
+        let mut goal = goals::get(&self.goal_id)
+            .ok_or_else(|| err("goal_complete", "this goal no longer exists"))?;
+
+        // A goal that says it is done while its own plan says otherwise is the
+        // failure this whole design is arranged against, so it is refused rather
+        // than recorded. Refusing returns control to the agent, which can either
+        // finish the step or uncheck the claim.
+        let scratchpad = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
+        let progress = goals::progress_of(&scratchpad);
+        if progress.total > 0 && progress.done < progress.total {
+            return Err(err(
+                "goal_complete",
+                format!(
+                    "{} of {} plan steps are still unchecked. Either finish them, or — if they \
+                     turned out to be unnecessary — rewrite the plan with goal_scratchpad_write \
+                     saying so, then complete.",
+                    progress.total - progress.done,
+                    progress.total
+                ),
+            ));
+        }
+
+        goal.status = goals::GoalStatus::Done;
+        goal.blocked_reason = None;
+        goals::save(&goal).map_err(|e| err("goal_complete", e))?;
+
+        let updated = goals::append_to_section(
+            &scratchpad,
+            "Log",
+            &format!("- **Goal complete.** {}", summary.replace('\n', " ")),
+        );
+        let _ = goals::write_scratchpad(&self.goal_id, &updated);
+
+        Ok(serde_json::json!({ "ok": true, "status": "done" }))
+    }
+}

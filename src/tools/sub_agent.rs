@@ -428,6 +428,13 @@ impl metalcraft::Tool for SubAgentTool {
                 // obligations it cannot see, so delegation stops here and the
                 // nested run answers on its own terms.
                 turn_plan: None,
+                // Same reasoning as the plan, and it matters more here: the
+                // scratchpad is the goal's entire memory, and a delegate holds
+                // only the fragment of the task it was handed. One that rewrote
+                // the document would be summarising a goal it cannot see. It
+                // reports back instead, and the tick — which can see all of it —
+                // writes.
+                goal_id: None,
             };
             let registry = crate::tools::create_registry_for_with_config(
                 &persona.resolved_tool_names(),

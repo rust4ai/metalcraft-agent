@@ -42,7 +42,7 @@ pub enum TaskStatus {
 
 /// Where a fired follow-up's reply should be delivered. Captured when the job is
 /// armed so the daemon can rebuild the right [`ReplySink`](crate::tools::ReplySink).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IoBinding {
     /// A Workshop chat — deliver by appending to the chat and publishing to its
