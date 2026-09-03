@@ -6,6 +6,7 @@ pub mod find_files;
 pub mod gateway;
 pub mod gateway_webhook;
 pub mod goal;
+pub mod goal_task;
 pub mod grep;
 pub mod http_api;
 pub mod list_files;
@@ -260,7 +261,8 @@ pub fn create_registry_for_with_config(
                 config.and_then(|c| c.reply_sink.clone()),
             )),
             "goal_note" | "goal_scratchpad_write" | "goal_block" | "goal_complete"
-            | "goal_await_run" | "goal_finding" | "goal_finding_update" => {
+            | "goal_await_run" | "goal_finding" | "goal_finding_update" | "task_add"
+            | "task_update" | "task_done" | "task_block" | "task_drop" => {
                 // Bound to one goal at registration. Outside a goal tick there is
                 // no goal to bind to, so the tools are absent rather than
                 // registered and failing at call time — the model is never shown
@@ -279,6 +281,13 @@ pub fn create_registry_for_with_config(
                         "goal_finding_update" => {
                             registry.register(goal::GoalFindingUpdateTool::new(goal_id))
                         }
+                        "task_add" => registry.register(goal_task::TaskAddTool::new(goal_id)),
+                        "task_update" => {
+                            registry.register(goal_task::TaskUpdateTool::new(goal_id))
+                        }
+                        "task_done" => registry.register(goal_task::TaskDoneTool::new(goal_id)),
+                        "task_block" => registry.register(goal_task::TaskBlockTool::new(goal_id)),
+                        "task_drop" => registry.register(goal_task::TaskDropTool::new(goal_id)),
                         _ => registry.register(goal::GoalCompleteTool::new(goal_id)),
                     },
                     None => {

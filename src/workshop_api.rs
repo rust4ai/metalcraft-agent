@@ -630,6 +630,7 @@ async fn auth_middleware(
         post_factory_reset,
         list_goals, get_goal, post_goal, patch_goal, delete_goal,
         get_goal_journal, put_goal_scratchpad, get_goal_findings,
+        get_goal_tasks, put_goal_tasks,
     ),
     components(schemas(
         FactoryResetRequest, ResetReport, ResetScope, ResetFailure, RestartExpectation,
@@ -640,6 +641,8 @@ async fn auth_middleware(
         InstallFlowRequest, InstallDependenciesResponse,
         crate::scheduled_flows::SchedulePreview,
         GoalList, GoalRow, GoalDetail, GoalJournal, CreateGoalRequest, UpdateGoalRequest,
+        WriteTasksRequest, crate::goal_tasks::Task, crate::goal_tasks::TaskStatus,
+        crate::goal_tasks::Evidence, crate::goal_tasks::EvidenceKind,
         WriteScratchpadRequest,
         crate::goals::Goal, crate::goals::GoalKind, crate::goals::GoalStatus,
         crate::goals::Heartbeat, crate::goals::Workspace, crate::goals::GoalRepo,
@@ -880,6 +883,8 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/goals/{id}", delete(delete_goal))
         .route("/api/v1/goals/{id}/journal", get(get_goal_journal))
         .route("/api/v1/goals/{id}/scratchpad", put(put_goal_scratchpad))
+        .route("/api/v1/goals/{id}/tasks", get(get_goal_tasks))
+        .route("/api/v1/goals/{id}/tasks", put(put_goal_tasks))
         .route("/api/v1/goals/{id}/findings", get(get_goal_findings))
         .route("/api/v1/scheduled-flows", get(list_scheduled_flows))
         .route("/api/v1/scheduled-flows", post(post_scheduled_flow))
@@ -9477,6 +9482,9 @@ struct GoalDetail {
     /// Set when the document has decayed enough that the next review tick will
     /// groom it rather than merely audit the plan.
     needs_groom: bool,
+    /// The plan, as records. Empty for a goal created before tasks existed —
+    /// its plan is still checkboxes inside `scratchpad`.
+    tasks: Vec<crate::goal_tasks::Task>,
 }
 
 /// `GET /api/v1/goals` — what this pod is working towards on its own.
@@ -9513,10 +9521,69 @@ async fn get_goal(Path(id): Path<String>) -> Response {
     Json(GoalDetail {
         row: goal_row(&goal),
         needs_groom: crate::goals::needs_groom(&scratchpad),
+        tasks: crate::goal_tasks::list(&id),
         scratchpad,
         goal_record: goal,
     })
     .into_response()
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct WriteTasksRequest {
+    /// The whole list, replacing what is there. Ids are preserved as given, so
+    /// a client edits what it read rather than posting a diff.
+    tasks: Vec<crate::goal_tasks::Task>,
+}
+
+/// `GET /api/v1/goals/{id}/tasks` — the plan, as records.
+#[utoipa::path(
+    get,
+    path = "/api/v1/goals/{id}/tasks",
+    tag = "goals",
+    params(("id" = String, Path, description = "Goal id")),
+    responses((status = 200, body = Vec<crate::goal_tasks::Task>), (status = 404, body = ErrorResponse)),
+)]
+async fn get_goal_tasks(Path(id): Path<String>) -> Response {
+    if crate::goals::get(&id).is_none() {
+        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+    }
+    Json(crate::goal_tasks::list(&id)).into_response()
+}
+
+/// `PUT /api/v1/goals/{id}/tasks` — steer a running goal.
+///
+/// The point of a plan being records rather than prose: a person watching a goal
+/// can add a task, re-order the list, or drop something that has become
+/// pointless, without editing markdown and hoping the next tick honours it.
+///
+/// Deliberately a whole-list replace, like the scratchpad write next to it: the
+/// client edits what it just read, and there is never a question of which write
+/// won. There is one other writer — the tick — and a person and a tick racing on
+/// the same list is the same race the scratchpad already has, resolved the same
+/// way.
+#[utoipa::path(
+    put,
+    path = "/api/v1/goals/{id}/tasks",
+    tag = "goals",
+    params(("id" = String, Path, description = "Goal id")),
+    request_body = WriteTasksRequest,
+    responses(
+        (status = 200, body = Vec<crate::goal_tasks::Task>),
+        (status = 400, description = "The list is not a usable plan", body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+    ),
+)]
+async fn put_goal_tasks(Path(id): Path<String>, Json(req): Json<WriteTasksRequest>) -> Response {
+    if crate::goals::get(&id).is_none() {
+        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+    }
+    if let Err(e) = crate::goal_tasks::validate(&req.tasks) {
+        return err_json(StatusCode::BAD_REQUEST, e);
+    }
+    if let Err(e) = crate::goal_tasks::save(&id, &req.tasks) {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    Json(crate::goal_tasks::list(&id)).into_response()
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -9895,6 +9962,7 @@ async fn put_goal_scratchpad(
     Json(GoalDetail {
         row: goal_row(&goal),
         needs_groom: crate::goals::needs_groom(&scratchpad),
+        tasks: crate::goal_tasks::list(&id),
         scratchpad,
         goal_record: goal,
     })

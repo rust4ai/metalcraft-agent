@@ -280,10 +280,25 @@ impl Goal {
         paths::goal_dir(&self.id)
     }
 
-    /// How far along, derived from the scratchpad's `Plan` checkboxes so no
-    /// client ever has to parse markdown to draw a progress bar.
+    /// How far along.
+    ///
+    /// From the task list when the goal has one, and from the scratchpad's
+    /// `Plan` checkboxes when it does not — every goal created before tasks
+    /// existed still draws a correct bar, with nothing to migrate.
     pub fn progress(&self) -> Progress {
+        if crate::goal_tasks::exists(&self.id) {
+            return crate::goal_tasks::progress(&crate::goal_tasks::list(&self.id));
+        }
         progress_of(&read_scratchpad(&self.id).unwrap_or_default())
+    }
+
+    /// Whether anything this goal started is still running — a build handed to
+    /// the heartbeat, by the goal itself or by any of its tasks.
+    pub fn awaiting_a_run(&self) -> bool {
+        self.pending_run.is_some()
+            || crate::goal_tasks::list(&self.id)
+                .iter()
+                .any(|t| t.pending_run.is_some())
     }
 
     /// The interval until the next tick, honouring a pending run's short fuse.
@@ -292,7 +307,7 @@ impl Goal {
     /// working through phases should not. This is the only place the interval
     /// shrinks, and it shrinks for a reason that will resolve on its own.
     pub fn tick_interval_minutes(&self) -> u32 {
-        if self.pending_run.is_some() {
+        if self.awaiting_a_run() {
             return MIN_HEARTBEAT_MINUTES;
         }
         self.heartbeat.every_minutes.max(MIN_HEARTBEAT_MINUTES)
@@ -457,7 +472,7 @@ pub fn seed_scratchpad(goal: &Goal) -> String {
         _ => "None yet.\n".to_string(),
     };
     format!(
-        "## Goal\n{}\n\n## Workspace\n{}\n## Plan\n_No plan yet — writing one is this tick's work._\n\n\
+        "## Goal\n{}\n\n## Workspace\n{}\n## Plan\n_No plan yet — call `task_add` to write one; this section is rendered from the task list._\n\n\
          ## State\n(nothing yet)\n\n## Log\n\n## Blockers\n(none)\n\n## Questions for the human\n(none)\n",
         goal.goal.trim(),
         workspace,

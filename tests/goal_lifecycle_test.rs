@@ -65,7 +65,7 @@ async fn a_goal_lives_through_its_scratchpad() {
     // asked for something wants to wait half an hour for it to start.
     let pad = goals::read_scratchpad(&goal.id).unwrap();
     assert!(pad.contains("Ship Stripe billing"), "the goal is in its own scratchpad");
-    assert_eq!(goal_tick::tick_kind(&loaded, &pad), TickKind::Plan);
+    assert_eq!(goal_tick::tick_kind(&loaded, &pad, &[]), TickKind::Plan);
     assert!(goal_tick::is_due(&loaded, chrono::Utc::now()));
     assert_eq!(goal_tick::due(chrono::Utc::now()).len(), 1);
 
@@ -83,7 +83,7 @@ async fn a_goal_lives_through_its_scratchpad() {
 
     let pad = goals::read_scratchpad(&goal.id).unwrap();
     assert_eq!(goals::progress_of(&pad), goals::Progress { done: 0, total: 2 });
-    assert_eq!(goal_tick::tick_kind(&loaded, &pad), TickKind::Work);
+    assert_eq!(goal_tick::tick_kind(&loaded, &pad, &[]), TickKind::Work);
     // the previous version is kept — grooming is the one op that can destroy a goal
     assert!(!goals::snapshots(&goal.id).is_empty(), "the write snapshotted");
 
@@ -115,7 +115,7 @@ async fn a_goal_lives_through_its_scratchpad() {
         .await
         .expect_err("a goal with unchecked steps cannot be complete");
     assert!(
-        format!("{err}").contains("unchecked"),
+        format!("{err}").contains("still open"),
         "the refusal has to say what is still owed: {err}"
     );
     assert_eq!(

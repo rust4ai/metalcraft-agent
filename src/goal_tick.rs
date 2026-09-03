@@ -19,6 +19,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::diagnostics::DiagnosticsLogger;
+use crate::goal_tasks::{self, Evidence, EvidenceKind, Task, TaskStatus};
 use crate::goals::{self, Goal, GoalStatus};
 use crate::runtime::{self, AgentRuntimeContext, RunOneShotRequest};
 use crate::approval::ApprovalMode;
@@ -58,8 +59,16 @@ pub const REVIEW_EVERY: u32 = 5;
 /// A scratchpad that has decayed past its bounds forces a review regardless of
 /// the cadence — a goal that thrashes grooms more often, which is the correct
 /// response to thrashing rather than a punishment for it.
-pub fn tick_kind(goal: &Goal, scratchpad: &str) -> TickKind {
-    if goals::progress_of(scratchpad).total == 0 {
+///
+/// `tasks` is the goal's task list; a goal old enough to predate it passes an
+/// empty slice and falls back to counting checkboxes, exactly as before.
+pub fn tick_kind(goal: &Goal, scratchpad: &str, tasks: &[Task]) -> TickKind {
+    let planned = if tasks.is_empty() {
+        goals::progress_of(scratchpad).total
+    } else {
+        goal_tasks::progress(tasks).total
+    };
+    if planned == 0 {
         return TickKind::Plan;
     }
     if goals::needs_groom(scratchpad) {
@@ -386,25 +395,81 @@ pub fn decide_pending(
 /// follows starts from what is true rather than from what was true last time.
 async fn preflight(goal: &mut Goal) -> PreFlight {
     let mut notes: Vec<String> = Vec::new();
+    let mut still_waiting: Vec<String> = Vec::new();
 
     if let Some(pending) = goal.pending_run.clone() {
-        let age = chrono::DateTime::parse_from_rfc3339(&pending.started_at)
-            .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_minutes())
-            .unwrap_or(0);
+        let age = run_age_minutes(&pending.started_at);
         let result = crate::buildr::get_run(&pending.workspace_id, &pending.run_id).await;
         match decide_pending(&result, age, &pending.what) {
-            PreFlight::Wait { why } => {
-                // Deliberately nothing else: no journal line, no counters. A
-                // wait is not a tick, and one line every five minutes would bury
-                // the ticks that did something.
-                log::info!("goal {} waiting: {why}", goal.id);
-                return PreFlight::Wait { why };
-            }
+            PreFlight::Wait { why } => still_waiting.push(why),
             PreFlight::Spend { note } => {
                 goal.pending_run = None;
                 notes.extend(note);
             }
         }
+    }
+
+    // Every task's own run, polled the same way. This is where a goal gets to
+    // have three builds in flight at once: N HTTP GETs and no model, so the
+    // waiting costs nothing whether there is one of them or five.
+    let mut tasks = goal_tasks::list(&goal.id);
+    let mut tasks_changed = false;
+    for task in tasks.iter_mut() {
+        let Some(pending) = task.pending_run.clone() else {
+            continue;
+        };
+        let age = run_age_minutes(&pending.started_at);
+        let result = crate::buildr::get_run(&pending.workspace_id, &pending.run_id).await;
+        match decide_pending(&result, age, &pending.what) {
+            PreFlight::Wait { why } => still_waiting.push(format!("**{}** {why}", task.id)),
+            PreFlight::Spend { note } => {
+                task.pending_run = None;
+                // Back into the pool: the run it was owed has landed, so it is
+                // workable again whether that run passed or failed.
+                if task.status == TaskStatus::Waiting {
+                    task.status = TaskStatus::Todo;
+                }
+                // The verdict goes on the record, not just in the prompt. A gate
+                // is checked against this evidence, so a task whose run exited 0
+                // can be completed and one whose run failed cannot.
+                if let Ok(run) = &result
+                    && run.finished()
+                {
+                    let exit = run
+                        .exit_code
+                        .map(|c| format!(" exit {c}"))
+                        .unwrap_or_default();
+                    task.evidence.push(Evidence::new(
+                        EvidenceKind::Run,
+                        &format!("{} {}{exit} ({})", pending.run_id, run.status, pending.what),
+                    ));
+                }
+                tasks_changed = true;
+                notes.extend(note.map(|n| format!("**{}** ({}): {n}", task.id, task.title)));
+            }
+        }
+    }
+    if tasks_changed {
+        let _ = goal_tasks::save(&goal.id, &tasks);
+    }
+
+    // Wait only when nothing landed AND there is nothing else worth waking for.
+    // A goal with one task building and another ready to start should start it:
+    // that is the whole reason tasks own their runs rather than the goal owning
+    // one. With no tasks this is exactly the old behaviour — a goal waiting on
+    // its single run has nothing else it could be doing.
+    if notes.is_empty() && !still_waiting.is_empty() && goal_tasks::ready(&tasks).is_empty() {
+        let why = still_waiting.join("; ");
+        // Deliberately nothing else: no journal line, no counters. A wait is not
+        // a tick, and one line every five minutes would bury the ticks that did
+        // something.
+        log::info!("goal {} waiting: {why}", goal.id);
+        return PreFlight::Wait { why };
+    }
+    // Something is still running but there is work to get on with — say so, so
+    // the tick does not start a second copy of it.
+    if !still_waiting.is_empty() {
+        notes.push(format!("Still running: {}.", still_waiting.join("; ")));
     }
 
     // A workspace that has been reaped is the normal end of a free-plan week,
@@ -443,6 +508,15 @@ async fn preflight(goal: &mut Goal) -> PreFlight {
             Some(notes.join("\n\n"))
         },
     }
+}
+
+/// How long ago a run was started, in minutes. Zero when the stamp is
+/// unreadable — an unparseable timestamp must not read as "ancient" and get a
+/// live run declared dead.
+fn run_age_minutes(started_at: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(started_at)
+        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_minutes())
+        .unwrap_or(0)
 }
 
 /// Tell the person who set the goal that it has stopped and needs them.
@@ -508,37 +582,52 @@ pub fn tick_frame(goal: &Goal, kind: TickKind, tick_number: u32) -> String {
         "You are working towards a long-running goal. This is tick {tick_number}.\n\n\
          You remember nothing of previous ticks. Everything you know is in the scratchpad \
          below — and everything the *next* tick will know is what you leave there.\n\n\
+         Your plan is a **task list**, not prose. `## Plan` below is rendered from it and you \
+         cannot edit it by writing markdown: use `task_add` to add tasks, `task_done` to finish \
+         one (with evidence), `task_block` to park one, `task_drop` to retire one, and \
+         `task_update` to re-scope or re-route. Nothing you do not name can change, so there is \
+         no way to lose a step.\n\n\
          Rules that hold on every tick:\n\
          - **Do one slice of work, not the whole goal.** A tick is minutes, not hours.\n\
-         - **Verify before you claim.** Never check a plan box you did not see pass — a build \
-         that compiles is not a feature that works.\n\
+         - **Verify before you claim.** `task_done` wants the commit, the run and its exit code, \
+         or the file — a build that compiles is not a feature that works.\n\
          - **Uncommitted work does not exist.** If you changed code, commit and push it before \
          the tick ends; the workspace can be reaped between ticks.\n\
          - **Decide, don't stall.** For an ordinary choice, pick the reasonable option, record \
          the decision and why in the scratchpad's State, and keep moving. Use `goal_block` only \
-         when the call is irreversible, spends money, or changes what the goal means.\n\
-         - **Finish by rewriting the scratchpad** with `goal_scratchpad_write`, so a stranger \
-         could pick this up. That is the last thing you do.\n\n"
+         when the call is irreversible, spends money, or changes what the goal means. To stop \
+         ONE task without stopping the goal, use `task_block` — its siblings keep going.\n\
+         - **Finish by rewriting the scratchpad** with `goal_scratchpad_write` — State, Log, \
+         Blockers, Questions. Leave `## Plan` alone; the task list is that.\n\n"
     );
 
     let specific = match kind {
         TickKind::Plan => {
             "**This tick is for planning.** There is no usable plan yet. Look at the goal and at \
-             whatever the repo or the workspace tells you, then write a plan of 3–8 concrete \
-             steps as markdown checkboxes under `## Plan`. Each step should be one tick's worth \
-             of work and concrete enough that you could tell whether it happened. Do not start \
-             the work this tick — the plan is the work."
+             whatever the repo or the workspace tells you, then call `task_add` ONCE with 3–8 \
+             concrete tasks. Each should be one tick's worth of work and concrete enough that \
+             you could tell whether it happened, and each `detail` has to carry everything a \
+             delegate would need, because a delegate sees nothing but that.\n\
+             Think about `deps` deliberately: tasks with no deps can run **at the same time**, \
+             so leave them empty wherever two tasks are genuinely independent, and only add an \
+             edge where one task really needs another's output. Decide anything two tasks would \
+             otherwise each have to pick — a file format, a schema, a naming scheme — now, and \
+             write it into both details. Do not start the work this tick; the plan is the work."
         }
         TickKind::Work => {
-            "**This tick is for work.** Take the first unchecked step in the plan. Do it, verify \
-             it, and check it off only if the verification passed. If the step turns out to be \
-             bigger than one tick, split it in the plan and do the first part."
+            "**This tick is for work.** Take a task marked `[ready]`. Do it, verify it, and call \
+             `task_done` with the evidence. If it turns out to be bigger than one tick, tighten \
+             it with `task_update` and `task_add` the remainder. If a long build or test run is \
+             involved, start it and hand it to the heartbeat with `goal_await_run` naming that \
+             task — the next tick reads the result for free."
         }
         TickKind::Review => {
             "**This tick is for review and grooming.** Do no new work. Instead:\n\
              1. Re-derive the plan from reality — what is actually on the branch, what the tests \
-             and CI actually say — not from what earlier ticks claimed. Uncheck anything not \
-             genuinely done, and add anything that was missed.\n\
+             and CI actually say — not from what earlier ticks claimed. Check each done task's \
+             evidence actually holds; `task_update` with `reopen` anything that does not, \
+             `task_add` anything that was missed, and `task_drop` anything reality has made \
+             pointless.\n\
              2. Fold the older half of the Log into State: turn twenty lines of what-I-did into \
              three lines of what-is-true-now.\n\
              3. Retire what is resolved — answered questions, cleared blockers.\n\
@@ -552,6 +641,16 @@ pub fn tick_frame(goal: &Goal, kind: TickKind, tick_number: u32) -> String {
     let scratchpad = goals::read_scratchpad(&goal.id)
         .map(|s| goals::trim_for_injection(&s))
         .unwrap_or_else(|| goals::seed_scratchpad(goal));
+    // The plan the tick reads is rendered from the task list, replacing whatever
+    // prose is in the stored document. One plan, one truth: a frame carrying
+    // both a stale markdown plan and a live task list would be asking the model
+    // which to believe. A goal with no tasks keeps its checkboxes untouched.
+    let tasks = goal_tasks::list(&goal.id);
+    let scratchpad = if tasks.is_empty() {
+        scratchpad
+    } else {
+        goals::replace_section(&scratchpad, "Plan", &goal_tasks::render(&tasks))
+    };
 
     // The ledger, for an audit goal, injected the same way the scratchpad is —
     // it is the dedupe key, and a sweep that cannot see it re-finds what it
@@ -567,17 +666,27 @@ pub fn tick_frame(goal: &Goal, kind: TickKind, tick_number: u32) -> String {
         String::new()
     };
 
-    let pending = goal
-        .pending_run
-        .as_ref()
-        .map(|r| {
-            format!(
-                "\n\n**First, before anything else:** the previous tick started `{}` (run `{}` in \
-                 workspace `{}`) and did not wait for it. Read its result and act on it.",
-                r.what, r.run_id, r.workspace_id
-            )
-        })
-        .unwrap_or_default();
+    let mut in_flight: Vec<String> = Vec::new();
+    if let Some(r) = goal.pending_run.as_ref() {
+        in_flight.push(format!(
+            "`{}` (run `{}` in workspace `{}`)",
+            r.what, r.run_id, r.workspace_id
+        ));
+    }
+    for t in tasks.iter() {
+        if let Some(r) = t.pending_run.as_ref() {
+            in_flight.push(format!("**{}** `{}` (run `{}`)", t.id, r.what, r.run_id));
+        }
+    }
+    let pending = if in_flight.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n**First, before anything else:** an earlier tick started {} and did not wait. \
+             Read the result and act on it before starting anything new.",
+            in_flight.join(", ")
+        )
+    };
 
     format!("{common}{specific}{pending}\n\n---\n\n{scratchpad}{ledger}")
 }
@@ -668,7 +777,8 @@ pub async fn run_tick(
         }
         None => before,
     };
-    let kind = tick_kind(goal, &before);
+    let tasks_before = goal_tasks::list(&goal.id);
+    let kind = tick_kind(goal, &before, &tasks_before);
     let tick_number = goal.counters.ticks + 1;
     let model = model_for(goal, kind);
     let persona = persona_for(goal);
@@ -714,7 +824,8 @@ pub async fn run_tick(
     // out from under the copy we started with, and theirs is the newer one.
     let mut goal = goals::get(&goal.id).unwrap_or_else(|| goal.clone());
     let after = goals::read_scratchpad(&goal.id).unwrap_or_default();
-    let progressed = after != before;
+    let tasks_after = goal_tasks::list(&goal.id);
+    let progressed = did_progress(&before, &after, &tasks_before, &tasks_after);
 
     goal.counters.ticks = tick_number;
     goal.counters.last_tick_at = Some(now.to_rfc3339());
@@ -798,6 +909,34 @@ fn persona_for(goal: &Goal) -> String {
     fallback
 }
 
+/// Whether this tick actually moved anything.
+///
+/// For a goal with tasks this is **task movement**, not scratchpad bytes: a tick
+/// that appended "still working on the parser" to the Log used to read as
+/// progress and reset the no-progress streak to zero, which quietly defeated one
+/// of only two rails that can stop a runaway goal. Prose is bookkeeping;
+/// evidence is progress.
+///
+/// A goal with no tasks falls back to the old rule, because for it the
+/// scratchpad is the only record there is.
+fn did_progress(
+    pad_before: &str,
+    pad_after: &str,
+    tasks_before: &[Task],
+    tasks_after: &[Task],
+) -> bool {
+    if tasks_before.is_empty() && tasks_after.is_empty() {
+        return pad_before != pad_after;
+    }
+    fn fingerprint(tasks: &[Task]) -> Vec<(String, TaskStatus, usize, u32)> {
+        tasks
+            .iter()
+            .map(|t| (t.id.clone(), t.status, t.evidence.len(), t.attempts))
+            .collect()
+    }
+    fingerprint(tasks_before) != fingerprint(tasks_after)
+}
+
 fn record(
     goal: &Goal,
     kind: TickKind,
@@ -854,13 +993,13 @@ mod tests {
 
     #[test]
     fn a_goal_with_no_plan_plans() {
-        assert_eq!(tick_kind(&goal(), "## Plan\n_none yet_\n"), TickKind::Plan);
+        assert_eq!(tick_kind(&goal(), "## Plan\n_none yet_\n", &[]), TickKind::Plan);
     }
 
     #[test]
     fn a_goal_with_a_plan_works() {
         let doc = "## Plan\n- [ ] one\n";
-        assert_eq!(tick_kind(&goal(), doc), TickKind::Work);
+        assert_eq!(tick_kind(&goal(), doc, &[]), TickKind::Work);
     }
 
     #[test]
@@ -868,14 +1007,14 @@ mod tests {
         let mut g = goal();
         let doc = "## Plan\n- [ ] one\n";
         g.counters.ticks = REVIEW_EVERY - 1;
-        assert_eq!(tick_kind(&g, doc), TickKind::Review);
+        assert_eq!(tick_kind(&g, doc, &[]), TickKind::Review);
     }
 
     #[test]
     fn a_bloated_scratchpad_forces_a_review_off_cadence() {
         let g = goal();
         let doc = format!("## Plan\n- [ ] one\n\n## Log\n{}", "- a line\n".repeat(200));
-        assert_eq!(tick_kind(&g, &doc), TickKind::Review);
+        assert_eq!(tick_kind(&g, &doc, &[]), TickKind::Review);
     }
 
     #[test]
@@ -1004,7 +1143,11 @@ mod tests {
         assert!(frame.contains("tick 3"));
         assert!(frame.contains("run_9"), "the pending run must be named first");
         assert!(frame.contains("do the thing"), "the goal itself must be in the frame");
-        assert!(frame.contains("first unchecked step"));
+        // A work tick is told to take a ready task and finish it with evidence —
+        // the plan is a task list, so "the first unchecked box" is no longer a
+        // thing the frame can meaningfully say.
+        assert!(frame.contains("[ready]"), "a work tick must name what to take");
+        assert!(frame.contains("task_done"), "and how to close it");
     }
 
     fn run(status: &str) -> crate::buildr::Run {

@@ -1,0 +1,467 @@
+//! The tools a goal tick uses to keep its plan.
+//!
+//! These replace the half of `goal_scratchpad_write` that was never really
+//! prose. A plan rewritten as markdown on every tick is a plan a model can drop
+//! a row from — and the tick frame's answer to that was to *ask it not to*
+//! ("never drop an unchecked step"). These tools make the asking unnecessary:
+//! the list is a store, the model only ever names the row it means, and nothing
+//! it does not mention can change.
+//!
+//! Each is bound to one goal at registration, exactly like the other `goal_*`
+//! tools, so the model never names which goal it is writing to.
+//!
+//! The one rule worth knowing before reading the code: **`task_done` requires
+//! evidence.** Not because prose is worthless, but because "verify before you
+//! claim" as a sentence in a system prompt is a rule; as a required parameter it
+//! is a fact.
+
+use async_trait::async_trait;
+
+use crate::goal_tasks::{self, Evidence, EvidenceKind, NewTask, TaskPatch, TaskStatus};
+
+fn err(tool: &str, message: impl Into<String>) -> metalcraft::GraphError {
+    metalcraft::GraphError::ToolCallFailed {
+        tool: tool.into(),
+        message: message.into(),
+    }
+}
+
+/// The list as it stands, returned by every tool so the model always sees the
+/// consequence of what it just did without spending a call to look.
+fn state(goal_id: &str) -> serde_json::Value {
+    let tasks = goal_tasks::list(goal_id);
+    serde_json::json!({
+        "summary": goal_tasks::summarize(&tasks),
+        "plan": goal_tasks::render(&tasks),
+    })
+}
+
+// ── add ──────────────────────────────────────────────────────────────────────
+
+pub struct TaskAddTool {
+    goal_id: String,
+}
+
+impl TaskAddTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for TaskAddTool {
+    fn name(&self) -> &str {
+        "task_add"
+    }
+
+    fn description(&self) -> &str {
+        "Add tasks to your goal's plan. Pass the whole plan in one call — a planning tick writes \
+         its plan once, not a row at a time. Each task should be one tick's worth of work and \
+         concrete enough that you could tell whether it happened. Use `deps` to say what must \
+         land first: tasks with NO deps run in parallel, so leave deps empty wherever two tasks \
+         are genuinely independent. Within one call, a dep may be the 0-based index of another \
+         task in the same call (\"0\", \"1\") as well as an existing task id."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "description": "The tasks to add, in plan order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "description": "One line, imperative — 'Wire the limiter into the middleware'."
+                            },
+                            "detail": {
+                                "type": "string",
+                                "description": "What a delegate is handed when this task runs. It will have NONE of your context, so carry every decision this task depends on: file paths, the chosen approach, what 'done' looks like."
+                            },
+                            "deps": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Task ids (or 0-based indices into this call) that must finish first. Leave empty for anything independent — that is what lets tasks run at the same time."
+                            },
+                            "assignee": {
+                                "type": "string",
+                                "description": "Persona to delegate this to when it runs. Omit to do it yourself."
+                            },
+                            "mutates_workspace": {
+                                "type": "boolean",
+                                "description": "Whether running this writes to the workspace (edits files, runs a build). Defaults to true. Set false ONLY for pure reading — research, reviewing, reading CI output. Read-only tasks can run alongside each other; writing ones cannot, because there is one workspace."
+                            },
+                            "gate": {
+                                "type": "string",
+                                "description": "Optional. A command that must exit 0 before this task may be marked done — 'cargo test --all'. Run it with buildr's test/build, record it with goal_await_run, and the next tick will have the verdict."
+                            }
+                        },
+                        "required": ["title"]
+                    }
+                }
+            },
+            "required": ["tasks"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let raw = args["tasks"]
+            .as_array()
+            .ok_or_else(|| err("task_add", "Missing required parameter: tasks (an array)"))?;
+        if raw.is_empty() {
+            return Err(err("task_add", "tasks is empty — nothing to add"));
+        }
+        let new: Vec<NewTask> = raw
+            .iter()
+            .map(|t| NewTask {
+                title: t["title"].as_str().unwrap_or_default().to_string(),
+                detail: t["detail"].as_str().unwrap_or_default().to_string(),
+                deps: t["deps"]
+                    .as_array()
+                    .map(|d| {
+                        d.iter()
+                            .filter_map(|x| {
+                                x.as_str()
+                                    .map(str::to_string)
+                                    // A model that writes deps as numbers rather
+                                    // than strings means the same thing.
+                                    .or_else(|| x.as_u64().map(|n| n.to_string()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                assignee: t["assignee"].as_str().map(str::to_string),
+                mutates_workspace: t["mutates_workspace"].as_bool(),
+                gate: t["gate"].as_str().map(str::to_string),
+            })
+            .collect();
+
+        let added = goal_tasks::add_many(&self.goal_id, &new).map_err(|e| err("task_add", e))?;
+        let ids: Vec<&str> = added.iter().map(|t| t.id.as_str()).collect();
+        Ok(serde_json::json!({
+            "ok": true,
+            "added": ids,
+            "state": state(&self.goal_id),
+        }))
+    }
+}
+
+// ── update ───────────────────────────────────────────────────────────────────
+
+pub struct TaskUpdateTool {
+    goal_id: String,
+}
+
+impl TaskUpdateTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for TaskUpdateTool {
+    fn name(&self) -> &str {
+        "task_update"
+    }
+
+    fn description(&self) -> &str {
+        "Re-scope, re-route or re-order one task. Use this when a task turns out to be bigger \
+         than you thought (tighten it and task_add the remainder), when a different persona \
+         should run it, or when a dependency you did not see turns up. Anything you do not pass \
+         is left alone. To finish a task use task_done; to stop one use task_block."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "The task id, e.g. 't3'." },
+                "title": { "type": "string" },
+                "detail": { "type": "string" },
+                "deps": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Replaces the dependency list entirely. Existing task ids only."
+                },
+                "assignee": { "type": "string", "description": "Persona to delegate to. Pass an empty string to clear it." },
+                "mutates_workspace": { "type": "boolean" },
+                "gate": { "type": "string", "description": "Pass an empty string to clear the gate." },
+                "reopen": {
+                    "type": "boolean",
+                    "description": "Put a done, blocked or dropped task back to todo — what a review tick uses when the evidence does not hold up."
+                }
+            },
+            "required": ["id"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = args["id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|i| !i.is_empty())
+            .ok_or_else(|| err("task_update", "Missing required parameter: id"))?;
+
+        let patch = TaskPatch {
+            title: args["title"].as_str().map(str::to_string),
+            detail: args["detail"].as_str().map(str::to_string),
+            deps: args["deps"].as_array().map(|d| {
+                d.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            }),
+            assignee: args["assignee"].as_str().map(|a| Some(a.to_string())),
+            mutates_workspace: args["mutates_workspace"].as_bool(),
+            gate: args["gate"].as_str().map(|g| Some(g.to_string())),
+            status: args["reopen"]
+                .as_bool()
+                .filter(|r| *r)
+                .map(|_| TaskStatus::Todo),
+            // Reopening clears the stale reason along with the status: a task
+            // back in the pool must not still read as blocked.
+            blocked_reason: args["reopen"].as_bool().filter(|r| *r).map(|_| None),
+            pending_run: None,
+            bump_attempts: false,
+        };
+
+        let task = goal_tasks::update(&self.goal_id, id, patch).map_err(|e| err("task_update", e))?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "id": task.id,
+            "state": state(&self.goal_id),
+        }))
+    }
+}
+
+// ── done ─────────────────────────────────────────────────────────────────────
+
+pub struct TaskDoneTool {
+    goal_id: String,
+}
+
+impl TaskDoneTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for TaskDoneTool {
+    fn name(&self) -> &str {
+        "task_done"
+    }
+
+    fn description(&self) -> &str {
+        "Mark one task finished, with proof. The proof is required and it is the point: a build \
+         that compiles is not a feature that works, and a task is done when you have SEEN \
+         something, not when it looks likely. Pass the commit you pushed, the run id and its \
+         exit code, the finding id, or the file you produced. If a task has a gate, it cannot be \
+         completed until that gate has run and exited 0."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "The task id, e.g. 't3'." },
+                "evidence_kind": {
+                    "type": "string",
+                    "enum": ["commit", "run", "finding", "file", "note"],
+                    "description": "What kind of proof this is. Prefer 'commit' or 'run' — 'note' is for the rare task with nothing else to point at."
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "The proof itself: a commit sha, a run id and its exit code ('r_88 exit 0'), a finding id, a path, or one sentence for 'note'."
+                }
+            },
+            "required": ["id", "evidence_kind", "evidence"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = args["id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|i| !i.is_empty())
+            .ok_or_else(|| err("task_done", "Missing required parameter: id"))?;
+        let kind = match args["evidence_kind"].as_str().unwrap_or("note") {
+            "commit" => EvidenceKind::Commit,
+            "run" => EvidenceKind::Run,
+            "finding" => EvidenceKind::Finding,
+            "file" => EvidenceKind::File,
+            _ => EvidenceKind::Note,
+        };
+        let value = args["evidence"]
+            .as_str()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .ok_or_else(|| {
+                err(
+                    "task_done",
+                    "Missing required parameter: evidence. A task is done when you have seen \
+                     something — name the commit, the run, or the file.",
+                )
+            })?;
+
+        let task = goal_tasks::complete(&self.goal_id, id, Evidence::new(kind, value))
+            .map_err(|e| err("task_done", e))?;
+
+        // The log is what a person reads and what the next tick skims. A task
+        // landing is exactly the kind of thing that belongs there, and writing
+        // it here means the model does not have to remember to.
+        let current = crate::goals::read_scratchpad(&self.goal_id).unwrap_or_default();
+        let updated = crate::goals::append_to_section(
+            &current,
+            "Log",
+            &format!("- **{}** done: {} ({value})", task.id, task.title),
+        );
+        let _ = crate::goals::write_scratchpad(&self.goal_id, &updated);
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "id": task.id,
+            "state": state(&self.goal_id),
+        }))
+    }
+}
+
+// ── block / drop ─────────────────────────────────────────────────────────────
+
+pub struct TaskBlockTool {
+    goal_id: String,
+}
+
+impl TaskBlockTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for TaskBlockTool {
+    fn name(&self) -> &str {
+        "task_block"
+    }
+
+    fn description(&self) -> &str {
+        "Stop ONE task on something you cannot resolve, and keep working on the rest. This is \
+         not goal_block: the goal keeps ticking and its other tasks keep moving — only this row \
+         waits. Use it for a missing credential, a decision you need from a person, or an \
+         upstream that is down. Say concretely what would unblock it."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "reason": {
+                    "type": "string",
+                    "description": "What is stopping it, and what would unblock it. Written for a person who has not read the scratchpad."
+                }
+            },
+            "required": ["id", "reason"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = args["id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|i| !i.is_empty())
+            .ok_or_else(|| err("task_block", "Missing required parameter: id"))?;
+        let reason = args["reason"]
+            .as_str()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .ok_or_else(|| err("task_block", "Missing required parameter: reason"))?;
+
+        let patch = TaskPatch {
+            status: Some(TaskStatus::Blocked),
+            blocked_reason: Some(Some(reason.to_string())),
+            ..Default::default()
+        };
+        let task = goal_tasks::update(&self.goal_id, id, patch).map_err(|e| err("task_block", e))?;
+
+        // Surfaced in the scratchpad too: a blocked task is something a person
+        // reading the goal should see without opening the task list.
+        let current = crate::goals::read_scratchpad(&self.goal_id).unwrap_or_default();
+        let updated = crate::goals::append_to_section(
+            &current,
+            "Blockers",
+            &format!("- **{}** {}: {reason}", task.id, task.title),
+        );
+        let _ = crate::goals::write_scratchpad(&self.goal_id, &updated);
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "id": task.id,
+            "note": "That task is parked. Its siblings are unaffected — keep working.",
+            "state": state(&self.goal_id),
+        }))
+    }
+}
+
+pub struct TaskDropTool {
+    goal_id: String,
+}
+
+impl TaskDropTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for TaskDropTool {
+    fn name(&self) -> &str {
+        "task_drop"
+    }
+
+    fn description(&self) -> &str {
+        "Retire a task reality has made pointless — the feature was cut, the bug was fixed \
+         upstream, the approach was abandoned. The row is kept rather than deleted so a later \
+         tick does not re-derive it from the same reasoning that produced it. Anything waiting \
+         on it stops waiting. This is a review tick's pruning verb; do not use it to skip work \
+         that is merely hard."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "why": { "type": "string", "description": "One line: what changed that made this unnecessary." }
+            },
+            "required": ["id", "why"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let id = args["id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|i| !i.is_empty())
+            .ok_or_else(|| err("task_drop", "Missing required parameter: id"))?;
+        let why = args["why"]
+            .as_str()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .ok_or_else(|| err("task_drop", "Missing required parameter: why"))?;
+
+        let patch = TaskPatch {
+            status: Some(TaskStatus::Dropped),
+            blocked_reason: Some(Some(why.to_string())),
+            ..Default::default()
+        };
+        let task = goal_tasks::update(&self.goal_id, id, patch).map_err(|e| err("task_drop", e))?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "id": task.id,
+            "state": state(&self.goal_id),
+        }))
+    }
+}

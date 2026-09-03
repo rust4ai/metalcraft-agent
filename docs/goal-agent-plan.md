@@ -199,8 +199,12 @@ of every tick, even mid-phase, on the goal's own branch (`goal/<slug>`).
 
 **The load-bearing wall.** Not instance memory: memory is fuzzy, recall-ranked
 and lossy on purpose. A goal needs state that is *verbatim, complete, and injected
-every single tick*. Markdown, because the model maintains it and a checkbox list
-is the cheapest plan format a model reliably keeps correct.
+every single tick*. Markdown, because the model maintains it and prose is what a
+model is good at.
+
+> **The `## Plan` section is no longer prose — see §3.5.** It is rendered from
+> the task list, and the model cannot edit it by writing markdown. Everything
+> else here is unchanged.
 
 ```markdown
 ## Goal
@@ -211,9 +215,10 @@ buildr ws_7c2… · repo `foo` at `/workspace/foo` · branch `goal/billing`
 (if this is gone: create a workspace, clone rust4ai/foo, checkout goal/billing)
 
 ## Plan
-- [x] 1. Read the repo, write the schema
-- [ ] 2. Checkout + webhook endpoint      ← current
-- [ ] 3. Reconciliation job
+(rendered from tasks.json — see §3.5)
+- **t1** [done] Read the repo, write the schema · commit: 8f21a0c
+- **t2** [ready] Checkout + webhook endpoint · delegate: coding-agent
+- **t3** [todo] Reconciliation job (after t2) · gate: `cargo test --all`
 
 ## State
 Migration 0004 applied. `cargo test` green as of tick 11. Pushed through 3f9a1c2.
@@ -238,7 +243,58 @@ Writer tools, and no more than these:
 - `goal_scratchpad_write { markdown }` — replace the document (the tick's final act).
 - `goal_block { reason, question }` — stop the heartbeat, ask the human.
 - `goal_complete { summary }` — the goal is met.
+- `goal_await_run { workspace_id, run_id, what, task_id? }` — hand a long run to
+  the heartbeat (§4.3). With a `task_id` it parks that task only.
 - `goal_finding { … }` — audit goals only (§6.2).
+
+### 3.5 The task list — `<data>/goals/<id>/tasks.json`
+
+The plan started as markdown checkboxes the model rewrote every tick, which made
+the frame have to *ask* it not to lose a row ("never drop an unchecked step"). A
+store cannot lose a row, so the plan moved out of the prose and became records.
+
+The split that results:
+
+| | Format | Written by | Why |
+| --- | --- | --- | --- |
+| plan, status, evidence, deps | `tasks.json` | the tools | structure a model must not lose |
+| State / Log / Blockers / Questions | `scratchpad.md` | the model | prose, judgement, decisions |
+
+```rust
+Task {
+    id,                    // t1, t2 — typeable, quoted in the Log
+    title, detail,         // detail is what a delegate is handed; it sees nothing else
+    status,                // todo | waiting | blocked | done | dropped
+    deps,                  // task ids in this goal. NO deps ⇒ runs in parallel
+    assignee,              // persona to delegate to; None ⇒ the tick does it
+    mutates_workspace,     // default TRUE — one workspace, so writers serialize
+    pending_run,           // this task's own long-running build (§4.3)
+    gate,                  // a command that must exit 0 before it can be done
+    attempts, evidence, blocked_reason,
+}
+```
+
+Three properties carry the design:
+
+- **Readiness is derived, never stored.** A task is ready when its deps have
+  landed. There is no promote pass and no second source of truth.
+- **Done needs evidence.** `task_done` takes a commit, a run id and its exit
+  code, a finding id, or a path. "Verify before you claim" stopped being a
+  sentence in a prompt and became a required parameter.
+- **A task blocks without blocking the goal.** `task_block` parks one row;
+  `goal_block` stops the heartbeat. Reaching for the smaller one first is what
+  keeps a goal working overnight instead of waiting on a human for one detail.
+
+Tools: `task_add` (a batch — a plan is written at once, and deps may name a row
+by its index in the same call), `task_update`, `task_done`, `task_block`,
+`task_drop`. A goal created before this existed has no `tasks.json` and every
+caller falls back to counting checkboxes; nothing had to be migrated.
+
+**Parallelism follows from it.** Rows with no deps are ready together, and each
+row owns its own `pending_run`, so a goal can have three builds in flight and
+poll all of them in the pre-flight — N HTTP GETs and no model. A goal only
+*waits* when every run is still going **and** nothing is ready; otherwise it gets
+on with what is.
 
 ---
 
@@ -664,6 +720,7 @@ it do overnight" is actually read.
 | **G2 — a place to work** ✅ | workspace provisioning + reconcile-or-reprovision, hibernate enforcement, `pending_run` + short-fuse re-tick, compute-minute accounting, the `goal-agents` pack (rosters include `buildr-space-agent`) | `src/goal_tick.rs`, `src/goals.rs`, new pack |
 | **G3 — the loop closes** ✅ | review + groom ticks, no-progress detection and tier escalation, model-free pre-flight (§4.6), rails → `blocked`, unblock-by-reply through `io` | `src/goal_tick.rs`, `src/workshop_api.rs` |
 | **G4 — audit kind** ✅ | findings ledger + `goal_finding`, sweep/fix alternation, PR-per-finding, `max_open_prs`, dedupe via `github_list_pull_requests` | pack skills, `src/tools/goal.rs` |
+| **G6 — the plan is records** ✅ | `tasks.json` + the five `task_*` tools, plan rendered into the tick frame, per-task `pending_run` (several runs in flight at once), evidence-gated `task_done`, progress = task movement rather than scratchpad bytes, `GET`/`PUT /goals/{id}/tasks` | `src/goal_tasks.rs`, `src/tools/goal_task.rs`, `src/goal_tick.rs`, `src/workshop_api.rs`, goal personas |
 | **G5 — build kind at depth** | phase → PR mapping, test/serve gating before a box is checked | pack skills |
 | **B1 — buildr.space PR path** *(independent of G1–G3; **blocks G4**; do the permission batch now)* | App gains Pull requests write + Issues write + Actions/Checks read; `installation_token()` takes a permissions argument; `POST /workspaces/{id}/pr` on a separately-minted token; `op: "branch"` that also updates the repo row; `GET /workspaces/{id}/checks` for CI verdicts; new pack tools | buildr.space `github_app.rs`, `workspace_ops.rs`, `buildr-space` pack |
 
@@ -732,15 +789,33 @@ no model in the loop and is a different risk entirely.
 ### 11.2 Smaller, decidable later
 
 - **Concurrency.** The daemon runs due work inline and sequentially, so two goals
-  due in the same minute serialize. Fine at first, and safer. Revisit when goals
-  outnumber ticks.
+  due in the same minute serialize. The parallelism people actually wanted now
+  lives *inside* a tick (§3.5), so running two goals at once is a throughput
+  optimisation rather than the point. When it is worth doing it needs one thing
+  first — the daemon's single poll loop split into a loop per subsystem, so a
+  25-minute goal tick stops stalling flow polling — and then a semaphore plus an
+  in-flight set, because there is one process and each goal writes only its own
+  directory.
 - **A goal's own chat, or a journal?** Proposed: a journal chat, one line per
   tick, replyable to unblock. Full tick transcripts stay in `sessions/`
   diagnostics, because nobody will read them.
 - **Sharing one workspace across goals** on the free plan (cap: 1). Probably
   "one goal per workspace, queue the rest" — but a repo-scoped shared workspace
   is the escape hatch if that cap bites.
-- **Sub-goals.** No for v1: a goal's plan is its phases, and a phase that needs
-  its own heartbeat is a second goal a person chose to create in the UI.
+- **Sub-goals — answered by tasks, not by more goals.** The instinct was a goal
+  DAG: goals with parents, a waiting state, a promote pass. That is the wrong
+  unit. A goal is *expensive by design* — its own instance and memory, a
+  heartbeat, a workspace, a journal chat, a slot against `MAX_ACTIVE_GOALS`, and
+  above all a human decision to commit the pod to unattended spend. Multiplying
+  it to run five things at once multiplies all of that, including the part that
+  is a policy question.
+
+  A **task** (§3.5) costs a struct: no heartbeat (the goal's drives it), no
+  instance (it shares the goal's), no budget (it draws the goal's), no separate
+  authorisation (it is inside something a human already authorised). It gets the
+  dependency graph, the parallelism and the per-task in-flight runs, and the
+  original rule survives untouched: **a phase that needs its own cadence, its own
+  memory, or its own repo is still a second goal a person chose to create in the
+  UI.** That line is now load-bearing rather than limiting.
 - **iOS parity timing.** Front first, iOS right after (§8) — or both at once, if
   the phone is where you will actually watch these run.

@@ -302,14 +302,22 @@ impl metalcraft::Tool for GoalCompleteTool {
         // than recorded. Refusing returns control to the agent, which can either
         // finish the step or uncheck the claim.
         let scratchpad = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
-        let progress = goals::progress_of(&scratchpad);
+        // `Goal::progress` reads the task list when there is one and falls back
+        // to the scratchpad's checkboxes when there is not, so this one check
+        // covers both kinds of goal.
+        let progress = goal.progress();
         if progress.total > 0 && progress.done < progress.total {
+            let how = if crate::goal_tasks::exists(&self.goal_id) {
+                "Either finish them, or — if they turned out to be unnecessary — `task_drop` \
+                 each one saying what changed, then complete."
+            } else {
+                "Either finish them, or — if they turned out to be unnecessary — rewrite the \
+                 plan with goal_scratchpad_write saying so, then complete."
+            };
             return Err(err(
                 "goal_complete",
                 format!(
-                    "{} of {} plan steps are still unchecked. Either finish them, or — if they \
-                     turned out to be unnecessary — rewrite the plan with goal_scratchpad_write \
-                     saying so, then complete.",
+                    "{} of {} plan steps are still open. {how}",
                     progress.total - progress.done,
                     progress.total
                 ),
@@ -353,7 +361,11 @@ impl metalcraft::Tool for GoalAwaitRunTool {
          build/test return a run id and keep going without you). Then finish your scratchpad and \
          end the tick: the next wake-up reads the result for you — without spending a model on \
          it — and hands you the outcome. Do not sit in a polling loop; that burns the tick on \
-         waiting and the run finishes after you are gone either way."
+         waiting and the run finishes after you are gone either way.\n\n\
+         Name the `task_id` the run belongs to whenever there is one. A run recorded against a \
+         task parks only that task — every other task keeps moving, and several runs can be in \
+         flight at once. Without a task_id the run is the whole goal's, and the goal may only \
+         have one at a time."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -371,6 +383,10 @@ impl metalcraft::Tool for GoalAwaitRunTool {
                 "what": {
                     "type": "string",
                     "description": "The command, for the log — 'cargo test', 'npm run build'."
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "The task this run belongs to, e.g. 't3'. Parks that task only; its siblings keep working, and other tasks may have their own runs in flight at the same time."
                 }
             },
             "required": ["workspace_id", "run_id"]
@@ -390,6 +406,61 @@ impl metalcraft::Tool for GoalAwaitRunTool {
             .ok_or_else(|| err("goal_await_run", "Missing required parameter: run_id"))?;
         let what = args["what"].as_str().map(str::trim).unwrap_or("a command");
 
+        let pending = goals::PendingRun {
+            workspace_id: workspace_id.to_string(),
+            run_id: run_id.to_string(),
+            what: what.to_string(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        // A run that names a task belongs to that task: it parks that row and
+        // nothing else, which is what lets a goal have three builds going at
+        // once. The goal-level slot below stays single because a run nobody
+        // owns has nothing to keep separate.
+        if let Some(task_id) = args["task_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            let tasks = crate::goal_tasks::list(&self.goal_id);
+            if let Some(existing) = crate::goal_tasks::get(&tasks, task_id)
+                && let Some(run) = existing.pending_run
+            {
+                return Err(err(
+                    "goal_await_run",
+                    format!(
+                        "task '{task_id}' is already waiting on `{}` (run {}). Let that land \
+                         first, or record this run against a different task.",
+                        run.what, run.run_id
+                    ),
+                ));
+            }
+            crate::goal_tasks::update(
+                &self.goal_id,
+                task_id,
+                crate::goal_tasks::TaskPatch {
+                    status: Some(crate::goal_tasks::TaskStatus::Waiting),
+                    pending_run: Some(Some(pending)),
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| err("goal_await_run", e))?;
+
+            let current = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
+            let updated = goals::append_to_section(
+                &current,
+                "Log",
+                &format!("- **{task_id}** started `{what}` (run {run_id}); handed to the heartbeat."),
+            );
+            let _ = goals::write_scratchpad(&self.goal_id, &updated);
+
+            return Ok(serde_json::json!({
+                "ok": true,
+                "task_id": task_id,
+                "note": "Recorded against that task. Its siblings are unaffected — carry on with anything else that is ready, then end the tick."
+            }));
+        }
+
         let mut goal = goals::get(&self.goal_id)
             .ok_or_else(|| err("goal_await_run", "this goal no longer exists"))?;
 
@@ -408,12 +479,7 @@ impl metalcraft::Tool for GoalAwaitRunTool {
             ));
         }
 
-        goal.pending_run = Some(goals::PendingRun {
-            workspace_id: workspace_id.to_string(),
-            run_id: run_id.to_string(),
-            what: what.to_string(),
-            started_at: chrono::Utc::now().to_rfc3339(),
-        });
+        goal.pending_run = Some(pending);
         goals::save(&goal).map_err(|e| err("goal_await_run", e))?;
 
         let current = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
