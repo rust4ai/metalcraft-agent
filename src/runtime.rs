@@ -80,6 +80,7 @@ pub fn configured_default_persona() -> String {
 /// class of bug [`TurnRunner`] exists to prevent.
 pub const MAX_TURN_STEPS: usize = 90;
 
+#[derive(Clone)]
 pub struct AgentRuntimeContext {
     pub personas_dir: PathBuf,
     pub skills_dir: PathBuf,

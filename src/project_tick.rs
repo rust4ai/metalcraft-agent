@@ -949,36 +949,44 @@ pub async fn run_tick(
         project.id
     );
 
-    let logger = DiagnosticsLogger::new().ok().map(Arc::new);
-    let outcome = runtime::run_one_shot_task(
-        context,
-        RunOneShotRequest {
-            persona_slug: &persona,
-            cwd,
-            model_name: &model,
-            task: &tick_frame(project, kind, tick_number, Some(&briefing.text)),
-            project_brief: Some(project.worker_brief.clone()).filter(|b| !b.trim().is_empty()),
-            approval_mode: approval_mode.clone(),
-            diagnostics: logger,
-            instance_id: Some(project.instance_id.clone()),
-            preset_personas: None,
-            project_id: Some(project.id.clone()),
-        },
-    )
-    .await;
+    // Scoped so the run's own `Result` — whose error is a bare `Box<dyn Error>`,
+    // and therefore not `Send` — is gone before the awaits below. Without the
+    // block it stays live in the generator across `hibernate_workspace`, and the
+    // whole tick becomes a future that cannot be spawned onto its own task. The
+    // only thing that needs to outlive the call is the summary, which is a String.
+    let summary = {
+        let logger = DiagnosticsLogger::new().ok().map(Arc::new);
+        let outcome = runtime::run_one_shot_task(
+            context,
+            RunOneShotRequest {
+                persona_slug: &persona,
+                cwd,
+                model_name: &model,
+                task: &tick_frame(project, kind, tick_number, Some(&briefing.text)),
+                project_brief: Some(project.worker_brief.clone())
+                    .filter(|b| !b.trim().is_empty()),
+                approval_mode: approval_mode.clone(),
+                diagnostics: logger,
+                instance_id: Some(project.instance_id.clone()),
+                preset_personas: None,
+                project_id: Some(project.id.clone()),
+            },
+        )
+        .await;
 
-    let summary = match outcome {
-        Ok(metalcraft::RunOutcome::Completed(state)) => state
-            .final_answer()
-            .unwrap_or("(the tick ended without saying anything)")
-            .to_string(),
-        Ok(metalcraft::RunOutcome::Interrupted { reason, .. }) => {
-            format!("Tick stopped early: {reason}")
+        match outcome {
+            Ok(metalcraft::RunOutcome::Completed(state)) => state
+                .final_answer()
+                .unwrap_or("(the tick ended without saying anything)")
+                .to_string(),
+            Ok(metalcraft::RunOutcome::Interrupted { reason, .. }) => {
+                format!("Tick stopped early: {reason}")
+            }
+            Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
+                format!("Tick failed in {node}: {error}")
+            }
+            Err(e) => format!("Tick could not run: {e}"),
         }
-        Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
-            format!("Tick failed in {node}: {error}")
-        }
-        Err(e) => format!("Tick could not run: {e}"),
     };
 
     let status_before = project.status;

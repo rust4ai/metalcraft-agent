@@ -4,8 +4,20 @@
 //!
 //! [`DaemonConfig`] holds everything the daemon needs. The CLI builds it from
 //! [`DaemonConfig::from_env`] and then overrides fields from flags; the umbrella
-//! uses `from_env` directly. [`run`] performs the actual work (spawn the
-//! workshop API + event listener, then run the flow polling loop).
+//! uses `from_env` directly. [`run`] performs the actual work: spawn the workshop
+//! API, then a loop per subsystem.
+//!
+//! **A loop per subsystem, not one loop doing everything.** Flows, scheduled
+//! follow-ups and projects each run agent turns, and a turn can take twenty-five
+//! minutes. Sharing one polling iteration meant the slowest of them decided how
+//! late the other two were — a project tick stalled flow polling, and a
+//! "remind me in an hour" arrived whenever the queue in front of it cleared.
+//! They have nothing to do with each other, so they no longer wait on each other.
+//!
+//! Each subsystem is still *internally* sequential: one project ticking at a
+//! time, one flow run at a time. That is deliberate — a project's scratchpad,
+//! task list and ledger have exactly one writer — and it is a different question
+//! from whether unrelated subsystems should block one another.
 
 use crate::approval::ApprovalMode;
 use crate::diagnostics::{DiagnosticsLogger, SessionInfo};
@@ -208,6 +220,50 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
     // only in memory, as they were, a restart erased them — and an interval
     // schedule with no record of a previous run fires immediately, so "every 24
     // hours" fired again on every pod roll. See `crate::schedule_timing`.
+    // Projects tick on their own loop, not in the shared polling iteration.
+    //
+    // A project tick is now two agent turns — the conductor's and the worker's —
+    // and a worker may run for the twenty-five minutes its persona allows. In the
+    // shared loop that stalled everything behind it: flows did not poll,
+    // scheduled follow-ups did not fire, and a forced tick waited out whatever
+    // was already running. None of those have anything to do with each other, so
+    // none of them should wait on each other.
+    //
+    // Still one loop for all projects, so two ticks never overlap: a project's
+    // scratchpad, task list and ledger have exactly one writer, and that is worth
+    // more than the wall-clock a second concurrent project would save.
+    //
+    // `--once` runs everything inline instead, because "run one pass and exit"
+    // has to mean the projects pass too.
+    if !once {
+        let ctx = context.clone();
+        let project_cwd = cwd.clone();
+        let mode = approval_mode.clone();
+        tokio::spawn(async move {
+            loop {
+                run_due_projects(&ctx, &project_cwd, &mode).await;
+                tokio::time::sleep(Duration::from_secs(poll_seconds)).await;
+            }
+        });
+
+        // Scheduled follow-ups, for the same reason. A follow-up is an agent run
+        // too, so leaving it in the shared iteration meant a slow one held up
+        // flow polling — and a "remind me in an hour" that fires an hour and
+        // twenty minutes late because something else was busy is the one failure
+        // this feature cannot have.
+        let ctx = context.clone();
+        let task_cwd = cwd.clone();
+        let persona = persona_slug.clone();
+        let model = model_name.clone();
+        let mode = approval_mode.clone();
+        tokio::spawn(async move {
+            loop {
+                run_due_scheduled_tasks(&ctx, &task_cwd, &persona, &model, &mode).await;
+                tokio::time::sleep(Duration::from_secs(poll_seconds)).await;
+            }
+        });
+    }
+
     let mut bookmarks = crate::schedule_timing::bookmarks::load();
 
     loop {
@@ -480,14 +536,6 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                 }
             }
 
-            // Fire any scheduled follow-ups whose time has come (see
-            // `crate::scheduled_tasks`). Runs in the same tick as flow polling.
-            run_due_scheduled_tasks(&context, &cwd, &persona_slug, &model_name, &approval_mode)
-                .await;
-
-            // Tick any project that is owed one (see `crate::project_tick`).
-            run_due_projects(&context, &cwd, &approval_mode).await;
-
             reap_stale_sessions().await;
         };
 
@@ -500,6 +548,11 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
         }
 
         if once {
+            // The passes nothing was spawned to do, inline: "run once and exit"
+            // has to mean all of it.
+            run_due_scheduled_tasks(&context, &cwd, &persona_slug, &model_name, &approval_mode)
+                .await;
+            run_due_projects(&context, &cwd, &approval_mode).await;
             break;
         }
 
