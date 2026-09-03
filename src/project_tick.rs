@@ -1,26 +1,26 @@
-//! The heartbeat: what happens when a goal wakes up.
+//! The heartbeat: what happens when a project wakes up.
 //!
 //! One tick is **one bounded agent turn in a fresh conversation**, carrying
-//! nothing but the goal's scratchpad. Fresh-per-tick is the load-bearing choice:
+//! nothing but the project's scratchpad. Fresh-per-tick is the load-bearing choice:
 //! continuing one ever-growing conversation makes every tick cost more than the
-//! last until compaction starts destroying exactly the detail the goal depends
+//! last until compaction starts destroying exactly the detail the project depends
 //! on. Statelessness is what makes the scratchpad matter, and it is the
-//! difference between a goal you can leave running for a week and one you
+//! difference between a project you can leave running for a week and one you
 //! cannot.
 //!
 //! Everything a tick leaves behind is in three places: the scratchpad (what the
-//! next tick reads), the goal record (status and counters), and the journal
+//! next tick reads), the project record (status and counters), and the journal
 //! (what a person reads).
 //!
-//! See `docs/goal-agent-plan.md`.
+//! See `docs/projects-plan.md`.
 
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::diagnostics::DiagnosticsLogger;
-use crate::goal_tasks::{self, Evidence, EvidenceKind, Task, TaskStatus};
-use crate::goals::{self, Goal, GoalStatus};
+use crate::project_tasks::{self, Evidence, EvidenceKind, Task, TaskStatus};
+use crate::projects::{self, Project, ProjectStatus};
 use crate::runtime::{self, AgentRuntimeContext, RunOneShotRequest};
 use crate::approval::ApprovalMode;
 
@@ -41,8 +41,8 @@ impl TickKind {
     /// The model tier this kind runs at.
     ///
     /// Strong where a mistake is expensive and hard to see: the plan shapes
-    /// everything downstream, and a review rewrites the only state the goal has
-    /// — a weak model there loses a goal rather than merely slowing it.
+    /// everything downstream, and a review rewrites the only state the project has
+    /// — a weak model there loses a project rather than merely slowing it.
     pub fn tier(&self) -> &'static str {
         match self {
             Self::Plan | Self::Review => "strong",
@@ -57,25 +57,25 @@ pub const REVIEW_EVERY: u32 = 5;
 /// Decide what this tick is.
 ///
 /// A scratchpad that has decayed past its bounds forces a review regardless of
-/// the cadence — a goal that thrashes grooms more often, which is the correct
+/// the cadence — a project that thrashes grooms more often, which is the correct
 /// response to thrashing rather than a punishment for it.
 ///
-/// `tasks` is the goal's task list; a goal old enough to predate it passes an
+/// `tasks` is the project's task list; a project old enough to predate it passes an
 /// empty slice and falls back to counting checkboxes, exactly as before.
-pub fn tick_kind(goal: &Goal, scratchpad: &str, tasks: &[Task]) -> TickKind {
+pub fn tick_kind(project: &Project, scratchpad: &str, tasks: &[Task]) -> TickKind {
     let planned = if tasks.is_empty() {
-        goals::progress_of(scratchpad).total
+        projects::progress_of(scratchpad).total
     } else {
-        goal_tasks::progress(tasks).total
+        project_tasks::progress(tasks).total
     };
     if planned == 0 {
         return TickKind::Plan;
     }
-    if goals::needs_groom(scratchpad) {
+    if projects::needs_groom(scratchpad) {
         return TickKind::Review;
     }
     // `ticks` is what has already happened, so the tick about to run is n+1.
-    let next = goal.counters.ticks + 1;
+    let next = project.counters.ticks + 1;
     if next.is_multiple_of(REVIEW_EVERY) {
         TickKind::Review
     } else {
@@ -109,7 +109,7 @@ fn escalate(tier: &str) -> &str {
     }
 }
 
-/// The tier for one tick: the kind's, the goal's override if it has one, then
+/// The tier for one tick: the kind's, the project's override if it has one, then
 /// one step up for every tick that has changed nothing.
 ///
 /// Static assignment is brittle in one direction: a cheap tick that thrashes
@@ -118,33 +118,33 @@ fn escalate(tier: &str) -> &str {
 /// for it — an observed failure to move — rather than on a model's opinion of
 /// how hard its own task is. A groom resets the streak, so this backs off again
 /// on its own.
-pub fn tier_for(goal: &Goal, kind: TickKind) -> String {
+pub fn tier_for(project: &Project, kind: TickKind) -> String {
     let base = match kind {
-        TickKind::Plan => goal.models.plan.as_deref(),
-        TickKind::Work => goal.models.work.as_deref(),
-        TickKind::Review => goal.models.review.as_deref(),
+        TickKind::Plan => project.models.plan.as_deref(),
+        TickKind::Work => project.models.work.as_deref(),
+        TickKind::Review => project.models.review.as_deref(),
     }
     .unwrap_or_else(|| kind.tier());
 
-    if goal.counters.no_progress_streak == 0 {
+    if project.counters.no_progress_streak == 0 {
         return base.to_string();
     }
     escalate(base).to_string()
 }
 
 /// The model for one tick.
-fn model_for(goal: &Goal, kind: TickKind) -> String {
-    resolve_tier(&tier_for(goal, kind))
+fn model_for(project: &Project, kind: TickKind) -> String {
+    resolve_tier(&tier_for(project, kind))
 }
 
 // ── the journal ──────────────────────────────────────────────────────────────
 
-/// One line of what the goal did, for a person to read.
+/// One line of what the project did, for a person to read.
 ///
 /// A structured record rather than chat messages: a tick summary is not a
-/// conversation turn, and the clients that render a goal draw a progress bar and
+/// conversation turn, and the clients that render a project draw a progress bar and
 /// a timeline from these fields. Questions for a person still go out through the
-/// goal's [`IoBinding`](crate::scheduled_tasks::IoBinding) — this is the log, not
+/// project's [`IoBinding`](crate::scheduled_tasks::IoBinding) — this is the log, not
 /// the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct JournalEntry {
@@ -155,7 +155,7 @@ pub struct JournalEntry {
     /// What the agent said it did — its final answer, trimmed.
     pub summary: String,
     /// Status after the tick, so a reader can see where it turned.
-    pub status: GoalStatus,
+    pub status: ProjectStatus,
     pub plan_done: u32,
     pub plan_total: u32,
     /// False when the tick left the scratchpad byte-identical: it thought,
@@ -164,16 +164,16 @@ pub struct JournalEntry {
     pub duration_secs: u64,
 }
 
-fn journal_path(goal_id: &str) -> std::path::PathBuf {
-    crate::paths::goal_dir(goal_id).join("journal.jsonl")
+fn journal_path(project_id: &str) -> std::path::PathBuf {
+    crate::paths::project_dir(project_id).join("journal.jsonl")
 }
 
 /// Append one entry. Append-only, one JSON per line: the journal is written far
 /// more often than it is read, and a tick must never be lost because the file
 /// grew large.
-pub fn append_journal(goal_id: &str, entry: &JournalEntry) {
+pub fn append_journal(project_id: &str, entry: &JournalEntry) {
     use std::io::Write;
-    let path = journal_path(goal_id);
+    let path = journal_path(project_id);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -183,16 +183,16 @@ pub fn append_journal(goal_id: &str, entry: &JournalEntry) {
     match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         Ok(mut f) => {
             if let Err(e) = writeln!(f, "{line}") {
-                log::warn!("could not write goal journal {goal_id}: {e}");
+                log::warn!("could not write project journal {project_id}: {e}");
             }
         }
-        Err(e) => log::warn!("could not open goal journal {goal_id}: {e}"),
+        Err(e) => log::warn!("could not open project journal {project_id}: {e}"),
     }
 }
 
 /// The journal, newest last. `limit` takes the most recent entries.
-pub fn read_journal(goal_id: &str, limit: usize) -> Vec<JournalEntry> {
-    let Ok(content) = std::fs::read_to_string(journal_path(goal_id)) else {
+pub fn read_journal(project_id: &str, limit: usize) -> Vec<JournalEntry> {
+    let Ok(content) = std::fs::read_to_string(journal_path(project_id)) else {
         return Vec::new();
     };
     let mut entries: Vec<JournalEntry> = content
@@ -208,66 +208,66 @@ pub fn read_journal(goal_id: &str, limit: usize) -> Vec<JournalEntry> {
 
 // ── due-ness ─────────────────────────────────────────────────────────────────
 
-/// Whether this goal is owed a tick now.
+/// Whether this project is owed a tick now.
 ///
-/// The bookmark is `counters.last_tick_at` on the goal record itself, rather
-/// than the separate file scheduled flows keep. A goal is a single recurring
+/// The bookmark is `counters.last_tick_at` on the project record itself, rather
+/// than the separate file scheduled flows keep. A project is a single recurring
 /// thing with one interval, so its own record is the natural place — and it
 /// survives a restart for free, which is the bug that file exists to fix.
 ///
-/// A goal that has never ticked is due immediately: it was created by someone
+/// A project that has never ticked is due immediately: it was created by someone
 /// who has just asked for it, and waiting half an hour to start would read as
 /// broken.
-pub fn is_due(goal: &Goal, now: chrono::DateTime<chrono::Utc>) -> bool {
-    if !goal.status.ticks() {
+pub fn is_due(project: &Project, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if !project.status.ticks() {
         return false;
     }
-    let Some(last) = goal.counters.last_tick_at.as_deref() else {
+    let Some(last) = project.counters.last_tick_at.as_deref() else {
         return true;
     };
     let Ok(last) = chrono::DateTime::parse_from_rfc3339(last) else {
-        // An unparseable bookmark must not wedge a goal forever.
+        // An unparseable bookmark must not wedge a project forever.
         return true;
     };
-    let interval = chrono::Duration::minutes(goal.tick_interval_minutes() as i64);
+    let interval = chrono::Duration::minutes(project.tick_interval_minutes() as i64);
     now >= last.with_timezone(&chrono::Utc) + interval
 }
 
-/// Every goal owed a tick, oldest bookmark first so a backlog drains fairly.
-pub fn due(now: chrono::DateTime<chrono::Utc>) -> Vec<Goal> {
-    let mut due: Vec<Goal> = goals::list().into_iter().filter(|g| is_due(g, now)).collect();
+/// Every project owed a tick, oldest bookmark first so a backlog drains fairly.
+pub fn due(now: chrono::DateTime<chrono::Utc>) -> Vec<Project> {
+    let mut due: Vec<Project> = projects::list().into_iter().filter(|g| is_due(g, now)).collect();
     due.sort_by(|a, b| a.counters.last_tick_at.cmp(&b.counters.last_tick_at));
     due
 }
 
 // ── rails ────────────────────────────────────────────────────────────────────
 
-/// Why a goal was stopped by a rail, if it was.
+/// Why a project was stopped by a rail, if it was.
 ///
-/// Every one of these blocks rather than ends the goal. Running out of rope is a
+/// Every one of these blocks rather than ends the project. Running out of rope is a
 /// reason to ask the person who set it whether to extend, not to disappear —
-/// and a goal that quietly gave up looks exactly like one still working.
-pub fn rail_tripped(goal: &Goal, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
-    let r = &goal.rails;
-    if goal.counters.ticks >= r.max_ticks {
+/// and a project that quietly gave up looks exactly like one still working.
+pub fn rail_tripped(project: &Project, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let r = &project.rails;
+    if project.counters.ticks >= r.max_ticks {
         return Some(format!(
             "Out of ticks: {} of {} used. Raise max_ticks to carry on.",
-            goal.counters.ticks, r.max_ticks
+            project.counters.ticks, r.max_ticks
         ));
     }
-    if goal.counters.no_progress_streak >= r.max_consecutive_no_progress {
+    if project.counters.no_progress_streak >= r.max_consecutive_no_progress {
         return Some(format!(
             "{} ticks in a row changed nothing. Something is stuck that I cannot see; \
              read the scratchpad before letting this run on.",
-            goal.counters.no_progress_streak
+            project.counters.no_progress_streak
         ));
     }
     if let Some(budget) = r.compute_minutes_budget
-        && goal.counters.compute_minutes_used >= budget
+        && project.counters.compute_minutes_used >= budget
     {
         return Some(format!(
             "Compute budget spent: {} of {budget} workspace minutes.",
-            goal.counters.compute_minutes_used
+            project.counters.compute_minutes_used
         ));
     }
     if let Some(deadline) = r.deadline.as_deref()
@@ -282,11 +282,11 @@ pub fn rail_tripped(goal: &Goal, now: chrono::DateTime<chrono::Utc>) -> Option<S
 
 // ── the pre-flight ───────────────────────────────────────────────────────────
 
-/// How long a pending run may hold a goal in the waiting state.
+/// How long a pending run may hold a project in the waiting state.
 ///
 /// buildr's own reaper settles a run whose follower died after 15 minutes, and
 /// `build`/`test` are capped at 10, so anything still running past this is not
-/// coming back. Waiting forever on it would be a goal that costs nothing and
+/// coming back. Waiting forever on it would be a project that costs nothing and
 /// does nothing, which is the quietest way for this design to fail.
 const PENDING_RUN_PATIENCE_MINS: i64 = 30;
 
@@ -296,7 +296,7 @@ pub enum PreFlight {
     /// Run a tick. `note` is something the pre-flight learned that belongs in
     /// the scratchpad first — a finished build, a workspace that vanished.
     Spend { note: Option<String> },
-    /// Spend nothing. The thing this goal is waiting for has not happened yet,
+    /// Spend nothing. The thing this project is waiting for has not happened yet,
     /// and asking a language model to observe that costs more than the answer.
     Wait { why: String },
 }
@@ -390,29 +390,29 @@ pub fn decide_pending(
 /// Answer everything that can be answered without a model, and decide whether
 /// this wake-up is worth a turn.
 ///
-/// Mutates `goal` in place — clearing a pending run that has landed, forgetting
+/// Mutates `project` in place — clearing a pending run that has landed, forgetting
 /// a workspace that has been reaped, recording compute spent — so the tick that
 /// follows starts from what is true rather than from what was true last time.
-async fn preflight(goal: &mut Goal) -> PreFlight {
+async fn preflight(project: &mut Project) -> PreFlight {
     let mut notes: Vec<String> = Vec::new();
     let mut still_waiting: Vec<String> = Vec::new();
 
-    if let Some(pending) = goal.pending_run.clone() {
+    if let Some(pending) = project.pending_run.clone() {
         let age = run_age_minutes(&pending.started_at);
         let result = crate::buildr::get_run(&pending.workspace_id, &pending.run_id).await;
         match decide_pending(&result, age, &pending.what) {
             PreFlight::Wait { why } => still_waiting.push(why),
             PreFlight::Spend { note } => {
-                goal.pending_run = None;
+                project.pending_run = None;
                 notes.extend(note);
             }
         }
     }
 
-    // Every task's own run, polled the same way. This is where a goal gets to
+    // Every task's own run, polled the same way. This is where a project gets to
     // have three builds in flight at once: N HTTP GETs and no model, so the
     // waiting costs nothing whether there is one of them or five.
-    let mut tasks = goal_tasks::list(&goal.id);
+    let mut tasks = project_tasks::list(&project.id);
     let mut tasks_changed = false;
     for task in tasks.iter_mut() {
         let Some(pending) = task.pending_run.clone() else {
@@ -450,20 +450,20 @@ async fn preflight(goal: &mut Goal) -> PreFlight {
         }
     }
     if tasks_changed {
-        let _ = goal_tasks::save(&goal.id, &tasks);
+        let _ = project_tasks::save(&project.id, &tasks);
     }
 
     // Wait only when nothing landed AND there is nothing else worth waking for.
-    // A goal with one task building and another ready to start should start it:
-    // that is the whole reason tasks own their runs rather than the goal owning
-    // one. With no tasks this is exactly the old behaviour — a goal waiting on
+    // A project with one task building and another ready to start should start it:
+    // that is the whole reason tasks own their runs rather than the project owning
+    // one. With no tasks this is exactly the old behaviour — a project waiting on
     // its single run has nothing else it could be doing.
-    if notes.is_empty() && !still_waiting.is_empty() && goal_tasks::ready(&tasks).is_empty() {
+    if notes.is_empty() && !still_waiting.is_empty() && project_tasks::ready(&tasks).is_empty() {
         let why = still_waiting.join("; ");
         // Deliberately nothing else: no journal line, no counters. A wait is not
         // a tick, and one line every five minutes would bury the ticks that did
         // something.
-        log::info!("goal {} waiting: {why}", goal.id);
+        log::info!("project {} waiting: {why}", project.id);
         return PreFlight::Wait { why };
     }
     // Something is still running but there is work to get on with — say so, so
@@ -475,7 +475,7 @@ async fn preflight(goal: &mut Goal) -> PreFlight {
     // A workspace that has been reaped is the normal end of a free-plan week,
     // not an error — but a tick that does not know costs a whole turn finding
     // out, and usually finds out by failing.
-    if let Some(ws_id) = goal.workspace.id.clone() {
+    if let Some(ws_id) = project.workspace.id.clone() {
         match crate::buildr::get_workspace(&ws_id).await {
             Ok(ws) if ws.is_ready() || ws.is_hibernated() => {}
             Ok(ws) => notes.push(format!(
@@ -484,21 +484,21 @@ async fn preflight(goal: &mut Goal) -> PreFlight {
                 ws.error.map(|e| format!(" ({e})")).unwrap_or_default()
             )),
             Err(crate::buildr::Error::Gone) => {
-                goal.workspace.id = None;
+                project.workspace.id = None;
                 notes.push(format!(
                     "Workspace `{ws_id}` is gone. Create a new one and clone the repo at the \
-                     goal's branch before doing anything else — the branch and this \
+                     project's branch before doing anything else — the branch and this \
                      scratchpad are the only things that survived."
                 ));
             }
-            Err(e) => log::debug!("goal {}: could not read workspace: {e}", goal.id),
+            Err(e) => log::debug!("project {}: could not read workspace: {e}", project.id),
         }
     }
 
     if crate::buildr::configured()
         && let Ok(compute) = crate::buildr::compute().await
     {
-        goal.counters.compute_minutes_used = compute.used();
+        project.counters.compute_minutes_used = compute.used();
     }
 
     PreFlight::Spend {
@@ -519,33 +519,33 @@ fn run_age_minutes(started_at: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// Tell the person who set the goal that it has stopped and needs them.
+/// Tell the person who set the project that it has stopped and needs them.
 ///
-/// The whole design leans on someone noticing a blocked goal — it stops the
-/// heartbeat, so nothing else will ever mention it again. Before this, a goal
+/// The whole design leans on someone noticing a blocked project — it stops the
+/// heartbeat, so nothing else will ever mention it again. Before this, a project
 /// that blocked at 2am sat there until somebody happened to open the right
-/// screen, which is exactly the overnight silence `goal_block` is supposed to be
+/// screen, which is exactly the overnight silence `project_block` is supposed to be
 /// rare enough to justify.
 ///
-/// Delivered into the chat the goal was created from, as a turn in that
+/// Delivered into the chat the project was created from, as a turn in that
 /// conversation, so it arrives wherever that chat already reaches — the
-/// workshop, a phone, a text message. A goal with no binding logs and moves on:
+/// workshop, a phone, a text message. A project with no binding logs and moves on:
 /// there is nowhere to say it.
-async fn announce(context: &AgentRuntimeContext, goal: &Goal, message: &str) {
+async fn announce(context: &AgentRuntimeContext, project: &Project, message: &str) {
     use crate::scheduled_tasks::IoBinding;
-    match &goal.io {
+    match &project.io {
         IoBinding::WorkshopChat { chat_id } => {
             match crate::workshop_api::deliver_followup_to_chat(context, chat_id, message).await {
                 crate::workshop_api::FollowupDelivery::Delivered => {}
-                // Not retried: the goal is already stopped and the message is in
+                // Not retried: the project is already stopped and the message is in
                 // its journal and its scratchpad either way. Waking a busy chat
                 // twice to say the same thing is worse than saying it once.
-                other => log::warn!("goal {}: could not announce ({other:?})", goal.id),
+                other => log::warn!("project {}: could not announce ({other:?})", project.id),
             }
         }
         other => log::info!(
-            "goal {} has nowhere to announce to ({other:?}): {message}",
-            goal.id
+            "project {} has nowhere to announce to ({other:?}): {message}",
+            project.id
         ),
     }
 }
@@ -554,17 +554,17 @@ async fn announce(context: &AgentRuntimeContext, goal: &Goal, message: &str) {
 ///
 /// Not an optimisation and not the prompt's job. buildr bills awake minutes and
 /// hibernates on its own only after 10–30 idle minutes, so a tick that leaves
-/// the box running bills most of the gap to the goal's owner — every half hour,
+/// the box running bills most of the gap to the project's owner — every half hour,
 /// all week. Failures are logged and swallowed: a workspace that refuses to
 /// hibernate (mid-provision, or serving) is buildr's problem to reap, and it is
 /// not worth failing a tick that otherwise went fine.
-async fn hibernate_workspace(goal: &Goal) {
-    let Some(ws_id) = goal.workspace.id.as_deref() else {
+async fn hibernate_workspace(project: &Project) {
+    let Some(ws_id) = project.workspace.id.as_deref() else {
         return;
     };
     match crate::buildr::hibernate(ws_id).await {
-        Ok(_) => log::info!("goal {}: hibernated workspace {ws_id}", goal.id),
-        Err(e) => log::debug!("goal {}: could not hibernate {ws_id}: {e}", goal.id),
+        Ok(_) => log::info!("project {}: hibernated workspace {ws_id}", project.id),
+        Err(e) => log::debug!("project {}: could not hibernate {ws_id}: {e}", project.id),
     }
 }
 
@@ -575,11 +575,11 @@ async fn hibernate_workspace(goal: &Goal) {
 /// It is long because it is the whole contract: every tick is a stranger to
 /// every other one, and this is the only place the rules can be stated. The
 /// three that matter most — verify before checking, commit before finishing,
-/// rewrite the scratchpad last — are the three whose absence produces a goal
+/// rewrite the scratchpad last — are the three whose absence produces a project
 /// that looks like it is working and is not.
-pub fn tick_frame(goal: &Goal, kind: TickKind, tick_number: u32) -> String {
+pub fn tick_frame(project: &Project, kind: TickKind, tick_number: u32) -> String {
     let common = format!(
-        "You are working towards a long-running goal. This is tick {tick_number}.\n\n\
+        "You are working towards a long-running project. This is tick {tick_number}.\n\n\
          You remember nothing of previous ticks. Everything you know is in the scratchpad \
          below — and everything the *next* tick will know is what you leave there.\n\n\
          Your plan is a **task list**, not prose. `## Plan` below is rendered from it and you \
@@ -588,22 +588,22 @@ pub fn tick_frame(goal: &Goal, kind: TickKind, tick_number: u32) -> String {
          `task_update` to re-scope or re-route. Nothing you do not name can change, so there is \
          no way to lose a step.\n\n\
          Rules that hold on every tick:\n\
-         - **Do one slice of work, not the whole goal.** A tick is minutes, not hours.\n\
+         - **Do one slice of work, not the whole project.** A tick is minutes, not hours.\n\
          - **Verify before you claim.** `task_done` wants the commit, the run and its exit code, \
          or the file — a build that compiles is not a feature that works.\n\
          - **Uncommitted work does not exist.** If you changed code, commit and push it before \
          the tick ends; the workspace can be reaped between ticks.\n\
          - **Decide, don't stall.** For an ordinary choice, pick the reasonable option, record \
-         the decision and why in the scratchpad's State, and keep moving. Use `goal_block` only \
-         when the call is irreversible, spends money, or changes what the goal means. To stop \
-         ONE task without stopping the goal, use `task_block` — its siblings keep going.\n\
-         - **Finish by rewriting the scratchpad** with `goal_scratchpad_write` — State, Log, \
+         the decision and why in the scratchpad's State, and keep moving. Use `project_block` only \
+         when the call is irreversible, spends money, or changes what the project means. To stop \
+         ONE task without stopping the project, use `task_block` — its siblings keep going.\n\
+         - **Finish by rewriting the scratchpad** with `project_scratchpad_write` — State, Log, \
          Blockers, Questions. Leave `## Plan` alone; the task list is that.\n\n"
     );
 
     let specific = match kind {
         TickKind::Plan => {
-            "**This tick is for planning.** There is no usable plan yet. Look at the goal and at \
+            "**This tick is for planning.** There is no usable plan yet. Look at the project and at \
              whatever the repo or the workspace tells you, then call `task_add` ONCE with 3–8 \
              concrete tasks. Each should be one tick's worth of work and concrete enough that \
              you could tell whether it happened, and each `detail` has to carry everything a \
@@ -620,7 +620,7 @@ pub fn tick_frame(goal: &Goal, kind: TickKind, tick_number: u32) -> String {
              them at the same time, and three reads take as long as the slowest rather than all three \
              added up. Verify what comes back, and call `task_done` with the evidence. If it turns out to be bigger than one tick, tighten \
              it with `task_update` and `task_add` the remainder. If a long build or test run is \
-             involved, start it and hand it to the heartbeat with `goal_await_run` naming that \
+             involved, start it and hand it to the heartbeat with `project_await_run` naming that \
              task — the next tick reads the result for free."
         }
         TickKind::Review => {
@@ -634,42 +634,42 @@ pub fn tick_frame(goal: &Goal, kind: TickKind, tick_number: u32) -> String {
              three lines of what-is-true-now.\n\
              3. Retire what is resolved — answered questions, cleared blockers.\n\
              4. Keep every decision you took, so a later tick does not re-litigate it.\n\
-             5. Remember anything that will outlive this goal (how this repo builds, what its \
+             5. Remember anything that will outlive this project (how this repo builds, what its \
              tests need) with `mem_remember`.\n\
              Never drop an unchecked step, an open blocker or an unresolved question."
         }
     };
 
-    let scratchpad = goals::read_scratchpad(&goal.id)
-        .map(|s| goals::trim_for_injection(&s))
-        .unwrap_or_else(|| goals::seed_scratchpad(goal));
+    let scratchpad = projects::read_scratchpad(&project.id)
+        .map(|s| projects::trim_for_injection(&s))
+        .unwrap_or_else(|| projects::seed_scratchpad(project));
     // The plan the tick reads is rendered from the task list, replacing whatever
     // prose is in the stored document. One plan, one truth: a frame carrying
     // both a stale markdown plan and a live task list would be asking the model
-    // which to believe. A goal with no tasks keeps its checkboxes untouched.
-    let tasks = goal_tasks::list(&goal.id);
+    // which to believe. A project with no tasks keeps its checkboxes untouched.
+    let tasks = project_tasks::list(&project.id);
     let scratchpad = if tasks.is_empty() {
         scratchpad
     } else {
-        goals::replace_section(&scratchpad, "Plan", &goal_tasks::render(&tasks))
+        projects::replace_section(&scratchpad, "Plan", &project_tasks::render(&tasks))
     };
 
-    // The ledger, for an audit goal, injected the same way the scratchpad is —
+    // The ledger, for an audit project, injected the same way the scratchpad is —
     // it is the dedupe key, and a sweep that cannot see it re-finds what it
     // already opened a PR for.
-    let ledger = if goal.kind == crate::goals::GoalKind::Audit {
+    let ledger = if project.kind == crate::projects::ProjectKind::Audit {
         format!(
             "\n\n## Findings ledger\n\n{}\n\n{} of {} PR slots in use.\n",
-            crate::goal_findings::render(&goal.id),
-            crate::goal_findings::open_prs(&goal.id),
-            goal.rails.max_open_prs,
+            crate::project_findings::render(&project.id),
+            crate::project_findings::open_prs(&project.id),
+            project.rails.max_open_prs,
         )
     } else {
         String::new()
     };
 
     let mut in_flight: Vec<String> = Vec::new();
-    if let Some(r) = goal.pending_run.as_ref() {
+    if let Some(r) = project.pending_run.as_ref() {
         in_flight.push(format!(
             "`{}` (run `{}` in workspace `{}`)",
             r.what, r.run_id, r.workspace_id
@@ -700,22 +700,22 @@ pub fn tick_frame(goal: &Goal, kind: TickKind, tick_number: u32) -> String {
 pub struct TickOutcome {
     pub kind: TickKind,
     pub progressed: bool,
-    pub status: GoalStatus,
+    pub status: ProjectStatus,
     pub summary: String,
-    /// True when the wake-up spent nothing: the pre-flight found the goal still
+    /// True when the wake-up spent nothing: the pre-flight found the project still
     /// waiting on something, and no model ran.
     pub waited: bool,
 }
 
-/// Run one tick of one goal, and record everything it left behind.
+/// Run one tick of one project, and record everything it left behind.
 ///
-/// Never returns an error: a tick that failed is a fact about the goal, not
-/// about the daemon, and the daemon has other goals to run. Failures land in the
+/// Never returns an error: a tick that failed is a fact about the project, not
+/// about the daemon, and the daemon has other projects to run. Failures land in the
 /// journal and count towards the no-progress rail like any other tick that
 /// achieved nothing.
 pub async fn run_tick(
     context: &AgentRuntimeContext,
-    goal: &Goal,
+    project: &Project,
     cwd: &str,
     approval_mode: &ApprovalMode,
 ) -> TickOutcome {
@@ -723,34 +723,34 @@ pub async fn run_tick(
     let now = chrono::Utc::now();
 
     // A rail that has already tripped blocks before spending anything.
-    if let Some(reason) = rail_tripped(goal, now) {
-        let mut goal = goal.clone();
-        goal.status = GoalStatus::Blocked;
-        goal.blocked_reason = Some(reason.clone());
-        let _ = goals::save(&goal);
-        record(&goal, TickKind::Work, "—", &reason, false, started);
+    if let Some(reason) = rail_tripped(project, now) {
+        let mut project = project.clone();
+        project.status = ProjectStatus::Blocked;
+        project.blocked_reason = Some(reason.clone());
+        let _ = projects::save(&project);
+        record(&project, TickKind::Work, "—", &reason, false, started);
         return TickOutcome {
             kind: TickKind::Work,
             progressed: false,
-            status: GoalStatus::Blocked,
+            status: ProjectStatus::Blocked,
             summary: reason,
             waited: false,
         };
     }
 
     // Everything answerable without a model, answered without one.
-    let mut goal = goal.clone();
-    let preflight_note = match preflight(&mut goal).await {
+    let mut project = project.clone();
+    let preflight_note = match preflight(&mut project).await {
         PreFlight::Wait { why } => {
             // The bookmark still moves, so the short fuse applies and this does
-            // not spin: the goal looks again in five minutes, having spent
+            // not spin: the project looks again in five minutes, having spent
             // nothing but one HTTP GET.
-            goal.counters.last_tick_at = Some(now.to_rfc3339());
-            let _ = goals::save(&goal);
+            project.counters.last_tick_at = Some(now.to_rfc3339());
+            let _ = projects::save(&project);
             return TickOutcome {
                 kind: TickKind::Work,
                 progressed: false,
-                status: goal.status,
+                status: project.status,
                 summary: why.clone(),
                 waited: true,
             };
@@ -759,13 +759,13 @@ pub async fn run_tick(
     };
     // Save what the pre-flight learned before the turn, so a tick that crashes
     // does not lose the fact that its build finished.
-    let _ = goals::save(&goal);
-    let goal = &goal;
+    let _ = projects::save(&project);
+    let project = &project;
 
-    let before = goals::read_scratchpad(&goal.id).unwrap_or_else(|| {
-        // First tick: give the goal the document it will spend its life editing.
-        let seeded = goals::seed_scratchpad(goal);
-        let _ = goals::write_scratchpad(&goal.id, &seeded);
+    let before = projects::read_scratchpad(&project.id).unwrap_or_else(|| {
+        // First tick: give the project the document it will spend its life editing.
+        let seeded = projects::seed_scratchpad(project);
+        let _ = projects::write_scratchpad(&project.id, &seeded);
         seeded
     });
     // What the pre-flight found goes into the document, not just into the
@@ -773,21 +773,21 @@ pub async fn run_tick(
     // of its finished build with it.
     let before = match &preflight_note {
         Some(note) => {
-            let updated = goals::append_to_section(&before, "Log", &format!("- {note}"));
-            let _ = goals::write_scratchpad(&goal.id, &updated);
+            let updated = projects::append_to_section(&before, "Log", &format!("- {note}"));
+            let _ = projects::write_scratchpad(&project.id, &updated);
             updated
         }
         None => before,
     };
-    let tasks_before = goal_tasks::list(&goal.id);
-    let kind = tick_kind(goal, &before, &tasks_before);
-    let tick_number = goal.counters.ticks + 1;
-    let model = model_for(goal, kind);
-    let persona = persona_for(goal);
+    let tasks_before = project_tasks::list(&project.id);
+    let kind = tick_kind(project, &before, &tasks_before);
+    let tick_number = project.counters.ticks + 1;
+    let model = model_for(project, kind);
+    let persona = persona_for(project);
 
     log::info!(
-        "goal {} tick {tick_number} [{kind:?}] as {persona} on {model}",
-        goal.id
+        "project {} tick {tick_number} [{kind:?}] as {persona} on {model}",
+        project.id
     );
 
     let logger = DiagnosticsLogger::new().ok().map(Arc::new);
@@ -797,12 +797,12 @@ pub async fn run_tick(
             persona_slug: &persona,
             cwd,
             model_name: &model,
-            task: &tick_frame(goal, kind, tick_number),
+            task: &tick_frame(project, kind, tick_number),
             approval_mode: approval_mode.clone(),
             diagnostics: logger,
-            instance_id: Some(goal.instance_id.clone()),
+            instance_id: Some(project.instance_id.clone()),
             preset_personas: None,
-            goal_id: Some(goal.id.clone()),
+            project_id: Some(project.id.clone()),
         },
     )
     .await;
@@ -821,105 +821,105 @@ pub async fn run_tick(
         Err(e) => format!("Tick could not run: {e}"),
     };
 
-    let status_before = goal.status;
+    let status_before = project.status;
     // Re-read: the goal_* tools may have moved the status or the scratchpad
     // out from under the copy we started with, and theirs is the newer one.
-    let mut goal = goals::get(&goal.id).unwrap_or_else(|| goal.clone());
-    let after = goals::read_scratchpad(&goal.id).unwrap_or_default();
-    let tasks_after = goal_tasks::list(&goal.id);
+    let mut project = projects::get(&project.id).unwrap_or_else(|| project.clone());
+    let after = projects::read_scratchpad(&project.id).unwrap_or_default();
+    let tasks_after = project_tasks::list(&project.id);
     let progressed = did_progress(&before, &after, &tasks_before, &tasks_after);
 
-    goal.counters.ticks = tick_number;
-    goal.counters.last_tick_at = Some(now.to_rfc3339());
-    goal.counters.no_progress_streak = if progressed {
+    project.counters.ticks = tick_number;
+    project.counters.last_tick_at = Some(now.to_rfc3339());
+    project.counters.no_progress_streak = if progressed {
         0
     } else {
-        goal.counters.no_progress_streak + 1
+        project.counters.no_progress_streak + 1
     };
 
     // Check the rails again with the tick's own result folded in, so a streak
     // that just reached its limit blocks now rather than after one more.
-    if goal.status == GoalStatus::Active
-        && let Some(reason) = rail_tripped(&goal, now)
+    if project.status == ProjectStatus::Active
+        && let Some(reason) = rail_tripped(&project, now)
     {
-        goal.status = GoalStatus::Blocked;
-        goal.blocked_reason = Some(reason);
+        project.status = ProjectStatus::Blocked;
+        project.blocked_reason = Some(reason);
     }
-    let _ = goals::save(&goal);
+    let _ = projects::save(&project);
 
     // Last thing, always — see `hibernate_workspace`.
-    hibernate_workspace(&goal).await;
+    hibernate_workspace(&project).await;
 
-    // A goal that has stopped has to say so, because nothing else will: the
+    // A project that has stopped has to say so, because nothing else will: the
     // heartbeat that would have mentioned it again is the thing that stopped.
-    match goal.status {
-        GoalStatus::Blocked if status_before == GoalStatus::Active => {
-            let question = goal
+    match project.status {
+        ProjectStatus::Blocked if status_before == ProjectStatus::Active => {
+            let question = project
                 .blocked_reason
                 .clone()
                 .unwrap_or_else(|| "It stopped and did not say why.".into());
             announce(
                 context,
-                &goal,
+                &project,
                 &format!(
-                    "Your goal **{}** has stopped and needs you.\n\n{question}\n\nReply here \
+                    "Your project **{}** has stopped and needs you.\n\n{question}\n\nReply here \
                      to answer it and start it again.",
-                    goal.title
+                    project.title
                 ),
             )
             .await;
         }
-        GoalStatus::Done if status_before == GoalStatus::Active => {
+        ProjectStatus::Done if status_before == ProjectStatus::Active => {
             announce(
                 context,
-                &goal,
-                &format!("Your goal **{}** is done.\n\n{summary}", goal.title),
+                &project,
+                &format!("Your project **{}** is done.\n\n{summary}", project.title),
             )
             .await;
         }
         _ => {}
     }
 
-    record(&goal, kind, &model, &summary, progressed, started);
+    record(&project, kind, &model, &summary, progressed, started);
 
     TickOutcome {
         kind,
         progressed,
-        status: goal.status,
+        status: project.status,
         summary,
         waited: false,
     }
 }
 
-/// The persona a goal's ticks run as, falling back when its pack is not
+/// The persona a project's ticks run as, falling back when its pack is not
 /// installed.
 ///
-/// The `goal-builder` / `goal-auditor` personas ship with the goal-agents pack.
-/// A pod without it still runs goals — as the pod's default orchestrator, which
+/// The `project-builder` / `project-auditor` personas ship with the project-agents pack.
+/// A pod without it still runs projects — as the pod's default orchestrator, which
 /// is worse at the job but not broken — rather than failing every tick with a
-/// missing-persona error that says nothing about goals.
-fn persona_for(goal: &Goal) -> String {
-    let wanted = goal.kind.persona();
+/// missing-persona error that says nothing about projects.
+fn persona_for(project: &Project) -> String {
+    let wanted = project.kind.persona();
     if crate::persona::Persona::load(wanted, &crate::paths::personas_dir()).is_ok() {
         return wanted.to_string();
     }
     let fallback = runtime::configured_default_persona();
     log::warn!(
-        "goal {} wants persona '{wanted}' (install the goal-agents pack); running as '{fallback}'",
-        goal.id
+        "project {} wants persona '{wanted}' (install the project-agents pack); running as '{fallback}'",
+        project.id
     );
     fallback
 }
 
 /// Whether this tick actually moved anything.
 ///
-/// For a goal with tasks this is **task movement**, not scratchpad bytes: a tick
+/// For a project with tasks this is **task movement**, not scratchpad bytes: a tick
 /// that appended "still working on the parser" to the Log used to read as
 /// progress and reset the no-progress streak to zero, which quietly defeated one
-/// of only two rails that can stop a runaway goal. Prose is bookkeeping;
+/// of only two rails that can stop a runaway project. Prose is bookkeeping;
 /// evidence is progress.
 ///
-/// A goal with no tasks falls back to the old rule, because for it the
+/// A project with no tasks falls back to the old rule, because for it the
 /// scratchpad is the only record there is.
 fn did_progress(
     pad_before: &str,
@@ -940,23 +940,23 @@ fn did_progress(
 }
 
 fn record(
-    goal: &Goal,
+    project: &Project,
     kind: TickKind,
     model: &str,
     summary: &str,
     progressed: bool,
     started: std::time::Instant,
 ) {
-    let progress = goal.progress();
+    let progress = project.progress();
     append_journal(
-        &goal.id,
+        &project.id,
         &JournalEntry {
             at: chrono::Utc::now().to_rfc3339(),
-            tick: goal.counters.ticks,
+            tick: project.counters.ticks,
             kind,
             model: model.to_string(),
             summary: summary.chars().take(2000).collect(),
-            status: goal.status,
+            status: project.status,
             plan_done: progress.done,
             plan_total: progress.total,
             progressed,
@@ -968,18 +968,18 @@ fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::goals::{Counters, GoalKind, Heartbeat, ModelTiers, Rails, Workspace};
+    use crate::projects::{Counters, ProjectKind, Heartbeat, ModelTiers, Rails, Workspace};
 
-    fn goal() -> Goal {
-        Goal {
-            id: "goal_test".into(),
+    fn project() -> Project {
+        Project {
+            id: "proj_test".into(),
             title: "t".into(),
             goal: "do the thing".into(),
-            kind: GoalKind::Build,
+            kind: ProjectKind::Build,
             instance_id: "inst".into(),
             agent_preset: "general-agent".into(),
             workspace: Workspace::default(),
-            status: GoalStatus::Active,
+            status: ProjectStatus::Active,
             blocked_reason: None,
             heartbeat: Heartbeat::default(),
             io: crate::scheduled_tasks::IoBinding::Unbound,
@@ -994,19 +994,19 @@ mod tests {
     }
 
     #[test]
-    fn a_goal_with_no_plan_plans() {
-        assert_eq!(tick_kind(&goal(), "## Plan\n_none yet_\n", &[]), TickKind::Plan);
+    fn a_project_with_no_plan_plans() {
+        assert_eq!(tick_kind(&project(), "## Plan\n_none yet_\n", &[]), TickKind::Plan);
     }
 
     #[test]
-    fn a_goal_with_a_plan_works() {
+    fn a_project_with_a_plan_works() {
         let doc = "## Plan\n- [ ] one\n";
-        assert_eq!(tick_kind(&goal(), doc, &[]), TickKind::Work);
+        assert_eq!(tick_kind(&project(), doc, &[]), TickKind::Work);
     }
 
     #[test]
     fn every_fifth_tick_reviews() {
-        let mut g = goal();
+        let mut g = project();
         let doc = "## Plan\n- [ ] one\n";
         g.counters.ticks = REVIEW_EVERY - 1;
         assert_eq!(tick_kind(&g, doc, &[]), TickKind::Review);
@@ -1014,26 +1014,26 @@ mod tests {
 
     #[test]
     fn a_bloated_scratchpad_forces_a_review_off_cadence() {
-        let g = goal();
+        let g = project();
         let doc = format!("## Plan\n- [ ] one\n\n## Log\n{}", "- a line\n".repeat(200));
         assert_eq!(tick_kind(&g, &doc, &[]), TickKind::Review);
     }
 
     #[test]
-    fn a_goal_that_never_ticked_is_due_now() {
-        assert!(is_due(&goal(), chrono::Utc::now()));
+    fn a_project_that_never_ticked_is_due_now() {
+        assert!(is_due(&project(), chrono::Utc::now()));
     }
 
     #[test]
-    fn a_goal_that_just_ticked_is_not() {
-        let mut g = goal();
+    fn a_project_that_just_ticked_is_not() {
+        let mut g = project();
         g.counters.last_tick_at = Some(chrono::Utc::now().to_rfc3339());
         assert!(!is_due(&g, chrono::Utc::now()));
     }
 
     #[test]
     fn a_goal_becomes_due_after_its_interval() {
-        let mut g = goal();
+        let mut g = project();
         let now = chrono::Utc::now();
         g.counters.last_tick_at =
             Some((now - chrono::Duration::minutes(31)).to_rfc3339());
@@ -1042,18 +1042,18 @@ mod tests {
 
     #[test]
     fn a_blocked_goal_never_ticks() {
-        let mut g = goal();
-        g.status = GoalStatus::Blocked;
+        let mut g = project();
+        g.status = ProjectStatus::Blocked;
         assert!(!is_due(&g, chrono::Utc::now()));
-        g.status = GoalStatus::Done;
+        g.status = ProjectStatus::Done;
         assert!(!is_due(&g, chrono::Utc::now()));
-        g.status = GoalStatus::Paused;
+        g.status = ProjectStatus::Paused;
         assert!(!is_due(&g, chrono::Utc::now()));
     }
 
     #[test]
     fn an_unreadable_bookmark_does_not_wedge_a_goal() {
-        let mut g = goal();
+        let mut g = project();
         g.counters.last_tick_at = Some("not a date".into());
         assert!(is_due(&g, chrono::Utc::now()));
     }
@@ -1061,21 +1061,21 @@ mod tests {
     #[test]
     fn rails_trip_on_ticks_streak_and_deadline() {
         let now = chrono::Utc::now();
-        let mut g = goal();
+        let mut g = project();
         assert!(rail_tripped(&g, now).is_none());
 
         g.counters.ticks = g.rails.max_ticks;
         assert!(rail_tripped(&g, now).unwrap().contains("Out of ticks"));
 
-        let mut g = goal();
+        let mut g = project();
         g.counters.no_progress_streak = g.rails.max_consecutive_no_progress;
         assert!(rail_tripped(&g, now).unwrap().contains("changed nothing"));
 
-        let mut g = goal();
+        let mut g = project();
         g.rails.deadline = Some((now - chrono::Duration::hours(1)).to_rfc3339());
         assert!(rail_tripped(&g, now).unwrap().contains("deadline"));
 
-        let mut g = goal();
+        let mut g = project();
         g.rails.compute_minutes_budget = Some(10);
         g.counters.compute_minutes_used = 10;
         assert!(rail_tripped(&g, now).unwrap().contains("Compute budget"));
@@ -1084,7 +1084,7 @@ mod tests {
     #[test]
     fn a_future_deadline_does_not_trip() {
         let now = chrono::Utc::now();
-        let mut g = goal();
+        let mut g = project();
         g.rails.deadline = Some((now + chrono::Duration::hours(1)).to_rfc3339());
         assert!(rail_tripped(&g, now).is_none());
     }
@@ -1100,7 +1100,7 @@ mod tests {
 
     #[test]
     fn a_goal_may_override_a_tier() {
-        let mut g = goal();
+        let mut g = project();
         g.models.work = Some("mini".into());
         assert_eq!(model_for(&g, TickKind::Work), runtime::AVAILABLE_MODELS[0]);
         // and the ones it did not override keep the kind's tier
@@ -1112,7 +1112,7 @@ mod tests {
 
     #[test]
     fn a_stuck_goal_escalates_a_tier_by_itself() {
-        let mut g = goal();
+        let mut g = project();
         assert_eq!(tier_for(&g, TickKind::Work), "standard");
         g.counters.no_progress_streak = 1;
         assert_eq!(
@@ -1124,18 +1124,18 @@ mod tests {
 
     #[test]
     fn escalation_respects_the_top_of_the_ladder() {
-        let mut g = goal();
+        let mut g = project();
         g.counters.no_progress_streak = 3;
         assert_eq!(tier_for(&g, TickKind::Review), "strong");
-        // and an explicitly cheap goal still climbs, just from lower down
+        // and an explicitly cheap project still climbs, just from lower down
         g.models.work = Some("mini".into());
         assert_eq!(tier_for(&g, TickKind::Work), "standard");
     }
 
     #[test]
     fn the_frame_carries_the_scratchpad_and_the_pending_run() {
-        let mut g = goal();
-        g.pending_run = Some(crate::goals::PendingRun {
+        let mut g = project();
+        g.pending_run = Some(crate::projects::PendingRun {
             workspace_id: "ws_1".into(),
             run_id: "run_9".into(),
             what: "cargo test".into(),
@@ -1144,7 +1144,7 @@ mod tests {
         let frame = tick_frame(&g, TickKind::Work, 3);
         assert!(frame.contains("tick 3"));
         assert!(frame.contains("run_9"), "the pending run must be named first");
-        assert!(frame.contains("do the thing"), "the goal itself must be in the frame");
+        assert!(frame.contains("do the thing"), "the project itself must be in the frame");
         // A work tick is told to take a ready task and finish it with evidence —
         // the plan is a task list, so "the first unchecked box" is no longer a
         // thing the frame can meaningfully say.
@@ -1170,7 +1170,7 @@ mod tests {
 
     #[test]
     fn a_build_that_will_never_land_stops_being_waited_for() {
-        // Past the patience window nothing is coming back, and a goal that waits
+        // Past the patience window nothing is coming back, and a project that waits
         // forever costs nothing and does nothing — the quietest failure here.
         let d = decide_pending(&Ok(run("running")), PENDING_RUN_PATIENCE_MINS, "cargo test");
         match d {
@@ -1224,7 +1224,7 @@ mod tests {
 
     #[test]
     fn the_review_frame_forbids_new_work() {
-        let frame = tick_frame(&goal(), TickKind::Review, 5);
+        let frame = tick_frame(&project(), TickKind::Review, 5);
         assert!(frame.contains("Do no new work"));
         assert!(frame.contains("Never drop an unchecked step"));
     }

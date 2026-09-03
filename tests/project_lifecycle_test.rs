@@ -1,7 +1,7 @@
-//! One goal, from creation to completion, through the pieces that actually run
+//! One project, from creation to completion, through the pieces that actually run
 //! it: the store, the scratchpad, and the four `goal_*` tools.
 //!
-//! What this is really guarding is the loop's memory. A goal is a hundred fresh
+//! What this is really guarding is the loop's memory. A project is a hundred fresh
 //! conversations that share nothing but one markdown file, so if the tools do
 //! not write that file — or a rewrite quietly loses the plan — every tick after
 //! it works on the wrong thing while still looking busy. That failure is
@@ -16,28 +16,28 @@
 use std::fs;
 
 use metalcraft::Tool;
-use metalcraft_agent::goal_tick::{self, TickKind};
-use metalcraft_agent::goals::{self, Goal, GoalKind, GoalStatus};
-use metalcraft_agent::tools::goal as goal_tools;
+use metalcraft_agent::project_tick::{self, TickKind};
+use metalcraft_agent::projects::{self, Project, ProjectKind, ProjectStatus};
+use metalcraft_agent::tools::project as goal_tools;
 
-fn a_goal(id: &str) -> Goal {
-    Goal {
+fn a_goal(id: &str) -> Project {
+    Project {
         id: id.into(),
         title: "Billing".into(),
         goal: "Ship Stripe billing in rust4ai/foo".into(),
-        kind: GoalKind::Build,
+        kind: ProjectKind::Build,
         instance_id: "inst_test".into(),
         agent_preset: "general-agent".into(),
-        workspace: goals::Workspace::default(),
-        status: GoalStatus::Active,
+        workspace: projects::Workspace::default(),
+        status: ProjectStatus::Active,
         blocked_reason: None,
-        heartbeat: goals::Heartbeat::default(),
+        heartbeat: projects::Heartbeat::default(),
         io: metalcraft_agent::scheduled_tasks::IoBinding::Unbound,
         journal_chat_id: None,
-        rails: goals::Rails::default(),
-        counters: goals::Counters::default(),
+        rails: projects::Rails::default(),
+        counters: projects::Counters::default(),
         pending_run: None,
-        models: goals::ModelTiers::default(),
+        models: projects::ModelTiers::default(),
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: String::new(),
     }
@@ -45,7 +45,7 @@ fn a_goal(id: &str) -> Goal {
 
 #[tokio::test]
 async fn a_goal_lives_through_its_scratchpad() {
-    let data_dir = std::env::temp_dir().join(format!("mc-agent-goal-{}", std::process::id()));
+    let data_dir = std::env::temp_dir().join(format!("mc-agent-project-{}", std::process::id()));
     let _ = fs::remove_dir_all(&data_dir);
     unsafe {
         std::env::set_var("METALCRAFT_DATA_DIR", &data_dir);
@@ -53,25 +53,25 @@ async fn a_goal_lives_through_its_scratchpad() {
     fs::create_dir_all(&data_dir).unwrap();
 
     // ── created ──────────────────────────────────────────────────────────────
-    let goal = a_goal(&goals::new_id());
-    goals::save(&goal).expect("save");
-    goals::write_scratchpad(&goal.id, &goals::seed_scratchpad(&goal)).expect("seed");
+    let project = a_goal(&projects::new_id());
+    projects::save(&project).expect("save");
+    projects::write_scratchpad(&project.id, &projects::seed_scratchpad(&project)).expect("seed");
 
-    let loaded = goals::get(&goal.id).expect("round-trips");
-    assert_eq!(loaded.goal, goal.goal);
-    assert_eq!(goals::active_count(), 1);
+    let loaded = projects::get(&project.id).expect("round-trips");
+    assert_eq!(loaded.goal, project.goal);
+    assert_eq!(projects::active_count(), 1);
 
-    // A goal with no plan yet plans, and is due immediately — nobody who just
+    // A project with no plan yet plans, and is due immediately — nobody who just
     // asked for something wants to wait half an hour for it to start.
-    let pad = goals::read_scratchpad(&goal.id).unwrap();
-    assert!(pad.contains("Ship Stripe billing"), "the goal is in its own scratchpad");
-    assert_eq!(goal_tick::tick_kind(&loaded, &pad, &[]), TickKind::Plan);
-    assert!(goal_tick::is_due(&loaded, chrono::Utc::now()));
-    assert_eq!(goal_tick::due(chrono::Utc::now()).len(), 1);
+    let pad = projects::read_scratchpad(&project.id).unwrap();
+    assert!(pad.contains("Ship Stripe billing"), "the project is in its own scratchpad");
+    assert_eq!(project_tick::tick_kind(&loaded, &pad, &[]), TickKind::Plan);
+    assert!(project_tick::is_due(&loaded, chrono::Utc::now()));
+    assert_eq!(project_tick::due(chrono::Utc::now()).len(), 1);
 
     // ── the planning tick writes a plan ──────────────────────────────────────
-    let write = goal_tools::GoalScratchpadWriteTool::new(goal.id.clone());
-    let planned = goals::replace_section(
+    let write = goal_tools::ProjectScratchpadWriteTool::new(project.id.clone());
+    let planned = projects::replace_section(
         &pad,
         "Plan",
         "- [ ] 1. Schema + migration\n- [ ] 2. Checkout endpoint",
@@ -81,22 +81,22 @@ async fn a_goal_lives_through_its_scratchpad() {
         .await
         .expect("plan written");
 
-    let pad = goals::read_scratchpad(&goal.id).unwrap();
-    assert_eq!(goals::progress_of(&pad), goals::Progress { done: 0, total: 2 });
-    assert_eq!(goal_tick::tick_kind(&loaded, &pad, &[]), TickKind::Work);
-    // the previous version is kept — grooming is the one op that can destroy a goal
-    assert!(!goals::snapshots(&goal.id).is_empty(), "the write snapshotted");
+    let pad = projects::read_scratchpad(&project.id).unwrap();
+    assert_eq!(projects::progress_of(&pad), projects::Progress { done: 0, total: 2 });
+    assert_eq!(project_tick::tick_kind(&loaded, &pad, &[]), TickKind::Work);
+    // the previous version is kept — grooming is the one op that can destroy a project
+    assert!(!projects::snapshots(&project.id).is_empty(), "the write snapshotted");
 
     // ── a work tick logs what it did ─────────────────────────────────────────
-    let note = goal_tools::GoalNoteTool::new(goal.id.clone());
+    let note = goal_tools::ProjectNoteTool::new(project.id.clone());
     note.call(serde_json::json!({ "section": "Log", "text": "t1: migration 0004, pushed" }))
         .await
         .expect("note");
-    let pad = goals::read_scratchpad(&goal.id).unwrap();
-    assert!(goals::section_body(&pad, "Log").unwrap().contains("migration 0004"));
+    let pad = projects::read_scratchpad(&project.id).unwrap();
+    assert!(projects::section_body(&pad, "Log").unwrap().contains("migration 0004"));
     assert_eq!(
-        goals::progress_of(&pad),
-        goals::Progress { done: 0, total: 2 },
+        projects::progress_of(&pad),
+        projects::Progress { done: 0, total: 2 },
         "a note must not disturb the plan"
     );
 
@@ -109,23 +109,23 @@ async fn a_goal_lives_through_its_scratchpad() {
     );
 
     // ── completing early is refused ──────────────────────────────────────────
-    let complete = goal_tools::GoalCompleteTool::new(goal.id.clone());
+    let complete = goal_tools::ProjectCompleteTool::new(project.id.clone());
     let err = complete
         .call(serde_json::json!({ "summary": "all done!" }))
         .await
-        .expect_err("a goal with unchecked steps cannot be complete");
+        .expect_err("a project with unchecked steps cannot be complete");
     assert!(
         format!("{err}").contains("still open"),
         "the refusal has to say what is still owed: {err}"
     );
     assert_eq!(
-        goals::get(&goal.id).unwrap().status,
-        GoalStatus::Active,
-        "a refused completion leaves the goal running"
+        projects::get(&project.id).unwrap().status,
+        ProjectStatus::Active,
+        "a refused completion leaves the project running"
     );
 
     // ── blocking stops the heartbeat and records the question ────────────────
-    let block = goal_tools::GoalBlockTool::new(goal.id.clone());
+    let block = goal_tools::ProjectBlockTool::new(project.id.clone());
     block
         .call(serde_json::json!({
             "question": "Stripe test key or live key?",
@@ -134,26 +134,26 @@ async fn a_goal_lives_through_its_scratchpad() {
         .await
         .expect("block");
 
-    let blocked = goals::get(&goal.id).unwrap();
-    assert_eq!(blocked.status, GoalStatus::Blocked);
+    let blocked = projects::get(&project.id).unwrap();
+    assert_eq!(blocked.status, ProjectStatus::Blocked);
     assert!(blocked.blocked_reason.as_deref().unwrap().contains("test key or live key"));
-    assert!(!goal_tick::is_due(&blocked, chrono::Utc::now()), "a blocked goal never ticks");
-    assert!(goal_tick::due(chrono::Utc::now()).is_empty());
+    assert!(!project_tick::is_due(&blocked, chrono::Utc::now()), "a blocked project never ticks");
+    assert!(project_tick::due(chrono::Utc::now()).is_empty());
     assert!(
-        goals::read_scratchpad(&goal.id)
+        projects::read_scratchpad(&project.id)
             .unwrap()
             .contains("test key or live key"),
         "the question is in the document the next tick will read"
     );
 
     // ── unblocked, it finishes ───────────────────────────────────────────────
-    let mut resumed = goals::get(&goal.id).unwrap();
-    resumed.status = GoalStatus::Active;
+    let mut resumed = projects::get(&project.id).unwrap();
+    resumed.status = ProjectStatus::Active;
     resumed.blocked_reason = None;
-    goals::save(&resumed).unwrap();
+    projects::save(&resumed).unwrap();
 
-    let pad = goals::read_scratchpad(&goal.id).unwrap();
-    let done = goals::replace_section(
+    let pad = projects::read_scratchpad(&project.id).unwrap();
+    let done = projects::replace_section(
         &pad,
         "Plan",
         "- [x] 1. Schema + migration\n- [x] 2. Checkout endpoint",
@@ -167,13 +167,13 @@ async fn a_goal_lives_through_its_scratchpad() {
         .await
         .expect("now it may complete");
 
-    let finished = goals::get(&goal.id).unwrap();
-    assert_eq!(finished.status, GoalStatus::Done);
-    assert!(!goal_tick::is_due(&finished, chrono::Utc::now()));
-    assert_eq!(goals::active_count(), 0);
-    assert_eq!(finished.progress(), goals::Progress { done: 2, total: 2 });
+    let finished = projects::get(&project.id).unwrap();
+    assert_eq!(finished.status, ProjectStatus::Done);
+    assert!(!project_tick::is_due(&finished, chrono::Utc::now()));
+    assert_eq!(projects::active_count(), 0);
+    assert_eq!(finished.progress(), projects::Progress { done: 2, total: 2 });
 
-    // ── a rewrite that drops the goal statement gets it back ─────────────────
+    // ── a rewrite that drops the project statement gets it back ─────────────────
     // The one thing a scratchpad may not lose: without it every later tick works
     // towards nothing in particular, and the document still looks well-formed.
     write
@@ -181,19 +181,19 @@ async fn a_goal_lives_through_its_scratchpad() {
         .await
         .unwrap();
     assert!(
-        goals::read_scratchpad(&goal.id)
+        projects::read_scratchpad(&project.id)
             .unwrap()
             .contains("Ship Stripe billing"),
-        "the goal statement is restored rather than lost"
+        "the project statement is restored rather than lost"
     );
 
     // ── a long build is handed to the heartbeat, not waited on ───────────────
-    let mut running = a_goal(&goals::new_id());
+    let mut running = a_goal(&projects::new_id());
     running.title = "Awaiting".into();
-    goals::save(&running).unwrap();
-    goals::write_scratchpad(&running.id, &goals::seed_scratchpad(&running)).unwrap();
+    projects::save(&running).unwrap();
+    projects::write_scratchpad(&running.id, &projects::seed_scratchpad(&running)).unwrap();
 
-    let await_run = goal_tools::GoalAwaitRunTool::new(running.id.clone());
+    let await_run = goal_tools::ProjectAwaitRunTool::new(running.id.clone());
     await_run
         .call(serde_json::json!({
             "workspace_id": "ws_7",
@@ -203,58 +203,58 @@ async fn a_goal_lives_through_its_scratchpad() {
         .await
         .expect("handed over");
 
-    let waiting = goals::get(&running.id).unwrap();
+    let waiting = projects::get(&running.id).unwrap();
     let pending = waiting.pending_run.as_ref().expect("recorded");
     assert_eq!(pending.run_id, "run_42");
     assert_eq!(
         waiting.tick_interval_minutes(),
-        goals::MIN_HEARTBEAT_MINUTES,
-        "a goal waiting on a run looks again soon, not in half an hour"
+        projects::MIN_HEARTBEAT_MINUTES,
+        "a project waiting on a run looks again soon, not in half an hour"
     );
     assert!(
-        goals::read_scratchpad(&running.id).unwrap().contains("run_42"),
+        projects::read_scratchpad(&running.id).unwrap().contains("run_42"),
         "the handover is in the document too, in case the record and the pad disagree"
     );
 
-    // A second one is refused: a goal that started three builds and remembered
+    // A second one is refused: a project that started three builds and remembered
     // one would silently lose the other two.
     let second = await_run
         .call(serde_json::json!({ "workspace_id": "ws_7", "run_id": "run_43", "what": "cargo build" }))
         .await
         .expect_err("one at a time");
     assert!(format!("{second}").contains("run_42"), "{second}");
-    goals::delete(&running.id).unwrap();
+    projects::delete(&running.id).unwrap();
 
     // ── the journal is what a person reads ───────────────────────────────────
-    goal_tick::append_journal(
-        &goal.id,
-        &goal_tick::JournalEntry {
+    project_tick::append_journal(
+        &project.id,
+        &project_tick::JournalEntry {
             at: chrono::Utc::now().to_rfc3339(),
             tick: 1,
             kind: TickKind::Work,
             model: "gpt-5.4".into(),
             summary: "Wrote the migration.".into(),
-            status: GoalStatus::Active,
+            status: ProjectStatus::Active,
             plan_done: 1,
             plan_total: 2,
             progressed: true,
             duration_secs: 42,
         },
     );
-    let entries = goal_tick::read_journal(&goal.id, 50);
+    let entries = project_tick::read_journal(&project.id, 50);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].tick, 1);
     assert!(entries[0].progressed);
 
-    // ── an audit goal keeps a ledger, and the cap is a rail not a hope ───────
-    let mut audit = a_goal(&goals::new_id());
-    audit.kind = GoalKind::Audit;
+    // ── an audit project keeps a ledger, and the cap is a rail not a hope ───────
+    let mut audit = a_goal(&projects::new_id());
+    audit.kind = ProjectKind::Audit;
     audit.title = "Audit".into();
     audit.rails.max_open_prs = 2;
-    goals::save(&audit).unwrap();
+    projects::save(&audit).unwrap();
 
-    let finding = goal_tools::GoalFindingTool::new(audit.id.clone());
-    let update = goal_tools::GoalFindingUpdateTool::new(audit.id.clone());
+    let finding = goal_tools::ProjectFindingTool::new(audit.id.clone());
+    let update = goal_tools::ProjectFindingUpdateTool::new(audit.id.clone());
 
     let first = finding
         .call(serde_json::json!({
@@ -281,7 +281,7 @@ async fn a_goal_lives_through_its_scratchpad() {
         .unwrap();
     assert_eq!(again["already_known"], true);
     assert_eq!(again["id"], serde_json::json!(id));
-    assert_eq!(metalcraft_agent::goal_findings::list(&audit.id).len(), 1);
+    assert_eq!(metalcraft_agent::project_findings::list(&audit.id).len(), 1);
 
     // Fill the PR slots, then be refused the third — in code, not in a prompt.
     for (title, file) in [("Missing bound", "src/a.rs:1"), ("Dead branch", "src/b.rs:2")] {
@@ -290,7 +290,7 @@ async fn a_goal_lives_through_its_scratchpad() {
             .await
             .unwrap();
     }
-    let ids: Vec<String> = metalcraft_agent::goal_findings::list(&audit.id)
+    let ids: Vec<String> = metalcraft_agent::project_findings::list(&audit.id)
         .iter()
         .map(|f| f.id.clone())
         .collect();
@@ -315,17 +315,17 @@ async fn a_goal_lives_through_its_scratchpad() {
         .call(serde_json::json!({ "id": &ids[2], "state": "pr_open" }))
         .await
         .expect("a merged PR freed a slot");
-    assert_eq!(metalcraft_agent::goal_findings::open_prs(&audit.id), 2);
+    assert_eq!(metalcraft_agent::project_findings::open_prs(&audit.id), 2);
 
     // And the agent can see all of it next tick.
-    let rendered = metalcraft_agent::goal_findings::render(&audit.id);
+    let rendered = metalcraft_agent::project_findings::render(&audit.id);
     assert!(rendered.contains("Unwrap on a None"), "{rendered}");
     assert!(rendered.contains("Merged"), "{rendered}");
-    goals::delete(&audit.id).unwrap();
+    projects::delete(&audit.id).unwrap();
 
     // ── deleted ──────────────────────────────────────────────────────────────
-    goals::delete(&goal.id).expect("delete");
-    assert!(goals::get(&goal.id).is_none());
-    assert!(goals::read_scratchpad(&goal.id).is_none(), "its document went with it");
-    assert!(goal_tick::read_journal(&goal.id, 50).is_empty());
+    projects::delete(&project.id).expect("delete");
+    assert!(projects::get(&project.id).is_none());
+    assert!(projects::read_scratchpad(&project.id).is_none(), "its document went with it");
+    assert!(project_tick::read_journal(&project.id, 50).is_empty());
 }

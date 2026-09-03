@@ -1,7 +1,7 @@
-//! A goal's task list: the structured half of what a goal knows.
+//! A project's task list: the structured half of what a project knows.
 //!
-//! A goal's scratchpad already carried a plan — as markdown checkboxes under
-//! `## Plan`, parsed back out by [`crate::goals::progress_of`] to draw a
+//! A project's scratchpad already carried a plan — as markdown checkboxes under
+//! `## Plan`, parsed back out by [`crate::projects::progress_of`] to draw a
 //! progress bar. That is a task table stored as prose, maintained by a model
 //! the tick frame has to *beg* not to lose rows from ("never drop an unchecked
 //! step"). A store cannot drop a row, so the plan moves here and the scratchpad
@@ -18,26 +18,26 @@
 //!   first; everything else is [`ready`] at the same time, which is what a tick
 //!   fans out over.
 //! * **Long work in flight, per task.** Each task owns its own
-//!   [`PendingRun`](crate::goals::PendingRun), so a goal can have three builds
+//!   [`PendingRun`](crate::projects::PendingRun), so a project can have three builds
 //!   running at once and poll all of them for free — the pre-flight is HTTP, not
 //!   a model.
 //!
-//! One file per goal at `<data>/goals/<id>/tasks.json`, whole-file rewrite with
+//! One file per project at `<data>/projects/<id>/tasks.json`, whole-file rewrite with
 //! a tmp+rename, exactly like the findings ledger next to it: a plan is tens of
 //! rows, not thousands, and an atomic replace cannot leave half a list behind.
 //! There is one writer — the tick — so there is nothing to lock.
 //!
-//! A goal created before this existed has no `tasks.json`, and every caller
+//! A project created before this existed has no `tasks.json`, and every caller
 //! falls back to the checkbox parser. Nothing has to be migrated.
 
 use serde::{Deserialize, Serialize};
 
-use crate::goals::{PendingRun, Progress};
+use crate::projects::{PendingRun, Progress};
 use crate::paths;
 
-/// How many tasks one goal may hold.
+/// How many tasks one project may hold.
 ///
-/// Not a storage limit — a limit on what a plan can be. A goal that has decomposed
+/// Not a storage limit — a limit on what a plan can be. A project that has decomposed
 /// itself into eighty tasks has not planned; it has listed, and the review tick
 /// will spend its whole budget grooming the list instead of the work.
 pub const MAX_TASKS: usize = 60;
@@ -57,9 +57,9 @@ pub enum TaskStatus {
     /// test run) and is owed its result. The pre-flight polls it without
     /// spending a model.
     Waiting,
-    /// Stopped on something this goal cannot resolve by itself. Unlike
-    /// [`crate::goals::GoalStatus::Blocked`] this stops **one task**, not the
-    /// goal — its siblings keep going, which is most of the point of having
+    /// Stopped on something this project cannot resolve by itself. Unlike
+    /// [`crate::projects::ProjectStatus::Blocked`] this stops **one task**, not the
+    /// project — its siblings keep going, which is most of the point of having
     /// tasks at all.
     Blocked,
     Done,
@@ -87,11 +87,11 @@ impl TaskStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceKind {
-    /// A commit sha on the goal's branch.
+    /// A commit sha on the project's branch.
     Commit,
     /// A buildr run id, ideally with its exit code — `r_88 exit 0`.
     Run,
-    /// A findings-ledger id (`f3`), for audit goals.
+    /// A findings-ledger id (`f3`), for audit projects.
     Finding,
     /// A path the task produced or changed.
     File,
@@ -118,7 +118,7 @@ impl Evidence {
     }
 }
 
-/// One slice of a goal's plan.
+/// One slice of a project's plan.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Task {
     /// Short and typeable (`t1`, `t2`) — it is quoted in the scratchpad, in
@@ -127,18 +127,18 @@ pub struct Task {
     /// One line. This is what the rendered plan shows and what the UI lists.
     pub title: String,
     /// What a delegate is handed when this task is dispatched. A delegate has
-    /// none of the goal's context, so this carries every decision it depends on
+    /// none of the project's context, so this carries every decision it depends on
     /// — the same contract a sub-agent's `task` argument has always had.
     #[serde(default)]
     pub detail: String,
     pub status: TaskStatus,
-    /// Task ids **within this goal** that must land first.
+    /// Task ids **within this project** that must land first.
     #[serde(default)]
     pub deps: Vec<String>,
     /// Persona to delegate this to. `None` means the tick does it itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
-    /// Whether running this task writes to the goal's workspace.
+    /// Whether running this task writes to the project's workspace.
     ///
     /// **Defaults to `true`**, and the asymmetry is deliberate: a task wrongly
     /// marked read-only can be dispatched alongside another that is editing the
@@ -181,8 +181,8 @@ pub struct NewTask {
     pub gate: Option<String>,
 }
 
-fn path(goal_id: &str) -> std::path::PathBuf {
-    paths::goal_dir(goal_id).join("tasks.json")
+fn path(project_id: &str) -> std::path::PathBuf {
+    paths::project_dir(project_id).join("tasks.json")
 }
 
 /// Every task, in the order they were added.
@@ -190,26 +190,26 @@ fn path(goal_id: &str) -> std::path::PathBuf {
 /// Insertion order, not sorted: a plan reads top to bottom, and re-ordering it
 /// under the reader would make "the first unchecked step" mean something
 /// different on every tick.
-pub fn list(goal_id: &str) -> Vec<Task> {
-    std::fs::read_to_string(path(goal_id))
+pub fn list(project_id: &str) -> Vec<Task> {
+    std::fs::read_to_string(path(project_id))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-/// Whether this goal has a task list at all.
+/// Whether this project has a task list at all.
 ///
-/// False for every goal created before tasks existed, which is what the
+/// False for every project created before tasks existed, which is what the
 /// checkbox fallbacks key off.
-pub fn exists(goal_id: &str) -> bool {
-    path(goal_id).exists()
+pub fn exists(project_id: &str) -> bool {
+    path(project_id).exists()
 }
 
-pub fn save(goal_id: &str, tasks: &[Task]) -> Result<(), String> {
-    let dir = paths::goal_dir(goal_id);
+pub fn save(project_id: &str, tasks: &[Task]) -> Result<(), String> {
+    let dir = paths::project_dir(project_id);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(tasks).map_err(|e| e.to_string())?;
-    let p = path(goal_id);
+    let p = path(project_id);
     let tmp = p.with_extension("json.tmp");
     std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
@@ -284,17 +284,17 @@ fn next_id(tasks: &[Task]) -> String {
 /// — a plan describes its own shape before its rows have ids.
 ///
 /// Rejects, rather than silently repairing: an unknown dependency, a
-/// self-dependency, a cycle, or a batch that would take the goal past
-/// [`MAX_TASKS`]. A plan with a cycle is a plan the goal would never finish,
+/// self-dependency, a cycle, or a batch that would take the project past
+/// [`MAX_TASKS`]. A plan with a cycle is a plan the project would never finish,
 /// and discovering that on tick 40 is far worse than being told now.
-pub fn add_many(goal_id: &str, new: &[NewTask]) -> Result<Vec<Task>, String> {
+pub fn add_many(project_id: &str, new: &[NewTask]) -> Result<Vec<Task>, String> {
     if new.is_empty() {
         return Err("no tasks given".into());
     }
-    let mut tasks = list(goal_id);
+    let mut tasks = list(project_id);
     if tasks.len() + new.len() > MAX_TASKS {
         return Err(format!(
-            "that would be {} tasks; a goal holds at most {MAX_TASKS}. Drop what is done or \
+            "that would be {} tasks; a project holds at most {MAX_TASKS}. Drop what is done or \
              finished with, or make the plan coarser.",
             tasks.len() + new.len()
         ));
@@ -377,21 +377,21 @@ pub fn add_many(goal_id: &str, new: &[NewTask]) -> Result<Vec<Task>, String> {
             "those dependencies form a cycle ({cycle}) — nothing in it could ever start"
         ));
     }
-    save(goal_id, &tasks)?;
+    save(project_id, &tasks)?;
     Ok(added)
 }
 
 /// Whether a whole list is a usable plan — what a hand-edited list is checked
-/// against before it replaces the one a goal is living by.
+/// against before it replaces the one a project is living by.
 ///
 /// The tools cannot produce a bad list (they validate as they go), but a person
 /// or a client PUTting the whole thing can: duplicate ids, an empty title, a
 /// dependency on a row they just deleted, a cycle. All of those would either
-/// wedge the goal or make it silently skip work, so they are refused here rather
+/// wedge the project or make it silently skip work, so they are refused here rather
 /// than discovered on tick 40.
 pub fn validate(tasks: &[Task]) -> Result<(), String> {
     if tasks.len() > MAX_TASKS {
-        return Err(format!("{} tasks; a goal holds at most {MAX_TASKS}", tasks.len()));
+        return Err(format!("{} tasks; a project holds at most {MAX_TASKS}", tasks.len()));
     }
     let mut seen: Vec<&str> = Vec::with_capacity(tasks.len());
     for (i, t) in tasks.iter().enumerate() {
@@ -489,8 +489,8 @@ pub struct TaskPatch {
     pub bump_attempts: bool,
 }
 
-pub fn update(goal_id: &str, id: &str, patch: TaskPatch) -> Result<Task, String> {
-    let mut tasks = list(goal_id);
+pub fn update(project_id: &str, id: &str, patch: TaskPatch) -> Result<Task, String> {
+    let mut tasks = list(project_id);
     let slot = tasks
         .iter()
         .position(|t| t.id == id)
@@ -550,7 +550,7 @@ pub fn update(goal_id: &str, id: &str, patch: TaskPatch) -> Result<Task, String>
         return Err(format!("that would make a cycle ({cycle})"));
     }
     let updated = tasks[slot].clone();
-    save(goal_id, &tasks)?;
+    save(project_id, &tasks)?;
     Ok(updated)
 }
 
@@ -561,8 +561,8 @@ pub fn update(goal_id: &str, id: &str, patch: TaskPatch) -> Result<Task, String>
 /// drops; a parameter it cannot omit is not. A task whose only honest proof is
 /// prose can still pass [`EvidenceKind::Note`] — the point is that it had to say
 /// so on the record.
-pub fn complete(goal_id: &str, id: &str, evidence: Evidence) -> Result<Task, String> {
-    let mut tasks = list(goal_id);
+pub fn complete(project_id: &str, id: &str, evidence: Evidence) -> Result<Task, String> {
+    let mut tasks = list(project_id);
     let slot = tasks
         .iter()
         .position(|t| t.id == id)
@@ -573,7 +573,7 @@ pub fn complete(goal_id: &str, id: &str, evidence: Evidence) -> Result<Task, Str
     if tasks[slot].gate.is_some() && !gate_is_green(&tasks[slot]) {
         return Err(format!(
             "task '{id}' has a gate (`{}`) that has not passed. Run it, record the run with \
-             goal_await_run, and complete this task once it exits 0.",
+             project_await_run, and complete this task once it exits 0.",
             tasks[slot].gate.clone().unwrap_or_default()
         ));
     }
@@ -584,14 +584,14 @@ pub fn complete(goal_id: &str, id: &str, evidence: Evidence) -> Result<Task, Str
     t.evidence.push(evidence);
     t.updated_at = chrono::Utc::now().to_rfc3339();
     let done = t.clone();
-    save(goal_id, &tasks)?;
+    save(project_id, &tasks)?;
     Ok(done)
 }
 
 /// Whether a gated task has a green run on record.
 ///
 /// Looks for a `run` evidence item mentioning `exit 0`, which is the shape
-/// [`crate::goal_tick`] writes when a pending run lands. Deliberately literal:
+/// [`crate::project_tick`] writes when a pending run lands. Deliberately literal:
 /// a heuristic that guessed would defeat the point of having a gate.
 fn gate_is_green(task: &Task) -> bool {
     task.evidence
@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn a_hand_edited_list_is_checked_before_it_replaces_a_live_plan() {
-        // Everything here would either wedge the goal or make it skip work.
+        // Everything here would either wedge the project or make it skip work.
         assert!(validate(&[t("t1", TaskStatus::Todo, &[])]).is_ok());
         assert!(
             validate(&[t("t1", TaskStatus::Todo, &[]), t("t1", TaskStatus::Todo, &[])]).is_err(),

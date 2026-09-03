@@ -1,14 +1,14 @@
-//! The tools a goal tick uses to keep its plan.
+//! The tools a project tick uses to keep its plan.
 //!
-//! These replace the half of `goal_scratchpad_write` that was never really
+//! These replace the half of `project_scratchpad_write` that was never really
 //! prose. A plan rewritten as markdown on every tick is a plan a model can drop
 //! a row from — and the tick frame's answer to that was to *ask it not to*
 //! ("never drop an unchecked step"). These tools make the asking unnecessary:
 //! the list is a store, the model only ever names the row it means, and nothing
 //! it does not mention can change.
 //!
-//! Each is bound to one goal at registration, exactly like the other `goal_*`
-//! tools, so the model never names which goal it is writing to.
+//! Each is bound to one project at registration, exactly like the other `goal_*`
+//! tools, so the model never names which project it is writing to.
 //!
 //! The one rule worth knowing before reading the code: **`task_done` requires
 //! evidence.** Not because prose is worthless, but because "verify before you
@@ -17,7 +17,7 @@
 
 use async_trait::async_trait;
 
-use crate::goal_tasks::{self, Evidence, EvidenceKind, NewTask, TaskPatch, TaskStatus};
+use crate::project_tasks::{self, Evidence, EvidenceKind, NewTask, TaskPatch, TaskStatus};
 
 fn err(tool: &str, message: impl Into<String>) -> metalcraft::GraphError {
     metalcraft::GraphError::ToolCallFailed {
@@ -28,23 +28,23 @@ fn err(tool: &str, message: impl Into<String>) -> metalcraft::GraphError {
 
 /// The list as it stands, returned by every tool so the model always sees the
 /// consequence of what it just did without spending a call to look.
-fn state(goal_id: &str) -> serde_json::Value {
-    let tasks = goal_tasks::list(goal_id);
+fn state(project_id: &str) -> serde_json::Value {
+    let tasks = project_tasks::list(project_id);
     serde_json::json!({
-        "summary": goal_tasks::summarize(&tasks),
-        "plan": goal_tasks::render(&tasks),
+        "summary": project_tasks::summarize(&tasks),
+        "plan": project_tasks::render(&tasks),
     })
 }
 
 // ── add ──────────────────────────────────────────────────────────────────────
 
 pub struct TaskAddTool {
-    goal_id: String,
+    project_id: String,
 }
 
 impl TaskAddTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
@@ -55,7 +55,7 @@ impl metalcraft::Tool for TaskAddTool {
     }
 
     fn description(&self) -> &str {
-        "Add tasks to your goal's plan. Pass the whole plan in one call — a planning tick writes \
+        "Add tasks to your project's plan. Pass the whole plan in one call — a planning tick writes \
          its plan once, not a row at a time. Each task should be one tick's worth of work and \
          concrete enough that you could tell whether it happened. Use `deps` to say what must \
          land first: tasks with NO deps run in parallel, so leave deps empty wherever two tasks \
@@ -96,7 +96,7 @@ impl metalcraft::Tool for TaskAddTool {
                             },
                             "gate": {
                                 "type": "string",
-                                "description": "Optional. A command that must exit 0 before this task may be marked done — 'cargo test --all'. Run it with buildr's test/build, record it with goal_await_run, and the next tick will have the verdict."
+                                "description": "Optional. A command that must exit 0 before this task may be marked done — 'cargo test --all'. Run it with buildr's test/build, record it with project_await_run, and the next tick will have the verdict."
                             }
                         },
                         "required": ["title"]
@@ -139,12 +139,12 @@ impl metalcraft::Tool for TaskAddTool {
             })
             .collect();
 
-        let added = goal_tasks::add_many(&self.goal_id, &new).map_err(|e| err("task_add", e))?;
+        let added = project_tasks::add_many(&self.project_id, &new).map_err(|e| err("task_add", e))?;
         let ids: Vec<&str> = added.iter().map(|t| t.id.as_str()).collect();
         Ok(serde_json::json!({
             "ok": true,
             "added": ids,
-            "state": state(&self.goal_id),
+            "state": state(&self.project_id),
         }))
     }
 }
@@ -152,12 +152,12 @@ impl metalcraft::Tool for TaskAddTool {
 // ── update ───────────────────────────────────────────────────────────────────
 
 pub struct TaskUpdateTool {
-    goal_id: String,
+    project_id: String,
 }
 
 impl TaskUpdateTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
@@ -227,11 +227,11 @@ impl metalcraft::Tool for TaskUpdateTool {
             bump_attempts: false,
         };
 
-        let task = goal_tasks::update(&self.goal_id, id, patch).map_err(|e| err("task_update", e))?;
+        let task = project_tasks::update(&self.project_id, id, patch).map_err(|e| err("task_update", e))?;
         Ok(serde_json::json!({
             "ok": true,
             "id": task.id,
-            "state": state(&self.goal_id),
+            "state": state(&self.project_id),
         }))
     }
 }
@@ -239,12 +239,12 @@ impl metalcraft::Tool for TaskUpdateTool {
 // ── done ─────────────────────────────────────────────────────────────────────
 
 pub struct TaskDoneTool {
-    goal_id: String,
+    project_id: String,
 }
 
 impl TaskDoneTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
@@ -306,24 +306,24 @@ impl metalcraft::Tool for TaskDoneTool {
                 )
             })?;
 
-        let task = goal_tasks::complete(&self.goal_id, id, Evidence::new(kind, value))
+        let task = project_tasks::complete(&self.project_id, id, Evidence::new(kind, value))
             .map_err(|e| err("task_done", e))?;
 
         // The log is what a person reads and what the next tick skims. A task
         // landing is exactly the kind of thing that belongs there, and writing
         // it here means the model does not have to remember to.
-        let current = crate::goals::read_scratchpad(&self.goal_id).unwrap_or_default();
-        let updated = crate::goals::append_to_section(
+        let current = crate::projects::read_scratchpad(&self.project_id).unwrap_or_default();
+        let updated = crate::projects::append_to_section(
             &current,
             "Log",
             &format!("- **{}** done: {} ({value})", task.id, task.title),
         );
-        let _ = crate::goals::write_scratchpad(&self.goal_id, &updated);
+        let _ = crate::projects::write_scratchpad(&self.project_id, &updated);
 
         Ok(serde_json::json!({
             "ok": true,
             "id": task.id,
-            "state": state(&self.goal_id),
+            "state": state(&self.project_id),
         }))
     }
 }
@@ -331,12 +331,12 @@ impl metalcraft::Tool for TaskDoneTool {
 // ── block / drop ─────────────────────────────────────────────────────────────
 
 pub struct TaskBlockTool {
-    goal_id: String,
+    project_id: String,
 }
 
 impl TaskBlockTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
@@ -348,7 +348,7 @@ impl metalcraft::Tool for TaskBlockTool {
 
     fn description(&self) -> &str {
         "Stop ONE task on something you cannot resolve, and keep working on the rest. This is \
-         not goal_block: the goal keeps ticking and its other tasks keep moving — only this row \
+         not project_block: the project keeps ticking and its other tasks keep moving — only this row \
          waits. Use it for a missing credential, a decision you need from a person, or an \
          upstream that is down. Say concretely what would unblock it."
     }
@@ -384,34 +384,34 @@ impl metalcraft::Tool for TaskBlockTool {
             blocked_reason: Some(Some(reason.to_string())),
             ..Default::default()
         };
-        let task = goal_tasks::update(&self.goal_id, id, patch).map_err(|e| err("task_block", e))?;
+        let task = project_tasks::update(&self.project_id, id, patch).map_err(|e| err("task_block", e))?;
 
         // Surfaced in the scratchpad too: a blocked task is something a person
-        // reading the goal should see without opening the task list.
-        let current = crate::goals::read_scratchpad(&self.goal_id).unwrap_or_default();
-        let updated = crate::goals::append_to_section(
+        // reading the project should see without opening the task list.
+        let current = crate::projects::read_scratchpad(&self.project_id).unwrap_or_default();
+        let updated = crate::projects::append_to_section(
             &current,
             "Blockers",
             &format!("- **{}** {}: {reason}", task.id, task.title),
         );
-        let _ = crate::goals::write_scratchpad(&self.goal_id, &updated);
+        let _ = crate::projects::write_scratchpad(&self.project_id, &updated);
 
         Ok(serde_json::json!({
             "ok": true,
             "id": task.id,
             "note": "That task is parked. Its siblings are unaffected — keep working.",
-            "state": state(&self.goal_id),
+            "state": state(&self.project_id),
         }))
     }
 }
 
 pub struct TaskDropTool {
-    goal_id: String,
+    project_id: String,
 }
 
 impl TaskDropTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
@@ -457,11 +457,11 @@ impl metalcraft::Tool for TaskDropTool {
             blocked_reason: Some(Some(why.to_string())),
             ..Default::default()
         };
-        let task = goal_tasks::update(&self.goal_id, id, patch).map_err(|e| err("task_drop", e))?;
+        let task = project_tasks::update(&self.project_id, id, patch).map_err(|e| err("task_drop", e))?;
         Ok(serde_json::json!({
             "ok": true,
             "id": task.id,
-            "state": state(&self.goal_id),
+            "state": state(&self.project_id),
         }))
     }
 }
@@ -470,7 +470,7 @@ impl metalcraft::Tool for TaskDropTool {
 
 /// Run several ready tasks at once, each in its own sub-agent.
 ///
-/// This is where a goal actually gets parallel. A tick picks the rows that have
+/// This is where a project actually gets parallel. A tick picks the rows that have
 /// nothing left to wait for and hands them out together; three ninety-second
 /// surveys take ninety seconds rather than four and a half minutes, and a tick
 /// that would have overrun doing them one after another fits.
@@ -484,7 +484,7 @@ impl metalcraft::Tool for TaskDropTool {
 /// prose close a row would give back exactly the "it looks done" problem the
 /// evidence requirement exists to remove.
 pub struct TaskDispatchTool {
-    goal_id: String,
+    project_id: String,
     api_key: String,
     model_name: String,
     system_prompt: String,
@@ -495,9 +495,9 @@ pub struct TaskDispatchTool {
 }
 
 impl TaskDispatchTool {
-    pub fn new(goal_id: String, cfg: &crate::tools::ToolConfig) -> Self {
+    pub fn new(project_id: String, cfg: &crate::tools::ToolConfig) -> Self {
         Self {
-            goal_id,
+            project_id,
             api_key: cfg.api_key.clone(),
             model_name: cfg.model_name.clone(),
             system_prompt: cfg.system_prompt.clone(),
@@ -526,7 +526,7 @@ impl TaskDispatchTool {
 
 /// What one delegate is told. It has none of the tick's context, so the task's
 /// own detail is the whole briefing — which is why `task_add` insists on one.
-fn briefing(task: &goal_tasks::Task, goal: &str) -> String {
+fn briefing(task: &project_tasks::Task, project: &str) -> String {
     let detail = if task.detail.trim().is_empty() {
         "(no detail was recorded for this task — do what the title says, and say what you \
          needed that you did not have.)"
@@ -534,7 +534,7 @@ fn briefing(task: &goal_tasks::Task, goal: &str) -> String {
         task.detail.trim()
     };
     format!(
-        "You are one step of a longer goal: {goal}\n\nYour task ({}): {}\n\n{detail}",
+        "You are one step of a longer project: {project}\n\nYour task ({}): {}\n\n{detail}",
         task.id, task.title
     )
 }
@@ -587,15 +587,15 @@ impl metalcraft::Tool for TaskDispatchTool {
             return Err(err("task_dispatch", "Missing required parameter: ids"));
         }
 
-        let goal = crate::goals::get(&self.goal_id)
-            .ok_or_else(|| err("task_dispatch", "this goal no longer exists"))?;
-        let tasks = goal_tasks::list(&self.goal_id);
+        let project = crate::projects::get(&self.project_id)
+            .ok_or_else(|| err("task_dispatch", "this project no longer exists"))?;
+        let tasks = project_tasks::list(&self.project_id);
 
-        let mut chosen: Vec<goal_tasks::Task> = Vec::new();
+        let mut chosen: Vec<project_tasks::Task> = Vec::new();
         for id in &ids {
-            let task = goal_tasks::get(&tasks, id)
+            let task = project_tasks::get(&tasks, id)
                 .ok_or_else(|| err("task_dispatch", format!("no task '{id}'")))?;
-            if !goal_tasks::is_ready(&task, &tasks) {
+            if !project_tasks::is_ready(&task, &tasks) {
                 return Err(err(
                     "task_dispatch",
                     format!(
@@ -633,7 +633,7 @@ impl metalcraft::Tool for TaskDispatchTool {
         let delegate = self.delegate();
         let call_args = if chosen.len() == 1 {
             let t = &chosen[0];
-            let mut a = serde_json::json!({ "task": briefing(t, &goal.goal) });
+            let mut a = serde_json::json!({ "task": briefing(t, &project.goal) });
             match t.assignee.as_deref() {
                 Some(p) => a["persona"] = serde_json::json!(p),
                 // Without a persona a delegate gets the read-only set by
@@ -648,7 +648,7 @@ impl metalcraft::Tool for TaskDispatchTool {
                 "tasks": chosen
                     .iter()
                     .map(|t| {
-                        let mut a = serde_json::json!({ "task": briefing(t, &goal.goal) });
+                        let mut a = serde_json::json!({ "task": briefing(t, &project.goal) });
                         if let Some(p) = t.assignee.as_deref() {
                             a["persona"] = serde_json::json!(p);
                         }
@@ -688,7 +688,7 @@ impl metalcraft::Tool for TaskDispatchTool {
                 .unwrap_or_default();
 
             if !finished {
-                let mut patch = goal_tasks::TaskPatch {
+                let mut patch = project_tasks::TaskPatch {
                     bump_attempts: true,
                     ..Default::default()
                 };
@@ -711,7 +711,7 @@ impl metalcraft::Tool for TaskDispatchTool {
                 {
                     patch.assignee = Some(Some(next.to_string()));
                 }
-                let _ = goal_tasks::update(&self.goal_id, &task.id, patch);
+                let _ = project_tasks::update(&self.project_id, &task.id, patch);
             }
 
             reports.push(serde_json::json!({
@@ -728,7 +728,7 @@ impl metalcraft::Tool for TaskDispatchTool {
             "reports": reports,
             "next": "Check what came back. Close what genuinely landed with task_done and its \
                      evidence; anything reported unfinished is already recorded on its task.",
-            "state": state(&self.goal_id),
+            "state": state(&self.project_id),
         }))
     }
 }

@@ -184,7 +184,7 @@ impl AgentUnderTest for GatewayPersonaAgent {
             // Mirrors the gateway path, which watches no plan: nothing renders
             // a task list over SMS.
             plan_sink: None,
-        goal_id: None,
+        project_id: None,
         };
 
         let persona = Persona::load(&self.persona_slug, &self.context.personas_dir)

@@ -1,6 +1,6 @@
 ---
-name: goal-workspace
-description: How a goal agent uses a buildr.space workspace — reconcile, work, commit, hibernate — and how to hand a long build back to the heartbeat
+name: project-workspace
+description: How a project agent uses a buildr.space workspace — reconcile, work, commit, hibernate — and how to hand a long build back to the heartbeat
 version: 1.0.0
 ---
 

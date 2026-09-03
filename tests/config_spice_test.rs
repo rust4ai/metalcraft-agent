@@ -231,7 +231,7 @@ impl AgentUnderTest for MetalcraftPersonaAgent {
             diagnostics: None,
             instance_id: None,
             preset_personas: None,
-        goal_id: None,
+        project_id: None,
         };
 
         let outcome = run_one_shot_task(&self.context, request)

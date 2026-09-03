@@ -1,6 +1,6 @@
 //! The audit archetype's ledger: what a sweep found, and what happened to it.
 //!
-//! An audit goal's whole failure mode is repetition. It sweeps a repo across
+//! An audit project's whole failure mode is repetition. It sweeps a repo across
 //! many ticks, each one knowing nothing of the others, so without a durable
 //! record tick 9 reports what tick 4 already opened a PR for — and a repo that
 //! receives the same PR twice learns to ignore the sender.
@@ -12,7 +12,7 @@
 //! eye. A compact rendering is injected into every audit tick's prompt, which is
 //! how the agent sees the ledger without the scratchpad having to carry it.
 //!
-//! One file per goal at `<data>/goals/<id>/findings.json`, whole-file rewrite:
+//! One file per project at `<data>/projects/<id>/findings.json`, whole-file rewrite:
 //! a ledger is tens of entries, not thousands, and an atomic replace cannot
 //! leave half a list behind.
 
@@ -58,7 +58,7 @@ pub enum FindingState {
 }
 
 impl FindingState {
-    /// Whether this finding is still consuming one of the goal's PR slots.
+    /// Whether this finding is still consuming one of the project's PR slots.
     pub fn holds_a_pr_slot(&self) -> bool {
         matches!(self, Self::PrOpen)
     }
@@ -88,13 +88,13 @@ pub struct Finding {
     pub updated_at: String,
 }
 
-fn path(goal_id: &str) -> std::path::PathBuf {
-    paths::goal_dir(goal_id).join("findings.json")
+fn path(project_id: &str) -> std::path::PathBuf {
+    paths::project_dir(project_id).join("findings.json")
 }
 
 /// Every finding, highest severity first and oldest first within a severity.
-pub fn list(goal_id: &str) -> Vec<Finding> {
-    let mut findings: Vec<Finding> = std::fs::read_to_string(path(goal_id))
+pub fn list(project_id: &str) -> Vec<Finding> {
+    let mut findings: Vec<Finding> = std::fs::read_to_string(path(project_id))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
@@ -107,11 +107,11 @@ pub fn list(goal_id: &str) -> Vec<Finding> {
     findings
 }
 
-fn save(goal_id: &str, findings: &[Finding]) -> Result<(), String> {
-    let dir = paths::goal_dir(goal_id);
+fn save(project_id: &str, findings: &[Finding]) -> Result<(), String> {
+    let dir = paths::project_dir(project_id);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(findings).map_err(|e| e.to_string())?;
-    let p = path(goal_id);
+    let p = path(project_id);
     let tmp = p.with_extension("json.tmp");
     std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
@@ -143,13 +143,13 @@ fn same(a: &Finding, title: &str, file: Option<&str>) -> bool {
 /// just spent a tick finding it, and telling it "you already know this, it is
 /// f3, and f3 is already a PR" is more useful than an error.
 pub fn add(
-    goal_id: &str,
+    project_id: &str,
     title: &str,
     file: Option<&str>,
     severity: Severity,
     detail: &str,
 ) -> Result<(Finding, bool), String> {
-    let mut findings = list(goal_id);
+    let mut findings = list(project_id);
     if let Some(existing) = findings.iter().find(|f| same(f, title, file)) {
         return Ok((existing.clone(), true));
     }
@@ -175,18 +175,18 @@ pub fn add(
         updated_at: now,
     };
     findings.push(finding.clone());
-    save(goal_id, &findings)?;
+    save(project_id, &findings)?;
     Ok((finding, false))
 }
 
 /// Move a finding along. `link` is the PR or issue it became.
 pub fn set_state(
-    goal_id: &str,
+    project_id: &str,
     id: &str,
     state: FindingState,
     link: Option<&str>,
 ) -> Result<Finding, String> {
-    let mut findings = list(goal_id);
+    let mut findings = list(project_id);
     let found = findings
         .iter_mut()
         .find(|f| f.id == id)
@@ -197,14 +197,14 @@ pub fn set_state(
     }
     found.updated_at = chrono::Utc::now().to_rfc3339();
     let updated = found.clone();
-    save(goal_id, &findings)?;
+    save(project_id, &findings)?;
     Ok(updated)
 }
 
-/// How many of this goal's PRs are open — what `max_open_prs` is counted
+/// How many of this project's PRs are open — what `max_open_prs` is counted
 /// against.
-pub fn open_prs(goal_id: &str) -> usize {
-    list(goal_id)
+pub fn open_prs(project_id: &str) -> usize {
+    list(project_id)
         .iter()
         .filter(|f| f.state.holds_a_pr_slot())
         .count()
@@ -214,8 +214,8 @@ pub fn open_prs(goal_id: &str) -> usize {
 ///
 /// Everything but `Rejected` detail: a tick needs to know a finding was turned
 /// down so it does not raise it again, but not why — that argument is over.
-pub fn render(goal_id: &str) -> String {
-    let findings = list(goal_id);
+pub fn render(project_id: &str) -> String {
+    let findings = list(project_id);
     if findings.is_empty() {
         return "(nothing found yet)".to_string();
     }
@@ -286,7 +286,7 @@ mod tests {
     fn only_an_open_pr_holds_a_slot() {
         assert!(FindingState::PrOpen.holds_a_pr_slot());
         // A merged PR has stopped costing anyone attention, and an issue is not
-        // a PR — neither should keep the goal from opening the next one.
+        // a PR — neither should keep the project from opening the next one.
         assert!(!FindingState::Merged.holds_a_pr_slot());
         assert!(!FindingState::IssueOpen.holds_a_pr_slot());
         assert!(!FindingState::Rejected.holds_a_pr_slot());

@@ -1,23 +1,30 @@
-//! Goals — a long-running agent that owns one goal string and works at it on a
+//! Projects — a long-running piece of work that holds a goal and pursues it on a
 //! heartbeat.
 //!
-//! See `docs/goal-agent-plan.md` for the whole design. The shape that matters
-//! here:
+//! The container is a **project**; the goal is a *string in its state*. That is
+//! the whole reason this type is not called `Goal`: a goal is what you are aiming
+//! at, not the thing doing the aiming, and naming the container after one of its
+//! fields is what made `goal.goal` read the way it did. Because the goal is
+//! state, a project can be re-aimed without dying — it keeps its instances, its
+//! memory, its session, its tasks, its workspace and its history.
 //!
-//! * **A goal owns one [`AgentInstance`] for its life** (`InstanceOrigin::Goal`),
-//!   which is what gives it memory across ticks and a conversation history a
-//!   person can read.
-//! * **The scratchpad is the state.** A tick runs in a *fresh* conversation and
+//! See `docs/projects-plan.md` for the whole design. The shape that matters here:
+//!
+//! * **A project owns its [`AgentInstance`]s for its life**
+//!   (`InstanceOrigin::Project`), which is what gives it memory across ticks and
+//!   a conversation history a person can read.
+//! * **The scratchpad is the state.** A tick runs in a *fresh* context and
 //!   carries nothing but this document, so cost per tick stays flat instead of
-//!   climbing until compaction starts eating the detail the goal depends on. It
-//!   is markdown rather than a typed plan because the model maintains it, and a
-//!   checkbox list is the cheapest format a model reliably keeps correct.
+//!   climbing until compaction starts eating the detail the project depends on.
+//!   It is markdown because the model maintains it — except `## Plan`, which is
+//!   rendered from [`crate::project_tasks`] precisely because a model rewriting
+//!   its own plan is a model that can lose a row from it.
 //! * **Nothing here runs anything.** This module is the record and the document;
-//!   [`crate::goal_tick`] is what wakes up and acts on them.
+//!   [`crate::project_tick`] is what wakes up and acts on them.
 //!
-//! Storage mirrors the other data-dir stores: one JSON per goal at
-//! `<data>/goals/<id>.json`, with the scratchpad and its snapshots beside it in
-//! `<data>/goals/<id>/`.
+//! Storage mirrors the other data-dir stores: one JSON per project at
+//! `<data>/projects/<id>.json`, with the scratchpad and its snapshots beside it in
+//! `<data>/projects/<id>/`.
 //!
 //! [`AgentInstance`]: crate::agent_instance::AgentInstance
 
@@ -25,35 +32,35 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths;
 
-/// What a goal is trying to do, which selects its persona and its tick frame.
+/// What a project is trying to do, which selects its persona and its tick frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum GoalKind {
+pub enum ProjectKind {
     /// Ship something: phases, a branch, a PR per phase.
     Build,
     /// Review a repo: a findings ledger, a PR or issue per finding.
     Audit,
 }
 
-impl GoalKind {
+impl ProjectKind {
     /// The persona a tick of this kind runs as.
     pub fn persona(&self) -> &'static str {
         match self {
-            Self::Build => "goal-builder",
-            Self::Audit => "goal-auditor",
+            Self::Build => "project-builder",
+            Self::Audit => "project-auditor",
         }
     }
 }
 
-/// Where a goal is in its life.
+/// Where a project is in its life.
 ///
 /// `Blocked` is the one that carries weight: it is where *every* stopping
 /// condition lands — the agent asking a question, and every rail in [`Rails`]
-/// tripping. A goal that quietly gave up would be indistinguishable from one
+/// tripping. A project that quietly gave up would be indistinguishable from one
 /// still working, which is the worst confusion this design could offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum GoalStatus {
+pub enum ProjectStatus {
     Active,
     Blocked,
     Paused,
@@ -61,14 +68,14 @@ pub enum GoalStatus {
     Failed,
 }
 
-impl GoalStatus {
-    /// Whether the heartbeat fires for a goal in this state.
+impl ProjectStatus {
+    /// Whether the heartbeat fires for a project in this state.
     pub fn ticks(&self) -> bool {
         matches!(self, Self::Active)
     }
 }
 
-/// How often the goal wakes.
+/// How often the project wakes.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Heartbeat {
     #[serde(default = "default_every_minutes")]
@@ -79,9 +86,14 @@ pub struct Heartbeat {
     pub timezone: Option<String>,
 }
 
-/// Thirty minutes: long enough that a tick's work is worth the wake-up, short
-/// enough that a goal left running overnight makes visible progress by morning.
-pub const DEFAULT_HEARTBEAT_MINUTES: u32 = 30;
+/// Fifteen minutes: often enough that a change a person makes lands soon, rare
+/// enough that a project left running overnight is not a billing event.
+///
+/// Thirty was the right number when every wake-up cost a model call. It does not:
+/// the pre-flight answers "has the build finished?" with an HTTP GET and spends
+/// nothing when the answer is no, so an idle wake-up is nearly free and fifteen
+/// buys twice the responsiveness for almost none of the cost.
+pub const DEFAULT_HEARTBEAT_MINUTES: u32 = 15;
 
 /// The floor. Below this a "heartbeat" is a busy-loop billing someone for the
 /// privilege — and the only legitimate short interval is the pending-run
@@ -101,41 +113,41 @@ impl Default for Heartbeat {
     }
 }
 
-/// One repo the goal works in, inside its buildr.space workspace.
+/// One repo the project works in, inside its buildr.space workspace.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct GoalRepo {
+pub struct ProjectRepo {
     /// `owner/name` on GitHub.
     pub full_name: String,
     /// Directory under `/workspace`. Absent means buildr's own default (the
     /// repo's bare name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
-    /// The branch the goal works on — `goal/<slug>`, not the repo's default.
+    /// The branch the project works on — `project/<slug>`, not the repo's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
 }
 
-/// The goal's buildr.space workspace.
+/// The project's buildr.space workspace.
 ///
 /// **A cache, not state.** The truth is the branch on GitHub plus the
 /// scratchpad; this may be reaped, deleted after a week of hibernation on the
 /// free plan, or thrown away because the sprite got into a bad state. A tick
-/// reconciles rather than assuming, and a goal that cannot survive losing this
-/// is a goal that dies over a weekend.
+/// reconciles rather than assuming, and a project that cannot survive losing this
+/// is a project that dies over a weekend.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Workspace {
     /// buildr.space workspace id. `None` until the first tick provisions one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default)]
-    pub repos: Vec<GoalRepo>,
+    pub repos: Vec<ProjectRepo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_provisioned_at: Option<String>,
 }
 
-/// Everything that can stop a goal.
+/// Everything that can stop a project.
 ///
-/// All of them land in [`GoalStatus::Blocked`] rather than ending the goal:
+/// All of them land in [`ProjectStatus::Blocked`] rather than ending the project:
 /// running out of rope is a reason to ask a person, not to disappear.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Rails {
@@ -143,15 +155,15 @@ pub struct Rails {
     pub max_ticks: u32,
     #[serde(default = "default_max_no_progress")]
     pub max_consecutive_no_progress: u32,
-    /// buildr.space awake minutes this goal may spend. Absent = only the
+    /// buildr.space awake minutes this project may spend. Absent = only the
     /// account's own plan bounds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute_minutes_budget: Option<u32>,
-    /// How many of this goal's PRs may be open at once. Twenty simultaneous bot
+    /// How many of this project's PRs may be open at once. Twenty simultaneous bot
     /// PRs is how a repo learns to ignore them.
     #[serde(default = "default_max_open_prs")]
     pub max_open_prs: u32,
-    /// RFC3339. Past it, the goal blocks.
+    /// RFC3339. Past it, the project blocks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
 }
@@ -178,7 +190,7 @@ impl Default for Rails {
     }
 }
 
-/// What the goal has spent and how far it has got.
+/// What the project has spent and how far it has got.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Counters {
     #[serde(default)]
@@ -210,7 +222,7 @@ pub struct PendingRun {
     pub started_at: String,
 }
 
-/// Model tier per tick kind, in tier names rather than model ids so a goal
+/// Model tier per tick kind, in tier names rather than model ids so a project
 /// written on one pod runs on another.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ModelTiers {
@@ -222,24 +234,29 @@ pub struct ModelTiers {
     pub review: Option<String>,
 }
 
-/// One goal.
+/// One project.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct Goal {
+pub struct Project {
     pub id: String,
     /// Short human handle, for lists.
     pub title: String,
     /// **The goal.** The one field that matters; everything else is
     /// configuration or a counter.
+    ///
+    /// A field rather than the project's identity, so it can be re-aimed: edit
+    /// it and the project keeps its instances, memory, session, tasks,
+    /// workspace and history. Naming the container after this string is what
+    /// the old `Goal` type got wrong.
     pub goal: String,
-    pub kind: GoalKind,
-    /// The agent that owns this goal for its whole life.
+    pub kind: ProjectKind,
+    /// The agent that owns this project for its whole life.
     pub instance_id: String,
     pub agent_preset: String,
 
     #[serde(default)]
     pub workspace: Workspace,
 
-    pub status: GoalStatus,
+    pub status: ProjectStatus,
     /// Why it stopped, when it is blocked — the question to put to a person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
@@ -251,7 +268,7 @@ pub struct Goal {
     /// finishes when nobody is looking still has to reach somebody.
     #[serde(default = "unbound_io")]
     pub io: crate::scheduled_tasks::IoBinding,
-    /// The chat that holds this goal's journal — one line per tick, and where a
+    /// The chat that holds this project's journal — one line per tick, and where a
     /// person answers to unblock it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal_chat_id: Option<String>,
@@ -274,36 +291,36 @@ fn unbound_io() -> crate::scheduled_tasks::IoBinding {
     crate::scheduled_tasks::IoBinding::Unbound
 }
 
-impl Goal {
-    /// The goal's own directory: the scratchpad and its snapshots.
+impl Project {
+    /// The project's own directory: the scratchpad and its snapshots.
     pub fn dir(&self) -> std::path::PathBuf {
-        paths::goal_dir(&self.id)
+        paths::project_dir(&self.id)
     }
 
     /// How far along.
     ///
-    /// From the task list when the goal has one, and from the scratchpad's
-    /// `Plan` checkboxes when it does not — every goal created before tasks
+    /// From the task list when the project has one, and from the scratchpad's
+    /// `Plan` checkboxes when it does not — every project created before tasks
     /// existed still draws a correct bar, with nothing to migrate.
     pub fn progress(&self) -> Progress {
-        if crate::goal_tasks::exists(&self.id) {
-            return crate::goal_tasks::progress(&crate::goal_tasks::list(&self.id));
+        if crate::project_tasks::exists(&self.id) {
+            return crate::project_tasks::progress(&crate::project_tasks::list(&self.id));
         }
         progress_of(&read_scratchpad(&self.id).unwrap_or_default())
     }
 
-    /// Whether anything this goal started is still running — a build handed to
-    /// the heartbeat, by the goal itself or by any of its tasks.
+    /// Whether anything this project started is still running — a build handed to
+    /// the heartbeat, by the project itself or by any of its tasks.
     pub fn awaiting_a_run(&self) -> bool {
         self.pending_run.is_some()
-            || crate::goal_tasks::list(&self.id)
+            || crate::project_tasks::list(&self.id)
                 .iter()
                 .any(|t| t.pending_run.is_some())
     }
 
     /// The interval until the next tick, honouring a pending run's short fuse.
     ///
-    /// A goal waiting on a build it started should look again soon; a goal
+    /// A project waiting on a build it started should look again soon; a project
     /// working through phases should not. This is the only place the interval
     /// shrinks, and it shrinks for a reason that will resolve on its own.
     pub fn tick_interval_minutes(&self) -> u32 {
@@ -322,66 +339,66 @@ pub struct Progress {
 }
 
 pub fn new_id() -> String {
-    format!("goal_{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
+    format!("proj_{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
 }
 
 fn dir() -> std::path::PathBuf {
-    paths::goals_dir()
+    paths::projects_dir()
 }
 
-fn goal_path(id: &str) -> std::path::PathBuf {
+fn project_path(id: &str) -> std::path::PathBuf {
     dir().join(format!("{id}.json"))
 }
 
-/// Every goal on this pod, newest first.
-pub fn list() -> Vec<Goal> {
+/// Every project on this pod, newest first.
+pub fn list() -> Vec<Project> {
     let Ok(entries) = std::fs::read_dir(dir()) else {
         return Vec::new();
     };
-    let mut goals: Vec<Goal> = entries
+    let mut projects: Vec<Project> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-        .filter_map(|s| serde_json::from_str::<Goal>(&s).ok())
+        .filter_map(|s| serde_json::from_str::<Project>(&s).ok())
         .collect();
-    goals.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    goals
+    projects.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    projects
 }
 
-/// One goal by id.
-pub fn get(id: &str) -> Option<Goal> {
-    let content = std::fs::read_to_string(goal_path(id)).ok()?;
+/// One project by id.
+pub fn get(id: &str) -> Option<Project> {
+    let content = std::fs::read_to_string(project_path(id)).ok()?;
     serde_json::from_str(&content).ok()
 }
 
-/// Persist a goal, stamping `updated_at`.
-pub fn save(goal: &Goal) -> Result<(), String> {
-    let mut goal = goal.clone();
-    goal.updated_at = chrono::Utc::now().to_rfc3339();
+/// Persist a project, stamping `updated_at`.
+pub fn save(project: &Project) -> Result<(), String> {
+    let mut project = project.clone();
+    project.updated_at = chrono::Utc::now().to_rfc3339();
     std::fs::create_dir_all(dir()).map_err(|e| e.to_string())?;
-    let json = serde_json::to_string_pretty(&goal).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
     // tmp + rename, like the other stores: a pod that dies mid-write must not
-    // leave a goal whose JSON is half a document.
-    let tmp = goal_path(&goal.id).with_extension("json.tmp");
+    // leave a project whose JSON is half a document.
+    let tmp = project_path(&project.id).with_extension("json.tmp");
     std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, goal_path(&goal.id)).map_err(|e| e.to_string())
+    std::fs::rename(&tmp, project_path(&project.id)).map_err(|e| e.to_string())
 }
 
-/// Delete a goal and everything under it. The agent instance survives — it holds
-/// memory that outlives this goal, and instances are never deleted on a timer.
+/// Delete a project and everything under it. The agent instance survives — it holds
+/// memory that outlives this project, and instances are never deleted on a timer.
 pub fn delete(id: &str) -> Result<(), String> {
-    let existed = goal_path(id).exists();
-    let _ = std::fs::remove_file(goal_path(id));
-    let _ = std::fs::remove_dir_all(paths::goal_dir(id));
+    let existed = project_path(id).exists();
+    let _ = std::fs::remove_file(project_path(id));
+    let _ = std::fs::remove_dir_all(paths::project_dir(id));
     if existed {
         Ok(())
     } else {
-        Err(format!("no goal '{id}'"))
+        Err(format!("no project '{id}'"))
     }
 }
 
-/// How many goals are actively ticking. The ceiling exists because every active
-/// goal is a live buildr.space workspace on somebody's plan (1 free, 5 premium)
+/// How many projects are actively ticking. The ceiling exists because every active
+/// project is a live buildr.space workspace on somebody's plan (1 free, 5 premium)
 /// and unattended spend that nobody asked about twice.
 pub fn active_count() -> usize {
     list().iter().filter(|g| g.status.ticks()).count()
@@ -390,14 +407,14 @@ pub fn active_count() -> usize {
 // ── the scratchpad ───────────────────────────────────────────────────────────
 
 /// Hard cap on the injected document. Past this a tick spends more on reading
-/// its own history than on the work, so a groom is forced (see `goal_tick`).
+/// its own history than on the work, so a groom is forced (see `project_tick`).
 pub const SCRATCHPAD_MAX_BYTES: usize = 12 * 1024;
 
 /// Log lines past this many trigger a groom regardless of the review cadence.
 pub const SCRATCHPAD_MAX_LOG_LINES: usize = 40;
 
 /// How many previous scratchpads to keep. Grooming is the one operation that can
-/// destroy a goal, so it is never the only copy.
+/// destroy a project, so it is never the only copy.
 pub const SCRATCHPAD_SNAPSHOTS: usize = 10;
 
 /// The sections every scratchpad has, in order. Fixed rather than free-form
@@ -413,23 +430,23 @@ pub const SECTIONS: &[&str] = &[
     "Questions for the human",
 ];
 
-pub fn scratchpad_path(goal_id: &str) -> std::path::PathBuf {
-    paths::goal_dir(goal_id).join("scratchpad.md")
+pub fn scratchpad_path(project_id: &str) -> std::path::PathBuf {
+    paths::project_dir(project_id).join("scratchpad.md")
 }
 
-/// The scratchpad as written. `None` when the goal has none yet.
-pub fn read_scratchpad(goal_id: &str) -> Option<String> {
-    std::fs::read_to_string(scratchpad_path(goal_id)).ok()
+/// The scratchpad as written. `None` when the project has none yet.
+pub fn read_scratchpad(project_id: &str) -> Option<String> {
+    std::fs::read_to_string(scratchpad_path(project_id)).ok()
 }
 
 /// Replace the scratchpad, snapshotting the previous one first.
-pub fn write_scratchpad(goal_id: &str, markdown: &str) -> Result<(), String> {
-    let dir = paths::goal_dir(goal_id);
+pub fn write_scratchpad(project_id: &str, markdown: &str) -> Result<(), String> {
+    let dir = paths::project_dir(project_id);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    if let Some(previous) = read_scratchpad(goal_id) {
+    if let Some(previous) = read_scratchpad(project_id) {
         snapshot(&dir, &previous)?;
     }
-    let path = scratchpad_path(goal_id);
+    let path = scratchpad_path(project_id);
     let tmp = path.with_extension("md.tmp");
     std::fs::write(&tmp, markdown).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
@@ -447,16 +464,16 @@ fn snapshot(dir: &std::path::Path, previous: &str) -> Result<(), String> {
 }
 
 /// Previous scratchpads, newest first — what a bad groom is recovered from.
-pub fn snapshots(goal_id: &str) -> Vec<String> {
-    let dir = paths::goal_dir(goal_id);
+pub fn snapshots(project_id: &str) -> Vec<String> {
+    let dir = paths::project_dir(project_id);
     (1..=SCRATCHPAD_SNAPSHOTS)
         .filter_map(|n| std::fs::read_to_string(dir.join(format!("scratchpad.{n}.md"))).ok())
         .collect()
 }
 
-/// The document a goal starts with.
-pub fn seed_scratchpad(goal: &Goal) -> String {
-    let workspace = match (&goal.workspace.id, goal.workspace.repos.first()) {
+/// The document a project starts with.
+pub fn seed_scratchpad(project: &Project) -> String {
+    let workspace = match (&project.workspace.id, project.workspace.repos.first()) {
         (Some(id), Some(repo)) => format!(
             "buildr `{id}` · repo `{}`{}\n",
             repo.full_name,
@@ -474,7 +491,7 @@ pub fn seed_scratchpad(goal: &Goal) -> String {
     format!(
         "## Goal\n{}\n\n## Workspace\n{}\n## Plan\n_No plan yet — call `task_add` to write one; this section is rendered from the task list._\n\n\
          ## State\n(nothing yet)\n\n## Log\n\n## Blockers\n(none)\n\n## Questions for the human\n(none)\n",
-        goal.goal.trim(),
+        project.goal.trim(),
         workspace,
     )
 }
@@ -704,15 +721,15 @@ mod tests {
 
     #[test]
     fn a_pending_run_shortens_the_interval() {
-        let mut g = Goal {
+        let mut g = Project {
             id: "g".into(),
             title: "t".into(),
             goal: "do".into(),
-            kind: GoalKind::Build,
+            kind: ProjectKind::Build,
             instance_id: "i".into(),
             agent_preset: "p".into(),
             workspace: Workspace::default(),
-            status: GoalStatus::Active,
+            status: ProjectStatus::Active,
             blocked_reason: None,
             heartbeat: Heartbeat::default(),
             io: crate::scheduled_tasks::IoBinding::Unbound,
@@ -736,15 +753,15 @@ mod tests {
 
     #[test]
     fn a_silly_short_heartbeat_is_floored() {
-        let g = Goal {
+        let g = Project {
             id: "g".into(),
             title: "t".into(),
             goal: "do".into(),
-            kind: GoalKind::Build,
+            kind: ProjectKind::Build,
             instance_id: "i".into(),
             agent_preset: "p".into(),
             workspace: Workspace::default(),
-            status: GoalStatus::Active,
+            status: ProjectStatus::Active,
             blocked_reason: None,
             heartbeat: Heartbeat { every_minutes: 1, timezone: None },
             io: crate::scheduled_tasks::IoBinding::Unbound,

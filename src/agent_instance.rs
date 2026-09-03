@@ -52,14 +52,14 @@ pub enum InstanceOrigin {
     Flow {
         flow_id: String,
     },
-    /// An agent that exists to pursue one [goal](crate::goals), for as long as
+    /// An agent that exists to pursue one [project](crate::projects), for as long as
     /// that takes.
     ///
-    /// The goal is the reason the agent was minted, and the two live and die
-    /// together in intent — but not in storage: deleting a goal leaves the
+    /// The project is the reason the agent was minted, and the two live and die
+    /// together in intent — but not in storage: deleting a project leaves the
     /// instance, because what it learned along the way outlives the errand.
-    Goal {
-        goal_id: String,
+    Project {
+        project_id: String,
     },
 }
 
@@ -326,14 +326,14 @@ pub fn for_flow(flow_id: &str, label: &str, preset_slug: &str) -> Result<AgentIn
     Ok(instance)
 }
 
-/// The agent that pursues one [goal](crate::goals), minting it on first use.
+/// The agent that pursues one [project](crate::projects), minting it on first use.
 ///
-/// One instance for the goal's whole life, which is what makes its memory worth
-/// having: a goal is a hundred fresh conversations, and the only thing that
+/// One instance for the project's whole life, which is what makes its memory worth
+/// having: a project is a hundred fresh conversations, and the only thing that
 /// carries between them besides the scratchpad is what this agent knows.
-pub fn for_goal(goal_id: &str, label: &str, preset_slug: &str) -> Result<AgentInstance, String> {
-    let origin = InstanceOrigin::Goal {
-        goal_id: goal_id.to_string(),
+pub fn for_project(project_id: &str, label: &str, preset_slug: &str) -> Result<AgentInstance, String> {
+    let origin = InstanceOrigin::Project {
+        project_id: project_id.to_string(),
     };
     if let Some(found) = list().into_iter().find(|i| i.origin == origin) {
         return Ok(found);

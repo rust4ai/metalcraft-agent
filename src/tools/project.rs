@@ -1,29 +1,29 @@
-//! The four tools a goal tick uses to write down where it got to.
+//! The four tools a project tick uses to write down where it got to.
 //!
-//! Each is bound to one goal at registration ([`ToolConfig::goal_id`]), so the
-//! model never names which goal it is writing to — it cannot mistype it, and it
-//! cannot write to another goal's scratchpad.
+//! Each is bound to one project at registration ([`ToolConfig::project_id`]), so the
+//! model never names which project it is writing to — it cannot mistype it, and it
+//! cannot write to another project's scratchpad.
 //!
-//! The split is deliberate. [`GoalNoteTool`] is the cheap, frequent one: a line
-//! of log, a blocker, a question. [`GoalScratchpadWriteTool`] replaces the whole
+//! The split is deliberate. [`ProjectNoteTool`] is the cheap, frequent one: a line
+//! of log, a blocker, a question. [`ProjectScratchpadWriteTool`] replaces the whole
 //! document and is the tick's *final* act — wholesale rather than patched, for
 //! the same reason `update_plan` is: a step silently abandoned shows up as a
 //! deletion instead of sitting there forever, and there is never a question of
 //! which write won.
 //!
-//! [`GoalBlockTool`] and [`GoalCompleteTool`] are the two ways a goal stops. Both
-//! are terminal for the *goal*, not merely for the turn, which is why they are
+//! [`ProjectBlockTool`] and [`ProjectCompleteTool`] are the two ways a project stops. Both
+//! are terminal for the *project*, not merely for the turn, which is why they are
 //! tools rather than something inferred from what the agent said.
 //!
-//! [`ToolConfig::goal_id`]: crate::tools::ToolConfig::goal_id
+//! [`ToolConfig::project_id`]: crate::tools::ToolConfig::project_id
 
 use async_trait::async_trait;
 
-use crate::goals;
+use crate::projects;
 
 /// Sections a note may be appended to.
 ///
-/// Not the full section list: `Goal` is immutable, and `Plan`/`State`/`Workspace`
+/// Not the full section list: `Project` is immutable, and `Plan`/`State`/`Workspace`
 /// are rewritten wholesale by the scratchpad write rather than appended to a line
 /// at a time — appending to a plan is how a plan grows a second copy of itself.
 const NOTE_SECTIONS: &[&str] = &["Log", "Blockers", "Questions for the human"];
@@ -35,28 +35,28 @@ fn err(tool: &str, message: impl Into<String>) -> metalcraft::GraphError {
     }
 }
 
-pub struct GoalNoteTool {
-    goal_id: String,
+pub struct ProjectNoteTool {
+    project_id: String,
 }
 
-impl GoalNoteTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+impl ProjectNoteTool {
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
 #[async_trait]
-impl metalcraft::Tool for GoalNoteTool {
+impl metalcraft::Tool for ProjectNoteTool {
     fn name(&self) -> &str {
-        "goal_note"
+        "project_note"
     }
 
     fn description(&self) -> &str {
-        "Append one line to your goal's scratchpad. Use `Log` for what you just did (start it \
+        "Append one line to your project's scratchpad. Use `Log` for what you just did (start it \
          with what changed, not with what you intended), `Blockers` for something stopping \
          progress that you intend to work around, and `Questions for the human` for something \
          you want asked but are not blocking on. To rewrite the plan or the state, use \
-         goal_scratchpad_write instead — this tool only appends."
+         project_scratchpad_write instead — this tool only appends."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -80,10 +80,10 @@ impl metalcraft::Tool for GoalNoteTool {
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
         let section = args["section"]
             .as_str()
-            .ok_or_else(|| err("goal_note", "Missing required parameter: section"))?;
+            .ok_or_else(|| err("project_note", "Missing required parameter: section"))?;
         if !NOTE_SECTIONS.contains(&section) {
             return Err(err(
-                "goal_note",
+                "project_note",
                 format!("Unknown section '{section}'. One of: {}", NOTE_SECTIONS.join(", ")),
             ));
         }
@@ -91,40 +91,40 @@ impl metalcraft::Tool for GoalNoteTool {
             .as_str()
             .map(str::trim)
             .filter(|t| !t.is_empty())
-            .ok_or_else(|| err("goal_note", "Missing required parameter: text"))?;
+            .ok_or_else(|| err("project_note", "Missing required parameter: text"))?;
 
-        let current = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
+        let current = projects::read_scratchpad(&self.project_id).unwrap_or_default();
         // One line means one line: a note carrying its own newlines would end up
         // as several list items, one of which is a fragment.
         let line = format!("- {}", text.replace('\n', " "));
-        let updated = goals::append_to_section(&current, section, &line);
-        goals::write_scratchpad(&self.goal_id, &updated)
-            .map_err(|e| err("goal_note", format!("could not write scratchpad: {e}")))?;
+        let updated = projects::append_to_section(&current, section, &line);
+        projects::write_scratchpad(&self.project_id, &updated)
+            .map_err(|e| err("project_note", format!("could not write scratchpad: {e}")))?;
 
         Ok(serde_json::json!({ "ok": true, "section": section }))
     }
 }
 
-pub struct GoalScratchpadWriteTool {
-    goal_id: String,
+pub struct ProjectScratchpadWriteTool {
+    project_id: String,
 }
 
-impl GoalScratchpadWriteTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+impl ProjectScratchpadWriteTool {
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
 #[async_trait]
-impl metalcraft::Tool for GoalScratchpadWriteTool {
+impl metalcraft::Tool for ProjectScratchpadWriteTool {
     fn name(&self) -> &str {
-        "goal_scratchpad_write"
+        "project_scratchpad_write"
     }
 
     fn description(&self) -> &str {
-        "Replace your goal's whole scratchpad. This is the last thing you do in a tick, and the \
+        "Replace your project's whole scratchpad. This is the last thing you do in a tick, and the \
          only memory you carry to the next one — the tick that reads it will know nothing you \
-         know now. Pass the complete document, keeping every '## ' section heading: Goal, \
+         know now. Pass the complete document, keeping every '## ' section heading: Project, \
          Workspace, Plan, State, Log, Blockers, Questions for the human. Never drop an unchecked \
          plan step, an unresolved blocker or an open question; never check a box you did not \
          verify. The previous version is snapshotted, so a mistake here is recoverable — but a \
@@ -149,23 +149,23 @@ impl metalcraft::Tool for GoalScratchpadWriteTool {
             .as_str()
             .map(str::trim)
             .filter(|m| !m.is_empty())
-            .ok_or_else(|| err("goal_scratchpad_write", "Missing required parameter: markdown"))?;
+            .ok_or_else(|| err("project_scratchpad_write", "Missing required parameter: markdown"))?;
 
-        // The goal statement is the one thing a rewrite may not lose: a tick that
+        // The project statement is the one thing a rewrite may not lose: a tick that
         // drops it leaves every later tick working towards nothing in particular,
         // and the loss is invisible because the document still looks well-formed.
         let mut markdown = markdown.to_string();
-        if goals::section_body(&markdown, "Goal").is_none_or(str::is_empty) {
-            let Some(goal) = goals::get(&self.goal_id) else {
-                return Err(err("goal_scratchpad_write", "this goal no longer exists"));
+        if projects::section_body(&markdown, "Goal").is_none_or(str::is_empty) {
+            let Some(project) = projects::get(&self.project_id) else {
+                return Err(err("project_scratchpad_write", "this project no longer exists"));
             };
-            markdown = goals::replace_section(&markdown, "Goal", goal.goal.trim());
+            markdown = projects::replace_section(&markdown, "Goal", project.goal.trim());
         }
 
-        goals::write_scratchpad(&self.goal_id, &markdown)
-            .map_err(|e| err("goal_scratchpad_write", format!("could not write scratchpad: {e}")))?;
+        projects::write_scratchpad(&self.project_id, &markdown)
+            .map_err(|e| err("project_scratchpad_write", format!("could not write scratchpad: {e}")))?;
 
-        let progress = goals::progress_of(&markdown);
+        let progress = projects::progress_of(&markdown);
         Ok(serde_json::json!({
             "ok": true,
             "bytes": markdown.len(),
@@ -175,27 +175,27 @@ impl metalcraft::Tool for GoalScratchpadWriteTool {
     }
 }
 
-pub struct GoalBlockTool {
-    goal_id: String,
+pub struct ProjectBlockTool {
+    project_id: String,
 }
 
-impl GoalBlockTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+impl ProjectBlockTool {
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
 #[async_trait]
-impl metalcraft::Tool for GoalBlockTool {
+impl metalcraft::Tool for ProjectBlockTool {
     fn name(&self) -> &str {
-        "goal_block"
+        "project_block"
     }
 
     fn description(&self) -> &str {
-        "Stop the heartbeat and put a question to the person who set this goal. Use it sparingly: \
-         a blocked goal makes no progress until someone happens to look, which overnight is hours \
+        "Stop the heartbeat and put a question to the person who set this project. Use it sparingly: \
+         a blocked project makes no progress until someone happens to look, which overnight is hours \
          of nothing. Block only when the call is irreversible (deleting data, force-pushing, \
-         anything public), spends money, or would change what the goal means. For an ordinary \
+         anything public), spends money, or would change what the project means. For an ordinary \
          choice between reasonable options, decide it, write the decision and your reasoning into \
          the scratchpad's State, and keep going."
     }
@@ -210,7 +210,7 @@ impl metalcraft::Tool for GoalBlockTool {
                 },
                 "reason": {
                     "type": "string",
-                    "description": "Why you cannot decide this yourself — which of irreversible / costs money / changes the goal it is."
+                    "description": "Why you cannot decide this yourself — which of irreversible / costs money / changes the project it is."
                 }
             },
             "required": ["question"]
@@ -222,26 +222,26 @@ impl metalcraft::Tool for GoalBlockTool {
             .as_str()
             .map(str::trim)
             .filter(|q| !q.is_empty())
-            .ok_or_else(|| err("goal_block", "Missing required parameter: question"))?;
+            .ok_or_else(|| err("project_block", "Missing required parameter: question"))?;
         let reason = args["reason"].as_str().map(str::trim).unwrap_or_default();
 
-        let mut goal = goals::get(&self.goal_id)
-            .ok_or_else(|| err("goal_block", "this goal no longer exists"))?;
-        goal.status = goals::GoalStatus::Blocked;
-        goal.blocked_reason = Some(if reason.is_empty() {
+        let mut project = projects::get(&self.project_id)
+            .ok_or_else(|| err("project_block", "this project no longer exists"))?;
+        project.status = projects::ProjectStatus::Blocked;
+        project.blocked_reason = Some(if reason.is_empty() {
             question.to_string()
         } else {
             format!("{question}\n\n({reason})")
         });
-        goals::save(&goal).map_err(|e| err("goal_block", e))?;
+        projects::save(&project).map_err(|e| err("project_block", e))?;
 
-        let current = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
-        let updated = goals::append_to_section(
+        let current = projects::read_scratchpad(&self.project_id).unwrap_or_default();
+        let updated = projects::append_to_section(
             &current,
             "Questions for the human",
             &format!("- {}", question.replace('\n', " ")),
         );
-        let _ = goals::write_scratchpad(&self.goal_id, &updated);
+        let _ = projects::write_scratchpad(&self.project_id, &updated);
 
         Ok(serde_json::json!({
             "ok": true,
@@ -251,24 +251,24 @@ impl metalcraft::Tool for GoalBlockTool {
     }
 }
 
-pub struct GoalCompleteTool {
-    goal_id: String,
+pub struct ProjectCompleteTool {
+    project_id: String,
 }
 
-impl GoalCompleteTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+impl ProjectCompleteTool {
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
 #[async_trait]
-impl metalcraft::Tool for GoalCompleteTool {
+impl metalcraft::Tool for ProjectCompleteTool {
     fn name(&self) -> &str {
-        "goal_complete"
+        "project_complete"
     }
 
     fn description(&self) -> &str {
-        "Declare the goal met and stop the heartbeat. Only call this when every plan step is \
+        "Declare the project met and stop the heartbeat. Only call this when every plan step is \
          genuinely done and verified — not when the remaining work merely looks small. If part \
          of it turned out to be impossible or unwanted, say so in the summary rather than \
          quietly leaving it out."
@@ -292,30 +292,30 @@ impl metalcraft::Tool for GoalCompleteTool {
             .as_str()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| err("goal_complete", "Missing required parameter: summary"))?;
+            .ok_or_else(|| err("project_complete", "Missing required parameter: summary"))?;
 
-        let mut goal = goals::get(&self.goal_id)
-            .ok_or_else(|| err("goal_complete", "this goal no longer exists"))?;
+        let mut project = projects::get(&self.project_id)
+            .ok_or_else(|| err("project_complete", "this project no longer exists"))?;
 
-        // A goal that says it is done while its own plan says otherwise is the
+        // A project that says it is done while its own plan says otherwise is the
         // failure this whole design is arranged against, so it is refused rather
         // than recorded. Refusing returns control to the agent, which can either
         // finish the step or uncheck the claim.
-        let scratchpad = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
-        // `Goal::progress` reads the task list when there is one and falls back
+        let scratchpad = projects::read_scratchpad(&self.project_id).unwrap_or_default();
+        // `Project::progress` reads the task list when there is one and falls back
         // to the scratchpad's checkboxes when there is not, so this one check
-        // covers both kinds of goal.
-        let progress = goal.progress();
+        // covers both kinds of project.
+        let progress = project.progress();
         if progress.total > 0 && progress.done < progress.total {
-            let how = if crate::goal_tasks::exists(&self.goal_id) {
+            let how = if crate::project_tasks::exists(&self.project_id) {
                 "Either finish them, or — if they turned out to be unnecessary — `task_drop` \
                  each one saying what changed, then complete."
             } else {
                 "Either finish them, or — if they turned out to be unnecessary — rewrite the \
-                 plan with goal_scratchpad_write saying so, then complete."
+                 plan with project_scratchpad_write saying so, then complete."
             };
             return Err(err(
-                "goal_complete",
+                "project_complete",
                 format!(
                     "{} of {} plan steps are still open. {how}",
                     progress.total - progress.done,
@@ -324,35 +324,35 @@ impl metalcraft::Tool for GoalCompleteTool {
             ));
         }
 
-        goal.status = goals::GoalStatus::Done;
-        goal.blocked_reason = None;
-        goals::save(&goal).map_err(|e| err("goal_complete", e))?;
+        project.status = projects::ProjectStatus::Done;
+        project.blocked_reason = None;
+        projects::save(&project).map_err(|e| err("project_complete", e))?;
 
-        let updated = goals::append_to_section(
+        let updated = projects::append_to_section(
             &scratchpad,
             "Log",
-            &format!("- **Goal complete.** {}", summary.replace('\n', " ")),
+            &format!("- **Project complete.** {}", summary.replace('\n', " ")),
         );
-        let _ = goals::write_scratchpad(&self.goal_id, &updated);
+        let _ = projects::write_scratchpad(&self.project_id, &updated);
 
         Ok(serde_json::json!({ "ok": true, "status": "done" }))
     }
 }
 
-pub struct GoalAwaitRunTool {
-    goal_id: String,
+pub struct ProjectAwaitRunTool {
+    project_id: String,
 }
 
-impl GoalAwaitRunTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+impl ProjectAwaitRunTool {
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
 #[async_trait]
-impl metalcraft::Tool for GoalAwaitRunTool {
+impl metalcraft::Tool for ProjectAwaitRunTool {
     fn name(&self) -> &str {
-        "goal_await_run"
+        "project_await_run"
     }
 
     fn description(&self) -> &str {
@@ -364,7 +364,7 @@ impl metalcraft::Tool for GoalAwaitRunTool {
          waiting and the run finishes after you are gone either way.\n\n\
          Name the `task_id` the run belongs to whenever there is one. A run recorded against a \
          task parks only that task — every other task keeps moving, and several runs can be in \
-         flight at once. Without a task_id the run is the whole goal's, and the goal may only \
+         flight at once. Without a task_id the run is the whole project's, and the project may only \
          have one at a time."
     }
 
@@ -398,15 +398,15 @@ impl metalcraft::Tool for GoalAwaitRunTool {
             .as_str()
             .map(str::trim)
             .filter(|w| !w.is_empty())
-            .ok_or_else(|| err("goal_await_run", "Missing required parameter: workspace_id"))?;
+            .ok_or_else(|| err("project_await_run", "Missing required parameter: workspace_id"))?;
         let run_id = args["run_id"]
             .as_str()
             .map(str::trim)
             .filter(|r| !r.is_empty())
-            .ok_or_else(|| err("goal_await_run", "Missing required parameter: run_id"))?;
+            .ok_or_else(|| err("project_await_run", "Missing required parameter: run_id"))?;
         let what = args["what"].as_str().map(str::trim).unwrap_or("a command");
 
-        let pending = goals::PendingRun {
+        let pending = projects::PendingRun {
             workspace_id: workspace_id.to_string(),
             run_id: run_id.to_string(),
             what: what.to_string(),
@@ -414,20 +414,20 @@ impl metalcraft::Tool for GoalAwaitRunTool {
         };
 
         // A run that names a task belongs to that task: it parks that row and
-        // nothing else, which is what lets a goal have three builds going at
-        // once. The goal-level slot below stays single because a run nobody
+        // nothing else, which is what lets a project have three builds going at
+        // once. The project-level slot below stays single because a run nobody
         // owns has nothing to keep separate.
         if let Some(task_id) = args["task_id"]
             .as_str()
             .map(str::trim)
             .filter(|t| !t.is_empty())
         {
-            let tasks = crate::goal_tasks::list(&self.goal_id);
-            if let Some(existing) = crate::goal_tasks::get(&tasks, task_id)
+            let tasks = crate::project_tasks::list(&self.project_id);
+            if let Some(existing) = crate::project_tasks::get(&tasks, task_id)
                 && let Some(run) = existing.pending_run
             {
                 return Err(err(
-                    "goal_await_run",
+                    "project_await_run",
                     format!(
                         "task '{task_id}' is already waiting on `{}` (run {}). Let that land \
                          first, or record this run against a different task.",
@@ -435,24 +435,24 @@ impl metalcraft::Tool for GoalAwaitRunTool {
                     ),
                 ));
             }
-            crate::goal_tasks::update(
-                &self.goal_id,
+            crate::project_tasks::update(
+                &self.project_id,
                 task_id,
-                crate::goal_tasks::TaskPatch {
-                    status: Some(crate::goal_tasks::TaskStatus::Waiting),
+                crate::project_tasks::TaskPatch {
+                    status: Some(crate::project_tasks::TaskStatus::Waiting),
                     pending_run: Some(Some(pending)),
                     ..Default::default()
                 },
             )
-            .map_err(|e| err("goal_await_run", e))?;
+            .map_err(|e| err("project_await_run", e))?;
 
-            let current = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
-            let updated = goals::append_to_section(
+            let current = projects::read_scratchpad(&self.project_id).unwrap_or_default();
+            let updated = projects::append_to_section(
                 &current,
                 "Log",
                 &format!("- **{task_id}** started `{what}` (run {run_id}); handed to the heartbeat."),
             );
-            let _ = goals::write_scratchpad(&self.goal_id, &updated);
+            let _ = projects::write_scratchpad(&self.project_id, &updated);
 
             return Ok(serde_json::json!({
                 "ok": true,
@@ -461,16 +461,16 @@ impl metalcraft::Tool for GoalAwaitRunTool {
             }));
         }
 
-        let mut goal = goals::get(&self.goal_id)
-            .ok_or_else(|| err("goal_await_run", "this goal no longer exists"))?;
+        let mut project = projects::get(&self.project_id)
+            .ok_or_else(|| err("project_await_run", "this project no longer exists"))?;
 
-        // One at a time. A goal that started three builds and remembered one
+        // One at a time. A project that started three builds and remembered one
         // would wait on that one and silently lose the others — and a tick that
         // needs two commands at once can await the second one next tick, which
         // is the shape the heartbeat is for.
-        if let Some(existing) = &goal.pending_run {
+        if let Some(existing) = &project.pending_run {
             return Err(err(
-                "goal_await_run",
+                "project_await_run",
                 format!(
                     "Already waiting on `{}` (run {}). Let that one land first — the next tick \
                      will hand you its result.",
@@ -479,16 +479,16 @@ impl metalcraft::Tool for GoalAwaitRunTool {
             ));
         }
 
-        goal.pending_run = Some(pending);
-        goals::save(&goal).map_err(|e| err("goal_await_run", e))?;
+        project.pending_run = Some(pending);
+        projects::save(&project).map_err(|e| err("project_await_run", e))?;
 
-        let current = goals::read_scratchpad(&self.goal_id).unwrap_or_default();
-        let updated = goals::append_to_section(
+        let current = projects::read_scratchpad(&self.project_id).unwrap_or_default();
+        let updated = projects::append_to_section(
             &current,
             "Log",
             &format!("- Started `{what}` (run {run_id}); handed to the next tick."),
         );
-        let _ = goals::write_scratchpad(&self.goal_id, &updated);
+        let _ = projects::write_scratchpad(&self.project_id, &updated);
 
         Ok(serde_json::json!({
             "ok": true,
@@ -499,37 +499,37 @@ impl metalcraft::Tool for GoalAwaitRunTool {
 
 // ── the audit ledger ─────────────────────────────────────────────────────────
 
-pub struct GoalFindingTool {
-    goal_id: String,
+pub struct ProjectFindingTool {
+    project_id: String,
 }
 
-impl GoalFindingTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+impl ProjectFindingTool {
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
-fn severity_of(raw: &str) -> Result<crate::goal_findings::Severity, metalcraft::GraphError> {
-    use crate::goal_findings::Severity;
+fn severity_of(raw: &str) -> Result<crate::project_findings::Severity, metalcraft::GraphError> {
+    use crate::project_findings::Severity;
     match raw {
         "high" => Ok(Severity::High),
         "medium" => Ok(Severity::Medium),
         "low" => Ok(Severity::Low),
         other => Err(err(
-            "goal_finding",
+            "project_finding",
             format!("Unknown severity '{other}'. One of: high, medium, low."),
         )),
     }
 }
 
 #[async_trait]
-impl metalcraft::Tool for GoalFindingTool {
+impl metalcraft::Tool for ProjectFindingTool {
     fn name(&self) -> &str {
-        "goal_finding"
+        "project_finding"
     }
 
     fn description(&self) -> &str {
-        "Record something you found, in the goal's findings ledger. The ledger is what stops you \
+        "Record something you found, in the project's findings ledger. The ledger is what stops you \
          re-reporting on tick 9 what you already opened a PR for on tick 4 — so record every \
          finding here as you find it, even the ones you do not intend to fix. A finding you have \
          already recorded comes back with its existing id and state instead of being added twice."
@@ -566,14 +566,14 @@ impl metalcraft::Tool for GoalFindingTool {
             .as_str()
             .map(str::trim)
             .filter(|t| !t.is_empty())
-            .ok_or_else(|| err("goal_finding", "Missing required parameter: title"))?;
+            .ok_or_else(|| err("project_finding", "Missing required parameter: title"))?;
         let severity = severity_of(args["severity"].as_str().unwrap_or("medium"))?;
         let file = args["file"].as_str().map(str::trim).filter(|f| !f.is_empty());
         let detail = args["detail"].as_str().unwrap_or_default();
 
         let (finding, already) =
-            crate::goal_findings::add(&self.goal_id, title, file, severity, detail)
-                .map_err(|e| err("goal_finding", e))?;
+            crate::project_findings::add(&self.project_id, title, file, severity, detail)
+                .map_err(|e| err("project_finding", e))?;
 
         Ok(serde_json::json!({
             "id": finding.id,
@@ -589,20 +589,20 @@ impl metalcraft::Tool for GoalFindingTool {
     }
 }
 
-pub struct GoalFindingUpdateTool {
-    goal_id: String,
+pub struct ProjectFindingUpdateTool {
+    project_id: String,
 }
 
-impl GoalFindingUpdateTool {
-    pub fn new(goal_id: String) -> Self {
-        Self { goal_id }
+impl ProjectFindingUpdateTool {
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
     }
 }
 
 #[async_trait]
-impl metalcraft::Tool for GoalFindingUpdateTool {
+impl metalcraft::Tool for ProjectFindingUpdateTool {
     fn name(&self) -> &str {
-        "goal_finding_update"
+        "project_finding_update"
     }
 
     fn description(&self) -> &str {
@@ -632,13 +632,13 @@ impl metalcraft::Tool for GoalFindingUpdateTool {
     }
 
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
-        use crate::goal_findings::FindingState;
+        use crate::project_findings::FindingState;
 
         let id = args["id"]
             .as_str()
             .map(str::trim)
             .filter(|i| !i.is_empty())
-            .ok_or_else(|| err("goal_finding_update", "Missing required parameter: id"))?;
+            .ok_or_else(|| err("project_finding_update", "Missing required parameter: id"))?;
         let state = match args["state"].as_str().unwrap_or("open") {
             "open" => FindingState::Open,
             "pr_open" => FindingState::PrOpen,
@@ -647,7 +647,7 @@ impl metalcraft::Tool for GoalFindingUpdateTool {
             "rejected" => FindingState::Rejected,
             other => {
                 return Err(err(
-                    "goal_finding_update",
+                    "project_finding_update",
                     format!("Unknown state '{other}'."),
                 ));
             }
@@ -658,17 +658,17 @@ impl metalcraft::Tool for GoalFindingUpdateTool {
         // Twenty simultaneous bot PRs is how a repo learns to ignore the bot,
         // and a rail that only exists as advice is not a rail.
         if state.holds_a_pr_slot() {
-            let goal = goals::get(&self.goal_id)
-                .ok_or_else(|| err("goal_finding_update", "this goal no longer exists"))?;
-            let already = crate::goal_findings::list(&self.goal_id)
+            let project = projects::get(&self.project_id)
+                .ok_or_else(|| err("project_finding_update", "this project no longer exists"))?;
+            let already = crate::project_findings::list(&self.project_id)
                 .iter()
                 .filter(|f| f.id != id && f.state.holds_a_pr_slot())
                 .count();
-            if already >= goal.rails.max_open_prs as usize {
+            if already >= project.rails.max_open_prs as usize {
                 return Err(err(
-                    "goal_finding_update",
+                    "project_finding_update",
                     format!(
-                        "{already} of this goal's PRs are already open, which is its limit. Keep \
+                        "{already} of this project's PRs are already open, which is its limit. Keep \
                          sweeping and recording findings; open the next PR once one of those is \
                          merged or closed.",
                     ),
@@ -676,14 +676,14 @@ impl metalcraft::Tool for GoalFindingUpdateTool {
             }
         }
 
-        let finding = crate::goal_findings::set_state(&self.goal_id, id, state, link)
-            .map_err(|e| err("goal_finding_update", e))?;
+        let finding = crate::project_findings::set_state(&self.project_id, id, state, link)
+            .map_err(|e| err("project_finding_update", e))?;
 
         Ok(serde_json::json!({
             "ok": true,
             "id": finding.id,
             "state": finding.state,
-            "open_prs": crate::goal_findings::open_prs(&self.goal_id),
+            "open_prs": crate::project_findings::open_prs(&self.project_id),
         }))
     }
 }

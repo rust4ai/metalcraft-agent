@@ -390,7 +390,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                                     diagnostics: logger,
                                     instance_id: scheduled.instance_id.clone(),
                                     preset_personas: None,
-                                    goal_id: None,
+                                    project_id: None,
                                 },
                             )
                             .await;
@@ -484,8 +484,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
             run_due_scheduled_tasks(&context, &cwd, &persona_slug, &model_name, &approval_mode)
                 .await;
 
-            // Tick any goal that is owed one (see `crate::goal_tick`).
-            run_due_goals(&context, &cwd, &approval_mode).await;
+            // Tick any project that is owed one (see `crate::project_tick`).
+            run_due_projects(&context, &cwd, &approval_mode).await;
 
             reap_stale_sessions().await;
         };
@@ -617,7 +617,7 @@ async fn run_due_scheduled_tasks(
                         // A follow-up is not a flow run; it has no armed agent.
                         instance_id: None,
                         preset_personas: None,
-                        goal_id: None,
+                        project_id: None,
                     },
                 )
                 .await;
@@ -648,50 +648,50 @@ async fn run_due_scheduled_tasks(
     }
 }
 
-/// Run one tick for every goal that is due.
+/// Run one tick for every project that is due.
 ///
-/// Sequential on purpose, like everything else in this loop. Two goals ticking
+/// Sequential on purpose, like everything else in this loop. Two projects ticking
 /// at once would be two agents writing the pod's filesystem with no coordination
-/// between them, to save wall-clock nobody is waiting on — a goal's whole premise
+/// between them, to save wall-clock nobody is waiting on — a project's whole premise
 /// is that the person who set it has gone away.
 ///
 /// A tick that panics must not take the daemon down with it and leave every
-/// other goal unticked, so each is caught: a broken goal is one broken goal.
-async fn run_due_goals(context: &AgentRuntimeContext, cwd: &str, approval_mode: &ApprovalMode) {
-    let due = crate::goal_tick::due(chrono::Utc::now());
+/// other project unticked, so each is caught: a broken project is one broken project.
+async fn run_due_projects(context: &AgentRuntimeContext, cwd: &str, approval_mode: &ApprovalMode) {
+    let due = crate::project_tick::due(chrono::Utc::now());
     if due.is_empty() {
         return;
     }
-    log::info!("{} goal(s) due", due.len());
-    for goal in due {
-        let id = goal.id.clone();
-        let title = goal.title.clone();
-        let ran = std::panic::AssertUnwindSafe(crate::goal_tick::run_tick(
+    log::info!("{} project(s) due", due.len());
+    for project in due {
+        let id = project.id.clone();
+        let title = project.title.clone();
+        let ran = std::panic::AssertUnwindSafe(crate::project_tick::run_tick(
             context,
-            &goal,
+            &project,
             cwd,
             approval_mode,
         ));
         match futures_util::FutureExt::catch_unwind(ran).await {
             Ok(outcome) if outcome.waited => {
-                log::info!("goal {id} ('{title}') spent nothing: {}", outcome.summary)
+                log::info!("project {id} ('{title}') spent nothing: {}", outcome.summary)
             }
             Ok(outcome) => log::info!(
-                "goal {id} ('{title}') {:?} tick → {:?}{}",
+                "project {id} ('{title}') {:?} tick → {:?}{}",
                 outcome.kind,
                 outcome.status,
                 if outcome.progressed { "" } else { " (no change)" }
             ),
             Err(_) => {
-                // Blocked rather than left active: a goal whose tick panicked
+                // Blocked rather than left active: a project whose tick panicked
                 // will panic again in thirty minutes, and a loop that burns
                 // money doing so is worse than one that stops and says so.
-                log::error!("goal {id} ('{title}') panicked mid-tick; blocking it");
-                if let Some(mut g) = crate::goals::get(&id) {
-                    g.status = crate::goals::GoalStatus::Blocked;
+                log::error!("project {id} ('{title}') panicked mid-tick; blocking it");
+                if let Some(mut g) = crate::projects::get(&id) {
+                    g.status = crate::projects::ProjectStatus::Blocked;
                     g.blocked_reason =
                         Some("A tick crashed. Read the daemon log before resuming.".into());
-                    let _ = crate::goals::save(&g);
+                    let _ = crate::projects::save(&g);
                 }
             }
         }

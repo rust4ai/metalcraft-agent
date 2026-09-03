@@ -73,23 +73,23 @@ pub fn scheduled_flows_dir() -> PathBuf {
     data_dir().join("scheduled_flows")
 }
 
-/// Directory holding [goals](crate::goals) — one JSON per goal, saying what
+/// Directory holding [projects](crate::projects) — one JSON per project, saying what
 /// this pod is working towards on its own.
 ///
 /// Separate from `scheduled_flows_dir()` because the two answer different
-/// questions: a scheduled flow is a graph someone authored and armed, a goal is
+/// questions: a scheduled flow is a graph someone authored and armed, a project is
 /// an outcome someone asked for and left running.
-pub fn goals_dir() -> PathBuf {
-    data_dir().join("goals")
+pub fn projects_dir() -> PathBuf {
+    data_dir().join("projects")
 }
 
-/// One goal's own directory: its scratchpad and that scratchpad's snapshots.
+/// One project's own directory: its scratchpad and that scratchpad's snapshots.
 ///
 /// Beside the record rather than inside it because the scratchpad is a document
 /// people read and diff, and burying it in a JSON string field would make it
 /// neither.
-pub fn goal_dir(goal_id: &str) -> PathBuf {
-    goals_dir().join(goal_id)
+pub fn project_dir(project_id: &str) -> PathBuf {
+    projects_dir().join(project_id)
 }
 
 /// Directory holding in-flight and finished flow runs (one JSON per run),

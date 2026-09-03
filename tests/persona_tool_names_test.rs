@@ -93,7 +93,7 @@ fn shipped_api_tool_names() -> HashSet<String> {
 /// one, `load_skill` / `sub_agent` / `say_to_user` and friends are skipped for a
 /// reason that has nothing to do with the name being wrong. `instance_id` matters
 /// most: the `mem_*` tools belong to an agent and are dropped without one, and
-/// `goal_id` is the same bargain for the `goal_*` tools.
+/// `project_id` is the same bargain for the `goal_*` tools.
 fn full_config() -> metalcraft_agent::tools::ToolConfig {
     metalcraft_agent::tools::ToolConfig {
         api_key: "test-key".into(),
@@ -109,7 +109,7 @@ fn full_config() -> metalcraft_agent::tools::ToolConfig {
         instance_id: Some("test-instance".into()),
         interrupt: None,
         turn_plan: Some(metalcraft_agent::turn_plan::SharedTurnPlan::default()),
-        goal_id: Some("goal_test".into()),
+        project_id: Some("goal_test".into()),
     }
 }
 

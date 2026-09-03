@@ -619,12 +619,12 @@ impl SubAgentTool {
                 // nested run answers on its own terms.
                 turn_plan: None,
                 // Same reasoning as the plan, and it matters more here: the
-                // scratchpad is the goal's entire memory, and a delegate holds
+                // scratchpad is the project's entire memory, and a delegate holds
                 // only the fragment of the task it was handed. One that rewrote
-                // the document would be summarising a goal it cannot see. It
+                // the document would be summarising a project it cannot see. It
                 // reports back instead, and the tick — which can see all of it —
                 // writes.
-                goal_id: None,
+                project_id: None,
             };
             let registry = crate::tools::create_registry_for_with_config(
                 &persona.resolved_tool_names(),
@@ -854,7 +854,7 @@ mod tests {
         let writer = serde_json::json!({ "task": "fix it", "tool_set": "full" });
         assert!(entry_writes_workspace(&writer));
         // (run_batch routes a single entry to run_one before any rule applies —
-        // exercised through the goal task-dispatch test, which does not need a
+        // exercised through the project task-dispatch test, which does not need a
         // live model to reach the guards.)
     }
 

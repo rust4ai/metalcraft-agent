@@ -5,8 +5,8 @@ pub mod email_imap;
 pub mod find_files;
 pub mod gateway;
 pub mod gateway_webhook;
-pub mod goal;
-pub mod goal_task;
+pub mod project;
+pub mod task;
 pub mod grep;
 pub mod http_api;
 pub mod list_files;
@@ -120,10 +120,10 @@ pub struct ToolConfig {
     /// sub-agent (it runs its own turn and must not satisfy its parent's plan),
     /// a flow node, or a one-shot task.
     pub turn_plan: Option<crate::turn_plan::SharedTurnPlan>,
-    /// The goal whose tick this turn is. Binds the `goal_*` tools to one goal,
-    /// so the model never has to name (or mistype) which goal it is writing to.
-    /// `None` ⇒ not a goal tick, and those tools are not registered at all.
-    pub goal_id: Option<String>,
+    /// The project whose tick this turn is. Binds the `goal_*` tools to one project,
+    /// so the model never has to name (or mistype) which project it is writing to.
+    /// `None` ⇒ not a project tick, and those tools are not registered at all.
+    pub project_id: Option<String>,
 }
 
 /// Register only the tools listed by name.
@@ -267,48 +267,48 @@ pub fn create_registry_for_with_config(
             "ask_user" => registry.register(ask_user::AskUserTool::new(
                 config.and_then(|c| c.reply_sink.clone()),
             )),
-            "goal_note" | "goal_scratchpad_write" | "goal_block" | "goal_complete"
-            | "goal_await_run" | "goal_finding" | "goal_finding_update" | "task_add"
+            "project_note" | "project_scratchpad_write" | "project_block" | "project_complete"
+            | "project_await_run" | "project_finding" | "project_finding_update" | "task_add"
             | "task_update" | "task_done" | "task_block" | "task_drop" | "task_dispatch" => {
-                // Bound to one goal at registration. Outside a goal tick there is
-                // no goal to bind to, so the tools are absent rather than
+                // Bound to one project at registration. Outside a project tick there is
+                // no project to bind to, so the tools are absent rather than
                 // registered and failing at call time — the model is never shown
                 // an affordance it cannot use.
-                match config.and_then(|c| c.goal_id.clone()) {
-                    Some(goal_id) => match name.as_str() {
-                        "goal_note" => registry.register(goal::GoalNoteTool::new(goal_id)),
-                        "goal_scratchpad_write" => {
-                            registry.register(goal::GoalScratchpadWriteTool::new(goal_id))
+                match config.and_then(|c| c.project_id.clone()) {
+                    Some(project_id) => match name.as_str() {
+                        "project_note" => registry.register(project::ProjectNoteTool::new(project_id)),
+                        "project_scratchpad_write" => {
+                            registry.register(project::ProjectScratchpadWriteTool::new(project_id))
                         }
-                        "goal_block" => registry.register(goal::GoalBlockTool::new(goal_id)),
-                        "goal_await_run" => {
-                            registry.register(goal::GoalAwaitRunTool::new(goal_id))
+                        "project_block" => registry.register(project::ProjectBlockTool::new(project_id)),
+                        "project_await_run" => {
+                            registry.register(project::ProjectAwaitRunTool::new(project_id))
                         }
-                        "goal_finding" => registry.register(goal::GoalFindingTool::new(goal_id)),
-                        "goal_finding_update" => {
-                            registry.register(goal::GoalFindingUpdateTool::new(goal_id))
+                        "project_finding" => registry.register(project::ProjectFindingTool::new(project_id)),
+                        "project_finding_update" => {
+                            registry.register(project::ProjectFindingUpdateTool::new(project_id))
                         }
-                        "task_add" => registry.register(goal_task::TaskAddTool::new(goal_id)),
+                        "task_add" => registry.register(task::TaskAddTool::new(project_id)),
                         "task_update" => {
-                            registry.register(goal_task::TaskUpdateTool::new(goal_id))
+                            registry.register(task::TaskUpdateTool::new(project_id))
                         }
-                        "task_done" => registry.register(goal_task::TaskDoneTool::new(goal_id)),
-                        "task_block" => registry.register(goal_task::TaskBlockTool::new(goal_id)),
-                        "task_drop" => registry.register(goal_task::TaskDropTool::new(goal_id)),
+                        "task_done" => registry.register(task::TaskDoneTool::new(project_id)),
+                        "task_block" => registry.register(task::TaskBlockTool::new(project_id)),
+                        "task_drop" => registry.register(task::TaskDropTool::new(project_id)),
                         "task_dispatch" => {
                             // Needs the turn's credentials and roster: dispatch
                             // *is* delegation, so it builds sub-agents the same
                             // way `sub_agent` does.
                             match config {
                                 Some(cfg) => registry
-                                    .register(goal_task::TaskDispatchTool::new(goal_id, cfg)),
+                                    .register(task::TaskDispatchTool::new(project_id, cfg)),
                                 None => registry,
                             }
                         }
-                        _ => registry.register(goal::GoalCompleteTool::new(goal_id)),
+                        _ => registry.register(project::ProjectCompleteTool::new(project_id)),
                     },
                     None => {
-                        log::debug!("{name} requires a goal, skipping");
+                        log::debug!("{name} requires a project, skipping");
                         registry
                     }
                 }

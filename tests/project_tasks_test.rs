@@ -1,4 +1,4 @@
-//! A goal's plan, from an empty document to a finished one, through the tools a
+//! A project's plan, from an empty document to a finished one, through the tools a
 //! tick actually calls.
 //!
 //! What this guards is the promise that made tasks worth building: **a plan
@@ -19,29 +19,29 @@
 use std::fs;
 
 use metalcraft::Tool;
-use metalcraft_agent::goal_tasks::{self, TaskStatus};
-use metalcraft_agent::goals::{self, Goal, GoalKind, GoalStatus};
-use metalcraft_agent::tools::goal as goal_tools;
-use metalcraft_agent::tools::goal_task as task_tools;
+use metalcraft_agent::project_tasks::{self, TaskStatus};
+use metalcraft_agent::projects::{self, Project, ProjectKind, ProjectStatus};
+use metalcraft_agent::tools::project as goal_tools;
+use metalcraft_agent::tools::task as task_tools;
 
-fn a_goal(id: &str) -> Goal {
-    Goal {
+fn a_goal(id: &str) -> Project {
+    Project {
         id: id.into(),
         title: "Limiter".into(),
         goal: "Ship the token-bucket limiter in rust4ai/foo".into(),
-        kind: GoalKind::Build,
+        kind: ProjectKind::Build,
         instance_id: "inst_test".into(),
         agent_preset: "general-agent".into(),
-        workspace: goals::Workspace::default(),
-        status: GoalStatus::Active,
+        workspace: projects::Workspace::default(),
+        status: ProjectStatus::Active,
         blocked_reason: None,
-        heartbeat: goals::Heartbeat::default(),
+        heartbeat: projects::Heartbeat::default(),
         io: metalcraft_agent::scheduled_tasks::IoBinding::Unbound,
         journal_chat_id: None,
-        rails: goals::Rails::default(),
-        counters: goals::Counters::default(),
+        rails: projects::Rails::default(),
+        counters: projects::Counters::default(),
         pending_run: None,
-        models: goals::ModelTiers::default(),
+        models: projects::ModelTiers::default(),
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: String::new(),
     }
@@ -56,16 +56,16 @@ async fn a_plan_is_records_that_cannot_be_lost() {
     }
     fs::create_dir_all(&data_dir).unwrap();
 
-    let goal = a_goal(&goals::new_id());
-    goals::save(&goal).expect("save");
-    goals::write_scratchpad(&goal.id, &goals::seed_scratchpad(&goal)).expect("seed");
+    let project = a_goal(&projects::new_id());
+    projects::save(&project).expect("save");
+    projects::write_scratchpad(&project.id, &projects::seed_scratchpad(&project)).expect("seed");
 
-    // ── a goal with no tasks still reads as unplanned ────────────────────────
-    assert!(!goal_tasks::exists(&goal.id));
-    assert_eq!(goal.progress(), goals::Progress { done: 0, total: 0 });
+    // ── a project with no tasks still reads as unplanned ────────────────────────
+    assert!(!project_tasks::exists(&project.id));
+    assert_eq!(project.progress(), projects::Progress { done: 0, total: 0 });
 
     // ── the planning tick writes the whole plan in one call ──────────────────
-    let add = task_tools::TaskAddTool::new(goal.id.clone());
+    let add = task_tools::TaskAddTool::new(project.id.clone());
     add.call(serde_json::json!({
         "tasks": [
             { "title": "Survey the existing limiter", "mutates_workspace": false },
@@ -79,7 +79,7 @@ async fn a_plan_is_records_that_cannot_be_lost() {
     .await
     .expect("a plan is written in one call");
 
-    let tasks = goal_tasks::list(&goal.id);
+    let tasks = project_tasks::list(&project.id);
     assert_eq!(tasks.len(), 3);
     assert_eq!(tasks[2].deps, vec!["t1".to_string(), "t2".to_string()]);
     assert_eq!(tasks[2].assignee.as_deref(), Some("coding-agent"));
@@ -89,7 +89,7 @@ async fn a_plan_is_records_that_cannot_be_lost() {
 
     // ── the two independent rows are ready AT THE SAME TIME ──────────────────
     // This is the parallelism the whole design is for: one tick, two delegates.
-    let ready = goal_tasks::ready(&tasks);
+    let ready = project_tasks::ready(&tasks);
     assert_eq!(
         ready.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
         vec!["t1", "t2"],
@@ -97,9 +97,9 @@ async fn a_plan_is_records_that_cannot_be_lost() {
     );
 
     // ── the plan the tick is shown is rendered from the records ──────────────
-    let frame = metalcraft_agent::goal_tick::tick_frame(
-        &goals::get(&goal.id).unwrap(),
-        metalcraft_agent::goal_tick::TickKind::Work,
+    let frame = metalcraft_agent::project_tick::tick_frame(
+        &projects::get(&project.id).unwrap(),
+        metalcraft_agent::project_tick::TickKind::Work,
         2,
     );
     assert!(frame.contains("**t1** [ready]"), "{frame}");
@@ -110,7 +110,7 @@ async fn a_plan_is_records_that_cannot_be_lost() {
     );
 
     // ── done needs proof ─────────────────────────────────────────────────────
-    let done = task_tools::TaskDoneTool::new(goal.id.clone());
+    let done = task_tools::TaskDoneTool::new(project.id.clone());
     assert!(
         done.call(serde_json::json!({ "id": "t1", "evidence_kind": "note", "evidence": "" }))
             .await
@@ -125,50 +125,50 @@ async fn a_plan_is_records_that_cannot_be_lost() {
 
     // Everything nobody mentioned is untouched — the property the markdown plan
     // could never offer.
-    let after = goal_tasks::list(&goal.id);
+    let after = project_tasks::list(&project.id);
     assert_eq!(after.len(), 3);
     assert_eq!(after[0].status, TaskStatus::Done);
     assert_eq!(after[1].status, TaskStatus::Todo);
     assert_eq!(after[2].status, TaskStatus::Todo);
     assert_eq!(after[2].deps, vec!["t1".to_string(), "t2".to_string()]);
-    assert_eq!(goals::get(&goal.id).unwrap().progress(), goals::Progress { done: 1, total: 3 });
+    assert_eq!(projects::get(&project.id).unwrap().progress(), projects::Progress { done: 1, total: 3 });
 
-    // ── a task parks without stopping the goal ───────────────────────────────
-    let block = task_tools::TaskBlockTool::new(goal.id.clone());
+    // ── a task parks without stopping the project ───────────────────────────────
+    let block = task_tools::TaskBlockTool::new(project.id.clone());
     block
         .call(serde_json::json!({ "id": "t2", "reason": "needs the staging API key" }))
         .await
         .expect("one task can be parked");
     assert_eq!(
-        goals::get(&goal.id).unwrap().status,
-        GoalStatus::Active,
-        "parking a task must not stop the goal — that is what goal_block is for"
+        projects::get(&project.id).unwrap().status,
+        ProjectStatus::Active,
+        "parking a task must not stop the project — that is what project_block is for"
     );
     assert!(
-        goals::read_scratchpad(&goal.id)
+        projects::read_scratchpad(&project.id)
             .unwrap()
             .contains("staging API key"),
-        "a blocked task is visible to someone reading the goal"
+        "a blocked task is visible to someone reading the project"
     );
 
     // ── a run is owed by one task, and only that task waits ──────────────────
-    let await_run = goal_tools::GoalAwaitRunTool::new(goal.id.clone());
+    let await_run = goal_tools::ProjectAwaitRunTool::new(project.id.clone());
     await_run
         .call(serde_json::json!({
             "workspace_id": "ws_1", "run_id": "r_88", "what": "cargo test --all", "task_id": "t3"
         }))
         .await
         .expect("a task can own its run");
-    let waiting = goal_tasks::list(&goal.id);
-    let t3 = goal_tasks::get(&waiting, "t3").unwrap();
+    let waiting = project_tasks::list(&project.id);
+    let t3 = project_tasks::get(&waiting, "t3").unwrap();
     assert_eq!(t3.status, TaskStatus::Waiting);
     assert_eq!(t3.pending_run.unwrap().run_id, "r_88");
     assert!(
-        goals::get(&goal.id).unwrap().pending_run.is_none(),
-        "a task's run is the task's, not the goal's"
+        projects::get(&project.id).unwrap().pending_run.is_none(),
+        "a task's run is the task's, not the project's"
     );
-    // The goal looks again soon because something of its is running.
-    assert_eq!(goals::get(&goal.id).unwrap().tick_interval_minutes(), 5);
+    // The project looks again soon because something of its is running.
+    assert_eq!(projects::get(&project.id).unwrap().tick_interval_minutes(), 5);
 
     // ── a gate refuses a task whose run has not gone green ───────────────────
     assert!(
@@ -180,8 +180,8 @@ async fn a_plan_is_records_that_cannot_be_lost() {
         "a gated task cannot be closed before its gate passes"
     );
 
-    // ── the goal cannot say it is done while its plan is open ────────────────
-    let complete = goal_tools::GoalCompleteTool::new(goal.id.clone());
+    // ── the project cannot say it is done while its plan is open ────────────────
+    let complete = goal_tools::ProjectCompleteTool::new(project.id.clone());
     let e = complete
         .call(serde_json::json!({ "summary": "shipped it" }))
         .await
@@ -189,17 +189,17 @@ async fn a_plan_is_records_that_cannot_be_lost() {
     assert!(format!("{e}").contains("still open"), "{e}");
 
     // ── dropping what reality made pointless frees what waited on it ─────────
-    let drop = task_tools::TaskDropTool::new(goal.id.clone());
+    let drop = task_tools::TaskDropTool::new(project.id.clone());
     drop.call(serde_json::json!({
         "id": "t2", "why": "the middleware was deleted upstream"
     }))
     .await
     .expect("a review tick prunes");
-    let pruned = goal_tasks::list(&goal.id);
-    assert_eq!(goal_tasks::progress(&pruned), goals::Progress { done: 1, total: 2 });
+    let pruned = project_tasks::list(&project.id);
+    assert_eq!(project_tasks::progress(&pruned), projects::Progress { done: 1, total: 2 });
 
-    // ── a cycle is refused rather than wedging the goal forever ──────────────
-    let update = task_tools::TaskUpdateTool::new(goal.id.clone());
+    // ── a cycle is refused rather than wedging the project forever ──────────────
+    let update = task_tools::TaskUpdateTool::new(project.id.clone());
     assert!(
         update
             .call(serde_json::json!({ "id": "t1", "deps": ["t3"] }))
@@ -208,7 +208,7 @@ async fn a_plan_is_records_that_cannot_be_lost() {
         "t1 → t3 → t1 would mean nothing could ever start"
     );
     // ...and the refusal changed nothing.
-    assert!(goal_tasks::get(&goal_tasks::list(&goal.id), "t1").unwrap().deps.is_empty());
+    assert!(project_tasks::get(&project_tasks::list(&project.id), "t1").unwrap().deps.is_empty());
 
     // ── dispatch guards, before a single token is spent ──────────────────────
     // The delegation itself needs a live API, but everything that protects the
@@ -228,9 +228,9 @@ async fn a_plan_is_records_that_cannot_be_lost() {
         instance_id: None,
         interrupt: None,
         turn_plan: None,
-        goal_id: Some(goal.id.clone()),
+        project_id: Some(project.id.clone()),
     };
-    let dispatch = task_tools::TaskDispatchTool::new(goal.id.clone(), &cfg);
+    let dispatch = task_tools::TaskDispatchTool::new(project.id.clone(), &cfg);
 
     let e = dispatch
         .call(serde_json::json!({ "ids": ["t3"] }))

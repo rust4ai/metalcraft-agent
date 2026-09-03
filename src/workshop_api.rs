@@ -441,7 +441,7 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> Response {
 // ── Snapshot types ──────────────────────────────────────────────────────
 
 #[derive(Serialize, utoipa::ToSchema)]
-struct ProjectSnapshot {
+struct PodSnapshot {
     personas: Vec<PersonaSummary>,
     skills: Vec<SkillSummary>,
     /// From the external `metalcraft-flows` crate, which has no `ToSchema`; the
@@ -458,11 +458,11 @@ struct ProjectSnapshot {
     /// is one row per chat ever started, which is noise, not information.
     agent_instances: Vec<crate::agent_instance::AgentInstance>,
     default_agent_preset: String,
-    layout: ProjectLayout,
+    layout: PodLayout,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
-struct ProjectLayout {
+struct PodLayout {
     data_dir: String,
     personas_dir: String,
     skills_dir: String,
@@ -628,29 +628,29 @@ async fn auth_middleware(
         gateway_metalcraft_connect, gateway_metalcraft_disconnect,
         gateway_metalcraft_unregister,
         post_factory_reset,
-        list_goals, get_goal, post_goal, patch_goal, delete_goal,
-        get_goal_journal, put_goal_scratchpad, get_goal_findings,
-        get_goal_tasks, put_goal_tasks,
+        list_projects, get_project, post_project, patch_project, delete_project,
+        get_project_journal, put_project_scratchpad, get_project_findings,
+        get_project_tasks, put_project_tasks,
     ),
     components(schemas(
         FactoryResetRequest, ResetReport, ResetScope, ResetFailure, RestartExpectation,
-        ErrorResponse, ProjectSnapshot, ProjectLayout, ApiToolSummary,
+        ErrorResponse, PodSnapshot, PodLayout, ApiToolSummary,
         KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
         InferenceStatus, ChatContext, ChatCompacted, ChatInterrupt, ChatQueued,
         FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, RunFlowOutput, ResumeFlowRunRequest,
         InstallFlowRequest, InstallDependenciesResponse,
         crate::scheduled_flows::SchedulePreview,
-        GoalList, GoalRow, GoalDetail, GoalJournal, CreateGoalRequest, UpdateGoalRequest,
-        WriteTasksRequest, crate::goal_tasks::Task, crate::goal_tasks::TaskStatus,
-        crate::goal_tasks::Evidence, crate::goal_tasks::EvidenceKind,
+        ProjectList, ProjectRow, ProjectDetail, ProjectJournal, CreateProjectRequest, UpdateProjectRequest,
+        WriteTasksRequest, crate::project_tasks::Task, crate::project_tasks::TaskStatus,
+        crate::project_tasks::Evidence, crate::project_tasks::EvidenceKind,
         WriteScratchpadRequest,
-        crate::goals::Goal, crate::goals::GoalKind, crate::goals::GoalStatus,
-        crate::goals::Heartbeat, crate::goals::Workspace, crate::goals::GoalRepo,
-        crate::goals::Rails, crate::goals::Counters, crate::goals::PendingRun,
-        crate::goals::ModelTiers, crate::goals::Progress,
-        crate::goal_tick::JournalEntry, crate::goal_tick::TickKind,
-        GoalFindings, crate::goal_findings::Finding, crate::goal_findings::Severity,
-        crate::goal_findings::FindingState,
+        crate::projects::Project, crate::projects::ProjectKind, crate::projects::ProjectStatus,
+        crate::projects::Heartbeat, crate::projects::Workspace, crate::projects::ProjectRepo,
+        crate::projects::Rails, crate::projects::Counters, crate::projects::PendingRun,
+        crate::projects::ModelTiers, crate::projects::Progress,
+        crate::project_tick::JournalEntry, crate::project_tick::TickKind,
+        ProjectFindings, crate::project_findings::Finding, crate::project_findings::Severity,
+        crate::project_findings::FindingState,
         crate::scheduled_tasks::IoBinding,
         FlowList, FlowListItem, FlowValidation,
         // The graph itself, from `metalcraft-flows` (its `schema` feature). Without
@@ -718,7 +718,7 @@ async fn auth_middleware(
         (name = "agent-packs", description = "Installable agent packs — an agent plus every persona, skill and integration it needs"),
         (name = "agent-presets", description = "Agents this pod can be — a default persona, its callable roster, and the skills and packs they need"),
         (name = "agent-instances", description = "Agents that exist — each with its own memory and conversations"),
-        (name = "goals", description = "Long-running goals: what this pod is working towards on its own, and how far it has got"),
+        (name = "projects", description = "Long-running projects: what this pod is working towards on its own, and how far it has got"),
         (name = "gateway", description = "Messaging gateway channels + Metalcraft connect"),
     ),
 )]
@@ -876,16 +876,16 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/flows/{id}/binding", put(put_flow_binding))
         // Scheduled flows — *when* a flow runs. The literal `preview` is
         // registered before the `{id}` param so matchit prefers the static segment.
-        .route("/api/v1/goals", get(list_goals))
-        .route("/api/v1/goals", post(post_goal))
-        .route("/api/v1/goals/{id}", get(get_goal))
-        .route("/api/v1/goals/{id}", patch(patch_goal))
-        .route("/api/v1/goals/{id}", delete(delete_goal))
-        .route("/api/v1/goals/{id}/journal", get(get_goal_journal))
-        .route("/api/v1/goals/{id}/scratchpad", put(put_goal_scratchpad))
-        .route("/api/v1/goals/{id}/tasks", get(get_goal_tasks))
-        .route("/api/v1/goals/{id}/tasks", put(put_goal_tasks))
-        .route("/api/v1/goals/{id}/findings", get(get_goal_findings))
+        .route("/api/v1/projects", get(list_projects))
+        .route("/api/v1/projects", post(post_project))
+        .route("/api/v1/projects/{id}", get(get_project))
+        .route("/api/v1/projects/{id}", patch(patch_project))
+        .route("/api/v1/projects/{id}", delete(delete_project))
+        .route("/api/v1/projects/{id}/journal", get(get_project_journal))
+        .route("/api/v1/projects/{id}/scratchpad", put(put_project_scratchpad))
+        .route("/api/v1/projects/{id}/tasks", get(get_project_tasks))
+        .route("/api/v1/projects/{id}/tasks", put(put_project_tasks))
+        .route("/api/v1/projects/{id}/findings", get(get_project_findings))
         .route("/api/v1/scheduled-flows", get(list_scheduled_flows))
         .route("/api/v1/scheduled-flows", post(post_scheduled_flow))
         .route(
@@ -1148,9 +1148,9 @@ pub async fn start(config: WorkshopApiConfig) {
     get,
     path = "/api/v1/snapshot",
     tag = "agent",
-    responses((status = 200, body = ProjectSnapshot)),
+    responses((status = 200, body = PodSnapshot)),
 )]
-async fn get_snapshot() -> Json<ProjectSnapshot> {
+async fn get_snapshot() -> Json<PodSnapshot> {
     let personas = list_persona_summaries();
     let skills = list_skill_summaries();
     let flows = metalcraft_flows::list_flows(&paths::flows_dir());
@@ -1161,7 +1161,7 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
         crate::agent_preset::AgentPreset::list_summaries(&paths::agent_presets_dir());
     let agent_instances: Vec<_> = crate::agent_instance::list();
 
-    Json(ProjectSnapshot {
+    Json(PodSnapshot {
         personas,
         skills,
         flows,
@@ -1171,7 +1171,7 @@ async fn get_snapshot() -> Json<ProjectSnapshot> {
         agent_presets,
         agent_instances,
         default_agent_preset: crate::agent_preset::DEFAULT_PRESET.to_string(),
-        layout: ProjectLayout {
+        layout: PodLayout {
             data_dir: paths::data_dir().display().to_string(),
             personas_dir: paths::personas_dir().display().to_string(),
             skills_dir: paths::skills_dir().display().to_string(),
@@ -6248,7 +6248,7 @@ async fn post_chat_turn(
                         let _ = tx.try_send(ev);
                     })
                 })),
-                goal_id: None,
+                project_id: None,
             },
             Some(phase_sink),
             // What the person types while this turn runs, delivered at the
@@ -6666,7 +6666,7 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
                         let _ = sender.send(ev);
                     })
                 })),
-                goal_id: None,
+                project_id: None,
             },
             Some({
                 let sender = sender.clone();
@@ -6847,7 +6847,7 @@ pub async fn deliver_followup_to_chat(
                     let _ = sender.send(ev);
                 })
             })),
-            goal_id: None,
+            project_id: None,
         },
         // A follow-up fires with nobody necessarily watching, which is exactly
         // when a silent four-minute compaction is hardest to explain later.
@@ -8355,7 +8355,7 @@ async fn run_one_gateway_turn(
             interrupt: Some(interrupt.clone()),
             // Nothing renders a task list over SMS.
             plan_sink: None,
-            goal_id: None,
+            project_id: None,
         },
         // This path emits no frames at all — a gateway turn answers over its
         // adapter — so there is nobody to tell.
@@ -9387,143 +9387,143 @@ mod scheduled_flow_schema_tests {
 // ─────────────────────────────────────────────────────────────────────────────
 // Goals
 //
-// A goal is created by a person, in metalcraft-front or the iOS app, and
+// A project is created by a person, in metalcraft-front or the iOS app, and
 // nowhere else — there is no chat command and no agent tool that mints one.
 // Committing a pod to days of unattended work is a decision someone takes
-// deliberately, on a screen built for it, and that is also what keeps a goal
-// from being able to create goals.
+// deliberately, on a screen built for it, and that is also what keeps a project
+// from being able to create projects.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// How many goals may tick at once on one pod.
+/// How many projects may tick at once on one pod.
 ///
-/// Every active goal is unattended spend and (once workspaces land) a live
+/// Every active project is unattended spend and (once workspaces land) a live
 /// buildr.space box on somebody's plan, whose own ceiling is 1 free / 5 premium.
 /// Refused at creation with a message rather than discovered as a 403 on the
 /// first tick.
-pub const MAX_ACTIVE_GOALS: usize = 5;
+pub const MAX_ACTIVE_PROJECTS: usize = 5;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
-struct GoalRow {
+struct ProjectRow {
     id: String,
     title: String,
     goal: String,
-    kind: crate::goals::GoalKind,
-    status: crate::goals::GoalStatus,
+    kind: crate::projects::ProjectKind,
+    status: crate::projects::ProjectStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     blocked_reason: Option<String>,
     instance_id: String,
     /// Checked/total plan steps, so a client draws a progress bar without
     /// parsing markdown.
-    progress: crate::goals::Progress,
+    progress: crate::projects::Progress,
     ticks: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_tick_at: Option<String>,
-    /// When the next tick is owed, absent for a goal that is not ticking.
+    /// When the next tick is owed, absent for a project that is not ticking.
     #[serde(skip_serializing_if = "Option::is_none")]
     next_tick_at: Option<String>,
     every_minutes: u32,
     created_at: String,
 }
 
-fn goal_row(goal: &crate::goals::Goal) -> GoalRow {
-    let scratchpad = crate::goals::read_scratchpad(&goal.id).unwrap_or_default();
-    GoalRow {
-        id: goal.id.clone(),
-        title: goal.title.clone(),
-        goal: goal.goal.clone(),
-        kind: goal.kind,
-        status: goal.status,
-        blocked_reason: goal.blocked_reason.clone(),
-        instance_id: goal.instance_id.clone(),
-        progress: crate::goals::progress_of(&scratchpad),
-        ticks: goal.counters.ticks,
-        last_tick_at: goal.counters.last_tick_at.clone(),
-        next_tick_at: next_tick_at(goal),
-        every_minutes: goal.tick_interval_minutes(),
-        created_at: goal.created_at.clone(),
+fn project_row(project: &crate::projects::Project) -> ProjectRow {
+    let scratchpad = crate::projects::read_scratchpad(&project.id).unwrap_or_default();
+    ProjectRow {
+        id: project.id.clone(),
+        title: project.title.clone(),
+        goal: project.goal.clone(),
+        kind: project.kind,
+        status: project.status,
+        blocked_reason: project.blocked_reason.clone(),
+        instance_id: project.instance_id.clone(),
+        progress: crate::projects::progress_of(&scratchpad),
+        ticks: project.counters.ticks,
+        last_tick_at: project.counters.last_tick_at.clone(),
+        next_tick_at: next_tick_at(project),
+        every_minutes: project.tick_interval_minutes(),
+        created_at: project.created_at.clone(),
     }
 }
 
-/// When this goal next wakes. `None` when it is not going to.
+/// When this project next wakes. `None` when it is not going to.
 ///
-/// A goal that has never ticked wakes on the next daemon poll, which is sooner
+/// A project that has never ticked wakes on the next daemon poll, which is sooner
 /// than any interval — reported as now rather than as a time in the past.
-fn next_tick_at(goal: &crate::goals::Goal) -> Option<String> {
-    if !goal.status.ticks() {
+fn next_tick_at(project: &crate::projects::Project) -> Option<String> {
+    if !project.status.ticks() {
         return None;
     }
-    let Some(last) = goal.counters.last_tick_at.as_deref() else {
+    let Some(last) = project.counters.last_tick_at.as_deref() else {
         return Some(chrono::Utc::now().to_rfc3339());
     };
     let last = chrono::DateTime::parse_from_rfc3339(last).ok()?;
     Some(
         (last.with_timezone(&chrono::Utc)
-            + chrono::Duration::minutes(goal.tick_interval_minutes() as i64))
+            + chrono::Duration::minutes(project.tick_interval_minutes() as i64))
         .to_rfc3339(),
     )
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
-struct GoalList {
-    goals: Vec<GoalRow>,
-    /// How many are ticking, against the ceiling — what a "new goal" button
+struct ProjectList {
+    projects: Vec<ProjectRow>,
+    /// How many are ticking, against the ceiling — what a "new project" button
     /// needs to know before it is pressed.
     active: usize,
     max_active: usize,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
-struct GoalDetail {
+struct ProjectDetail {
     #[serde(flatten)]
-    row: GoalRow,
-    goal_record: crate::goals::Goal,
-    /// The scratchpad as written — the goal's whole memory, verbatim.
+    row: ProjectRow,
+    project_record: crate::projects::Project,
+    /// The scratchpad as written — the project's whole memory, verbatim.
     scratchpad: String,
     /// Set when the document has decayed enough that the next review tick will
     /// groom it rather than merely audit the plan.
     needs_groom: bool,
-    /// The plan, as records. Empty for a goal created before tasks existed —
+    /// The plan, as records. Empty for a project created before tasks existed —
     /// its plan is still checkboxes inside `scratchpad`.
-    tasks: Vec<crate::goal_tasks::Task>,
+    tasks: Vec<crate::project_tasks::Task>,
 }
 
-/// `GET /api/v1/goals` — what this pod is working towards on its own.
+/// `GET /api/v1/projects` — what this pod is working towards on its own.
 #[utoipa::path(
     get,
-    path = "/api/v1/goals",
-    tag = "goals",
-    responses((status = 200, description = "Goals on this pod", body = GoalList)),
+    path = "/api/v1/projects",
+    tag = "projects",
+    responses((status = 200, description = "Goals on this pod", body = ProjectList)),
 )]
-async fn list_goals() -> Response {
-    let goals = crate::goals::list();
-    let active = goals.iter().filter(|g| g.status.ticks()).count();
-    Json(GoalList {
-        goals: goals.iter().map(goal_row).collect(),
+async fn list_projects() -> Response {
+    let projects = crate::projects::list();
+    let active = projects.iter().filter(|g| g.status.ticks()).count();
+    Json(ProjectList {
+        projects: projects.iter().map(project_row).collect(),
         active,
-        max_active: MAX_ACTIVE_GOALS,
+        max_active: MAX_ACTIVE_PROJECTS,
     })
     .into_response()
 }
 
-/// `GET /api/v1/goals/{id}` — one goal, with the scratchpad a client renders.
+/// `GET /api/v1/projects/{id}` — one project, with the scratchpad a client renders.
 #[utoipa::path(
     get,
-    path = "/api/v1/goals/{id}",
-    tag = "goals",
-    params(("id" = String, Path, description = "Goal id")),
-    responses((status = 200, body = GoalDetail), (status = 404, body = ErrorResponse)),
+    path = "/api/v1/projects/{id}",
+    tag = "projects",
+    params(("id" = String, Path, description = "Project id")),
+    responses((status = 200, body = ProjectDetail), (status = 404, body = ErrorResponse)),
 )]
-async fn get_goal(Path(id): Path<String>) -> Response {
-    let Some(goal) = crate::goals::get(&id) else {
-        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+async fn get_project(Path(id): Path<String>) -> Response {
+    let Some(project) = crate::projects::get(&id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("no project '{id}'"));
     };
-    let scratchpad = crate::goals::read_scratchpad(&id).unwrap_or_default();
-    Json(GoalDetail {
-        row: goal_row(&goal),
-        needs_groom: crate::goals::needs_groom(&scratchpad),
-        tasks: crate::goal_tasks::list(&id),
+    let scratchpad = crate::projects::read_scratchpad(&id).unwrap_or_default();
+    Json(ProjectDetail {
+        row: project_row(&project),
+        needs_groom: crate::projects::needs_groom(&scratchpad),
+        tasks: crate::project_tasks::list(&id),
         scratchpad,
-        goal_record: goal,
+        project_record: project,
     })
     .into_response()
 }
@@ -9532,27 +9532,27 @@ async fn get_goal(Path(id): Path<String>) -> Response {
 struct WriteTasksRequest {
     /// The whole list, replacing what is there. Ids are preserved as given, so
     /// a client edits what it read rather than posting a diff.
-    tasks: Vec<crate::goal_tasks::Task>,
+    tasks: Vec<crate::project_tasks::Task>,
 }
 
-/// `GET /api/v1/goals/{id}/tasks` — the plan, as records.
+/// `GET /api/v1/projects/{id}/tasks` — the plan, as records.
 #[utoipa::path(
     get,
-    path = "/api/v1/goals/{id}/tasks",
-    tag = "goals",
-    params(("id" = String, Path, description = "Goal id")),
-    responses((status = 200, body = Vec<crate::goal_tasks::Task>), (status = 404, body = ErrorResponse)),
+    path = "/api/v1/projects/{id}/tasks",
+    tag = "projects",
+    params(("id" = String, Path, description = "Project id")),
+    responses((status = 200, body = Vec<crate::project_tasks::Task>), (status = 404, body = ErrorResponse)),
 )]
-async fn get_goal_tasks(Path(id): Path<String>) -> Response {
-    if crate::goals::get(&id).is_none() {
-        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+async fn get_project_tasks(Path(id): Path<String>) -> Response {
+    if crate::projects::get(&id).is_none() {
+        return err_json(StatusCode::NOT_FOUND, format!("no project '{id}'"));
     }
-    Json(crate::goal_tasks::list(&id)).into_response()
+    Json(crate::project_tasks::list(&id)).into_response()
 }
 
-/// `PUT /api/v1/goals/{id}/tasks` — steer a running goal.
+/// `PUT /api/v1/projects/{id}/tasks` — steer a running project.
 ///
-/// The point of a plan being records rather than prose: a person watching a goal
+/// The point of a plan being records rather than prose: a person watching a project
 /// can add a task, re-order the list, or drop something that has become
 /// pointless, without editing markdown and hoping the next tick honours it.
 ///
@@ -9563,44 +9563,44 @@ async fn get_goal_tasks(Path(id): Path<String>) -> Response {
 /// way.
 #[utoipa::path(
     put,
-    path = "/api/v1/goals/{id}/tasks",
-    tag = "goals",
-    params(("id" = String, Path, description = "Goal id")),
+    path = "/api/v1/projects/{id}/tasks",
+    tag = "projects",
+    params(("id" = String, Path, description = "Project id")),
     request_body = WriteTasksRequest,
     responses(
-        (status = 200, body = Vec<crate::goal_tasks::Task>),
+        (status = 200, body = Vec<crate::project_tasks::Task>),
         (status = 400, description = "The list is not a usable plan", body = ErrorResponse),
         (status = 404, body = ErrorResponse),
     ),
 )]
-async fn put_goal_tasks(Path(id): Path<String>, Json(req): Json<WriteTasksRequest>) -> Response {
-    if crate::goals::get(&id).is_none() {
-        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+async fn put_project_tasks(Path(id): Path<String>, Json(req): Json<WriteTasksRequest>) -> Response {
+    if crate::projects::get(&id).is_none() {
+        return err_json(StatusCode::NOT_FOUND, format!("no project '{id}'"));
     }
-    if let Err(e) = crate::goal_tasks::validate(&req.tasks) {
+    if let Err(e) = crate::project_tasks::validate(&req.tasks) {
         return err_json(StatusCode::BAD_REQUEST, e);
     }
-    if let Err(e) = crate::goal_tasks::save(&id, &req.tasks) {
+    if let Err(e) = crate::project_tasks::save(&id, &req.tasks) {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
-    Json(crate::goal_tasks::list(&id)).into_response()
+    Json(crate::project_tasks::list(&id)).into_response()
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-struct CreateGoalRequest {
-    /// Short handle for lists. Defaults to the first line of the goal.
+struct CreateProjectRequest {
+    /// Short handle for lists. Defaults to the first line of the project.
     #[serde(default)]
     title: Option<String>,
     /// **The goal.** Room for a paragraph: this is the whole instruction, and a
     /// tick six days from now reads it verbatim.
     goal: String,
-    #[serde(default = "default_goal_kind")]
-    kind: crate::goals::GoalKind,
-    /// The repo to work in, `owner/name`. Optional in this phase — a goal
+    #[serde(default = "default_project_kind")]
+    kind: crate::projects::ProjectKind,
+    /// The repo to work in, `owner/name`. Optional in this phase — a project
     /// without one still plans and thinks, it just has nowhere to build.
     #[serde(default)]
     repo: Option<String>,
-    /// The branch the goal works on. Defaults to `goal/<id>`.
+    /// The branch the project works on. Defaults to `project/<id>`.
     #[serde(default)]
     branch: Option<String>,
     /// Minutes between ticks. Floored at 5; defaults to 30.
@@ -9614,50 +9614,50 @@ struct CreateGoalRequest {
     #[serde(default)]
     agent_preset: Option<String>,
     #[serde(default)]
-    rails: Option<crate::goals::Rails>,
+    rails: Option<crate::projects::Rails>,
     #[serde(default)]
-    models: Option<crate::goals::ModelTiers>,
+    models: Option<crate::projects::ModelTiers>,
     /// Create it paused, to review the plan before it starts spending.
     #[serde(default)]
     paused: bool,
 }
 
-fn default_goal_kind() -> crate::goals::GoalKind {
-    crate::goals::GoalKind::Build
+fn default_project_kind() -> crate::projects::ProjectKind {
+    crate::projects::ProjectKind::Build
 }
 
-/// `POST /api/v1/goals` — set a goal.
+/// `POST /api/v1/projects` — set a project.
 ///
-/// The consent point, and the only one: this creates the goal **and** the agent
+/// The consent point, and the only one: this creates the project **and** the agent
 /// that will pursue it, because "work at this while I am not here" is one
 /// decision rather than two.
 #[utoipa::path(
     post,
-    path = "/api/v1/goals",
-    tag = "goals",
-    request_body = CreateGoalRequest,
+    path = "/api/v1/projects",
+    tag = "projects",
+    request_body = CreateProjectRequest,
     responses(
-        (status = 201, description = "Created", body = GoalRow),
-        (status = 400, description = "Empty goal, or no agent preset to run it as", body = ErrorResponse),
-        (status = 409, description = "Too many goals already ticking", body = ErrorResponse),
+        (status = 201, description = "Created", body = ProjectRow),
+        (status = 400, description = "Empty project, or no agent preset to run it as", body = ErrorResponse),
+        (status = 409, description = "Too many projects already ticking", body = ErrorResponse),
     ),
 )]
-async fn post_goal(Json(req): Json<CreateGoalRequest>) -> Response {
-    let goal_text = req.goal.trim();
-    if goal_text.is_empty() {
-        return err_json(StatusCode::BAD_REQUEST, "a goal needs to say what it is");
+async fn post_project(Json(req): Json<CreateProjectRequest>) -> Response {
+    let goal = req.goal.trim();
+    if goal.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "a project needs to say what it is");
     }
-    if !req.paused && crate::goals::active_count() >= MAX_ACTIVE_GOALS {
+    if !req.paused && crate::projects::active_count() >= MAX_ACTIVE_PROJECTS {
         return err_json(
             StatusCode::CONFLICT,
             format!(
-                "{MAX_ACTIVE_GOALS} goals are already running. Pause or finish one first, \
+                "{MAX_ACTIVE_PROJECTS} projects are already running. Pause or finish one first, \
                  or create this one paused."
             ),
         );
     }
 
-    let id = crate::goals::new_id();
+    let id = crate::projects::new_id();
     let title = req
         .title
         .as_deref()
@@ -9665,9 +9665,9 @@ async fn post_goal(Json(req): Json<CreateGoalRequest>) -> Response {
         .filter(|t| !t.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| {
-            // The first line of the goal, bounded — a list needs a handle, and
+            // The first line of the project, bounded — a list needs a handle, and
             // asking for one twice is a form to fill in rather than a decision.
-            let first = goal_text.lines().next().unwrap_or(goal_text);
+            let first = goal.lines().next().unwrap_or(goal);
             first.chars().take(60).collect::<String>()
         });
 
@@ -9675,19 +9675,19 @@ async fn post_goal(Json(req): Json<CreateGoalRequest>) -> Response {
         .agent_preset
         .clone()
         .unwrap_or_else(|| crate::agent_preset::DEFAULT_PRESET.to_string());
-    let instance = match crate::agent_instance::for_goal(&id, &title, &preset) {
+    let instance = match crate::agent_instance::for_project(&id, &title, &preset) {
         Ok(i) => i,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
     };
 
-    let goal = crate::goals::Goal {
+    let project = crate::projects::Project {
         id: id.clone(),
         title,
-        goal: goal_text.to_string(),
+        goal: goal.to_string(),
         kind: req.kind,
         instance_id: instance.id.clone(),
         agent_preset: preset,
-        workspace: crate::goals::Workspace {
+        workspace: crate::projects::Workspace {
             id: None,
             repos: req
                 .repo
@@ -9695,13 +9695,13 @@ async fn post_goal(Json(req): Json<CreateGoalRequest>) -> Response {
                 .map(str::trim)
                 .filter(|r| !r.is_empty())
                 .map(|full_name| {
-                    vec![crate::goals::GoalRepo {
+                    vec![crate::projects::ProjectRepo {
                         full_name: full_name.to_string(),
                         dir: None,
                         branch: Some(
                             req.branch
                                 .clone()
-                                .unwrap_or_else(|| format!("goal/{}", &id[5..])),
+                                .unwrap_or_else(|| format!("project/{}", &id[5..])),
                         ),
                     }]
                 })
@@ -9709,16 +9709,16 @@ async fn post_goal(Json(req): Json<CreateGoalRequest>) -> Response {
             last_provisioned_at: None,
         },
         status: if req.paused {
-            crate::goals::GoalStatus::Paused
+            crate::projects::ProjectStatus::Paused
         } else {
-            crate::goals::GoalStatus::Active
+            crate::projects::ProjectStatus::Active
         },
         blocked_reason: None,
-        heartbeat: crate::goals::Heartbeat {
+        heartbeat: crate::projects::Heartbeat {
             every_minutes: req
                 .every_minutes
-                .unwrap_or(crate::goals::DEFAULT_HEARTBEAT_MINUTES)
-                .max(crate::goals::MIN_HEARTBEAT_MINUTES),
+                .unwrap_or(crate::projects::DEFAULT_HEARTBEAT_MINUTES)
+                .max(crate::projects::MIN_HEARTBEAT_MINUTES),
             timezone: req.timezone,
         },
         io: match req.chat_id {
@@ -9727,35 +9727,35 @@ async fn post_goal(Json(req): Json<CreateGoalRequest>) -> Response {
         },
         journal_chat_id: None,
         rails: req.rails.unwrap_or_default(),
-        counters: crate::goals::Counters::default(),
+        counters: crate::projects::Counters::default(),
         pending_run: None,
         models: req.models.unwrap_or_default(),
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: String::new(),
     };
 
-    if let Err(e) = crate::goals::save(&goal) {
+    if let Err(e) = crate::projects::save(&project) {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
     // Seed the document now rather than on the first tick, so a client can show
-    // the goal as soon as it is created instead of an empty panel for half an
+    // the project as soon as it is created instead of an empty panel for half an
     // hour.
-    let _ = crate::goals::write_scratchpad(&goal.id, &crate::goals::seed_scratchpad(&goal));
+    let _ = crate::projects::write_scratchpad(&project.id, &crate::projects::seed_scratchpad(&project));
 
-    (StatusCode::CREATED, Json(goal_row(&goal))).into_response()
+    (StatusCode::CREATED, Json(project_row(&project))).into_response()
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-struct UpdateGoalRequest {
+struct UpdateProjectRequest {
     #[serde(default)]
     title: Option<String>,
-    /// Restate the goal. Allowed on purpose — a goal that turned out to be the
-    /// wrong goal is better corrected than abandoned — but it does not rewrite
+    /// Restate the project. Allowed on purpose — a project that turned out to be the
+    /// wrong project is better corrected than abandoned — but it does not rewrite
     /// the scratchpad, so the next tick will notice the two disagree.
     #[serde(default)]
     goal: Option<String>,
     #[serde(default)]
-    status: Option<crate::goals::GoalStatus>,
+    status: Option<crate::projects::ProjectStatus>,
     /// The answer to whatever it blocked on. Appended to the scratchpad's State,
     /// which is where the next tick will look for it.
     #[serde(default)]
@@ -9763,106 +9763,106 @@ struct UpdateGoalRequest {
     #[serde(default)]
     every_minutes: Option<u32>,
     #[serde(default)]
-    rails: Option<crate::goals::Rails>,
+    rails: Option<crate::projects::Rails>,
     #[serde(default)]
-    models: Option<crate::goals::ModelTiers>,
+    models: Option<crate::projects::ModelTiers>,
 }
 
-/// `PATCH /api/v1/goals/{id}` — pause, resume, retarget, or answer.
+/// `PATCH /api/v1/projects/{id}` — pause, resume, retarget, or answer.
 ///
-/// Answering is the important one: a blocked goal is stopped until a person
+/// Answering is the important one: a blocked project is stopped until a person
 /// says something, and this is where that lands. The answer goes into the
 /// scratchpad rather than into a message, because the tick that acts on it will
 /// have read nothing else.
 #[utoipa::path(
     patch,
-    path = "/api/v1/goals/{id}",
-    tag = "goals",
-    params(("id" = String, Path, description = "Goal id")),
-    request_body = UpdateGoalRequest,
+    path = "/api/v1/projects/{id}",
+    tag = "projects",
+    params(("id" = String, Path, description = "Project id")),
+    request_body = UpdateProjectRequest,
     responses(
-        (status = 200, body = GoalRow),
+        (status = 200, body = ProjectRow),
         (status = 404, body = ErrorResponse),
         (status = 409, description = "Resuming would exceed the active ceiling", body = ErrorResponse),
     ),
 )]
-async fn patch_goal(Path(id): Path<String>, Json(req): Json<UpdateGoalRequest>) -> Response {
-    let Some(mut goal) = crate::goals::get(&id) else {
-        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+async fn patch_project(Path(id): Path<String>, Json(req): Json<UpdateProjectRequest>) -> Response {
+    let Some(mut project) = crate::projects::get(&id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("no project '{id}'"));
     };
 
     if let Some(title) = req.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        goal.title = title.to_string();
+        project.title = title.to_string();
     }
     if let Some(text) = req.goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
-        goal.goal = text.to_string();
+        project.goal = text.to_string();
     }
     if let Some(minutes) = req.every_minutes {
-        goal.heartbeat.every_minutes = minutes.max(crate::goals::MIN_HEARTBEAT_MINUTES);
+        project.heartbeat.every_minutes = minutes.max(crate::projects::MIN_HEARTBEAT_MINUTES);
     }
     if let Some(rails) = req.rails {
-        goal.rails = rails;
+        project.rails = rails;
     }
     if let Some(models) = req.models {
-        goal.models = models;
+        project.models = models;
     }
 
     // An answer un-blocks by itself: replying to the question is the act of
     // saying carry on, and making someone also flip the status would be a second
-    // step whose omission looks like the goal ignoring them.
+    // step whose omission looks like the project ignoring them.
     if let Some(answer) = req.answer.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
-        let current = crate::goals::read_scratchpad(&id).unwrap_or_default();
-        let updated = crate::goals::append_to_section(
+        let current = crate::projects::read_scratchpad(&id).unwrap_or_default();
+        let updated = crate::projects::append_to_section(
             &current,
             "State",
             &format!("- Answered: {}", answer.replace('\n', " ")),
         );
-        let cleared = crate::goals::replace_section(&updated, "Blockers", "(none)");
-        let _ = crate::goals::write_scratchpad(&id, &cleared);
-        if goal.status == crate::goals::GoalStatus::Blocked {
-            goal.status = crate::goals::GoalStatus::Active;
-            goal.blocked_reason = None;
+        let cleared = crate::projects::replace_section(&updated, "Blockers", "(none)");
+        let _ = crate::projects::write_scratchpad(&id, &cleared);
+        if project.status == crate::projects::ProjectStatus::Blocked {
+            project.status = crate::projects::ProjectStatus::Active;
+            project.blocked_reason = None;
         }
     }
 
     if let Some(status) = req.status {
         // Resuming counts against the ceiling; pausing and finishing never do.
-        if status.ticks() && !goal.status.ticks() && crate::goals::active_count() >= MAX_ACTIVE_GOALS
+        if status.ticks() && !project.status.ticks() && crate::projects::active_count() >= MAX_ACTIVE_PROJECTS
         {
             return err_json(
                 StatusCode::CONFLICT,
-                format!("{MAX_ACTIVE_GOALS} goals are already running"),
+                format!("{MAX_ACTIVE_PROJECTS} projects are already running"),
             );
         }
-        goal.status = status;
+        project.status = status;
         if status.ticks() {
-            goal.blocked_reason = None;
-            // A goal that has been blocked for three days should not wake owing
+            project.blocked_reason = None;
+            // A project that has been blocked for three days should not wake owing
             // a backlog of ticks it will never run: resuming starts its clock now.
-            goal.counters.no_progress_streak = 0;
-            goal.counters.last_tick_at = Some(chrono::Utc::now().to_rfc3339());
+            project.counters.no_progress_streak = 0;
+            project.counters.last_tick_at = Some(chrono::Utc::now().to_rfc3339());
         }
     }
 
-    match crate::goals::save(&goal) {
-        Ok(()) => Json(goal_row(&goal)).into_response(),
+    match crate::projects::save(&project) {
+        Ok(()) => Json(project_row(&project)).into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
-/// `DELETE /api/v1/goals/{id}` — forget a goal.
+/// `DELETE /api/v1/projects/{id}` — forget a project.
 ///
 /// Its agent survives: instances are never deleted on a timer, and what this one
 /// learned about the repo outlives the errand it learned it on.
 #[utoipa::path(
     delete,
-    path = "/api/v1/goals/{id}",
-    tag = "goals",
-    params(("id" = String, Path, description = "Goal id")),
+    path = "/api/v1/projects/{id}",
+    tag = "projects",
+    params(("id" = String, Path, description = "Project id")),
     responses((status = 204, description = "Deleted"), (status = 404, body = ErrorResponse)),
 )]
-async fn delete_goal(Path(id): Path<String>) -> Response {
-    match crate::goals::delete(&id) {
+async fn delete_project(Path(id): Path<String>) -> Response {
+    match crate::projects::delete(&id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => err_json(StatusCode::NOT_FOUND, e),
     }
@@ -9876,55 +9876,55 @@ struct JournalQuery {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
-struct GoalJournal {
-    entries: Vec<crate::goal_tick::JournalEntry>,
+struct ProjectJournal {
+    entries: Vec<crate::project_tick::JournalEntry>,
 }
 
-/// `GET /api/v1/goals/{id}/journal` — what it has been doing, one line per tick.
+/// `GET /api/v1/projects/{id}/journal` — what it has been doing, one line per tick.
 #[utoipa::path(
     get,
-    path = "/api/v1/goals/{id}/journal",
-    tag = "goals",
-    params(("id" = String, Path, description = "Goal id"), JournalQuery),
-    responses((status = 200, body = GoalJournal), (status = 404, body = ErrorResponse)),
+    path = "/api/v1/projects/{id}/journal",
+    tag = "projects",
+    params(("id" = String, Path, description = "Project id"), JournalQuery),
+    responses((status = 200, body = ProjectJournal), (status = 404, body = ErrorResponse)),
 )]
-async fn get_goal_journal(Path(id): Path<String>, Query(q): Query<JournalQuery>) -> Response {
-    if crate::goals::get(&id).is_none() {
-        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+async fn get_project_journal(Path(id): Path<String>, Query(q): Query<JournalQuery>) -> Response {
+    if crate::projects::get(&id).is_none() {
+        return err_json(StatusCode::NOT_FOUND, format!("no project '{id}'"));
     }
-    Json(GoalJournal {
-        entries: crate::goal_tick::read_journal(&id, q.limit.unwrap_or(50)),
+    Json(ProjectJournal {
+        entries: crate::project_tick::read_journal(&id, q.limit.unwrap_or(50)),
     })
     .into_response()
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
-struct GoalFindings {
-    findings: Vec<crate::goal_findings::Finding>,
-    /// How many PRs this goal has open, against its own limit — the pair a
+struct ProjectFindings {
+    findings: Vec<crate::project_findings::Finding>,
+    /// How many PRs this project has open, against its own limit — the pair a
     /// reviewer needs to know whether it is holding back on purpose.
     open_prs: usize,
     max_open_prs: u32,
 }
 
-/// `GET /api/v1/goals/{id}/findings` — what an audit goal has turned up.
+/// `GET /api/v1/projects/{id}/findings` — what an audit project has turned up.
 ///
-/// Empty for a build goal, which keeps no ledger: its findings are its plan.
+/// Empty for a build project, which keeps no ledger: its findings are its plan.
 #[utoipa::path(
     get,
-    path = "/api/v1/goals/{id}/findings",
-    tag = "goals",
-    params(("id" = String, Path, description = "Goal id")),
-    responses((status = 200, body = GoalFindings), (status = 404, body = ErrorResponse)),
+    path = "/api/v1/projects/{id}/findings",
+    tag = "projects",
+    params(("id" = String, Path, description = "Project id")),
+    responses((status = 200, body = ProjectFindings), (status = 404, body = ErrorResponse)),
 )]
-async fn get_goal_findings(Path(id): Path<String>) -> Response {
-    let Some(goal) = crate::goals::get(&id) else {
-        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+async fn get_project_findings(Path(id): Path<String>) -> Response {
+    let Some(project) = crate::projects::get(&id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("no project '{id}'"));
     };
-    Json(GoalFindings {
-        findings: crate::goal_findings::list(&id),
-        open_prs: crate::goal_findings::open_prs(&id),
-        max_open_prs: goal.rails.max_open_prs,
+    Json(ProjectFindings {
+        findings: crate::project_findings::list(&id),
+        open_prs: crate::project_findings::open_prs(&id),
+        max_open_prs: project.rails.max_open_prs,
     })
     .into_response()
 }
@@ -9934,7 +9934,7 @@ struct WriteScratchpadRequest {
     markdown: String,
 }
 
-/// `PUT /api/v1/goals/{id}/scratchpad` — fix the goal's memory by hand.
+/// `PUT /api/v1/projects/{id}/scratchpad` — fix the project's memory by hand.
 ///
 /// The repair hatch. A groom that went wrong, or a plan that has drifted, is
 /// otherwise only correctable by asking the agent nicely and hoping. The
@@ -9942,29 +9942,29 @@ struct WriteScratchpadRequest {
 /// last copy either.
 #[utoipa::path(
     put,
-    path = "/api/v1/goals/{id}/scratchpad",
-    tag = "goals",
-    params(("id" = String, Path, description = "Goal id")),
+    path = "/api/v1/projects/{id}/scratchpad",
+    tag = "projects",
+    params(("id" = String, Path, description = "Project id")),
     request_body = WriteScratchpadRequest,
-    responses((status = 200, body = GoalDetail), (status = 404, body = ErrorResponse)),
+    responses((status = 200, body = ProjectDetail), (status = 404, body = ErrorResponse)),
 )]
-async fn put_goal_scratchpad(
+async fn put_project_scratchpad(
     Path(id): Path<String>,
     Json(req): Json<WriteScratchpadRequest>,
 ) -> Response {
-    let Some(goal) = crate::goals::get(&id) else {
-        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+    let Some(project) = crate::projects::get(&id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("no project '{id}'"));
     };
-    if let Err(e) = crate::goals::write_scratchpad(&id, &req.markdown) {
+    if let Err(e) = crate::projects::write_scratchpad(&id, &req.markdown) {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
-    let scratchpad = crate::goals::read_scratchpad(&id).unwrap_or_default();
-    Json(GoalDetail {
-        row: goal_row(&goal),
-        needs_groom: crate::goals::needs_groom(&scratchpad),
-        tasks: crate::goal_tasks::list(&id),
+    let scratchpad = crate::projects::read_scratchpad(&id).unwrap_or_default();
+    Json(ProjectDetail {
+        row: project_row(&project),
+        needs_groom: crate::projects::needs_groom(&scratchpad),
+        tasks: crate::project_tasks::list(&id),
         scratchpad,
-        goal_record: goal,
+        project_record: project,
     })
     .into_response()
 }

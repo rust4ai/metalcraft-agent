@@ -1,7 +1,7 @@
-//! A small buildr.space client — only the calls a [goal](crate::goals) has to
+//! A small buildr.space client — only the calls a [project](crate::projects) has to
 //! make *without* an agent in the loop.
 //!
-//! Goals do their real work in a buildr.space workspace through the
+//! Projects do their real work in a buildr.space workspace through the
 //! `buildr-space` agent pack's HTTP tools, driven by the model. This module is
 //! deliberately not that. It exists for the handful of questions the tick runner
 //! has to answer **before** deciding whether to spend a turn at all:
@@ -14,7 +14,7 @@
 //! ReAct turn, with a system prompt and a scratchpad and a summary — is the most
 //! expensive way to poll a URL that has ever been devised, and a goal waiting on
 //! a cold `cargo build` would do it every thirty minutes. See
-//! `docs/goal-agent-plan.md` §4.6: the cheapest tick is the one that never calls
+//! `docs/projects-plan.md` §3: the cheapest tick is the one that never calls
 //! a model.
 //!
 //! The other half is [`hibernate`], which is not a question but an obligation.
