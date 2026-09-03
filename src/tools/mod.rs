@@ -5,6 +5,7 @@ pub mod email_imap;
 pub mod find_files;
 pub mod gateway;
 pub mod gateway_webhook;
+pub mod conductor;
 pub mod project;
 pub mod task;
 pub mod grep;
@@ -269,7 +270,8 @@ pub fn create_registry_for_with_config(
             )),
             "project_note" | "project_scratchpad_write" | "project_block" | "project_complete"
             | "project_await_run" | "project_finding" | "project_finding_update" | "task_add"
-            | "task_update" | "task_done" | "task_block" | "task_drop" | "task_dispatch" => {
+            | "task_update" | "task_done" | "task_block" | "task_drop" | "task_dispatch"
+            | "conductor_write" | "conductor_note" => {
                 // Bound to one project at registration. Outside a project tick there is
                 // no project to bind to, so the tools are absent rather than
                 // registered and failing at call time — the model is never shown
@@ -295,6 +297,12 @@ pub fn create_registry_for_with_config(
                         "task_done" => registry.register(task::TaskDoneTool::new(project_id)),
                         "task_block" => registry.register(task::TaskBlockTool::new(project_id)),
                         "task_drop" => registry.register(task::TaskDropTool::new(project_id)),
+                        "conductor_write" => {
+                            registry.register(conductor::ConductorWriteTool::new(project_id))
+                        }
+                        "conductor_note" => {
+                            registry.register(conductor::ConductorNoteTool::new(project_id))
+                        }
                         "task_dispatch" => {
                             // Needs the turn's credentials and roster: dispatch
                             // *is* delegation, so it builds sub-agents the same

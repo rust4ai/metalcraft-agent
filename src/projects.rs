@@ -249,8 +249,18 @@ pub struct Project {
     /// the old `Goal` type got wrong.
     pub goal: String,
     pub kind: ProjectKind,
-    /// The agent that owns this project for its whole life.
+    /// The **worker**: the agent that does the work, in a fresh context each
+    /// tick. Owns the scratchpad and produces the evidence.
     pub instance_id: String,
+    /// The **conductor**: the small agent that *is* the project — it holds the
+    /// plan, judges whether the goal is met, and writes each tick's briefing.
+    /// Separate from the worker so that the thing which says "done" is not the
+    /// thing that wants to be finished.
+    ///
+    /// Empty on a project created before the conductor existed, which falls back
+    /// to sharing the worker's instance rather than losing its memory.
+    #[serde(default)]
+    pub conductor_instance_id: String,
     pub agent_preset: String,
 
     #[serde(default)]
@@ -316,6 +326,15 @@ impl Project {
             || crate::project_tasks::list(&self.id)
                 .iter()
                 .any(|t| t.pending_run.is_some())
+    }
+
+    /// Which instance the conductor runs as, falling back to the worker's.
+    pub fn conductor_instance<'a>(&'a self, fallback: &'a str) -> &'a str {
+        if self.conductor_instance_id.trim().is_empty() {
+            fallback
+        } else {
+            &self.conductor_instance_id
+        }
     }
 
     /// The interval until the next tick, honouring a pending run's short fuse.
@@ -727,6 +746,7 @@ mod tests {
             goal: "do".into(),
             kind: ProjectKind::Build,
             instance_id: "i".into(),
+            conductor_instance_id: String::new(),
             agent_preset: "p".into(),
             workspace: Workspace::default(),
             status: ProjectStatus::Active,
@@ -759,6 +779,7 @@ mod tests {
             goal: "do".into(),
             kind: ProjectKind::Build,
             instance_id: "i".into(),
+            conductor_instance_id: String::new(),
             agent_preset: "p".into(),
             workspace: Workspace::default(),
             status: ProjectStatus::Active,

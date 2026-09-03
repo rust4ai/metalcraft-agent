@@ -9675,7 +9675,25 @@ async fn post_project(Json(req): Json<CreateProjectRequest>) -> Response {
         .agent_preset
         .clone()
         .unwrap_or_else(|| crate::agent_preset::DEFAULT_PRESET.to_string());
-    let instance = match crate::agent_instance::for_project(&id, &title, &preset) {
+    // Two agents, created together: the worker that does the work and the
+    // conductor that holds the plan and judges whether the goal is met. Each
+    // gets its own instance because each accumulates a different kind of memory
+    // — the worker learns the codebase, the conductor learns the project.
+    let instance = match crate::agent_instance::for_project(
+        &id,
+        &title,
+        &preset,
+        crate::agent_instance::ProjectRole::Worker,
+    ) {
+        Ok(i) => i,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
+    };
+    let conductor = match crate::agent_instance::for_project(
+        &id,
+        &title,
+        &preset,
+        crate::agent_instance::ProjectRole::Conductor,
+    ) {
         Ok(i) => i,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
     };
@@ -9686,6 +9704,7 @@ async fn post_project(Json(req): Json<CreateProjectRequest>) -> Response {
         goal: goal.to_string(),
         kind: req.kind,
         instance_id: instance.id.clone(),
+        conductor_instance_id: conductor.id.clone(),
         agent_preset: preset,
         workspace: crate::projects::Workspace {
             id: None,

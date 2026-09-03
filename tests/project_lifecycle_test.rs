@@ -18,15 +18,16 @@ use std::fs;
 use metalcraft::Tool;
 use metalcraft_agent::project_tick::{self, TickKind};
 use metalcraft_agent::projects::{self, Project, ProjectKind, ProjectStatus};
-use metalcraft_agent::tools::project as goal_tools;
+use metalcraft_agent::tools::project as project_tools;
 
-fn a_goal(id: &str) -> Project {
+fn a_project(id: &str) -> Project {
     Project {
         id: id.into(),
         title: "Billing".into(),
         goal: "Ship Stripe billing in rust4ai/foo".into(),
         kind: ProjectKind::Build,
         instance_id: "inst_test".into(),
+        conductor_instance_id: String::new(),
         agent_preset: "general-agent".into(),
         workspace: projects::Workspace::default(),
         status: ProjectStatus::Active,
@@ -53,7 +54,7 @@ async fn a_goal_lives_through_its_scratchpad() {
     fs::create_dir_all(&data_dir).unwrap();
 
     // ── created ──────────────────────────────────────────────────────────────
-    let project = a_goal(&projects::new_id());
+    let project = a_project(&projects::new_id());
     projects::save(&project).expect("save");
     projects::write_scratchpad(&project.id, &projects::seed_scratchpad(&project)).expect("seed");
 
@@ -70,7 +71,7 @@ async fn a_goal_lives_through_its_scratchpad() {
     assert_eq!(project_tick::due(chrono::Utc::now()).len(), 1);
 
     // ── the planning tick writes a plan ──────────────────────────────────────
-    let write = goal_tools::ProjectScratchpadWriteTool::new(project.id.clone());
+    let write = project_tools::ProjectScratchpadWriteTool::new(project.id.clone());
     let planned = projects::replace_section(
         &pad,
         "Plan",
@@ -88,7 +89,7 @@ async fn a_goal_lives_through_its_scratchpad() {
     assert!(!projects::snapshots(&project.id).is_empty(), "the write snapshotted");
 
     // ── a work tick logs what it did ─────────────────────────────────────────
-    let note = goal_tools::ProjectNoteTool::new(project.id.clone());
+    let note = project_tools::ProjectNoteTool::new(project.id.clone());
     note.call(serde_json::json!({ "section": "Log", "text": "t1: migration 0004, pushed" }))
         .await
         .expect("note");
@@ -109,7 +110,7 @@ async fn a_goal_lives_through_its_scratchpad() {
     );
 
     // ── completing early is refused ──────────────────────────────────────────
-    let complete = goal_tools::ProjectCompleteTool::new(project.id.clone());
+    let complete = project_tools::ProjectCompleteTool::new(project.id.clone());
     let err = complete
         .call(serde_json::json!({ "summary": "all done!" }))
         .await
@@ -125,7 +126,7 @@ async fn a_goal_lives_through_its_scratchpad() {
     );
 
     // ── blocking stops the heartbeat and records the question ────────────────
-    let block = goal_tools::ProjectBlockTool::new(project.id.clone());
+    let block = project_tools::ProjectBlockTool::new(project.id.clone());
     block
         .call(serde_json::json!({
             "question": "Stripe test key or live key?",
@@ -188,12 +189,12 @@ async fn a_goal_lives_through_its_scratchpad() {
     );
 
     // ── a long build is handed to the heartbeat, not waited on ───────────────
-    let mut running = a_goal(&projects::new_id());
+    let mut running = a_project(&projects::new_id());
     running.title = "Awaiting".into();
     projects::save(&running).unwrap();
     projects::write_scratchpad(&running.id, &projects::seed_scratchpad(&running)).unwrap();
 
-    let await_run = goal_tools::ProjectAwaitRunTool::new(running.id.clone());
+    let await_run = project_tools::ProjectAwaitRunTool::new(running.id.clone());
     await_run
         .call(serde_json::json!({
             "workspace_id": "ws_7",
@@ -239,22 +240,28 @@ async fn a_goal_lives_through_its_scratchpad() {
             plan_total: 2,
             progressed: true,
             duration_secs: 42,
+            briefing: Some("Take the migration step; the schema decision is already made.".into()),
+            conducted: true,
         },
     );
     let entries = project_tick::read_journal(&project.id, 50);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].tick, 1);
     assert!(entries[0].progressed);
+    // The briefing is on the record: the first question about a tick that went
+    // wrong is what it was actually told to do.
+    assert!(entries[0].briefing.as_deref().unwrap_or_default().contains("migration"));
+    assert!(entries[0].conducted);
 
     // ── an audit project keeps a ledger, and the cap is a rail not a hope ───────
-    let mut audit = a_goal(&projects::new_id());
+    let mut audit = a_project(&projects::new_id());
     audit.kind = ProjectKind::Audit;
     audit.title = "Audit".into();
     audit.rails.max_open_prs = 2;
     projects::save(&audit).unwrap();
 
-    let finding = goal_tools::ProjectFindingTool::new(audit.id.clone());
-    let update = goal_tools::ProjectFindingUpdateTool::new(audit.id.clone());
+    let finding = project_tools::ProjectFindingTool::new(audit.id.clone());
+    let update = project_tools::ProjectFindingUpdateTool::new(audit.id.clone());
 
     let first = finding
         .call(serde_json::json!({

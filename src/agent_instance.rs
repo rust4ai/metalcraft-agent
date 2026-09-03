@@ -60,7 +60,36 @@ pub enum InstanceOrigin {
     /// instance, because what it learned along the way outlives the errand.
     Project {
         project_id: String,
+        /// Which of the project's two agents this is. A project runs a
+        /// **conductor** (holds the plan, judges the goal) and a **worker**
+        /// (does the work), and they must not share an instance: they
+        /// accumulate different memory — the worker learns the codebase, the
+        /// conductor learns the project — and merging the two would give each
+        /// of them the other's recall at exactly the moments it is misleading.
+        ///
+        /// Defaults to `worker`, which is what a project created before the
+        /// conductor existed had.
+        #[serde(default)]
+        role: ProjectRole,
     },
+}
+
+/// Which of a project's two agents an instance is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRole {
+    #[default]
+    Worker,
+    Conductor,
+}
+
+impl ProjectRole {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Conductor => "conductor",
+        }
+    }
 }
 
 impl Default for InstanceOrigin {
@@ -331,9 +360,15 @@ pub fn for_flow(flow_id: &str, label: &str, preset_slug: &str) -> Result<AgentIn
 /// One instance for the project's whole life, which is what makes its memory worth
 /// having: a project is a hundred fresh conversations, and the only thing that
 /// carries between them besides the scratchpad is what this agent knows.
-pub fn for_project(project_id: &str, label: &str, preset_slug: &str) -> Result<AgentInstance, String> {
+pub fn for_project(
+    project_id: &str,
+    label: &str,
+    preset_slug: &str,
+    role: ProjectRole,
+) -> Result<AgentInstance, String> {
     let origin = InstanceOrigin::Project {
         project_id: project_id.to_string(),
+        role,
     };
     if let Some(found) = list().into_iter().find(|i| i.origin == origin) {
         return Ok(found);
@@ -341,7 +376,10 @@ pub fn for_project(project_id: &str, label: &str, preset_slug: &str) -> Result<A
     let preset = crate::agent_preset::AgentPreset::load(preset_slug, &paths::agent_presets_dir())?;
     preset.ensure_spawnable()?;
     let mut instance = AgentInstance::new(&preset, origin);
-    instance.name = format!("{} — {label}", preset.name);
+    instance.name = match role {
+        ProjectRole::Worker => format!("{} — {label}", preset.name),
+        ProjectRole::Conductor => format!("{} — {label} ({})", preset.name, role.label()),
+    };
     instance.save()?;
     Ok(instance)
 }

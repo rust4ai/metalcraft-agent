@@ -170,6 +170,33 @@ Today re-aiming means deleting the goal and losing all of it.
 A project whose goal is met goes `done` — and can be given the next goal instead,
 arriving with everything it learned about the repo still in hand.
 
+## 6b. The conductor's two memories
+
+The conductor has both, and they are not the same thing:
+
+| | the ledger (`conductor.md`) | `mem_*` instance memory |
+| --- | --- | --- |
+| shape | one document, verbatim, injected **in full** every tick | ranked recall, injected by relevance |
+| written | rewritten by the conductor every tick | appended when something durable is learned; distilled by the nightly dream |
+| holds | its running thesis about **this** project — Bearing, Learned, Tried, Watching | what outlives this project — how this repo builds, which delegate is reliable at what |
+| if wrong | this project stalls | the pod forgets something |
+
+The ledger is to the conductor what the scratchpad is to the worker, and it
+exists for the same reason: recall is fuzzy and ranked *on purpose*, and a thing
+that has to be true and complete on every tick cannot be left to it.
+
+It is written twice per tick, from two directions:
+
+1. **The conductor rewrites it** at the end of its turn — judgement, in its words.
+2. **The runner appends what the worker did** when the worker returns, derived
+   from the task deltas rather than from anyone's recollection. Code writes the
+   structure; the model writes the judgement — the same division as everywhere
+   else here.
+
+There is deliberately no second conductor turn after the worker returns. It would
+double the conductor's cost per tick to reflect on something the next tick reads
+anyway fifteen minutes later, and nothing is lost in between.
+
 ## 7. What stays exactly as it is
 
 Nothing below changes; it is listed so a reader does not go looking.
@@ -190,7 +217,7 @@ Nothing below changes; it is listed so a reader does not go looking.
 | # | Step | Notes |
 | --- | --- | --- |
 | 1 | **Rename** `Goal` → `Project` across store, tick, tools, API, personas, docs, and `metalcraft-front` | Nothing has shipped — the branch is unmerged, so this costs no migration. Frees `ProjectSnapshot` → `PodSnapshot`, which is what it always was. |
-| 2 | **Conductor**: instance, persona, its own tool surface (`task_*`, `project_complete`, `project_block`, pace) | The plan moves off the worker |
+| 2 | **Conductor** ✅ — its own instance (`InstanceOrigin::Project { role }`), the `project-conductor` persona, its ledger at `<data>/projects/<id>/conductor.md` with `conductor_write`/`conductor_note`, and `conduct()` running before the worker each tick. The plan and the verdict moved off the worker. | |
 | 3 | **Boot**: conductor writes the worker's system prompt; store it as state | |
 | 4 | **Session**: one per project, context reset per heartbeat, turns posted into it | Uses `ChatSession`'s existing transcript/state split |
 | 5 | **Briefing**: conductor composes it each tick; runner appends the constant contract; store it on the journal entry | Retires `TickKind` |

@@ -154,6 +154,16 @@ pub struct JournalEntry {
     pub model: String,
     /// What the agent said it did — its final answer, trimmed.
     pub summary: String,
+    /// The briefing the conductor wrote for this tick. Recorded because the
+    /// first question about a tick that went wrong is "what did it actually
+    /// say?", and that should be answerable without opening a transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub briefing: Option<String>,
+    /// False when the conductor could not run and the tick used the fallback
+    /// briefing. "The conductor was down for six ticks" is the sort of thing
+    /// that explains a project which went nowhere.
+    #[serde(default = "yes")]
+    pub conducted: bool,
     /// Status after the tick, so a reader can see where it turned.
     pub status: ProjectStatus,
     pub plan_done: u32,
@@ -162,6 +172,10 @@ pub struct JournalEntry {
     /// possibly spent, and recorded nothing.
     pub progressed: bool,
     pub duration_secs: u64,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn journal_path(project_id: &str) -> std::path::PathBuf {
@@ -204,6 +218,31 @@ pub fn read_journal(project_id: &str, limit: usize) -> Vec<JournalEntry> {
         entries.drain(..entries.len() - limit);
     }
     entries
+}
+
+/// The last few ticks, one line each, for the conductor's frame.
+///
+/// Enough to see a pattern — three ticks in a row that changed nothing, a run
+/// that keeps failing — without handing it the whole history, which is what the
+/// ledger is for.
+fn recent_journal(project_id: &str) -> String {
+    let entries = read_journal(project_id, 6);
+    if entries.is_empty() {
+        return String::new();
+    }
+    entries
+        .iter()
+        .map(|e| {
+            format!(
+                "- t{} [{:?}{}] {}",
+                e.tick,
+                e.kind,
+                if e.progressed { "" } else { ", no change" },
+                e.summary.replace('\n', " ").chars().take(200).collect::<String>()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ── due-ness ─────────────────────────────────────────────────────────────────
@@ -577,7 +616,12 @@ async fn hibernate_workspace(project: &Project) {
 /// three that matter most — verify before checking, commit before finishing,
 /// rewrite the scratchpad last — are the three whose absence produces a project
 /// that looks like it is working and is not.
-pub fn tick_frame(project: &Project, kind: TickKind, tick_number: u32) -> String {
+pub fn tick_frame(
+    project: &Project,
+    kind: TickKind,
+    tick_number: u32,
+    briefing: Option<&str>,
+) -> String {
     let common = format!(
         "You are working towards a long-running project. This is tick {tick_number}.\n\n\
          You remember nothing of previous ticks. Everything you know is in the scratchpad \
@@ -690,7 +734,17 @@ pub fn tick_frame(project: &Project, kind: TickKind, tick_number: u32) -> String
         )
     };
 
-    format!("{common}{specific}{pending}\n\n---\n\n{scratchpad}{ledger}")
+    // The conductor's briefing goes first and the standing rules follow it. That
+    // order is the contract: the generated half may say anything about *this*
+    // tick, and the constant half is appended afterwards where it cannot be
+    // dropped. A frame whose rules were themselves generated would be a frame
+    // that quietly loses one — the same failure the task list exists to remove.
+    let brief = briefing
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(|b| format!("**This tick, from your conductor:**\n{b}\n\n"))
+        .unwrap_or_default();
+    format!("{brief}{common}{specific}{pending}\n\n---\n\n{scratchpad}{ledger}")
 }
 
 // ── running one ──────────────────────────────────────────────────────────────
@@ -728,7 +782,7 @@ pub async fn run_tick(
         project.status = ProjectStatus::Blocked;
         project.blocked_reason = Some(reason.clone());
         let _ = projects::save(&project);
-        record(&project, TickKind::Work, "—", &reason, false, started);
+        record(&project, TickKind::Work, "—", &reason, false, started, None, true);
         return TickOutcome {
             kind: TickKind::Work,
             progressed: false,
@@ -779,9 +833,78 @@ pub async fn run_tick(
         }
         None => before,
     };
+    let tick_number = project.counters.ticks + 1;
+
+    // ── the conductor goes first ─────────────────────────────────────────────
+    // It grooms the plan, decides whether the project is still going, keeps its
+    // own ledger, and writes the briefing the worker will open with. Everything
+    // it does is durable before the worker starts, so a worker turn that crashes
+    // does not take the tick's thinking with it.
+    let briefing = crate::project_conductor::conduct(
+        context,
+        project,
+        cwd,
+        approval_mode,
+        tick_number,
+        &project_tasks::list(&project.id),
+        preflight_note.as_deref(),
+        &recent_journal(&project.id),
+    )
+    .await;
+
+    // The conductor may have ended the project. Re-read rather than assume: it
+    // writes through the same store this copy came from.
+    let project = &projects::get(&project.id).unwrap_or_else(|| project.clone());
+    if project.status != ProjectStatus::Active {
+        let reason = project
+            .blocked_reason
+            .clone()
+            .unwrap_or_else(|| "The conductor ended this project.".into());
+        if project.status == ProjectStatus::Blocked {
+            announce(
+                context,
+                project,
+                &format!(
+                    "Your project **{}** has stopped and needs you.\n\n{reason}\n\nReply here \
+                     to answer it and start it again.",
+                    project.title
+                ),
+            )
+            .await;
+        } else if project.status == ProjectStatus::Done {
+            announce(
+                context,
+                project,
+                &format!("Your project **{}** is done.\n\n{reason}", project.title),
+            )
+            .await;
+        }
+        let mut ended = project.clone();
+        ended.counters.ticks = tick_number;
+        ended.counters.last_tick_at = Some(now.to_rfc3339());
+        let _ = projects::save(&ended);
+        hibernate_workspace(&ended).await;
+        record(
+            &ended,
+            TickKind::Review,
+            "—",
+            &reason,
+            true,
+            started,
+            Some(&briefing.text),
+            briefing.from_conductor,
+        );
+        return TickOutcome {
+            kind: TickKind::Review,
+            progressed: true,
+            status: ended.status,
+            summary: reason,
+            waited: false,
+        };
+    }
+
     let tasks_before = project_tasks::list(&project.id);
     let kind = tick_kind(project, &before, &tasks_before);
-    let tick_number = project.counters.ticks + 1;
     let model = model_for(project, kind);
     let persona = persona_for(project);
 
@@ -797,7 +920,7 @@ pub async fn run_tick(
             persona_slug: &persona,
             cwd,
             model_name: &model,
-            task: &tick_frame(project, kind, tick_number),
+            task: &tick_frame(project, kind, tick_number, Some(&briefing.text)),
             approval_mode: approval_mode.clone(),
             diagnostics: logger,
             instance_id: Some(project.instance_id.clone()),
@@ -828,6 +951,17 @@ pub async fn run_tick(
     let after = projects::read_scratchpad(&project.id).unwrap_or_default();
     let tasks_after = project_tasks::list(&project.id);
     let progressed = did_progress(&before, &after, &tasks_before, &tasks_after);
+
+    // What the worker did goes into the conductor's ledger, written by code from
+    // the task deltas rather than by a model from memory — so the next tick's
+    // conductor reads what actually happened, not what somebody recalled.
+    crate::project_conductor::record_worker_return(
+        &project.id,
+        tick_number,
+        &summary,
+        &tasks_before,
+        &tasks_after,
+    );
 
     project.counters.ticks = tick_number;
     project.counters.last_tick_at = Some(now.to_rfc3339());
@@ -880,7 +1014,16 @@ pub async fn run_tick(
         _ => {}
     }
 
-    record(&project, kind, &model, &summary, progressed, started);
+    record(
+        &project,
+        kind,
+        &model,
+        &summary,
+        progressed,
+        started,
+        Some(&briefing.text),
+        briefing.from_conductor,
+    );
 
     TickOutcome {
         kind,
@@ -939,6 +1082,7 @@ fn did_progress(
     fingerprint(tasks_before) != fingerprint(tasks_after)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record(
     project: &Project,
     kind: TickKind,
@@ -946,6 +1090,8 @@ fn record(
     summary: &str,
     progressed: bool,
     started: std::time::Instant,
+    briefing: Option<&str>,
+    conducted: bool,
 ) {
     let progress = project.progress();
     append_journal(
@@ -956,6 +1102,8 @@ fn record(
             kind,
             model: model.to_string(),
             summary: summary.chars().take(2000).collect(),
+            briefing: briefing.map(|b| b.chars().take(2000).collect()),
+            conducted,
             status: project.status,
             plan_done: progress.done,
             plan_total: progress.total,
@@ -977,6 +1125,7 @@ mod tests {
             goal: "do the thing".into(),
             kind: ProjectKind::Build,
             instance_id: "inst".into(),
+            conductor_instance_id: String::new(),
             agent_preset: "general-agent".into(),
             workspace: Workspace::default(),
             status: ProjectStatus::Active,
@@ -1141,7 +1290,7 @@ mod tests {
             what: "cargo test".into(),
             started_at: String::new(),
         });
-        let frame = tick_frame(&g, TickKind::Work, 3);
+        let frame = tick_frame(&g, TickKind::Work, 3, Some("Take t1 — the survey landed."));
         assert!(frame.contains("tick 3"));
         assert!(frame.contains("run_9"), "the pending run must be named first");
         assert!(frame.contains("do the thing"), "the project itself must be in the frame");
@@ -1224,7 +1373,7 @@ mod tests {
 
     #[test]
     fn the_review_frame_forbids_new_work() {
-        let frame = tick_frame(&project(), TickKind::Review, 5);
+        let frame = tick_frame(&project(), TickKind::Review, 5, None);
         assert!(frame.contains("Do no new work"));
         assert!(frame.contains("Never drop an unchecked step"));
     }

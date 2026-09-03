@@ -21,16 +21,17 @@ use std::fs;
 use metalcraft::Tool;
 use metalcraft_agent::project_tasks::{self, TaskStatus};
 use metalcraft_agent::projects::{self, Project, ProjectKind, ProjectStatus};
-use metalcraft_agent::tools::project as goal_tools;
+use metalcraft_agent::tools::project as project_tools;
 use metalcraft_agent::tools::task as task_tools;
 
-fn a_goal(id: &str) -> Project {
+fn a_project(id: &str) -> Project {
     Project {
         id: id.into(),
         title: "Limiter".into(),
         goal: "Ship the token-bucket limiter in rust4ai/foo".into(),
         kind: ProjectKind::Build,
         instance_id: "inst_test".into(),
+        conductor_instance_id: String::new(),
         agent_preset: "general-agent".into(),
         workspace: projects::Workspace::default(),
         status: ProjectStatus::Active,
@@ -56,7 +57,7 @@ async fn a_plan_is_records_that_cannot_be_lost() {
     }
     fs::create_dir_all(&data_dir).unwrap();
 
-    let project = a_goal(&projects::new_id());
+    let project = a_project(&projects::new_id());
     projects::save(&project).expect("save");
     projects::write_scratchpad(&project.id, &projects::seed_scratchpad(&project)).expect("seed");
 
@@ -101,6 +102,7 @@ async fn a_plan_is_records_that_cannot_be_lost() {
         &projects::get(&project.id).unwrap(),
         metalcraft_agent::project_tick::TickKind::Work,
         2,
+        None,
     );
     assert!(frame.contains("**t1** [ready]"), "{frame}");
     assert!(frame.contains("**t3** [todo] Write the token bucket (after t1, t2)"), "{frame}");
@@ -152,7 +154,7 @@ async fn a_plan_is_records_that_cannot_be_lost() {
     );
 
     // ── a run is owed by one task, and only that task waits ──────────────────
-    let await_run = goal_tools::ProjectAwaitRunTool::new(project.id.clone());
+    let await_run = project_tools::ProjectAwaitRunTool::new(project.id.clone());
     await_run
         .call(serde_json::json!({
             "workspace_id": "ws_1", "run_id": "r_88", "what": "cargo test --all", "task_id": "t3"
@@ -181,7 +183,7 @@ async fn a_plan_is_records_that_cannot_be_lost() {
     );
 
     // ── the project cannot say it is done while its plan is open ────────────────
-    let complete = goal_tools::ProjectCompleteTool::new(project.id.clone());
+    let complete = project_tools::ProjectCompleteTool::new(project.id.clone());
     let e = complete
         .call(serde_json::json!({ "summary": "shipped it" }))
         .await

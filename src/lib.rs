@@ -20,6 +20,7 @@ pub mod flows;
 pub mod pod_settings;
 pub mod schedule_timing;
 pub mod gateway_activity;
+pub mod project_conductor;
 pub mod project_findings;
 pub mod project_tasks;
 pub mod project_tick;
