@@ -673,6 +673,9 @@ async fn run_due_goals(context: &AgentRuntimeContext, cwd: &str, approval_mode: 
             approval_mode,
         ));
         match futures_util::FutureExt::catch_unwind(ran).await {
+            Ok(outcome) if outcome.waited => {
+                log::info!("goal {id} ('{title}') spent nothing: {}", outcome.summary)
+            }
             Ok(outcome) => log::info!(
                 "goal {id} ('{title}') {:?} tick → {:?}{}",
                 outcome.kind,

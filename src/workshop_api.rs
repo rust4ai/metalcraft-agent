@@ -6703,6 +6703,7 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
 }
 
 /// Outcome of trying to deliver a fired follow-up into its chat.
+#[derive(Debug)]
 pub enum FollowupDelivery {
     /// The follow-up ran and its reply was delivered/persisted.
     Delivered,

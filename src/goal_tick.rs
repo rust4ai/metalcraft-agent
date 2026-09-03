@@ -92,14 +92,40 @@ pub fn resolve_tier(tier: &str) -> String {
     }
 }
 
-/// The model for one tick, honouring the goal's own overrides.
-fn model_for(goal: &Goal, kind: TickKind) -> String {
-    let override_tier = match kind {
+/// One step up the ladder. `strong` is the top; asking past it returns it.
+fn escalate(tier: &str) -> &str {
+    match tier {
+        "mini" => "standard",
+        _ => "strong",
+    }
+}
+
+/// The tier for one tick: the kind's, the goal's override if it has one, then
+/// one step up for every tick that has changed nothing.
+///
+/// Static assignment is brittle in one direction: a cheap tick that thrashes
+/// costs more than the strong tick it was avoiding, and it does it repeatedly.
+/// Escalating on `no_progress_streak` puts the decision where there is evidence
+/// for it — an observed failure to move — rather than on a model's opinion of
+/// how hard its own task is. A groom resets the streak, so this backs off again
+/// on its own.
+pub fn tier_for(goal: &Goal, kind: TickKind) -> String {
+    let base = match kind {
         TickKind::Plan => goal.models.plan.as_deref(),
         TickKind::Work => goal.models.work.as_deref(),
         TickKind::Review => goal.models.review.as_deref(),
-    };
-    resolve_tier(override_tier.unwrap_or_else(|| kind.tier()))
+    }
+    .unwrap_or_else(|| kind.tier());
+
+    if goal.counters.no_progress_streak == 0 {
+        return base.to_string();
+    }
+    escalate(base).to_string()
+}
+
+/// The model for one tick.
+fn model_for(goal: &Goal, kind: TickKind) -> String {
+    resolve_tier(&tier_for(goal, kind))
 }
 
 // ── the journal ──────────────────────────────────────────────────────────────
@@ -244,6 +270,230 @@ pub fn rail_tripped(goal: &Goal, now: chrono::DateTime<chrono::Utc>) -> Option<S
     None
 }
 
+
+// ── the pre-flight ───────────────────────────────────────────────────────────
+
+/// How long a pending run may hold a goal in the waiting state.
+///
+/// buildr's own reaper settles a run whose follower died after 15 minutes, and
+/// `build`/`test` are capped at 10, so anything still running past this is not
+/// coming back. Waiting forever on it would be a goal that costs nothing and
+/// does nothing, which is the quietest way for this design to fail.
+const PENDING_RUN_PATIENCE_MINS: i64 = 30;
+
+/// What the pre-flight decided, before any model was involved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreFlight {
+    /// Run a tick. `note` is something the pre-flight learned that belongs in
+    /// the scratchpad first — a finished build, a workspace that vanished.
+    Spend { note: Option<String> },
+    /// Spend nothing. The thing this goal is waiting for has not happened yet,
+    /// and asking a language model to observe that costs more than the answer.
+    Wait { why: String },
+}
+
+/// The decision about a pending run, split out from the HTTP so it can be
+/// tested without a network.
+///
+/// `age_mins` is how long ago the run was started, which is the only thing that
+/// distinguishes "still going" from "never coming back".
+pub fn decide_pending(
+    result: &Result<crate::buildr::Run, crate::buildr::Error>,
+    age_mins: i64,
+    what: &str,
+) -> PreFlight {
+    match result {
+        Ok(run) if !run.finished() => {
+            if age_mins >= PENDING_RUN_PATIENCE_MINS {
+                PreFlight::Spend {
+                    note: Some(format!(
+                        "`{what}` (run {}) has been running for {age_mins} minutes and is not \
+                         coming back. Treat it as failed, and check the workspace \
+                         before starting another.",
+                        run.id
+                    )),
+                }
+            } else {
+                PreFlight::Wait {
+                    why: format!("`{what}` is still running"),
+                }
+            }
+        }
+        Ok(run) => {
+            // The output is what the next tick actually needs — a build that
+            // failed is only useful with the reason attached.
+            let tail: String = run
+                .output
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .rev()
+                .take(2000)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            PreFlight::Spend {
+                note: Some(format!(
+                    "`{what}` finished: **{}**{}.{}",
+                    run.status,
+                    run.exit_code
+                        .map(|c| format!(" (exit {c})"))
+                        .unwrap_or_default(),
+                    if tail.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n\n```\n{}\n```", tail.trim())
+                    }
+                )),
+            }
+        }
+        // Gone means gone: the run record was reaped or never existed, and
+        // waiting for it is waiting for nothing.
+        Err(crate::buildr::Error::Gone) => PreFlight::Spend {
+            note: Some(format!(
+                "The run for `{what}` no longer exists. Start it again if it still matters."
+            )),
+        },
+        // No credential: nothing here will ever resolve, so stop waiting and let
+        // the tick say so properly.
+        Err(crate::buildr::Error::NotConfigured) => PreFlight::Spend {
+            note: Some(format!(
+                "Could not check `{what}`: this pod has no buildr.space credential."
+            )),
+        },
+        // A transient — buildr down, a network blip. Cheap to try again shortly,
+        // but not forever: past the patience window the tick runs and reports.
+        Err(e) => {
+            if age_mins >= PENDING_RUN_PATIENCE_MINS {
+                PreFlight::Spend {
+                    note: Some(format!("Could not check `{what}` for {age_mins} minutes: {e}")),
+                }
+            } else {
+                PreFlight::Wait {
+                    why: format!("could not reach buildr.space ({e})"),
+                }
+            }
+        }
+    }
+}
+
+/// Answer everything that can be answered without a model, and decide whether
+/// this wake-up is worth a turn.
+///
+/// Mutates `goal` in place — clearing a pending run that has landed, forgetting
+/// a workspace that has been reaped, recording compute spent — so the tick that
+/// follows starts from what is true rather than from what was true last time.
+async fn preflight(goal: &mut Goal) -> PreFlight {
+    let mut notes: Vec<String> = Vec::new();
+
+    if let Some(pending) = goal.pending_run.clone() {
+        let age = chrono::DateTime::parse_from_rfc3339(&pending.started_at)
+            .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_minutes())
+            .unwrap_or(0);
+        let result = crate::buildr::get_run(&pending.workspace_id, &pending.run_id).await;
+        match decide_pending(&result, age, &pending.what) {
+            PreFlight::Wait { why } => {
+                // Deliberately nothing else: no journal line, no counters. A
+                // wait is not a tick, and one line every five minutes would bury
+                // the ticks that did something.
+                log::info!("goal {} waiting: {why}", goal.id);
+                return PreFlight::Wait { why };
+            }
+            PreFlight::Spend { note } => {
+                goal.pending_run = None;
+                notes.extend(note);
+            }
+        }
+    }
+
+    // A workspace that has been reaped is the normal end of a free-plan week,
+    // not an error — but a tick that does not know costs a whole turn finding
+    // out, and usually finds out by failing.
+    if let Some(ws_id) = goal.workspace.id.clone() {
+        match crate::buildr::get_workspace(&ws_id).await {
+            Ok(ws) if ws.is_ready() || ws.is_hibernated() => {}
+            Ok(ws) => notes.push(format!(
+                "Workspace `{ws_id}` is `{}`{}. It is not usable yet.",
+                ws.status,
+                ws.error.map(|e| format!(" ({e})")).unwrap_or_default()
+            )),
+            Err(crate::buildr::Error::Gone) => {
+                goal.workspace.id = None;
+                notes.push(format!(
+                    "Workspace `{ws_id}` is gone. Create a new one and clone the repo at the \
+                     goal's branch before doing anything else — the branch and this \
+                     scratchpad are the only things that survived."
+                ));
+            }
+            Err(e) => log::debug!("goal {}: could not read workspace: {e}", goal.id),
+        }
+    }
+
+    if crate::buildr::configured()
+        && let Ok(compute) = crate::buildr::compute().await
+    {
+        goal.counters.compute_minutes_used = compute.used();
+    }
+
+    PreFlight::Spend {
+        note: if notes.is_empty() {
+            None
+        } else {
+            Some(notes.join("\n\n"))
+        },
+    }
+}
+
+/// Tell the person who set the goal that it has stopped and needs them.
+///
+/// The whole design leans on someone noticing a blocked goal — it stops the
+/// heartbeat, so nothing else will ever mention it again. Before this, a goal
+/// that blocked at 2am sat there until somebody happened to open the right
+/// screen, which is exactly the overnight silence `goal_block` is supposed to be
+/// rare enough to justify.
+///
+/// Delivered into the chat the goal was created from, as a turn in that
+/// conversation, so it arrives wherever that chat already reaches — the
+/// workshop, a phone, a text message. A goal with no binding logs and moves on:
+/// there is nowhere to say it.
+async fn announce(context: &AgentRuntimeContext, goal: &Goal, message: &str) {
+    use crate::scheduled_tasks::IoBinding;
+    match &goal.io {
+        IoBinding::WorkshopChat { chat_id } => {
+            match crate::workshop_api::deliver_followup_to_chat(context, chat_id, message).await {
+                crate::workshop_api::FollowupDelivery::Delivered => {}
+                // Not retried: the goal is already stopped and the message is in
+                // its journal and its scratchpad either way. Waking a busy chat
+                // twice to say the same thing is worse than saying it once.
+                other => log::warn!("goal {}: could not announce ({other:?})", goal.id),
+            }
+        }
+        other => log::info!(
+            "goal {} has nowhere to announce to ({other:?}): {message}",
+            goal.id
+        ),
+    }
+}
+
+/// Put the workspace back to sleep, whatever the tick did or forgot.
+///
+/// Not an optimisation and not the prompt's job. buildr bills awake minutes and
+/// hibernates on its own only after 10–30 idle minutes, so a tick that leaves
+/// the box running bills most of the gap to the goal's owner — every half hour,
+/// all week. Failures are logged and swallowed: a workspace that refuses to
+/// hibernate (mid-provision, or serving) is buildr's problem to reap, and it is
+/// not worth failing a tick that otherwise went fine.
+async fn hibernate_workspace(goal: &Goal) {
+    let Some(ws_id) = goal.workspace.id.as_deref() else {
+        return;
+    };
+    match crate::buildr::hibernate(ws_id).await {
+        Ok(_) => log::info!("goal {}: hibernated workspace {ws_id}", goal.id),
+        Err(e) => log::debug!("goal {}: could not hibernate {ws_id}: {e}", goal.id),
+    }
+}
+
 // ── the frame ────────────────────────────────────────────────────────────────
 
 /// The instruction a tick opens with, before its scratchpad.
@@ -327,6 +577,9 @@ pub struct TickOutcome {
     pub progressed: bool,
     pub status: GoalStatus,
     pub summary: String,
+    /// True when the wake-up spent nothing: the pre-flight found the goal still
+    /// waiting on something, and no model ran.
+    pub waited: bool,
 }
 
 /// Run one tick of one goal, and record everything it left behind.
@@ -356,8 +609,33 @@ pub async fn run_tick(
             progressed: false,
             status: GoalStatus::Blocked,
             summary: reason,
+            waited: false,
         };
     }
+
+    // Everything answerable without a model, answered without one.
+    let mut goal = goal.clone();
+    let preflight_note = match preflight(&mut goal).await {
+        PreFlight::Wait { why } => {
+            // The bookmark still moves, so the short fuse applies and this does
+            // not spin: the goal looks again in five minutes, having spent
+            // nothing but one HTTP GET.
+            goal.counters.last_tick_at = Some(now.to_rfc3339());
+            let _ = goals::save(&goal);
+            return TickOutcome {
+                kind: TickKind::Work,
+                progressed: false,
+                status: goal.status,
+                summary: why.clone(),
+                waited: true,
+            };
+        }
+        PreFlight::Spend { note } => note,
+    };
+    // Save what the pre-flight learned before the turn, so a tick that crashes
+    // does not lose the fact that its build finished.
+    let _ = goals::save(&goal);
+    let goal = &goal;
 
     let before = goals::read_scratchpad(&goal.id).unwrap_or_else(|| {
         // First tick: give the goal the document it will spend its life editing.
@@ -365,6 +643,17 @@ pub async fn run_tick(
         let _ = goals::write_scratchpad(&goal.id, &seeded);
         seeded
     });
+    // What the pre-flight found goes into the document, not just into the
+    // prompt: a tick that crashes before writing must not take the only record
+    // of its finished build with it.
+    let before = match &preflight_note {
+        Some(note) => {
+            let updated = goals::append_to_section(&before, "Log", &format!("- {note}"));
+            let _ = goals::write_scratchpad(&goal.id, &updated);
+            updated
+        }
+        None => before,
+    };
     let kind = tick_kind(goal, &before);
     let tick_number = goal.counters.ticks + 1;
     let model = model_for(goal, kind);
@@ -406,6 +695,7 @@ pub async fn run_tick(
         Err(e) => format!("Tick could not run: {e}"),
     };
 
+    let status_before = goal.status;
     // Re-read: the goal_* tools may have moved the status or the scratchpad
     // out from under the copy we started with, and theirs is the newer one.
     let mut goal = goals::get(&goal.id).unwrap_or_else(|| goal.clone());
@@ -429,6 +719,40 @@ pub async fn run_tick(
         goal.blocked_reason = Some(reason);
     }
     let _ = goals::save(&goal);
+
+    // Last thing, always — see `hibernate_workspace`.
+    hibernate_workspace(&goal).await;
+
+    // A goal that has stopped has to say so, because nothing else will: the
+    // heartbeat that would have mentioned it again is the thing that stopped.
+    match goal.status {
+        GoalStatus::Blocked if status_before == GoalStatus::Active => {
+            let question = goal
+                .blocked_reason
+                .clone()
+                .unwrap_or_else(|| "It stopped and did not say why.".into());
+            announce(
+                context,
+                &goal,
+                &format!(
+                    "Your goal **{}** has stopped and needs you.\n\n{question}\n\nReply here \
+                     to answer it and start it again.",
+                    goal.title
+                ),
+            )
+            .await;
+        }
+        GoalStatus::Done if status_before == GoalStatus::Active => {
+            announce(
+                context,
+                &goal,
+                &format!("Your goal **{}** is done.\n\n{summary}", goal.title),
+            )
+            .await;
+        }
+        _ => {}
+    }
+
     record(&goal, kind, &model, &summary, progressed, started);
 
     TickOutcome {
@@ -436,6 +760,7 @@ pub async fn run_tick(
         progressed,
         status: goal.status,
         summary,
+        waited: false,
     }
 }
 
@@ -631,6 +956,28 @@ mod tests {
     }
 
     #[test]
+    fn a_stuck_goal_escalates_a_tier_by_itself() {
+        let mut g = goal();
+        assert_eq!(tier_for(&g, TickKind::Work), "standard");
+        g.counters.no_progress_streak = 1;
+        assert_eq!(
+            tier_for(&g, TickKind::Work),
+            "strong",
+            "one tick that changed nothing buys the next one a better model"
+        );
+    }
+
+    #[test]
+    fn escalation_respects_the_top_of_the_ladder() {
+        let mut g = goal();
+        g.counters.no_progress_streak = 3;
+        assert_eq!(tier_for(&g, TickKind::Review), "strong");
+        // and an explicitly cheap goal still climbs, just from lower down
+        g.models.work = Some("mini".into());
+        assert_eq!(tier_for(&g, TickKind::Work), "standard");
+    }
+
+    #[test]
     fn the_frame_carries_the_scratchpad_and_the_pending_run() {
         let mut g = goal();
         g.pending_run = Some(crate::goals::PendingRun {
@@ -644,6 +991,76 @@ mod tests {
         assert!(frame.contains("run_9"), "the pending run must be named first");
         assert!(frame.contains("do the thing"), "the goal itself must be in the frame");
         assert!(frame.contains("first unchecked step"));
+    }
+
+    fn run(status: &str) -> crate::buildr::Run {
+        crate::buildr::Run {
+            id: "run_1".into(),
+            status: status.into(),
+            exit_code: None,
+            cmd: None,
+            output: None,
+        }
+    }
+
+    #[test]
+    fn a_running_build_is_waited_for_rather_than_watched() {
+        let d = decide_pending(&Ok(run("running")), 4, "cargo test");
+        assert!(matches!(d, PreFlight::Wait { .. }), "{d:?}");
+    }
+
+    #[test]
+    fn a_build_that_will_never_land_stops_being_waited_for() {
+        // Past the patience window nothing is coming back, and a goal that waits
+        // forever costs nothing and does nothing — the quietest failure here.
+        let d = decide_pending(&Ok(run("running")), PENDING_RUN_PATIENCE_MINS, "cargo test");
+        match d {
+            PreFlight::Spend { note } => assert!(note.unwrap().contains("not coming back")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_finished_build_carries_its_output_into_the_tick() {
+        let mut r = run("failed");
+        r.exit_code = Some(101);
+        r.output = Some("error[E0308]: mismatched types".into());
+        match decide_pending(&Ok(r), 3, "cargo test") {
+            PreFlight::Spend { note } => {
+                let note = note.unwrap();
+                assert!(note.contains("failed"), "{note}");
+                assert!(note.contains("exit 101"), "{note}");
+                // the reason, not just the verdict — a failure without it is
+                // one the next tick has to reproduce to learn anything
+                assert!(note.contains("E0308"), "{note}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_vanished_run_is_not_waited_for() {
+        let d = decide_pending(&Err(crate::buildr::Error::Gone), 1, "cargo build");
+        match d {
+            PreFlight::Spend { note } => assert!(note.unwrap().contains("no longer exists")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pod_with_no_buildr_credential_stops_waiting_immediately() {
+        let d = decide_pending(&Err(crate::buildr::Error::NotConfigured), 1, "cargo build");
+        assert!(matches!(d, PreFlight::Spend { .. }), "{d:?}");
+    }
+
+    #[test]
+    fn buildr_being_briefly_unreachable_is_waited_out_but_not_forever() {
+        let blip = Err(crate::buildr::Error::Http("502".into()));
+        assert!(matches!(decide_pending(&blip, 2, "x"), PreFlight::Wait { .. }));
+        assert!(matches!(
+            decide_pending(&blip, PENDING_RUN_PATIENCE_MINS + 1, "x"),
+            PreFlight::Spend { .. }
+        ));
     }
 
     #[test]
