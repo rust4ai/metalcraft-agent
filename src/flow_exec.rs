@@ -989,6 +989,7 @@ impl<'a> FlowExecutor<'a> {
         // Registry = persona tools + injected extras + one HandleTool per output.
         let tool_config = crate::tools::ToolConfig {
             preset_personas: self.preset_personas.clone(),
+            sub_agent_depth: 0,
             instance_id: self.instance_id.clone(),
             api_key: self.context.api_key.clone(),
             model_name: model_name.clone(),

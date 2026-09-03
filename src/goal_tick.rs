@@ -615,8 +615,10 @@ pub fn tick_frame(goal: &Goal, kind: TickKind, tick_number: u32) -> String {
              write it into both details. Do not start the work this tick; the plan is the work."
         }
         TickKind::Work => {
-            "**This tick is for work.** Take a task marked `[ready]`. Do it, verify it, and call \
-             `task_done` with the evidence. If it turns out to be bigger than one tick, tighten \
+            "**This tick is for work.** Take a task marked `[ready]` — or several, if more than \
+             one is ready and at most one of them writes the workspace: `task_dispatch` runs \
+             them at the same time, and three reads take as long as the slowest rather than all three \
+             added up. Verify what comes back, and call `task_done` with the evidence. If it turns out to be bigger than one tick, tighten \
              it with `task_update` and `task_add` the remainder. If a long build or test run is \
              involved, start it and hand it to the heartbeat with `goal_await_run` naming that \
              task — the next tick reads the result for free."

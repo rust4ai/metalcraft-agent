@@ -287,14 +287,34 @@ Three properties carry the design:
 
 Tools: `task_add` (a batch — a plan is written at once, and deps may name a row
 by its index in the same call), `task_update`, `task_done`, `task_block`,
-`task_drop`. A goal created before this existed has no `tasks.json` and every
+`task_drop`, `task_dispatch`. A goal created before this existed has no `tasks.json` and every
 caller falls back to counting checkboxes; nothing had to be migrated.
 
-**Parallelism follows from it.** Rows with no deps are ready together, and each
-row owns its own `pending_run`, so a goal can have three builds in flight and
-poll all of them in the pre-flight — N HTTP GETs and no model. A goal only
-*waits* when every run is still going **and** nothing is ready; otherwise it gets
-on with what is.
+**Parallelism follows from it**, in two places:
+
+- **In the waiting.** Each row owns its own `pending_run`, so a goal can have
+  three builds in flight and poll all of them in the pre-flight — N HTTP GETs and
+  no model. A goal *waits* only when every run is still going **and** nothing is
+  ready; otherwise it gets on with what is.
+- **In the working.** `task_dispatch([ids])` runs ready tasks in sub-agents at
+  the same time (`sub_agent` grew a `tasks` batch to carry it, capped at
+  `MAX_PARALLEL_DELEGATES = 3`). Three ninety-second surveys take ninety seconds.
+
+One rule is enforced rather than asked for: **at most one task in flight may
+write the workspace.** There is one sprite, and two agents editing it at once
+overwrite each other without either noticing — the worst kind of bug to go
+looking for. One writer alongside readers is allowed: a reader seeing a file
+mid-edit is imprecise, not corrupting.
+`mutates_workspace` defaults to `true` for exactly that asymmetry: a task wrongly
+marked read-only corrupts a repo, one wrongly marked writing merely runs on its
+own.
+
+The dispatcher folds the **bad** news automatically — a delegate that comes back
+unfinished has its `not_done` written into the task's detail and its suggested
+persona set as the assignee — and leaves the **good** news to the orchestrator: a
+delegate saying "done" does not close a row. Letting a delegate's own prose close
+its own task would give back exactly the "it looks done" problem the evidence
+requirement exists to remove.
 
 ---
 
@@ -720,7 +740,8 @@ it do overnight" is actually read.
 | **G2 — a place to work** ✅ | workspace provisioning + reconcile-or-reprovision, hibernate enforcement, `pending_run` + short-fuse re-tick, compute-minute accounting, the `goal-agents` pack (rosters include `buildr-space-agent`) | `src/goal_tick.rs`, `src/goals.rs`, new pack |
 | **G3 — the loop closes** ✅ | review + groom ticks, no-progress detection and tier escalation, model-free pre-flight (§4.6), rails → `blocked`, unblock-by-reply through `io` | `src/goal_tick.rs`, `src/workshop_api.rs` |
 | **G4 — audit kind** ✅ | findings ledger + `goal_finding`, sweep/fix alternation, PR-per-finding, `max_open_prs`, dedupe via `github_list_pull_requests` | pack skills, `src/tools/goal.rs` |
-| **G6 — the plan is records** ✅ | `tasks.json` + the five `task_*` tools, plan rendered into the tick frame, per-task `pending_run` (several runs in flight at once), evidence-gated `task_done`, progress = task movement rather than scratchpad bytes, `GET`/`PUT /goals/{id}/tasks` | `src/goal_tasks.rs`, `src/tools/goal_task.rs`, `src/goal_tick.rs`, `src/workshop_api.rs`, goal personas |
+| **G6 — the plan is records** ✅ | `tasks.json` + the five `task_*` tools, plan rendered into the tick frame, per-task `pending_run` (several runs in flight at once), `task_dispatch` + a parallel `sub_agent` batch, evidence-gated `task_done`, progress = task movement rather than scratchpad bytes, `GET`/`PUT /goals/{id}/tasks` | `src/goal_tasks.rs`, `src/tools/goal_task.rs`, `src/goal_tick.rs`, `src/workshop_api.rs`, goal personas |
+| **D1 — delegation bounds** ✅ | `sub_agent` depth cap (`MAX_SUB_AGENT_DEPTH = 2`) and the nested roster fix: a nested delegate was handed `preset_personas: None`, which is *unscoped*, so a preset-restricted agent could delegate to a delegate that reached any persona on the pod | `src/tools/sub_agent.rs`, `src/tools/mod.rs` |
 | **G5 — build kind at depth** | phase → PR mapping, test/serve gating before a box is checked | pack skills |
 | **B1 — buildr.space PR path** *(independent of G1–G3; **blocks G4**; do the permission batch now)* | App gains Pull requests write + Issues write + Actions/Checks read; `installation_token()` takes a permissions argument; `POST /workspaces/{id}/pr` on a separately-minted token; `op: "branch"` that also updates the repo row; `GET /workspaces/{id}/checks` for CI verdicts; new pack tools | buildr.space `github_app.rs`, `workspace_ops.rs`, `buildr-space` pack |
 

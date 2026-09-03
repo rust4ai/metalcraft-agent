@@ -465,3 +465,270 @@ impl metalcraft::Tool for TaskDropTool {
         }))
     }
 }
+
+// ── dispatch ─────────────────────────────────────────────────────────────────
+
+/// Run several ready tasks at once, each in its own sub-agent.
+///
+/// This is where a goal actually gets parallel. A tick picks the rows that have
+/// nothing left to wait for and hands them out together; three ninety-second
+/// surveys take ninety seconds rather than four and a half minutes, and a tick
+/// that would have overrun doing them one after another fits.
+///
+/// **The runner folds the bad news, the orchestrator closes the good news.** A
+/// delegate that comes back unfinished has its `not_done` written into the
+/// task's detail and its suggested persona set as the assignee, automatically —
+/// that is the bookkeeping a model reliably forgets. A delegate that says it
+/// finished does **not** close the task: the orchestrator has to look at what
+/// came back and call `task_done` with real evidence. Letting a delegate's own
+/// prose close a row would give back exactly the "it looks done" problem the
+/// evidence requirement exists to remove.
+pub struct TaskDispatchTool {
+    goal_id: String,
+    api_key: String,
+    model_name: String,
+    system_prompt: String,
+    preset_personas: Option<Vec<String>>,
+    instance_id: Option<String>,
+    depth: u32,
+    interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl TaskDispatchTool {
+    pub fn new(goal_id: String, cfg: &crate::tools::ToolConfig) -> Self {
+        Self {
+            goal_id,
+            api_key: cfg.api_key.clone(),
+            model_name: cfg.model_name.clone(),
+            system_prompt: cfg.system_prompt.clone(),
+            preset_personas: cfg.preset_personas.clone(),
+            instance_id: cfg.instance_id.clone(),
+            depth: cfg.sub_agent_depth,
+            interrupt: cfg.interrupt.clone(),
+        }
+    }
+
+    fn delegate(&self) -> crate::tools::sub_agent::SubAgentTool {
+        crate::tools::sub_agent::SubAgentTool::new(
+            self.api_key.clone(),
+            self.model_name.clone(),
+            self.system_prompt.clone(),
+        )
+        .with_depth(self.depth)
+        .with_preset_personas(self.preset_personas.clone())
+        .with_instance(self.instance_id.clone())
+        .with_interrupt(self.interrupt.clone())
+        // Deliberately no turn plan: a dispatched delegate's unfinished work is
+        // recorded on its *task*, which outlives the turn. Recording it in both
+        // places would hold the turn open over an obligation already durable.
+    }
+}
+
+/// What one delegate is told. It has none of the tick's context, so the task's
+/// own detail is the whole briefing — which is why `task_add` insists on one.
+fn briefing(task: &goal_tasks::Task, goal: &str) -> String {
+    let detail = if task.detail.trim().is_empty() {
+        "(no detail was recorded for this task — do what the title says, and say what you \
+         needed that you did not have.)"
+    } else {
+        task.detail.trim()
+    };
+    format!(
+        "You are one step of a longer goal: {goal}\n\nYour task ({}): {}\n\n{detail}",
+        task.id, task.title
+    )
+}
+
+#[async_trait]
+impl metalcraft::Tool for TaskDispatchTool {
+    fn name(&self) -> &str {
+        "task_dispatch"
+    }
+
+    fn description(&self) -> &str {
+        "Run ready tasks in sub-agents. Pass several ids to run them AT THE SAME TIME — that is \
+         how a tick does a week's reading in one wake-up. Each delegate is given only that \
+         task's title and detail, so the detail has to carry everything it needs.\n\n\
+         Only tasks marked `[ready]` can be dispatched. Tasks that change the workspace must be \
+         dispatched ONE at a time: there is one workspace, and two agents editing it at once \
+         overwrite each other.\n\n\
+         What comes back is each delegate's report. Work that came back unfinished is folded \
+         into its task for you. Work that came back finished is NOT closed for you — read what \
+         it says, check it, and call `task_done` with the commit, the run, or the file."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Task ids to run, e.g. [\"t2\", \"t3\"]. Several run at once; up to 3."
+                }
+            },
+            "required": ["ids"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let ids: Vec<String> = args["ids"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if ids.is_empty() {
+            return Err(err("task_dispatch", "Missing required parameter: ids"));
+        }
+
+        let goal = crate::goals::get(&self.goal_id)
+            .ok_or_else(|| err("task_dispatch", "this goal no longer exists"))?;
+        let tasks = goal_tasks::list(&self.goal_id);
+
+        let mut chosen: Vec<goal_tasks::Task> = Vec::new();
+        for id in &ids {
+            let task = goal_tasks::get(&tasks, id)
+                .ok_or_else(|| err("task_dispatch", format!("no task '{id}'")))?;
+            if !goal_tasks::is_ready(&task, &tasks) {
+                return Err(err(
+                    "task_dispatch",
+                    format!(
+                        "'{id}' is not ready ({}). Only tasks marked [ready] can run — the \
+                         others are waiting on something.",
+                        match task.status {
+                            TaskStatus::Todo => "its dependencies have not landed".to_string(),
+                            other => format!("{other:?}").to_lowercase(),
+                        }
+                    ),
+                ));
+            }
+            chosen.push(task);
+        }
+
+        // One workspace: writers go one at a time. Refused here as well as in
+        // the batch path, so the message names the task rather than the tool set.
+        let writers: Vec<&str> = chosen
+            .iter()
+            .filter(|t| t.mutates_workspace)
+            .map(|t| t.id.as_str())
+            .collect();
+        if writers.len() > 1 {
+            return Err(err(
+                "task_dispatch",
+                format!(
+                    "{} all change the workspace, and there is only one — two agents editing it \
+                     at the same time overwrite each other without either noticing. Dispatch one \
+                     of them now (alongside any read-only tasks) and the rest after.",
+                    writers.join(", ")
+                ),
+            ));
+        }
+
+        let delegate = self.delegate();
+        let call_args = if chosen.len() == 1 {
+            let t = &chosen[0];
+            let mut a = serde_json::json!({ "task": briefing(t, &goal.goal) });
+            match t.assignee.as_deref() {
+                Some(p) => a["persona"] = serde_json::json!(p),
+                // Without a persona a delegate gets the read-only set by
+                // default, which is wrong for a task that exists to change
+                // something. Widen only for those.
+                None if t.mutates_workspace => a["tool_set"] = serde_json::json!("all"),
+                None => {}
+            }
+            a
+        } else {
+            serde_json::json!({
+                "tasks": chosen
+                    .iter()
+                    .map(|t| {
+                        let mut a = serde_json::json!({ "task": briefing(t, &goal.goal) });
+                        if let Some(p) = t.assignee.as_deref() {
+                            a["persona"] = serde_json::json!(p);
+                        }
+                        a
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        let raw = delegate.call(call_args).await?;
+        let per_task: Vec<serde_json::Value> = match raw.get("results").and_then(|r| r.as_array()) {
+            Some(list) => list.clone(),
+            None => vec![raw.clone()],
+        };
+
+        // Fold what came back into the records. Only the bad news is written
+        // automatically — see the type's docs.
+        let mut reports: Vec<serde_json::Value> = Vec::new();
+        for (task, result) in chosen.iter().zip(per_task.iter()) {
+            let finished = result
+                .get("completed")
+                .and_then(|c| c.as_bool())
+                .unwrap_or(false)
+                && !result
+                    .get("error")
+                    .and_then(|e| e.as_bool())
+                    .unwrap_or(false);
+            let not_done: Vec<String> = result
+                .get("not_done")
+                .and_then(|n| n.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if !finished {
+                let mut patch = goal_tasks::TaskPatch {
+                    bump_attempts: true,
+                    ..Default::default()
+                };
+                if !not_done.is_empty() {
+                    patch.detail = Some(format!(
+                        "{}\n\nStill outstanding after attempt {}:\n{}",
+                        task.detail.trim(),
+                        task.attempts + 1,
+                        not_done
+                            .iter()
+                            .map(|n| format!("- {n}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ));
+                }
+                // The delegate that just read the code is better placed than the
+                // orchestrator to say who should finish it.
+                if let Some(next) = result.get("suggest_persona").and_then(|p| p.as_str())
+                    && !next.trim().is_empty()
+                {
+                    patch.assignee = Some(Some(next.to_string()));
+                }
+                let _ = goal_tasks::update(&self.goal_id, &task.id, patch);
+            }
+
+            reports.push(serde_json::json!({
+                "id": task.id,
+                "title": task.title,
+                "reported_complete": finished,
+                "result": result.get("result").cloned().unwrap_or(serde_json::Value::Null),
+                "not_done": not_done,
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "dispatched": chosen.len(),
+            "reports": reports,
+            "next": "Check what came back. Close what genuinely landed with task_done and its \
+                     evidence; anything reported unfinished is already recorded on its task.",
+            "state": state(&self.goal_id),
+        }))
+    }
+}

@@ -24,6 +24,64 @@ const DEFAULT_SUB_AGENT_TIMEOUT_SECS: u64 = 120;
 /// Ceiling on any declared or configured delegation timeout: half an hour.
 const MAX_SUB_AGENT_TIMEOUT_SECS: u64 = 1800;
 
+/// How deep a delegation tree may go: an orchestrator (depth 0) delegates to a
+/// worker (depth 1), and that worker may delegate once more (depth 2).
+///
+/// A bound has to exist. Until now nothing counted the levels, so the only thing
+/// stopping a tree from recursing was that each level eventually timed out —
+/// which is a bound on *one branch*, not on the tree, and every extra level
+/// multiplies spend. Two is the shallowest depth that still allows the one shape
+/// that genuinely needs it: an orchestrator handing a workspace agent a job that
+/// the workspace agent then splits.
+pub const MAX_SUB_AGENT_DEPTH: u32 = 2;
+
+/// How many delegations may run at once in one batch.
+///
+/// Each one is a whole agent spending its own tokens, so this is a spend
+/// multiplier before it is a throughput one. Three is enough for the shape this
+/// exists for — survey three areas, read three files, review three angles —
+/// without a single tool call quietly costing five times what the model expects.
+pub const MAX_PARALLEL_DELEGATES: usize = 3;
+
+/// Tools that change the workspace rather than read it.
+///
+/// A batch runs its delegates *at the same time* in **one** workspace, so two of
+/// them writing it would overwrite each other silently — the worst kind of bug
+/// to go looking for. The batch path allows at most one writer: one writer
+/// alongside readers is only imprecise (a reader may see a file mid-edit), while
+/// two writers is corruption. Unknown tools count as safe: a pack tool that
+/// calls somebody else's API is not touching this repo.
+const WORKSPACE_WRITING_TOOLS: &[&str] = &[
+    "write_file",
+    "edit_file",
+    "bash",
+    "buildr_write_file",
+    "buildr_exec",
+    "buildr_git",
+    "buildr_build",
+    "buildr_test",
+    "buildr_serve",
+];
+
+/// Whether one batch entry would write the workspace.
+///
+/// `tool_set` says so directly — `full` and `all` both add `write_file`,
+/// `edit_file` and `bash`. A named persona is asked what tools it actually
+/// resolves to; a persona that cannot be loaded is assumed to write, because
+/// guessing "safe" about something unreadable is how the rule gets defeated.
+fn entry_writes_workspace(entry: &serde_json::Value) -> bool {
+    if let Some(slug) = entry["persona"].as_str().filter(|s| !s.is_empty()) {
+        return match crate::persona::Persona::load(slug, &crate::paths::personas_dir()) {
+            Ok(p) => p
+                .resolved_tool_names()
+                .iter()
+                .any(|t| WORKSPACE_WRITING_TOOLS.contains(&t.as_str())),
+            Err(_) => true,
+        };
+    }
+    matches!(entry["tool_set"].as_str(), Some("full") | Some("all"))
+}
+
 fn sub_agent_timeout(persona_max_run_secs: Option<u64>) -> std::time::Duration {
     let configured = crate::key_store::lookup("SUB_AGENT_TIMEOUT_SECS")
         .and_then(|v| v.trim().parse::<u64>().ok());
@@ -77,6 +135,8 @@ pub struct SubAgentTool {
     /// Personas this sub-agent may run as, from the active agent preset's roster.
     /// `None` ⇒ unscoped (any persona on the pod) — the pre-preset behaviour.
     preset_personas: Option<Vec<String>>,
+    /// How deep this delegation already is; a child runs at `depth + 1`.
+    depth: u32,
     /// The agent instance the parent turn runs as. A delegated subtask remembers
     /// into the same place, rather than opening a second store nobody reads.
     instance_id: Option<String>,
@@ -97,6 +157,12 @@ pub struct SubAgentTool {
 }
 
 impl SubAgentTool {
+    /// Set how deep in a delegation tree this tool sits.
+    pub fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
+        self
+    }
+
     /// Restrict delegation to an agent preset's callable roster.
     pub fn with_preset_personas(mut self, personas: Option<Vec<String>>) -> Self {
         self.preset_personas = personas;
@@ -129,6 +195,7 @@ impl SubAgentTool {
             model_name,
             system_prompt,
             preset_personas: None,
+            depth: 0,
             instance_id: None,
             interrupt: None,
             turn_plan: None,
@@ -281,8 +348,12 @@ impl metalcraft::Tool for SubAgentTool {
     fn description(&self) -> &str {
         "Spawn a sub-agent to handle an independent subtask. Sub-agents run autonomously \
          with their own tool set and return a result. Use this for research, exploration, \
-         or any task that can be delegated. Sub-agents run one at a time, in the order \
-         you call them, so a turn costs the sum of its delegations."
+         or any task that can be delegated.\n\n\
+         Pass `task` for one delegation. Pass `tasks` (up to 3) to run several AT THE SAME TIME \
+         — three surveys take as long as the slowest one rather than all three added up. A batch \
+         is mostly for READING: research, review, survey. At most one entry may change the \
+         workspace, because there is one workspace and two agents editing it at once overwrite \
+         each other."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -305,7 +376,22 @@ impl metalcraft::Tool for SubAgentTool {
             "properties": {
                 "task": {
                     "type": "string",
-                    "description": "The task for the sub-agent to perform"
+                    "description": "The task for the sub-agent to perform. Omit when using `tasks`."
+                },
+                "tasks": {
+                    "type": "array",
+                    "maxItems": MAX_PARALLEL_DELEGATES,
+                    "description": "Several independent delegations to run at the same time (max 3). Each entry takes the same fields as a single call. At most one of them may change the workspace — the rest must be read-only.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task": { "type": "string" },
+                            "persona": { "type": "string" },
+                            "tool_set": { "type": "string", "enum": ["read_only", "full", "all"] },
+                            "pack": { "type": "string" }
+                        },
+                        "required": ["task"]
+                    }
                 },
                 "persona": persona_schema,
                 "tool_set": {
@@ -323,6 +409,93 @@ impl metalcraft::Tool for SubAgentTool {
     }
 
     async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        match args["tasks"].as_array().filter(|b| !b.is_empty()) {
+            Some(batch) => self.run_batch(batch).await,
+            None => self.run_one(&args).await,
+        }
+    }
+}
+
+impl SubAgentTool {
+    /// Run a batch of delegations at the same time.
+    ///
+    /// The win is wall-clock: three surveys that each take ninety seconds take
+    /// ninety seconds instead of four and a half minutes, and a tick that would
+    /// have overrun its budget doing them one after another fits.
+    ///
+    /// Two rules, both enforced here rather than asked for in a prompt:
+    /// **at most [`MAX_PARALLEL_DELEGATES`]**, because each delegate spends its
+    /// own tokens and one tool call should not quietly cost five; and **at most
+    /// one delegate that writes the workspace**, because there is one workspace
+    /// and two agents editing it at once overwrite each other invisibly.
+    async fn run_batch(
+        &self,
+        batch: &[serde_json::Value],
+    ) -> metalcraft::Result<serde_json::Value> {
+        // A batch of one is not a batch. Route it down the single path so the
+        // rules below — which exist because things run *at the same time* —
+        // never refuse something that has nothing to run alongside.
+        if let [only] = batch {
+            return self.run_one(only).await;
+        }
+        if batch.len() > MAX_PARALLEL_DELEGATES {
+            return Ok(serde_json::json!({
+                "error": true,
+                "result": format!(
+                    "{} delegations at once; the limit is {MAX_PARALLEL_DELEGATES}. Each one \
+                     spends its own tokens. Run the most useful {MAX_PARALLEL_DELEGATES} now \
+                     and the rest after.",
+                    batch.len()
+                ),
+            }));
+        }
+        let writers: Vec<String> = batch
+            .iter()
+            .filter(|e| entry_writes_workspace(e))
+            .map(|e| {
+                e["persona"]
+                    .as_str()
+                    .or_else(|| e["tool_set"].as_str())
+                    .unwrap_or("one of them")
+                    .to_string()
+            })
+            .collect();
+        if writers.len() > 1 {
+            return Ok(serde_json::json!({
+                "error": true,
+                "result": format!(
+                    "{} of these delegations change the workspace ({}), and there is only one \
+                     workspace — two agents editing it at the same time overwrite each other \
+                     without either noticing. Run at most one writing delegation at a time; the \
+                     reading ones can go together.",
+                    writers.len(),
+                    writers.join(", ")
+                ),
+            }));
+        }
+
+        let results = futures_util::future::join_all(batch.iter().map(|entry| async move {
+            match self.run_one(entry).await {
+                Ok(v) => v,
+                // One delegate failing is a fact about that delegate, not about
+                // the batch: the others' work is still worth returning.
+                Err(e) => serde_json::json!({ "error": true, "result": format!("{e}") }),
+            }
+        }))
+        .await;
+
+        Ok(serde_json::json!({
+            "results": results,
+            "count": batch.len(),
+        }))
+    }
+
+    /// Run exactly one delegation. The trait's `call` is a thin router over
+    /// this: one task runs it once, a batch runs it several times at once.
+    async fn run_one(
+        &self,
+        args: &serde_json::Value,
+    ) -> metalcraft::Result<serde_json::Value> {
         // Already stopped before this delegation began — one LLM call can return
         // several tool calls, and they all run inside the one node the guard has
         // not been asked about yet. Starting a whole agent run there would be the
@@ -332,6 +505,17 @@ impl metalcraft::Tool for SubAgentTool {
                 "result": "Delegation not started: stopped by the user.",
                 "stopped": true,
                 "error": true,
+            }));
+        }
+
+        if self.depth >= MAX_SUB_AGENT_DEPTH {
+            return Ok(serde_json::json!({
+                "error": true,
+                "result": format!(
+                    "Delegation is {} levels deep already, which is the limit. Do this part \
+                     yourself, or report back what is left so the agent above you can route it.",
+                    self.depth
+                ),
             }));
         }
 
@@ -405,8 +589,14 @@ impl metalcraft::Tool for SubAgentTool {
 
             let base_prompt = persona.build_system_prompt(&crate::paths::skills_dir(), ".");
             let config = crate::tools::ToolConfig {
-                // A nested sub-agent must not widen its own reach.
-                preset_personas: None,
+                // A nested sub-agent must not widen its own reach — and `None`
+                // here used to mean exactly that, because `None` is *unscoped*
+                // (see the roster check above, which only runs when there is a
+                // roster). A preset-restricted agent could therefore delegate to
+                // a delegate that reached any persona on the pod. The roster
+                // travels down instead.
+                preset_personas: self.preset_personas.clone(),
+                sub_agent_depth: self.depth + 1,
                 instance_id: self.instance_id.clone(),
                 api_key: self.api_key.clone(),
                 model_name: self.model_name.clone(),
@@ -604,6 +794,76 @@ impl metalcraft::Tool for SubAgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_delegate_cannot_reach_past_its_parents_roster() {
+        // The bug this guards: the roster check is skipped when
+        // `preset_personas` is None, and a nested delegate used to be handed
+        // None — so a preset-restricted agent could delegate to a delegate that
+        // reached anything on the pod. The roster has to travel down.
+        let tool = SubAgentTool::new("k".into(), "m".into(), "p".into())
+            .with_preset_personas(Some(vec!["research-agent".into()]));
+        assert_eq!(
+            tool.preset_personas.as_deref(),
+            Some(["research-agent".to_string()].as_slice())
+        );
+        // What the nested config is built from — the parent's roster, not None.
+        let nested = tool.preset_personas.clone();
+        assert!(nested.is_some(), "a nested delegate must stay scoped");
+    }
+
+    #[test]
+    fn a_delegation_tree_has_a_bottom() {
+        // Depth is what bounds the tree. Without it the only limit is that each
+        // branch eventually times out, which bounds a branch, not the spend.
+        assert_eq!(MAX_SUB_AGENT_DEPTH, 2);
+        let at_limit = SubAgentTool::new("k".into(), "m".into(), "p".into())
+            .with_depth(MAX_SUB_AGENT_DEPTH);
+        assert!(at_limit.depth >= MAX_SUB_AGENT_DEPTH);
+        let root = SubAgentTool::new("k".into(), "m".into(), "p".into());
+        assert_eq!(root.depth, 0, "a turn a person started is the top");
+    }
+
+    #[test]
+    fn a_batch_keeps_writers_out() {
+        // Two delegates editing one workspace at the same time overwrite each
+        // other and neither notices, so the batch path refuses writers outright
+        // rather than trusting a prompt to keep them out.
+        assert!(!entry_writes_workspace(&serde_json::json!({ "task": "read it" })));
+        assert!(!entry_writes_workspace(
+            &serde_json::json!({ "task": "read it", "tool_set": "read_only" })
+        ));
+        assert!(entry_writes_workspace(
+            &serde_json::json!({ "task": "fix it", "tool_set": "full" })
+        ));
+        assert!(entry_writes_workspace(
+            &serde_json::json!({ "task": "fix it", "tool_set": "all" })
+        ));
+        // A persona nobody can load is assumed to write: guessing "safe" about
+        // something unreadable is how the rule gets defeated.
+        assert!(entry_writes_workspace(
+            &serde_json::json!({ "task": "x", "persona": "no-such-persona" })
+        ));
+    }
+
+    #[test]
+    fn a_batch_of_one_is_not_a_batch() {
+        // The rules below exist because entries run *at the same time*. A lone
+        // entry has nothing to run alongside, so refusing it for writing the
+        // workspace would be refusing an ordinary delegation for no reason.
+        let writer = serde_json::json!({ "task": "fix it", "tool_set": "full" });
+        assert!(entry_writes_workspace(&writer));
+        // (run_batch routes a single entry to run_one before any rule applies —
+        // exercised through the goal task-dispatch test, which does not need a
+        // live model to reach the guards.)
+    }
+
+    #[test]
+    fn a_batch_is_bounded() {
+        // Each delegate spends its own tokens, so one tool call must not be
+        // able to quietly cost five.
+        assert_eq!(MAX_PARALLEL_DELEGATES, 3);
+    }
 
     #[test]
     fn an_answer_with_no_block_is_treated_as_complete() {

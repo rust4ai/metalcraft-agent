@@ -105,6 +105,7 @@ fn full_config() -> metalcraft_agent::tools::ToolConfig {
         session_binding: None,
         reschedule_depth: 0,
         preset_personas: None,
+        sub_agent_depth: 0,
         instance_id: Some("test-instance".into()),
         interrupt: None,
         turn_plan: Some(metalcraft_agent::turn_plan::SharedTurnPlan::default()),

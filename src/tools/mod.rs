@@ -98,6 +98,13 @@ pub struct ToolConfig {
     /// Personas `sub_agent` may delegate to, from the active agent preset's
     /// roster. `None` ⇒ unscoped.
     pub preset_personas: Option<Vec<String>>,
+    /// How deep into a delegation tree this turn already is. 0 for a turn a
+    /// person or the heartbeat started; a delegated run gets its parent's depth
+    /// plus one, and `sub_agent` refuses past
+    /// [`sub_agent::MAX_SUB_AGENT_DEPTH`]. Bounded for the same reason
+    /// `reschedule_depth` is: without a counter the only thing stopping a tree
+    /// from spending forever is that each level happens to time out.
+    pub sub_agent_depth: u32,
     /// The agent instance this turn runs as. Scopes the `mem_*` tools to that
     /// agent's own memory. `None` ⇒ the pod-global store.
     pub instance_id: Option<String>,
@@ -262,7 +269,7 @@ pub fn create_registry_for_with_config(
             )),
             "goal_note" | "goal_scratchpad_write" | "goal_block" | "goal_complete"
             | "goal_await_run" | "goal_finding" | "goal_finding_update" | "task_add"
-            | "task_update" | "task_done" | "task_block" | "task_drop" => {
+            | "task_update" | "task_done" | "task_block" | "task_drop" | "task_dispatch" => {
                 // Bound to one goal at registration. Outside a goal tick there is
                 // no goal to bind to, so the tools are absent rather than
                 // registered and failing at call time — the model is never shown
@@ -288,6 +295,16 @@ pub fn create_registry_for_with_config(
                         "task_done" => registry.register(goal_task::TaskDoneTool::new(goal_id)),
                         "task_block" => registry.register(goal_task::TaskBlockTool::new(goal_id)),
                         "task_drop" => registry.register(goal_task::TaskDropTool::new(goal_id)),
+                        "task_dispatch" => {
+                            // Needs the turn's credentials and roster: dispatch
+                            // *is* delegation, so it builds sub-agents the same
+                            // way `sub_agent` does.
+                            match config {
+                                Some(cfg) => registry
+                                    .register(goal_task::TaskDispatchTool::new(goal_id, cfg)),
+                                None => registry,
+                            }
+                        }
                         _ => registry.register(goal::GoalCompleteTool::new(goal_id)),
                     },
                     None => {
@@ -326,6 +343,7 @@ pub fn create_registry_for_with_config(
                             cfg.model_name.clone(),
                             cfg.system_prompt.clone(),
                         )
+                        .with_depth(cfg.sub_agent_depth)
                         .with_preset_personas(cfg.preset_personas.clone())
                         .with_instance(cfg.instance_id.clone())
                         .with_interrupt(cfg.interrupt.clone())

@@ -835,6 +835,7 @@ where
     let turn_plan = crate::turn_plan::new_shared_watched(options.plan_sink.clone());
     let tool_config = crate::tools::ToolConfig {
         preset_personas: options.preset_personas.clone(),
+        sub_agent_depth: 0,
         instance_id: options.instance_id.clone(),
         goal_id: options.goal_id.clone(),
         api_key: context.api_key.clone(),

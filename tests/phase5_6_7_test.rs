@@ -115,6 +115,7 @@ fn sub_agent_registered_with_config() {
         session_binding: None,
         reschedule_depth: 0,
         preset_personas: None,
+        sub_agent_depth: 0,
         instance_id: None,
         // Nothing to stop for: this asserts what gets registered, not what a
         // delegated run does when the turn is stopped.

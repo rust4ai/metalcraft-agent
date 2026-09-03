@@ -210,5 +210,60 @@ async fn a_plan_is_records_that_cannot_be_lost() {
     // ...and the refusal changed nothing.
     assert!(goal_tasks::get(&goal_tasks::list(&goal.id), "t1").unwrap().deps.is_empty());
 
+    // ── dispatch guards, before a single token is spent ──────────────────────
+    // The delegation itself needs a live API, but everything that protects the
+    // workspace and the plan happens first — so that part is testable, and it is
+    // the part that fails silently if it is wrong.
+    let cfg = metalcraft_agent::tools::ToolConfig {
+        api_key: "test-key".into(),
+        model_name: "test-model".into(),
+        system_prompt: String::new(),
+        skills_dir: data_dir.join("skills"),
+        available_skills: Vec::new(),
+        reply_sink: None,
+        session_binding: None,
+        reschedule_depth: 0,
+        preset_personas: None,
+        sub_agent_depth: 0,
+        instance_id: None,
+        interrupt: None,
+        turn_plan: None,
+        goal_id: Some(goal.id.clone()),
+    };
+    let dispatch = task_tools::TaskDispatchTool::new(goal.id.clone(), &cfg);
+
+    let e = dispatch
+        .call(serde_json::json!({ "ids": ["t3"] }))
+        .await
+        .expect_err("a task still waiting on a run is not ready");
+    assert!(format!("{e}").contains("not ready"), "{e}");
+
+    let e = dispatch
+        .call(serde_json::json!({ "ids": ["t_nope"] }))
+        .await
+        .expect_err("an id that is not a task is refused");
+    assert!(format!("{e}").contains("no task"), "{e}");
+
+    // Two rows that both write: refused, because there is one workspace and two
+    // agents editing it at once overwrite each other without either noticing.
+    // (One writer alongside readers is allowed — a reader seeing a file mid-edit
+    // is imprecise, not corrupting.)
+    add.call(serde_json::json!({
+        "tasks": [
+            { "title": "Read the changelog", "mutates_workspace": false },
+            { "title": "Rewrite the changelog", "mutates_workspace": true },
+            { "title": "Regenerate the fixtures", "mutates_workspace": true },
+        ]
+    }))
+    .await
+    .expect("three more tasks");
+    let e = dispatch
+        .call(serde_json::json!({ "ids": ["t5", "t6"] }))
+        .await
+        .expect_err("two writers cannot run at the same time");
+    let msg = format!("{e}");
+    assert!(msg.contains("t5") && msg.contains("t6"), "name them both: {msg}");
+    assert!(msg.contains("only one"), "{msg}");
+
     let _ = fs::remove_dir_all(&data_dir);
 }
