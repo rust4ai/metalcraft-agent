@@ -241,10 +241,15 @@ pub async fn project_conversation(
         plan: Arc::new(std::sync::Mutex::new(Vec::new())),
         running: Arc::new(std::sync::Mutex::new(None)),
     };
-    chat_store()
-        .lock()
-        .await
-        .insert(id.clone(), Arc::new(Mutex::new(session)));
+    let session = Arc::new(Mutex::new(session));
+    chat_store().lock().await.insert(id.clone(), session.clone());
+    // Written to disk at creation, not at the first turn. A flow run records a
+    // turn seconds later so the gap does not matter; a project's first turn is
+    // two agent turns and several minutes away, and a restart inside that window
+    // would lose a conversation the project record already points at — after
+    // which `record_project_tick` finds nothing and files nothing, silently, for
+    // the rest of the project's life.
+    persist_chat(&session).await;
     Some(id)
 }
 
@@ -256,6 +261,12 @@ pub async fn project_conversation(
 /// becoming a month of context.
 pub async fn record_project_tick(chat_id: &str, briefing: &str, summary: &str) {
     let Some(session) = chat_store().lock().await.get(chat_id).cloned() else {
+        // Not fatal — the tick's work is already durable in the scratchpad, the
+        // task list and the ledger — but not silent either: a project whose
+        // thread has gone is one whose history stops without anything saying so.
+        log::warn!(
+            "project conversation {chat_id} is missing; this tick was not filed in it"
+        );
         return;
     };
     {

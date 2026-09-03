@@ -258,11 +258,11 @@ impl metalcraft::Tool for ConductorPaceTool {
         } else {
             format!("- Back to the {effective} min the project was set to: {why}")
         };
-        let current = crate::projects::read_scratchpad(&self.project_id).unwrap_or_default();
-        let _ = crate::projects::write_scratchpad(
-            &self.project_id,
-            &crate::projects::append_to_section(&current, "Log", &line),
-        );
+        // Into the conductor's own ledger, not the worker's scratchpad. The
+        // worker rewrites that document wholesale at the end of the same tick,
+        // so a line written here would be gone by the time anyone read it — and
+        // this is the conductor's decision about its own pace anyway.
+        let _ = ledger::append(&self.project_id, "Learned", &line);
 
         Ok(serde_json::json!({
             "ok": true,
