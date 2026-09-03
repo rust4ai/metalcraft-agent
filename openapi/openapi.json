@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.40.0"
+    "version": "0.41.0"
   },
   "paths": {
     "/api/v1/agent-packs": {
@@ -2532,365 +2532,6 @@
         }
       }
     },
-    "/api/v1/goals": {
-      "get": {
-        "tags": [
-          "goals"
-        ],
-        "summary": "`GET /api/v1/goals` — what this pod is working towards on its own.",
-        "operationId": "list_goals",
-        "responses": {
-          "200": {
-            "description": "Goals on this pod",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GoalList"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "goals"
-        ],
-        "summary": "`POST /api/v1/goals` — set a goal.",
-        "description": "The consent point, and the only one: this creates the goal **and** the agent\nthat will pursue it, because \"work at this while I am not here\" is one\ndecision rather than two.",
-        "operationId": "post_goal",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateGoalRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GoalRow"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Empty goal, or no agent preset to run it as",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Too many goals already ticking",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/goals/{id}": {
-      "get": {
-        "tags": [
-          "goals"
-        ],
-        "summary": "`GET /api/v1/goals/{id}` — one goal, with the scratchpad a client renders.",
-        "operationId": "get_goal",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Goal id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GoalDetail"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "goals"
-        ],
-        "summary": "`DELETE /api/v1/goals/{id}` — forget a goal.",
-        "description": "Its agent survives: instances are never deleted on a timer, and what this one\nlearned about the repo outlives the errand it learned it on.",
-        "operationId": "delete_goal",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Goal id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Deleted"
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      },
-      "patch": {
-        "tags": [
-          "goals"
-        ],
-        "summary": "`PATCH /api/v1/goals/{id}` — pause, resume, retarget, or answer.",
-        "description": "Answering is the important one: a blocked goal is stopped until a person\nsays something, and this is where that lands. The answer goes into the\nscratchpad rather than into a message, because the tick that acts on it will\nhave read nothing else.",
-        "operationId": "patch_goal",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Goal id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateGoalRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GoalRow"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Resuming would exceed the active ceiling",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/goals/{id}/findings": {
-      "get": {
-        "tags": [
-          "goals"
-        ],
-        "summary": "`GET /api/v1/goals/{id}/findings` — what an audit goal has turned up.",
-        "description": "Empty for a build goal, which keeps no ledger: its findings are its plan.",
-        "operationId": "get_goal_findings",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Goal id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GoalFindings"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/goals/{id}/journal": {
-      "get": {
-        "tags": [
-          "goals"
-        ],
-        "summary": "`GET /api/v1/goals/{id}/journal` — what it has been doing, one line per tick.",
-        "operationId": "get_goal_journal",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Goal id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "How many of the most recent entries. Defaults to 50.",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "minimum": 0
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GoalJournal"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/goals/{id}/scratchpad": {
-      "put": {
-        "tags": [
-          "goals"
-        ],
-        "summary": "`PUT /api/v1/goals/{id}/scratchpad` — fix the goal's memory by hand.",
-        "description": "The repair hatch. A groom that went wrong, or a plan that has drifted, is\notherwise only correctable by asking the agent nicely and hoping. The\nprevious version is snapshotted like any other write, so this cannot be the\nlast copy either.",
-        "operationId": "put_goal_scratchpad",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Goal id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/WriteScratchpadRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GoalDetail"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/inference": {
       "get": {
         "tags": [
@@ -3355,6 +2996,527 @@
         "responses": {
           "200": {
             "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/api/v1/projects": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "`GET /api/v1/projects` — what this pod is working towards on its own.",
+        "operationId": "list_projects",
+        "responses": {
+          "200": {
+            "description": "Goals on this pod",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "`POST /api/v1/projects` — set a project.",
+        "description": "The consent point, and the only one: this creates the project **and** the agent\nthat will pursue it, because \"work at this while I am not here\" is one\ndecision rather than two.",
+        "operationId": "post_project",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectRow"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty project, or no agent preset to run it as",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Too many projects already ticking",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "`GET /api/v1/projects/{id}` — one project, with the scratchpad a client renders.",
+        "operationId": "get_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "`DELETE /api/v1/projects/{id}` — forget a project.",
+        "description": "Its agent survives: instances are never deleted on a timer, and what this one\nlearned about the repo outlives the errand it learned it on.",
+        "operationId": "delete_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "`PATCH /api/v1/projects/{id}` — pause, resume, retarget, or answer.",
+        "description": "Answering is the important one: a blocked project is stopped until a person\nsays something, and this is where that lands. The answer goes into the\nscratchpad rather than into a message, because the tick that acts on it will\nhave read nothing else.",
+        "operationId": "patch_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectRow"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Resuming would exceed the active ceiling",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/findings": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "`GET /api/v1/projects/{id}/findings` — what an audit project has turned up.",
+        "description": "Empty for a build project, which keeps no ledger: its findings are its plan.",
+        "operationId": "get_project_findings",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectFindings"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/journal": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "`GET /api/v1/projects/{id}/journal` — what it has been doing, one line per tick.",
+        "operationId": "get_project_journal",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many of the most recent entries. Defaults to 50.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectJournal"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/scratchpad": {
+      "put": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "`PUT /api/v1/projects/{id}/scratchpad` — fix the project's memory by hand.",
+        "description": "The repair hatch. A groom that went wrong, or a plan that has drifted, is\notherwise only correctable by asking the agent nicely and hoping. The\nprevious version is snapshotted like any other write, so this cannot be the\nlast copy either.",
+        "operationId": "put_project_scratchpad",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WriteScratchpadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/tasks": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "`GET /api/v1/projects/{id}/tasks` — the plan, as records.",
+        "operationId": "get_project_tasks",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectTask"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "`PUT /api/v1/projects/{id}/tasks` — steer a running project.",
+        "description": "The point of a plan being records rather than prose: a person watching a project\ncan add a task, re-order the list, or drop something that has become\npointless, without editing markdown and hoping the next tick honours it.\n\nDeliberately a whole-list replace, like the scratchpad write next to it: the\nclient edits what it just read, and there is never a question of which write\nwon. There is one other writer — the tick — and a person and a tick racing on\nthe same list is the same race the scratchpad already has, resolved the same\nway.",
+        "operationId": "put_project_tasks",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WriteTasksRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectTask"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The list is not a usable plan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/tick": {
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "`POST /api/v1/projects/{id}/tick` — run now, rather than at the next heartbeat.",
+        "description": "One of the three levers a person gets over a project, and the reason the\nother two are usable: change the goal or the period and this is how you see\nthe effect without waiting fifteen minutes for it.\n\nA **request**, not a preemption. It raises a flag the dispatcher honours on\nits next pass; if a tick is already running, the flag survives it and fires\nwhen it ends. Two turns of the same worker at once is the one thing a project\nmust never do, so this will not start one.\n\nA paused project stays paused: \"run now\" is about *when*, not about\noverriding a decision somebody already took.",
+        "operationId": "post_project_tick",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted; the dispatcher will pick it up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectRow"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The project is not in a state that ticks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -3883,7 +4045,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProjectSnapshot"
+                  "$ref": "#/components/schemas/PodSnapshot"
                 }
               }
             }
@@ -5254,7 +5416,7 @@
       },
       "Counters": {
         "type": "object",
-        "description": "What the goal has spent and how far it has got.",
+        "description": "What the project has spent and how far it has got.",
         "properties": {
           "compute_minutes_used": {
             "type": "integer",
@@ -5349,7 +5511,24 @@
           }
         }
       },
-      "CreateGoalRequest": {
+      "CreateInstanceRequest": {
+        "type": "object",
+        "properties": {
+          "agent_preset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CreateProjectRequest": {
         "type": "object",
         "required": [
           "goal"
@@ -5366,7 +5545,7 @@
               "string",
               "null"
             ],
-            "description": "The branch the goal works on. Defaults to `goal/<id>`."
+            "description": "The branch the project works on. Defaults to `project/<id>`."
           },
           "chat_id": {
             "type": [
@@ -5389,7 +5568,7 @@
             "description": "**The goal.** Room for a paragraph: this is the whole instruction, and a\ntick six days from now reads it verbatim."
           },
           "kind": {
-            "$ref": "#/components/schemas/GoalKind"
+            "$ref": "#/components/schemas/ProjectKind"
           },
           "models": {
             "oneOf": [
@@ -5420,7 +5599,7 @@
               "string",
               "null"
             ],
-            "description": "The repo to work in, `owner/name`. Optional in this phase — a goal\nwithout one still plans and thinks, it just has nowhere to build."
+            "description": "The repo to work in, `owner/name`. Optional in this phase — a project\nwithout one still plans and thinks, it just has nowhere to build."
           },
           "timezone": {
             "type": [
@@ -5433,24 +5612,7 @@
               "string",
               "null"
             ],
-            "description": "Short handle for lists. Defaults to the first line of the goal."
-          }
-        }
-      },
-      "CreateInstanceRequest": {
-        "type": "object",
-        "properties": {
-          "agent_preset": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "name": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "description": "Short handle for lists. Defaults to the first line of the project."
           }
         }
       },
@@ -5823,6 +5985,36 @@
             "type": "string"
           }
         }
+      },
+      "Evidence": {
+        "type": "object",
+        "required": [
+          "kind",
+          "value",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EvidenceKind"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "EvidenceKind": {
+        "type": "string",
+        "description": "What kind of proof a task finished.",
+        "enum": [
+          "commit",
+          "run",
+          "finding",
+          "file",
+          "note"
+        ]
       },
       "ExportAgentPackRequest": {
         "type": "object",
@@ -6591,312 +6783,23 @@
           }
         }
       },
-      "Goal": {
-        "type": "object",
-        "description": "One goal.",
-        "required": [
-          "id",
-          "title",
-          "goal",
-          "kind",
-          "instance_id",
-          "agent_preset",
-          "status",
-          "created_at"
-        ],
-        "properties": {
-          "agent_preset": {
-            "type": "string"
-          },
-          "blocked_reason": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why it stopped, when it is blocked — the question to put to a person."
-          },
-          "counters": {
-            "$ref": "#/components/schemas/Counters"
-          },
-          "created_at": {
-            "type": "string"
-          },
-          "goal": {
-            "type": "string",
-            "description": "**The goal.** The one field that matters; everything else is\nconfiguration or a counter."
-          },
-          "heartbeat": {
-            "$ref": "#/components/schemas/Heartbeat"
-          },
-          "id": {
-            "type": "string"
-          },
-          "instance_id": {
-            "type": "string",
-            "description": "The agent that owns this goal for its whole life."
-          },
-          "io": {
-            "$ref": "#/components/schemas/IoBinding",
-            "description": "Where a question or a report is delivered. Reuses the binding scheduled\nfollow-ups already use, because it is the same problem: a job that\nfinishes when nobody is looking still has to reach somebody."
-          },
-          "journal_chat_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The chat that holds this goal's journal — one line per tick, and where a\nperson answers to unblock it."
-          },
-          "kind": {
-            "$ref": "#/components/schemas/GoalKind"
-          },
-          "models": {
-            "$ref": "#/components/schemas/ModelTiers"
-          },
-          "pending_run": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/PendingRun"
-              }
-            ]
-          },
-          "rails": {
-            "$ref": "#/components/schemas/Rails"
-          },
-          "status": {
-            "$ref": "#/components/schemas/GoalStatus"
-          },
-          "title": {
-            "type": "string",
-            "description": "Short human handle, for lists."
-          },
-          "updated_at": {
-            "type": "string"
-          },
-          "workspace": {
-            "$ref": "#/components/schemas/Workspace"
-          }
-        }
-      },
-      "GoalDetail": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/GoalRow"
-          },
-          {
-            "type": "object",
-            "required": [
-              "goal_record",
-              "scratchpad",
-              "needs_groom"
-            ],
-            "properties": {
-              "goal_record": {
-                "$ref": "#/components/schemas/Goal"
-              },
-              "needs_groom": {
-                "type": "boolean",
-                "description": "Set when the document has decayed enough that the next review tick will\ngroom it rather than merely audit the plan."
-              },
-              "scratchpad": {
-                "type": "string",
-                "description": "The scratchpad as written — the goal's whole memory, verbatim."
-              }
-            }
-          }
-        ]
-      },
-      "GoalFindings": {
-        "type": "object",
-        "required": [
-          "findings",
-          "open_prs",
-          "max_open_prs"
-        ],
-        "properties": {
-          "findings": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Finding"
-            }
-          },
-          "max_open_prs": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "open_prs": {
-            "type": "integer",
-            "description": "How many PRs this goal has open, against its own limit — the pair a\nreviewer needs to know whether it is holding back on purpose.",
-            "minimum": 0
-          }
-        }
-      },
-      "GoalJournal": {
-        "type": "object",
-        "required": [
-          "entries"
-        ],
-        "properties": {
-          "entries": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/JournalEntry"
-            }
-          }
-        }
-      },
-      "GoalKind": {
-        "type": "string",
-        "description": "What a goal is trying to do, which selects its persona and its tick frame.",
-        "enum": [
-          "build",
-          "audit"
-        ]
-      },
-      "GoalList": {
-        "type": "object",
-        "required": [
-          "goals",
-          "active",
-          "max_active"
-        ],
-        "properties": {
-          "active": {
-            "type": "integer",
-            "description": "How many are ticking, against the ceiling — what a \"new goal\" button\nneeds to know before it is pressed.",
-            "minimum": 0
-          },
-          "goals": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/GoalRow"
-            }
-          },
-          "max_active": {
-            "type": "integer",
-            "minimum": 0
-          }
-        }
-      },
-      "GoalRepo": {
-        "type": "object",
-        "description": "One repo the goal works in, inside its buildr.space workspace.",
-        "required": [
-          "full_name"
-        ],
-        "properties": {
-          "branch": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The branch the goal works on — `goal/<slug>`, not the repo's default."
-          },
-          "dir": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Directory under `/workspace`. Absent means buildr's own default (the\nrepo's bare name)."
-          },
-          "full_name": {
-            "type": "string",
-            "description": "`owner/name` on GitHub."
-          }
-        }
-      },
-      "GoalRow": {
-        "type": "object",
-        "required": [
-          "id",
-          "title",
-          "goal",
-          "kind",
-          "status",
-          "instance_id",
-          "progress",
-          "ticks",
-          "every_minutes",
-          "created_at"
-        ],
-        "properties": {
-          "blocked_reason": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "created_at": {
-            "type": "string"
-          },
-          "every_minutes": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "goal": {
-            "type": "string"
-          },
-          "id": {
-            "type": "string"
-          },
-          "instance_id": {
-            "type": "string"
-          },
-          "kind": {
-            "$ref": "#/components/schemas/GoalKind"
-          },
-          "last_tick_at": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "next_tick_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "When the next tick is owed, absent for a goal that is not ticking."
-          },
-          "progress": {
-            "$ref": "#/components/schemas/Progress",
-            "description": "Checked/total plan steps, so a client draws a progress bar without\nparsing markdown."
-          },
-          "status": {
-            "$ref": "#/components/schemas/GoalStatus"
-          },
-          "ticks": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "title": {
-            "type": "string"
-          }
-        }
-      },
-      "GoalStatus": {
-        "type": "string",
-        "description": "Where a goal is in its life.\n\n`Blocked` is the one that carries weight: it is where *every* stopping\ncondition lands — the agent asking a question, and every rail in [`Rails`]\ntripping. A goal that quietly gave up would be indistinguishable from one\nstill working, which is the worst confusion this design could offer.",
-        "enum": [
-          "active",
-          "blocked",
-          "paused",
-          "done",
-          "failed"
-        ]
-      },
       "Heartbeat": {
         "type": "object",
-        "description": "How often the goal wakes.",
+        "description": "How often the project wakes.",
         "properties": {
+          "conductor_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the conductor has backed off to, when it has.\n\nThe conductor may slow itself down and it may come back, but it can never\ngo faster than the person set. That asymmetry is the whole design: a model\ndeciding how often to spend money is exactly the concern that got\nper-delegation model tiers deferred, and it disappears entirely if the\nonly direction it can move is *cheaper*. Backing off is judgement about\nthis project; spending more than was authorised is not its call.\n\nCleared when a person edits the period — a new instruction supersedes an\nold accommodation.",
+            "minimum": 0
+          },
           "every_minutes": {
             "type": "integer",
             "format": "int32",
+            "description": "What the person asked for. The **fastest** this project may wake.",
             "minimum": 0
           },
           "timezone": {
@@ -7413,20 +7316,24 @@
           },
           {
             "type": "object",
-            "description": "An agent that exists to pursue one [goal](crate::goals), for as long as\nthat takes.\n\nThe goal is the reason the agent was minted, and the two live and die\ntogether in intent — but not in storage: deleting a goal leaves the\ninstance, because what it learned along the way outlives the errand.",
+            "description": "An agent that exists to pursue one [project](crate::projects), for as long as\nthat takes.\n\nThe project is the reason the agent was minted, and the two live and die\ntogether in intent — but not in storage: deleting a project leaves the\ninstance, because what it learned along the way outlives the errand.",
             "required": [
-              "goal_id",
+              "project_id",
               "kind"
             ],
             "properties": {
-              "goal_id": {
-                "type": "string"
-              },
               "kind": {
                 "type": "string",
                 "enum": [
-                  "goal"
+                  "project"
                 ]
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "role": {
+                "$ref": "#/components/schemas/ProjectRole",
+                "description": "Which of the project's two agents this is. A project runs a\n**conductor** (holds the plan, judges the goal) and a **worker**\n(does the work), and they must not share an instance: they\naccumulate different memory — the worker learns the codebase, the\nconductor learns the project — and merging the two would give each\nof them the other's recall at exactly the moments it is misleading.\n\nDefaults to `worker`, which is what a project created before the\nconductor existed had."
               }
             }
           }
@@ -7642,7 +7549,7 @@
       },
       "JournalEntry": {
         "type": "object",
-        "description": "One line of what the goal did, for a person to read.\n\nA structured record rather than chat messages: a tick summary is not a\nconversation turn, and the clients that render a goal draw a progress bar and\na timeline from these fields. Questions for a person still go out through the\ngoal's [`IoBinding`](crate::scheduled_tasks::IoBinding) — this is the log, not\nthe conversation.",
+        "description": "One line of what the project did, for a person to read.\n\nA structured record rather than chat messages: a tick summary is not a\nconversation turn, and the clients that render a project draw a progress bar and\na timeline from these fields. Questions for a person still go out through the\nproject's [`IoBinding`](crate::scheduled_tasks::IoBinding) — this is the log, not\nthe conversation.",
         "required": [
           "at",
           "tick",
@@ -7658,6 +7565,17 @@
         "properties": {
           "at": {
             "type": "string"
+          },
+          "briefing": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The briefing the conductor wrote for this tick. Recorded because the\nfirst question about a tick that went wrong is \"what did it actually\nsay?\", and that should be answerable without opening a transcript."
+          },
+          "conducted": {
+            "type": "boolean",
+            "description": "False when the conductor could not run and the tick used the fallback\nbriefing. \"The conductor was down for six ticks\" is the sort of thing\nthat explains a project which went nowhere."
           },
           "duration_secs": {
             "type": "integer",
@@ -7685,7 +7603,7 @@
             "description": "False when the tick left the scratchpad byte-identical: it thought,\npossibly spent, and recorded nothing."
           },
           "status": {
-            "$ref": "#/components/schemas/GoalStatus",
+            "$ref": "#/components/schemas/ProjectStatus",
             "description": "Status after the tick, so a reader can see where it turned."
           },
           "summary": {
@@ -8065,7 +7983,7 @@
       },
       "ModelTiers": {
         "type": "object",
-        "description": "Model tier per tick kind, in tier names rather than model ids so a goal\nwritten on one pod runs on another.",
+        "description": "Model tier per tick kind, in tier names rather than model ids so a project\nwritten on one pod runs on another.",
         "properties": {
           "plan": {
             "type": [
@@ -8519,6 +8437,45 @@
           }
         }
       },
+      "PodLayout": {
+        "type": "object",
+        "required": [
+          "data_dir",
+          "personas_dir",
+          "skills_dir",
+          "flows_dir",
+          "sessions_dir",
+          "api_tools_dir",
+          "agent_presets_dir",
+          "agent_instances_dir"
+        ],
+        "properties": {
+          "agent_instances_dir": {
+            "type": "string"
+          },
+          "agent_presets_dir": {
+            "type": "string"
+          },
+          "api_tools_dir": {
+            "type": "string"
+          },
+          "data_dir": {
+            "type": "string"
+          },
+          "flows_dir": {
+            "type": "string"
+          },
+          "personas_dir": {
+            "type": "string"
+          },
+          "sessions_dir": {
+            "type": "string"
+          },
+          "skills_dir": {
+            "type": "string"
+          }
+        }
+      },
       "PodSettings": {
         "type": "object",
         "description": "Everything a pod is configured to prefer.\n\nEvery field optional and every absence meaningful, because this file is\nwritten by whichever client last saved and read by a pod that may be newer\nthan it: an unknown field must not become an opinion.",
@@ -8529,6 +8486,80 @@
               "null"
             ],
             "description": "IANA timezone this pod's people live in — `\"America/Detroit\"`.\n\nUsed for a cron schedule that names no zone of its own. `None` falls back\nto the host clock, which is what every pod did before this existed and is\nalmost never what anybody meant."
+          }
+        }
+      },
+      "PodSnapshot": {
+        "type": "object",
+        "required": [
+          "personas",
+          "skills",
+          "flows",
+          "sessions",
+          "api_tools",
+          "keys",
+          "agent_presets",
+          "agent_instances",
+          "default_agent_preset",
+          "layout"
+        ],
+        "properties": {
+          "agent_instances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentInstance"
+            },
+            "description": "Agents that actually exist. Ephemeral ones are excluded — an unfiltered list\nis one row per chat ever started, which is noise, not information."
+          },
+          "agent_presets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PresetSummary"
+            },
+            "description": "Agents this pod can be. Both Workshop clients paint their agent picker from\nthe snapshot, so leaving these out costs an extra round-trip on every load."
+          },
+          "api_tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiToolSummary"
+            }
+          },
+          "default_agent_preset": {
+            "type": "string"
+          },
+          "flows": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "From the external `metalcraft-flows` crate, which has no `ToSchema`; the\nweb app doesn't consume this field, so expose it as an opaque object array."
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KeySummary"
+            }
+          },
+          "layout": {
+            "$ref": "#/components/schemas/PodLayout"
+          },
+          "personas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonaSummary"
+            }
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticsSessionSummary"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkillSummary"
+            }
           }
         }
       },
@@ -8650,116 +8681,422 @@
           }
         }
       },
-      "ProjectLayout": {
+      "Project": {
         "type": "object",
+        "description": "One project.",
         "required": [
-          "data_dir",
-          "personas_dir",
-          "skills_dir",
-          "flows_dir",
-          "sessions_dir",
-          "api_tools_dir",
-          "agent_presets_dir",
-          "agent_instances_dir"
+          "id",
+          "title",
+          "goal",
+          "kind",
+          "instance_id",
+          "agent_preset",
+          "status",
+          "created_at"
         ],
         "properties": {
-          "agent_instances_dir": {
+          "agent_preset": {
             "type": "string"
           },
-          "agent_presets_dir": {
+          "blocked_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it stopped, when it is blocked — the question to put to a person."
+          },
+          "conductor_instance_id": {
+            "type": "string",
+            "description": "The **conductor**: the small agent that *is* the project — it holds the\nplan, judges whether the goal is met, and writes each tick's briefing.\nSeparate from the worker so that the thing which says \"done\" is not the\nthing that wants to be finished.\n\nEmpty on a project created before the conductor existed, which falls back\nto sharing the worker's instance rather than losing its memory."
+          },
+          "counters": {
+            "$ref": "#/components/schemas/Counters"
+          },
+          "created_at": {
             "type": "string"
           },
-          "api_tools_dir": {
+          "goal": {
+            "type": "string",
+            "description": "**The goal.** The one field that matters; everything else is\nconfiguration or a counter.\n\nA field rather than the project's identity, so it can be re-aimed: edit\nit and the project keeps its instances, memory, session, tasks,\nworkspace and history. Naming the container after this string is what\nthe old `Goal` type got wrong."
+          },
+          "heartbeat": {
+            "$ref": "#/components/schemas/Heartbeat"
+          },
+          "id": {
             "type": "string"
           },
-          "data_dir": {
+          "instance_id": {
+            "type": "string",
+            "description": "The **worker**: the agent that does the work, in a fresh context each\ntick. Owns the scratchpad and produces the evidence."
+          },
+          "io": {
+            "$ref": "#/components/schemas/IoBinding",
+            "description": "Where a question or a report is delivered. Reuses the binding scheduled\nfollow-ups already use, because it is the same problem: a job that\nfinishes when nobody is looking still has to reach somebody."
+          },
+          "journal_chat_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The chat that holds this project's journal — one line per tick, and where a\nperson answers to unblock it."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ProjectKind"
+          },
+          "models": {
+            "$ref": "#/components/schemas/ModelTiers"
+          },
+          "pending_run": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PendingRun"
+              }
+            ]
+          },
+          "rails": {
+            "$ref": "#/components/schemas/Rails"
+          },
+          "session_id": {
+            "type": "string",
+            "description": "The conversation this project records itself into — one thread for its\nwhole life, which is what a person opens to see how it got here.\n\nA window, not a chat: nothing routes typing into it. Empty for a project\nmade before it existed, and for one whose first tick has not run yet."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProjectStatus"
+          },
+          "tick_requested": {
+            "type": "boolean",
+            "description": "A person asked for a tick now, rather than at the next heartbeat.\n\nA flag rather than \"clear the bookmark\", because a force is a *request*\nand not a preemption: if a tick is already running, the running one\ncleared this at its start, so a force raised while it works survives and\nis honoured when it ends. Two turns of the same worker running at once is\nthe one thing a project must never do."
+          },
+          "title": {
+            "type": "string",
+            "description": "Short human handle, for lists."
+          },
+          "updated_at": {
             "type": "string"
           },
-          "flows_dir": {
+          "worker_brief": {
+            "type": "string",
+            "description": "The worker's own instructions, written once by the conductor from the\ngoal and stored here.\n\nWritten once rather than re-derived every tick, and that is the whole\ndifference between a brief and a briefing: this says what kind of work\nthis project *is* — the repo, the stack, the conventions, what \"careful\"\nmeans here — and it does not change when the plan does. It goes in the\nworker's system prompt; what changes each tick is the conductor's\nbriefing, and that goes in the message.\n\nEmpty until the first tick composes it, and empty is fine: the worker\nfalls back to its persona alone, which is exactly how it behaved before\nbriefs existed."
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/Workspace"
+          }
+        }
+      },
+      "ProjectDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ProjectRow"
+          },
+          {
+            "type": "object",
+            "required": [
+              "project_record",
+              "scratchpad",
+              "needs_groom",
+              "tasks"
+            ],
+            "properties": {
+              "needs_groom": {
+                "type": "boolean",
+                "description": "Set when the document has decayed enough that the next review tick will\ngroom it rather than merely audit the plan."
+              },
+              "project_record": {
+                "$ref": "#/components/schemas/Project"
+              },
+              "scratchpad": {
+                "type": "string",
+                "description": "The scratchpad as written — the project's whole memory, verbatim."
+              },
+              "tasks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ProjectTask"
+                },
+                "description": "The plan, as records. Empty for a project created before tasks existed —\nits plan is still checkboxes inside `scratchpad`."
+              }
+            }
+          }
+        ]
+      },
+      "ProjectFindings": {
+        "type": "object",
+        "required": [
+          "findings",
+          "open_prs",
+          "max_open_prs"
+        ],
+        "properties": {
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            }
+          },
+          "max_open_prs": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "open_prs": {
+            "type": "integer",
+            "description": "How many PRs this project has open, against its own limit — the pair a\nreviewer needs to know whether it is holding back on purpose.",
+            "minimum": 0
+          }
+        }
+      },
+      "ProjectJournal": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JournalEntry"
+            }
+          }
+        }
+      },
+      "ProjectKind": {
+        "type": "string",
+        "description": "What a project is trying to do, which selects its persona and its tick frame.",
+        "enum": [
+          "build",
+          "audit"
+        ]
+      },
+      "ProjectList": {
+        "type": "object",
+        "required": [
+          "projects",
+          "active",
+          "max_active"
+        ],
+        "properties": {
+          "active": {
+            "type": "integer",
+            "description": "How many are ticking, against the ceiling — what a \"new project\" button\nneeds to know before it is pressed.",
+            "minimum": 0
+          },
+          "max_active": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectRow"
+            }
+          }
+        }
+      },
+      "ProjectRepo": {
+        "type": "object",
+        "description": "One repo the project works in, inside its buildr.space workspace.",
+        "required": [
+          "full_name"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The branch the project works on — `project/<slug>`, not the repo's default."
+          },
+          "dir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Directory under `/workspace`. Absent means buildr's own default (the\nrepo's bare name)."
+          },
+          "full_name": {
+            "type": "string",
+            "description": "`owner/name` on GitHub."
+          }
+        }
+      },
+      "ProjectRole": {
+        "type": "string",
+        "description": "Which of a project's two agents an instance is.",
+        "enum": [
+          "worker",
+          "conductor"
+        ]
+      },
+      "ProjectRow": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "goal",
+          "kind",
+          "status",
+          "instance_id",
+          "progress",
+          "ticks",
+          "every_minutes",
+          "created_at"
+        ],
+        "properties": {
+          "blocked_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
             "type": "string"
           },
-          "personas_dir": {
+          "every_minutes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "goal": {
             "type": "string"
           },
-          "sessions_dir": {
+          "id": {
             "type": "string"
           },
-          "skills_dir": {
+          "instance_id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ProjectKind"
+          },
+          "last_tick_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_tick_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the next tick is owed, absent for a project that is not ticking."
+          },
+          "progress": {
+            "$ref": "#/components/schemas/Progress",
+            "description": "Checked/total plan steps, so a client draws a progress bar without\nparsing markdown."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProjectStatus"
+          },
+          "ticks": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "title": {
             "type": "string"
           }
         }
       },
-      "ProjectSnapshot": {
+      "ProjectStatus": {
+        "type": "string",
+        "description": "Where a project is in its life.\n\n`Blocked` is the one that carries weight: it is where *every* stopping\ncondition lands — the agent asking a question, and every rail in [`Rails`]\ntripping. A project that quietly gave up would be indistinguishable from one\nstill working, which is the worst confusion this design could offer.",
+        "enum": [
+          "active",
+          "blocked",
+          "paused",
+          "done",
+          "failed"
+        ]
+      },
+      "ProjectTask": {
         "type": "object",
+        "description": "One slice of a project's plan.\n\nPublished as `ProjectTask` rather than `Task`. In Rust, inside this module,\n`Task` is unambiguous; on the wire it is not — a generated Swift client puts\nevery schema in one namespace, where a type called `Task` shadows Swift's own\n`Task` and breaks every `Task { … }` in the app. The name is only free here\nbecause this module is small.",
         "required": [
-          "personas",
-          "skills",
-          "flows",
-          "sessions",
-          "api_tools",
-          "keys",
-          "agent_presets",
-          "agent_instances",
-          "default_agent_preset",
-          "layout"
+          "id",
+          "title",
+          "status",
+          "created_at",
+          "updated_at"
         ],
         "properties": {
-          "agent_instances": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/AgentInstance"
-            },
-            "description": "Agents that actually exist. Ephemeral ones are excluded — an unfiltered list\nis one row per chat ever started, which is noise, not information."
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Persona to delegate this to. `None` means the tick does it itself."
           },
-          "agent_presets": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/PresetSummary"
-            },
-            "description": "Agents this pod can be. Both Workshop clients paint their agent picker from\nthe snapshot, so leaving these out costs an extra round-trip on every load."
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many times this task has been attempted and come back unfinished.",
+            "minimum": 0
           },
-          "api_tools": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ApiToolSummary"
-            }
+          "blocked_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
-          "default_agent_preset": {
+          "created_at": {
             "type": "string"
           },
-          "flows": {
+          "deps": {
             "type": "array",
             "items": {
-              "type": "object"
+              "type": "string"
             },
-            "description": "From the external `metalcraft-flows` crate, which has no `ToSchema`; the\nweb app doesn't consume this field, so expose it as an opaque object array."
+            "description": "Task ids **within this project** that must land first."
           },
-          "keys": {
+          "detail": {
+            "type": "string",
+            "description": "What a delegate is handed when this task is dispatched. A delegate has\nnone of the project's context, so this carries every decision it depends on\n— the same contract a sub-agent's `task` argument has always had."
+          },
+          "evidence": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/KeySummary"
+              "$ref": "#/components/schemas/Evidence"
             }
           },
-          "layout": {
-            "$ref": "#/components/schemas/ProjectLayout"
+          "gate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A command that must exit 0 before this task may be `Done`."
           },
-          "personas": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/PersonaSummary"
-            }
+          "id": {
+            "type": "string",
+            "description": "Short and typeable (`t1`, `t2`) — it is quoted in the scratchpad, in\nhandoffs and in the journal, so it has to survive being retyped."
           },
-          "sessions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/DiagnosticsSessionSummary"
-            }
+          "mutates_workspace": {
+            "type": "boolean",
+            "description": "Whether running this task writes to the project's workspace.\n\n**Defaults to `true`**, and the asymmetry is deliberate: a task wrongly\nmarked read-only can be dispatched alongside another that is editing the\nsame sprite, and two agents writing one workspace corrupt each other\nsilently. A task wrongly marked as mutating merely runs on its own. The\ncheap mistake is the safe one."
           },
-          "skills": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SkillSummary"
-            }
+          "pending_run": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PendingRun",
+                "description": "A long-running command this task started and did not wait for. The\npre-flight reads it on the next tick, spending nothing."
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatus"
+          },
+          "title": {
+            "type": "string",
+            "description": "One line. This is what the rendered plan shows and what the UI lists."
+          },
+          "updated_at": {
+            "type": "string"
           }
         }
       },
@@ -8789,7 +9126,7 @@
       },
       "Rails": {
         "type": "object",
-        "description": "Everything that can stop a goal.\n\nAll of them land in [`GoalStatus::Blocked`] rather than ending the goal:\nrunning out of rope is a reason to ask a person, not to disappear.",
+        "description": "Everything that can stop a project.\n\nAll of them land in [`ProjectStatus::Blocked`] rather than ending the project:\nrunning out of rope is a reason to ask a person, not to disappear.",
         "properties": {
           "compute_minutes_budget": {
             "type": [
@@ -8797,7 +9134,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "buildr.space awake minutes this goal may spend. Absent = only the\naccount's own plan bounds it.",
+            "description": "buildr.space awake minutes this project may spend. Absent = only the\naccount's own plan bounds it.",
             "minimum": 0
           },
           "deadline": {
@@ -8805,7 +9142,7 @@
               "string",
               "null"
             ],
-            "description": "RFC3339. Past it, the goal blocks."
+            "description": "RFC3339. Past it, the project blocks."
           },
           "max_consecutive_no_progress": {
             "type": "integer",
@@ -8815,7 +9152,7 @@
           "max_open_prs": {
             "type": "integer",
             "format": "int32",
-            "description": "How many of this goal's PRs may be open at once. Twenty simultaneous bot\nPRs is how a repo learns to ignore them.",
+            "description": "How many of this project's PRs may be open at once. Twenty simultaneous bot\nPRs is how a repo learns to ignore them.",
             "minimum": 0
           },
           "max_ticks": {
@@ -9586,6 +9923,17 @@
           "skipped"
         ]
       },
+      "TaskStatus": {
+        "type": "string",
+        "description": "Where a task has got to.\n\nThere is no `Ready` variant: readiness is *derived* from the dependency\ngraph ([`is_ready`]) rather than stored, so it can never disagree with the\ndeps it is supposed to summarise. Storing it would mean a promote pass, and\na promote pass means two sources of truth.",
+        "enum": [
+          "todo",
+          "waiting",
+          "blocked",
+          "done",
+          "dropped"
+        ]
+      },
       "TickKind": {
         "type": "string",
         "description": "What this tick is for. The kind picks the frame the agent is given and the\nmodel tier that runs it.",
@@ -9691,7 +10039,7 @@
           }
         }
       },
-      "UpdateGoalRequest": {
+      "UpdateProjectRequest": {
         "type": "object",
         "properties": {
           "answer": {
@@ -9714,7 +10062,7 @@
               "string",
               "null"
             ],
-            "description": "Restate the goal. Allowed on purpose — a goal that turned out to be the\nwrong goal is better corrected than abandoned — but it does not rewrite\nthe scratchpad, so the next tick will notice the two disagree."
+            "description": "Restate the project. Allowed on purpose — a project that turned out to be the\nwrong project is better corrected than abandoned — but it does not rewrite\nthe scratchpad, so the next tick will notice the two disagree."
           },
           "models": {
             "oneOf": [
@@ -9742,7 +10090,7 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/GoalStatus"
+                "$ref": "#/components/schemas/ProjectStatus"
               }
             ]
           },
@@ -9834,7 +10182,7 @@
       },
       "Workspace": {
         "type": "object",
-        "description": "The goal's buildr.space workspace.\n\n**A cache, not state.** The truth is the branch on GitHub plus the\nscratchpad; this may be reaped, deleted after a week of hibernation on the\nfree plan, or thrown away because the sprite got into a bad state. A tick\nreconciles rather than assuming, and a goal that cannot survive losing this\nis a goal that dies over a weekend.",
+        "description": "The project's buildr.space workspace.\n\n**A cache, not state.** The truth is the branch on GitHub plus the\nscratchpad; this may be reaped, deleted after a week of hibernation on the\nfree plan, or thrown away because the sprite got into a bad state. A tick\nreconciles rather than assuming, and a project that cannot survive losing this\nis a project that dies over a weekend.",
         "properties": {
           "id": {
             "type": [
@@ -9852,7 +10200,7 @@
           "repos": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/GoalRepo"
+              "$ref": "#/components/schemas/ProjectRepo"
             }
           }
         }
@@ -9865,6 +10213,21 @@
         "properties": {
           "markdown": {
             "type": "string"
+          }
+        }
+      },
+      "WriteTasksRequest": {
+        "type": "object",
+        "required": [
+          "tasks"
+        ],
+        "properties": {
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectTask"
+            },
+            "description": "The whole list, replacing what is there. Ids are preserved as given, so\na client edits what it read rather than posting a diff."
           }
         }
       }
@@ -9940,8 +10303,8 @@
       "description": "Agents that exist — each with its own memory and conversations"
     },
     {
-      "name": "goals",
-      "description": "Long-running goals: what this pod is working towards on its own, and how far it has got"
+      "name": "projects",
+      "description": "Long-running projects: what this pod is working towards on its own, and how far it has got"
     },
     {
       "name": "gateway",
