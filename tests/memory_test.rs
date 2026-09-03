@@ -247,6 +247,7 @@ async fn memory_store_round_trip() {
     };
     let extras = PromptExtras {
         memory_profile: profile.clone(),
+        project_brief: String::new(),
     };
     let prompt = p.build_system_prompt_with(&dir.path().join("skills"), ".", &extras);
     assert!(prompt.contains("# What You Remember About This User"));

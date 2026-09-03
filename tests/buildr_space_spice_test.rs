@@ -897,6 +897,7 @@ impl AgentUnderTest for MetalcraftPresetAgent {
             diagnostics: None,
             instance_id: None,
             preset_personas: self.preset_personas.clone(),
+        project_brief: None,
         project_id: None,
         };
 

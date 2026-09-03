@@ -261,6 +261,30 @@ pub struct Project {
     /// to sharing the worker's instance rather than losing its memory.
     #[serde(default)]
     pub conductor_instance_id: String,
+    /// The worker's own instructions, written once by the conductor from the
+    /// goal and stored here.
+    ///
+    /// Written once rather than re-derived every tick, and that is the whole
+    /// difference between a brief and a briefing: this says what kind of work
+    /// this project *is* — the repo, the stack, the conventions, what "careful"
+    /// means here — and it does not change when the plan does. It goes in the
+    /// worker's system prompt; what changes each tick is the conductor's
+    /// briefing, and that goes in the message.
+    ///
+    /// Empty until the first tick composes it, and empty is fine: the worker
+    /// falls back to its persona alone, which is exactly how it behaved before
+    /// briefs existed.
+    #[serde(default)]
+    pub worker_brief: String,
+    /// A person asked for a tick now, rather than at the next heartbeat.
+    ///
+    /// A flag rather than "clear the bookmark", because a force is a *request*
+    /// and not a preemption: if a tick is already running, the running one
+    /// cleared this at its start, so a force raised while it works survives and
+    /// is honoured when it ends. Two turns of the same worker running at once is
+    /// the one thing a project must never do.
+    #[serde(default)]
+    pub tick_requested: bool,
     pub agent_preset: String,
 
     #[serde(default)]
@@ -747,6 +771,8 @@ mod tests {
             kind: ProjectKind::Build,
             instance_id: "i".into(),
             conductor_instance_id: String::new(),
+            worker_brief: String::new(),
+            tick_requested: false,
             agent_preset: "p".into(),
             workspace: Workspace::default(),
             status: ProjectStatus::Active,
@@ -780,6 +806,8 @@ mod tests {
             kind: ProjectKind::Build,
             instance_id: "i".into(),
             conductor_instance_id: String::new(),
+            worker_brief: String::new(),
+            tick_requested: false,
             agent_preset: "p".into(),
             workspace: Workspace::default(),
             status: ProjectStatus::Active,

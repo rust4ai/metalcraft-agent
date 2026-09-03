@@ -63,9 +63,25 @@ pub struct PromptExtras {
     /// Rendered memory profile, or empty when memory is off or has nothing
     /// durable to say yet.
     pub memory_profile: String,
+    /// A project's own instructions for its worker, written by its conductor at
+    /// boot from the goal. Empty for every run that is not a project tick.
+    ///
+    /// It goes in the **system prompt** rather than the tick's message because it
+    /// is the one thing about a project that does not change: a project aimed at
+    /// a Rust service and one aimed at a docs site should not get the same
+    /// worker, and re-deriving that every fifteen minutes would both cost more
+    /// and drift. What *does* change each tick — which task to take, what not to
+    /// re-litigate — is the conductor's briefing, and that belongs in the message.
+    pub project_brief: String,
 }
 
 impl PromptExtras {
+    /// Carry a project's worker brief into the system prompt.
+    pub fn with_project_brief(mut self, brief: &str) -> Self {
+        self.project_brief = brief.trim().to_string();
+        self
+    }
+
     /// Build the extras for a real turn, reading the live memory profile.
     ///
     /// `instance_id` is `None` for the CLI, which has no agent and therefore no
@@ -76,6 +92,7 @@ impl PromptExtras {
                 Some(id) => crate::memory::profile_block(id).await,
                 None => String::new(),
             },
+            project_brief: String::new(),
         }
     }
 }
@@ -253,6 +270,14 @@ impl Persona {
         {
             prompt.push_str("\n\n# What You Remember About This User\n");
             prompt.push_str(&extras.memory_profile);
+        }
+
+        // The project's own instructions for this worker. After the standing
+        // persona prompt and before the tool lists: it narrows what this agent is
+        // for without replacing what it is.
+        if !extras.project_brief.is_empty() {
+            prompt.push_str("\n\n# This Project\n");
+            prompt.push_str(&extras.project_brief);
         }
 
         if !skills_block.is_empty() && !template_uses(&self.system_prompt, "available_skills") {

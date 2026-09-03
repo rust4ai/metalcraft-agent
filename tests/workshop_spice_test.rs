@@ -355,6 +355,7 @@ impl AgentUnderTest for MetalcraftPersonaAgent {
             diagnostics: None,
             instance_id: None,
             preset_personas: None,
+        project_brief: None,
         project_id: None,
         };
 

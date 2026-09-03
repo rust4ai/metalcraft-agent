@@ -218,8 +218,8 @@ Nothing below changes; it is listed so a reader does not go looking.
 | --- | --- | --- |
 | 1 | **Rename** `Goal` → `Project` across store, tick, tools, API, personas, docs, and `metalcraft-front` | Nothing has shipped — the branch is unmerged, so this costs no migration. Frees `ProjectSnapshot` → `PodSnapshot`, which is what it always was. |
 | 2 | **Conductor** ✅ — its own instance (`InstanceOrigin::Project { role }`), the `project-conductor` persona, its ledger at `<data>/projects/<id>/conductor.md` with `conductor_write`/`conductor_note`, and `conduct()` running before the worker each tick. The plan and the verdict moved off the worker. | |
-| 3 | **Boot**: conductor writes the worker's system prompt; store it as state | |
+| 3 | **Boot** ✅ — the conductor composes `worker_brief` on the first tick (creation stays instant and cannot fail on a model being down; the first tick is due immediately anyway). Stored as state, injected into the worker's **system prompt** via `PromptExtras`, so it survives a fresh context and is not re-sent every tick. | |
 | 4 | **Session**: one per project, context reset per heartbeat, turns posted into it | Uses `ChatSession`'s existing transcript/state split |
 | 5 | **Briefing**: conductor composes it each tick; runner appends the constant contract; store it on the journal entry | Retires `TickKind` |
-| 6 | **15m default**, and let the conductor adjust the pace | |
+| 6 | **15m default** ✅. `POST /projects/{id}/tick` forces one — a request, not a preemption: it raises a flag the tick clears at its *start*, so a force raised while one runs survives it. Editing the goal and the period were already `PATCH`. Letting the conductor adjust its own pace is still open. |
 | 7 | Front: projects view, the session read-only as the transcript, and the three levers — edit goal, force heartbeat, set period | |

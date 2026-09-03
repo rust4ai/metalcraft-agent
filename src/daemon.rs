@@ -390,6 +390,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                                     diagnostics: logger,
                                     instance_id: scheduled.instance_id.clone(),
                                     preset_personas: None,
+                                    project_brief: None,
                                     project_id: None,
                                 },
                             )
@@ -617,6 +618,7 @@ async fn run_due_scheduled_tasks(
                         // A follow-up is not a flow run; it has no armed agent.
                         instance_id: None,
                         preset_personas: None,
+                        project_brief: None,
                         project_id: None,
                     },
                 )

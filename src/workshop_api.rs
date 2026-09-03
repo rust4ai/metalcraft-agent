@@ -630,7 +630,7 @@ async fn auth_middleware(
         post_factory_reset,
         list_projects, get_project, post_project, patch_project, delete_project,
         get_project_journal, put_project_scratchpad, get_project_findings,
-        get_project_tasks, put_project_tasks,
+        get_project_tasks, put_project_tasks, post_project_tick,
     ),
     components(schemas(
         FactoryResetRequest, ResetReport, ResetScope, ResetFailure, RestartExpectation,
@@ -883,6 +883,7 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/projects/{id}", delete(delete_project))
         .route("/api/v1/projects/{id}/journal", get(get_project_journal))
         .route("/api/v1/projects/{id}/scratchpad", put(put_project_scratchpad))
+        .route("/api/v1/projects/{id}/tick", post(post_project_tick))
         .route("/api/v1/projects/{id}/tasks", get(get_project_tasks))
         .route("/api/v1/projects/{id}/tasks", put(put_project_tasks))
         .route("/api/v1/projects/{id}/findings", get(get_project_findings))
@@ -9535,6 +9536,51 @@ struct WriteTasksRequest {
     tasks: Vec<crate::project_tasks::Task>,
 }
 
+/// `POST /api/v1/projects/{id}/tick` — run now, rather than at the next heartbeat.
+///
+/// One of the three levers a person gets over a project, and the reason the
+/// other two are usable: change the goal or the period and this is how you see
+/// the effect without waiting fifteen minutes for it.
+///
+/// A **request**, not a preemption. It raises a flag the dispatcher honours on
+/// its next pass; if a tick is already running, the flag survives it and fires
+/// when it ends. Two turns of the same worker at once is the one thing a project
+/// must never do, so this will not start one.
+///
+/// A paused project stays paused: "run now" is about *when*, not about
+/// overriding a decision somebody already took.
+#[utoipa::path(
+    post,
+    path = "/api/v1/projects/{id}/tick",
+    tag = "projects",
+    params(("id" = String, Path, description = "Project id")),
+    responses(
+        (status = 202, description = "Accepted; the dispatcher will pick it up", body = ProjectRow),
+        (status = 409, description = "The project is not in a state that ticks", body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+    ),
+)]
+async fn post_project_tick(Path(id): Path<String>) -> Response {
+    let Some(mut project) = crate::projects::get(&id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("no project '{id}'"));
+    };
+    if !project.status.ticks() {
+        return err_json(
+            StatusCode::CONFLICT,
+            format!(
+                "this project is {:?} — it does not tick. Resume it first, or answer what it \
+                 blocked on.",
+                project.status
+            ),
+        );
+    }
+    project.tick_requested = true;
+    if let Err(e) = crate::projects::save(&project) {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    (StatusCode::ACCEPTED, Json(project_row(&project))).into_response()
+}
+
 /// `GET /api/v1/projects/{id}/tasks` — the plan, as records.
 #[utoipa::path(
     get,
@@ -9705,6 +9751,8 @@ async fn post_project(Json(req): Json<CreateProjectRequest>) -> Response {
         kind: req.kind,
         instance_id: instance.id.clone(),
         conductor_instance_id: conductor.id.clone(),
+        worker_brief: String::new(),
+        tick_requested: false,
         agent_preset: preset,
         workspace: crate::projects::Workspace {
             id: None,

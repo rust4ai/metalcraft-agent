@@ -261,6 +261,12 @@ pub fn is_due(project: &Project, now: chrono::DateTime<chrono::Utc>) -> bool {
     if !project.status.ticks() {
         return false;
     }
+    // Somebody asked for one. Still gated on the project actually ticking — a
+    // paused project that is forced stays paused, because "run now" is about
+    // *when*, not about overriding a decision somebody already made.
+    if project.tick_requested {
+        return true;
+    }
     let Some(last) = project.counters.last_tick_at.as_deref() else {
         return true;
     };
@@ -794,6 +800,13 @@ pub async fn run_tick(
 
     // Everything answerable without a model, answered without one.
     let mut project = project.clone();
+    // Clear the force at the START, not the end: a force raised while this tick
+    // runs must survive it and fire again, rather than being swallowed by the
+    // tick that was already in flight when it was asked for.
+    if project.tick_requested {
+        project.tick_requested = false;
+        let _ = projects::save(&project);
+    }
     let preflight_note = match preflight(&mut project).await {
         PreFlight::Wait { why } => {
             // The bookmark still moves, so the short fuse applies and this does
@@ -834,6 +847,29 @@ pub async fn run_tick(
         None => before,
     };
     let tick_number = project.counters.ticks + 1;
+
+    // ── boot: the conductor writes the worker's standing instructions ────────
+    // Once per project, on its first tick rather than at creation, so making a
+    // project stays instant and cannot fail on a model being down. The first
+    // tick is due immediately anyway, so in practice this is boot.
+    let project = &if project.worker_brief.trim().is_empty() {
+        match crate::project_conductor::compose_worker_brief(context, project, cwd, approval_mode)
+            .await
+        {
+            Some(brief) => {
+                let mut with_brief = project.clone();
+                with_brief.worker_brief = brief;
+                let _ = projects::save(&with_brief);
+                log::info!("project {}: composed the worker's brief", project.id);
+                with_brief
+            }
+            // Nothing to do about it and nothing to stop for: the worker runs on
+            // its persona alone and the next tick tries again.
+            None => project.clone(),
+        }
+    } else {
+        project.clone()
+    };
 
     // ── the conductor goes first ─────────────────────────────────────────────
     // It grooms the plan, decides whether the project is still going, keeps its
@@ -921,6 +957,7 @@ pub async fn run_tick(
             cwd,
             model_name: &model,
             task: &tick_frame(project, kind, tick_number, Some(&briefing.text)),
+            project_brief: Some(project.worker_brief.clone()).filter(|b| !b.trim().is_empty()),
             approval_mode: approval_mode.clone(),
             diagnostics: logger,
             instance_id: Some(project.instance_id.clone()),
@@ -1126,6 +1163,8 @@ mod tests {
             kind: ProjectKind::Build,
             instance_id: "inst".into(),
             conductor_instance_id: String::new(),
+            worker_brief: String::new(),
+            tick_requested: false,
             agent_preset: "general-agent".into(),
             workspace: Workspace::default(),
             status: ProjectStatus::Active,

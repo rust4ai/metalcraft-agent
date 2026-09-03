@@ -32,6 +32,8 @@ fn a_project(id: &str) -> Project {
         kind: ProjectKind::Build,
         instance_id: "inst_test".into(),
         conductor_instance_id: String::new(),
+        worker_brief: String::new(),
+        tick_requested: false,
         agent_preset: "general-agent".into(),
         workspace: projects::Workspace::default(),
         status: ProjectStatus::Active,

@@ -18,6 +18,8 @@ fn a_project(id: &str) -> Project {
         kind: ProjectKind::Build,
         instance_id: "inst_test".into(),
         conductor_instance_id: String::new(),
+        worker_brief: String::new(),
+        tick_requested: false,
         agent_preset: "general-agent".into(),
         workspace: projects::Workspace::default(),
         status: ProjectStatus::Active,
@@ -144,6 +146,35 @@ async fn the_conductor_keeps_its_own_memory() {
         .unwrap()
         .to_string();
     assert!(tried.contains("nothing moved"), "{tried}");
+
+    // ── the worker's brief is state, not something re-derived every tick ─────
+    // Which is the difference between a brief and a briefing: this says what the
+    // project IS, so it must not change under the worker between ticks.
+    let mut with_brief = projects::get(&project.id).unwrap();
+    assert!(
+        with_brief.worker_brief.is_empty(),
+        "a new project has no brief until its first tick writes one"
+    );
+    with_brief.worker_brief = "A Rust service. Verified means `cargo test --all` is green.".into();
+    projects::save(&with_brief).expect("save");
+
+    // It reaches the worker through the system prompt rather than the tick
+    // message, so it survives a fresh context and does not cost a re-send.
+    let persona = metalcraft_agent::persona::Persona::load(
+        "project-builder",
+        &metalcraft_agent::paths::personas_dir(),
+    );
+    if let Ok(persona) = persona {
+        let extras = metalcraft_agent::persona::PromptExtras::default()
+            .with_project_brief(&with_brief.worker_brief);
+        let prompt = persona.build_system_prompt_with(
+            &metalcraft_agent::paths::skills_dir(),
+            ".",
+            &extras,
+        );
+        assert!(prompt.contains("cargo test --all"), "the brief must reach the system prompt");
+        assert!(prompt.contains("# This Project"), "under its own heading");
+    }
 
     let _ = fs::remove_dir_all(&data_dir);
 }

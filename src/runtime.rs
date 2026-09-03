@@ -745,7 +745,12 @@ pub struct RunOneShotRequest<'a> {
     /// The roster a `sub_agent` call may reach, when this run is bound to a
     /// preset. `None` means unrestricted, as before presets existed.
     pub preset_personas: Option<Vec<String>>,
-    /// The project this run is a tick of. Registers the `goal_*` tools against it,
+    /// A project's own instructions for its worker, written by its conductor at
+    /// boot. Goes into the system prompt; `None` for every run that is not a
+    /// project's worker tick — including the conductor's own turn, which is
+    /// generic by design.
+    pub project_brief: Option<String>,
+    /// The project this run is a tick of. Registers the `project_*` tools against it,
     /// so a tick can write its own scratchpad. `None` for every other kind of
     /// run — and the tools are then absent rather than inert, because a tool
     /// whose writes land nowhere is worse than one that isn't offered.
@@ -764,6 +769,7 @@ impl<'a> RunOneShotRequest<'a> {
             diagnostics: None,
             instance_id: None,
             preset_personas: None,
+            project_brief: None,
             project_id: None,
         }
     }
@@ -919,7 +925,8 @@ pub async fn run_one_shot_task(
         RuntimeOptions {
             // free-text agent; no session reply sink
             prompt_extras: crate::persona::PromptExtras::load(request.instance_id.as_deref())
-                .await,
+                .await
+                .with_project_brief(request.project_brief.as_deref().unwrap_or_default()),
             instance_id: request.instance_id.clone(),
             preset_personas: request.preset_personas.clone(),
             project_id: request.project_id.clone(),

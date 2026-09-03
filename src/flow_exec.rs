@@ -751,6 +751,7 @@ impl<'a> FlowExecutor<'a> {
                 diagnostics: self.logger.clone(),
                 instance_id: self.instance_id.clone(),
                 preset_personas: self.preset_personas.clone(),
+                project_brief: None,
                 project_id: None,
             },
         )

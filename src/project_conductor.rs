@@ -173,6 +173,100 @@ pub fn record_worker_return(
     }
 }
 
+// ── the worker's brief ───────────────────────────────────────────────────────
+
+/// Ask the conductor to write the worker's standing instructions, from the goal.
+///
+/// Called once, on a project's first tick. A project aimed at a Rust service and
+/// one aimed at a docs site should not get the same worker, and a generic persona
+/// cannot say what a generated one can: which repo, which stack, what "verified"
+/// looks like here, which conventions matter.
+///
+/// Once, not every tick, and the distinction is load-bearing. This is what the
+/// project *is*; the briefing is what this tick is *for*. Re-deriving the first
+/// from a model every fifteen minutes would cost more and drift — the worker
+/// would find its own standing instructions quietly rewritten under it, which is
+/// the same instability the fresh-per-tick design exists to avoid.
+///
+/// Returns `None` when it cannot be written. The worker then runs on its persona
+/// alone, exactly as it did before briefs existed.
+pub async fn compose_worker_brief(
+    context: &AgentRuntimeContext,
+    project: &Project,
+    cwd: &str,
+    approval_mode: &ApprovalMode,
+) -> Option<String> {
+    if crate::persona::Persona::load(CONDUCTOR_PERSONA, &crate::paths::personas_dir()).is_err() {
+        return None;
+    }
+    let repos = project
+        .workspace
+        .repos
+        .iter()
+        .map(|r| {
+            format!(
+                "{}{}",
+                r.full_name,
+                r.branch.as_deref().map(|b| format!(" (branch {b})")).unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let task = format!(
+        "Write the standing instructions for the worker agent on this project.\n\n\
+         The goal:\n{}\n\n\
+         Repository: {}\n\n\
+         These instructions go in the worker's system prompt and are written ONCE — they are what \
+         this project *is*, not what any one tick is *for*. You will write the per-tick briefing \
+         separately, every tick, so do not put anything here that changes.\n\n\
+         Say what a competent stranger would need to know to work on this and nothing else:\n\
+         - what the project is, in a sentence\n\
+         - the stack and where things live, as far as the goal implies them\n\
+         - what 'done' and 'verified' mean for work of this kind\n\
+         - conventions worth holding to, and anything that is explicitly out of scope\n\n\
+         Do not restate the kanban-style protocol, the task tools, or the standing rules — the \
+         worker is given all of those anyway, and repeating them wastes the room. Do not invent \
+         facts about the codebase you have not been told; say what to check instead. Under 300 \
+         words. Output the instructions only — no preamble, no heading, no code fence.",
+        project.goal.trim(),
+        if repos.is_empty() { "(none named yet)" } else { &repos },
+    );
+
+    let outcome = runtime::run_one_shot_task(
+        context,
+        RunOneShotRequest {
+            persona_slug: CONDUCTOR_PERSONA,
+            cwd,
+            model_name: &crate::project_tick::resolve_tier("strong"),
+            task: &task,
+            approval_mode: approval_mode.clone(),
+            diagnostics: None,
+            instance_id: Some(project.conductor_instance(&project.instance_id).to_string()),
+            preset_personas: None,
+            project_brief: None,
+            project_id: None,
+        },
+    )
+    .await;
+
+    match outcome {
+        Ok(metalcraft::RunOutcome::Completed(state)) => state
+            .final_answer()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string),
+        other => {
+            log::warn!(
+                "project {}: could not compose the worker brief ({other:?}); \
+                 the worker will run on its persona alone",
+                project.id
+            );
+            None
+        }
+    }
+}
+
 // ── the turn ─────────────────────────────────────────────────────────────────
 
 /// What the conductor decided this tick.
@@ -300,6 +394,7 @@ pub async fn conduct(
             diagnostics: None,
             instance_id: Some(project.conductor_instance(&project.instance_id).to_string()),
             preset_personas: None,
+            project_brief: None,
             project_id: Some(project.id.clone()),
         },
     )

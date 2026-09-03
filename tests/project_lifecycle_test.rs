@@ -1,5 +1,5 @@
 //! One project, from creation to completion, through the pieces that actually run
-//! it: the store, the scratchpad, and the four `goal_*` tools.
+//! it: the store, the scratchpad, and the `project_*` tools.
 //!
 //! What this is really guarding is the loop's memory. A project is a hundred fresh
 //! conversations that share nothing but one markdown file, so if the tools do
@@ -28,6 +28,8 @@ fn a_project(id: &str) -> Project {
         kind: ProjectKind::Build,
         instance_id: "inst_test".into(),
         conductor_instance_id: String::new(),
+        worker_brief: String::new(),
+        tick_requested: false,
         agent_preset: "general-agent".into(),
         workspace: projects::Workspace::default(),
         status: ProjectStatus::Active,
@@ -45,7 +47,7 @@ fn a_project(id: &str) -> Project {
 }
 
 #[tokio::test]
-async fn a_goal_lives_through_its_scratchpad() {
+async fn a_project_lives_through_its_scratchpad() {
     let data_dir = std::env::temp_dir().join(format!("mc-agent-project-{}", std::process::id()));
     let _ = fs::remove_dir_all(&data_dir);
     unsafe {
@@ -329,6 +331,27 @@ async fn a_goal_lives_through_its_scratchpad() {
     assert!(rendered.contains("Unwrap on a None"), "{rendered}");
     assert!(rendered.contains("Merged"), "{rendered}");
     projects::delete(&audit.id).unwrap();
+
+    // ── forcing a tick is a request, not a preemption ────────────────────────
+    let mut forced = projects::get(&project.id).unwrap();
+    forced.status = ProjectStatus::Active;
+    forced.counters.last_tick_at = Some(chrono::Utc::now().to_rfc3339());
+    forced.tick_requested = false;
+    assert!(
+        !project_tick::is_due(&forced, chrono::Utc::now()),
+        "a project that just ticked is not due"
+    );
+
+    forced.tick_requested = true;
+    assert!(
+        project_tick::is_due(&forced, chrono::Utc::now()),
+        "but a forced one is, whatever its bookmark says"
+    );
+
+    // A paused project that is forced stays paused: "run now" is about WHEN, not
+    // about overriding a decision somebody already took.
+    forced.status = ProjectStatus::Paused;
+    assert!(!project_tick::is_due(&forced, chrono::Utc::now()));
 
     // ── deleted ──────────────────────────────────────────────────────────────
     projects::delete(&project.id).expect("delete");
