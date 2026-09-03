@@ -119,7 +119,14 @@ impl Evidence {
 }
 
 /// One slice of a project's plan.
+///
+/// Published as `ProjectTask` rather than `Task`. In Rust, inside this module,
+/// `Task` is unambiguous; on the wire it is not — a generated Swift client puts
+/// every schema in one namespace, where a type called `Task` shadows Swift's own
+/// `Task` and breaks every `Task { … }` in the app. The name is only free here
+/// because this module is small.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = ProjectTask)]
 pub struct Task {
     /// Short and typeable (`t1`, `t2`) — it is quoted in the scratchpad, in
     /// handoffs and in the journal, so it has to survive being retyped.
