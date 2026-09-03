@@ -2740,6 +2740,49 @@
         }
       }
     },
+    "/api/v1/goals/{id}/findings": {
+      "get": {
+        "tags": [
+          "goals"
+        ],
+        "summary": "`GET /api/v1/goals/{id}/findings` — what an audit goal has turned up.",
+        "description": "Empty for a build goal, which keeps no ledger: its findings are its plan.",
+        "operationId": "get_goal_findings",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Goal id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalFindings"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/goals/{id}/journal": {
       "get": {
         "tags": [
@@ -5822,6 +5865,66 @@
           }
         }
       },
+      "Finding": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "severity",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`path/to/file.rs:42`, when it has one."
+          },
+          "id": {
+            "type": "string",
+            "description": "Short and stable (`f1`, `f2`) — it is quoted in PR bodies and in the\nscratchpad, so it has to be typeable."
+          },
+          "link": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The PR or issue it turned into."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity"
+          },
+          "state": {
+            "$ref": "#/components/schemas/FindingState"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        }
+      },
+      "FindingState": {
+        "type": "string",
+        "description": "Where a finding has got to.\n\n`Rejected` is the state that keeps the ledger honest. Without it a finding\nsomebody decided against would be re-found on the next sweep, forever — the\nledger has to remember the noes as well as the yeses.",
+        "enum": [
+          "open",
+          "pr_open",
+          "issue_open",
+          "merged",
+          "rejected"
+        ]
+      },
       "FlowBindingView": {
         "type": "object",
         "description": "The binding for one flow, resolved for display.",
@@ -6604,6 +6707,32 @@
             }
           }
         ]
+      },
+      "GoalFindings": {
+        "type": "object",
+        "required": [
+          "findings",
+          "open_prs",
+          "max_open_prs"
+        ],
+        "properties": {
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            }
+          },
+          "max_open_prs": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "open_prs": {
+            "type": "integer",
+            "description": "How many PRs this goal has open, against its own limit — the pair a\nreviewer needs to know whether it is holding back on purpose.",
+            "minimum": 0
+          }
+        }
       },
       "GoalJournal": {
         "type": "object",
@@ -9337,6 +9466,14 @@
             "type": "boolean"
           }
         }
+      },
+      "Severity": {
+        "type": "string",
+        "enum": [
+          "high",
+          "medium",
+          "low"
+        ]
       },
       "Skill": {
         "type": "object",

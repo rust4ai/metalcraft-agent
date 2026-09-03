@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 /// Adding a persona, skill, or whole integration is just dropping files
 /// under `seed/` — no edit to this file is needed.
 ///
-/// Layout (top-level subdirs map to data dirs; `integrations/<id>/` is a
-/// pack tree):
+/// Layout (top-level subdirs map to data dirs; `agent_packs/<id>/` is a bundle
+/// installed into the content store rather than copied to a data dir):
 /// ```text
 /// seed/
 ///   personas/*.json          -> versioned upgrade (see write_versioned_seeds)
@@ -21,7 +21,10 @@ use std::path::{Path, PathBuf};
 ///   flows/*                  -> write-if-missing
 ///   api_tools/*              -> write-if-missing
 ///   flow_templates/*         -> write-if-missing
-///   integrations/<id>/  -> pack-version-gated (see write_integrations)
+///   agent_packs/<id>/        -> installed as an agent pack, version-gated on its
+///                               `agent_pack.json` (see install_seed_agent_packs).
+///                               A first-party integration ships here, vendored at
+///                               `agent_packs/<id>/integrations/<id>/`.
 /// ```
 ///
 /// Caveat: `include_dir` re-embeds when the *contents* of already-tracked files
@@ -457,49 +460,24 @@ fn collect_pack_files(
     }
 }
 
-/// Materialize a single embedded integration into the data dir, writing
-/// any of its files that are missing (which also repairs a partial install).
-/// Returns `false` if no pack with `id` is embedded in the binary.
-///
-/// Called by [`crate::integrations::set_enabled`] so that *enabling* a
-/// pack always guarantees its personas, skills, and api_tools are present on
-/// disk — an enabled flag with no files behind it was a real failure mode.
-/// Idempotent: existing files are left untouched (version upgrades still happen
-/// at startup via [`write_integrations`]).
-/// True when a pack with this id ships embedded in the binary (a first-party
-/// seed). Registry installs refuse ids that collide with an embedded pack so the
-/// version-gated boot seeder can never clobber a registry install.
-pub fn is_embedded_integration(id: &str) -> bool {
-    SEED.get_dir(format!("integrations/{id}")).is_some()
-}
-
-pub fn install_pack(id: &str) -> bool {
-    let Some(pack_dir) = SEED.get_dir(format!("integrations/{id}")) else {
-        return false;
-    };
-    let dest_root = paths::integrations_dir().join(id);
-    let mut files: Vec<(PathBuf, &[u8])> = Vec::new();
-    collect_files(pack_dir, pack_dir.path(), &mut files);
-    for (rel_path, content) in files {
-        let target = dest_root.join(&rel_path);
-        if target.exists() {
-            continue;
-        }
-        if let Some(parent) = target.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                eprintln!("Warning: could not create {}: {e}", parent.display());
-                continue;
-            }
-        }
-        if let Err(e) = fs::write(&target, content) {
-            eprintln!("Warning: could not write {}: {e}", target.display());
-        }
-    }
-    true
-}
+// `is_embedded_integration` and `install_pack` used to live here. Both read
+// `seed/integrations/<id>/`, a layout that no longer exists: a first-party pack now
+// ships *vendored inside a seeded agent pack*
+// (`seed/agent_packs/<pack>/integrations/<id>/`) and is installed through
+// [`install_seed_agent_packs`] into the content store. Both functions had no callers
+// left, both would have returned `false` for every pack ever asked about, and
+// `install_pack` wrote into `paths::integrations_dir()` — a directory this very module
+// retires on boot. Their doc comments referenced `integrations::set_enabled` and
+// `write_integrations`, neither of which exists either. Deleted rather than repaired:
+// there is nothing they could correctly do that the agent-pack path does not already do.
+// `collect_files` stayed, gated to `#[cfg(test)]`: its only remaining caller is the
+// test below that checks each seeded agent pack carries its manifest, preset,
+// persona, skill and vendored integration. `collect_pack_files` is the walker the
+// runtime uses — it collects into the shape a bundle wants rather than a flat list.
 
 /// Recursively collect every embedded file under `dir` as
 /// `(path_relative_to_base, contents)`, descending into subdirectories.
+#[cfg(test)]
 fn collect_files<'a>(dir: &Dir<'a>, base: &Path, out: &mut Vec<(PathBuf, &'a [u8])>) {
     for f in dir.files() {
         if let Ok(rel) = f.path().strip_prefix(base) {
@@ -815,5 +793,63 @@ mod tests {
             checked >= 2,
             "expected the metalcraft-* packs, checked {checked}"
         );
+    }
+
+    /// The Metalcraft Images pack is the only seeded pack that can spend the user's
+    /// money, and the reason it earns that is the loop it enables: generate, then
+    /// *look at what you made*, then report. An agent that can generate but not
+    /// check its own work is the thing this pack was built to stop being.
+    ///
+    /// So this guards the pieces that make the loop possible against a refactor that
+    /// keeps the pack while quietly dropping one of them: the specialist persona, the
+    /// skill it loads, and the three tools that create, edit, and see.
+    #[test]
+    fn the_images_pack_can_generate_edit_and_look_at_what_it_made() {
+        use crate::agent_preset::AgentPreset;
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let pack = repo.join("seed/agent_packs/metalcraft-images");
+
+        let preset: AgentPreset = serde_json::from_str(
+            &fs::read_to_string(pack.join("agent_presets/metalcraft-images.json"))
+                .expect("seeded preset"),
+        )
+        .expect("seeded preset parses");
+        assert_eq!(preset.default_persona, "metalcraft-images-agent");
+        // Unlike the packs pack, this one IS an agent worth starting — an image
+        // studio is a thing a person sits down with, not just a capability the
+        // orchestrator borrows.
+        assert!(!preset.library, "the images preset is a startable agent");
+        assert!(preset.ensure_spawnable().is_ok());
+
+        let persona: crate::persona::Persona = serde_json::from_str(
+            &fs::read_to_string(pack.join("personas/metalcraft-images-agent.json"))
+                .expect("seeded persona"),
+        )
+        .expect("seeded persona parses");
+        assert!(
+            // The JSON key is `packs`; the field kept the older name `integrations`
+            // and reads the newer spelling through a serde alias.
+            persona.integrations.contains(&"metalcraft-images".to_string()),
+            "the persona reaches its tools through `packs`; without it the specialist \
+             has nothing but load_skill"
+        );
+        assert!(
+            pack.join("skills/metalcraft-images.md").is_file(),
+            "the skill that carries the generate -> describe -> report workflow"
+        );
+
+        for tool in [
+            "mimg_generate_image",
+            "mimg_edit_image",
+            // The one that closes the loop. Losing this leaves an agent that pays
+            // for images and cannot tell whether they are right.
+            "mimg_describe_image",
+        ] {
+            assert!(
+                pack.join(format!("integrations/metalcraft-images/api_tools/{tool}.json"))
+                    .is_file(),
+                "missing {tool}"
+            );
+        }
     }
 }

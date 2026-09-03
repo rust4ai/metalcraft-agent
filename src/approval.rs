@@ -134,6 +134,24 @@ impl OperationKind {
             {
                 Self::ReadFile
             }
+            // Metalcraft Images pack (`mimg_` tools): the catalog and the history
+            // auto-approve — looking up which models exist, what they cost, or what
+            // was already made changes nothing and costs nothing.
+            //
+            // Everything else in this pack falls through to the default `Execute`
+            // arm on purpose, and it is a different purpose than usual: these tools
+            // spend the user's real money. `mimg_generate_image`, `mimg_edit_image`
+            // and `mimg_describe_image` each bill credits per call (a description is
+            // one inference call, which is exactly why buildr.space made its own
+            // vision verdict opt-in). `mimg_share_image` spends nothing but mints a
+            // link that anyone holding it can open, which is a disclosure the owner
+            // should get to see coming. `mimg_upload_image` reads a local file and
+            // sends it off the machine.
+            n if n.starts_with("mimg_")
+                && (n.contains("_list") || n.contains("_get")) =>
+            {
+                Self::ReadFile
+            }
             // Metalcraft Email pack (`memail_` tools) is read-only — it lists,
             // searches and reads mail but never sends or mutates it, so the whole
             // prefix auto-approves. A future sending tool must be excluded here

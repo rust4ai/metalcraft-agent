@@ -4,9 +4,12 @@
 store, the scratchpad, the four `goal_*` tools, the 30-minute heartbeat, the
 journal, the REST surface, a small buildr.space client, the model-free
 pre-flight, hibernate enforcement, tier escalation on a no-progress streak, and
-announcing a blocked or finished goal to the person who set it. What remains is
-the agent-facing half of G2 (provisioning and cloning a workspace, the
-`goal-agents` pack), G4, G5, B1 and F1. Supersedes the first draft
+announcing a blocked or finished goal to the person who set it. G2 is complete
+(`goal_await_run`, the `goal-workspace` skill, the personas' buildr integration)
+and so is G4's ledger — findings with a real dedupe key, and `max_open_prs`
+enforced in the tool rather than asked for in a prompt. F1 is built in
+`metalcraft-front` on a matching `goal-agents` branch. What remains is G5, B1,
+and the iOS half of F1. Supersedes the first draft
 (`GOAL_AGENTS_PLAN.md`, deleted).
 
 Two things landed differently from the plan, both deliberately:
@@ -657,10 +660,10 @@ it do overnight" is actually read.
 | Phase | What lands | Files |
 | --- | --- | --- |
 | **G1 — the primitive** ✅ | `Goal` store + CRUD, `InstanceOrigin::Goal`, scratchpad + the 4 `goal_*` tools, 30-min heartbeat pass in the daemon, journal chat, REST + OpenAPI | `src/goals.rs`, `src/goal_tick.rs`, `src/tools/goal.rs`, `src/paths.rs`, `src/agent_instance.rs`, `src/daemon.rs`, `src/workshop_api.rs` |
-| **F1 — the way in** *(ships with G1; nothing works without it)* | Goal create / list / detail / journal / unblock-reply in `metalcraft-front`; iOS follows | `metalcraft-front`, `metalcraft-mobile` |
-| **G2 — a place to work** (half: client, pre-flight, hibernate, compute accounting ✅; provisioning + pack pending) | workspace provisioning + reconcile-or-reprovision, hibernate enforcement, `pending_run` + short-fuse re-tick, compute-minute accounting, the `goal-agents` pack (rosters include `buildr-space-agent`) | `src/goal_tick.rs`, `src/goals.rs`, new pack |
+| **F1 — the way in** (desktop ✅, iOS pending) | Goal create / list / detail / journal / unblock-reply in `metalcraft-front`; iOS follows | `metalcraft-front`, `metalcraft-mobile` |
+| **G2 — a place to work** ✅ | workspace provisioning + reconcile-or-reprovision, hibernate enforcement, `pending_run` + short-fuse re-tick, compute-minute accounting, the `goal-agents` pack (rosters include `buildr-space-agent`) | `src/goal_tick.rs`, `src/goals.rs`, new pack |
 | **G3 — the loop closes** ✅ | review + groom ticks, no-progress detection and tier escalation, model-free pre-flight (§4.6), rails → `blocked`, unblock-by-reply through `io` | `src/goal_tick.rs`, `src/workshop_api.rs` |
-| **G4 — audit kind** | findings ledger + `goal_finding`, sweep/fix alternation, PR-per-finding, `max_open_prs`, dedupe via `github_list_pull_requests` | pack skills, `src/tools/goal.rs` |
+| **G4 — audit kind** ✅ | findings ledger + `goal_finding`, sweep/fix alternation, PR-per-finding, `max_open_prs`, dedupe via `github_list_pull_requests` | pack skills, `src/tools/goal.rs` |
 | **G5 — build kind at depth** | phase → PR mapping, test/serve gating before a box is checked | pack skills |
 | **B1 — buildr.space PR path** *(independent of G1–G3; **blocks G4**; do the permission batch now)* | App gains Pull requests write + Issues write + Actions/Checks read; `installation_token()` takes a permissions argument; `POST /workspaces/{id}/pr` on a separately-minted token; `op: "branch"` that also updates the repo row; `GET /workspaces/{id}/checks` for CI verdicts; new pack tools | buildr.space `github_app.rs`, `workspace_ops.rs`, `buildr-space` pack |
 

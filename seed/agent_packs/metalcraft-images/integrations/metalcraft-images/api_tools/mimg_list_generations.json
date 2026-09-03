@@ -1,0 +1,18 @@
+{
+  "name": "mimg_list_generations",
+  "description": "List the user's recent generations, newest first, each with its prompt, mode, status, credits charged, and images (`id`, `url`, `seed`). Optional: `limit` (1-200, default 50), `before` (an ISO-8601 timestamp — pass the `created_at` of the last row you saw to page further back; the response carries `next_before` while more remain), and `mode` ('text-to-image' or 'image-to-image'). Read-only and free. Also the RECOVERY path: if a generate or edit call timed out, list here to find whether the image was in fact produced — never re-run the generation, which would charge the user twice.",
+  "method": "GET",
+  "url": "https://images.metalcraftai.com/api/v1/generations?limit={limit}&before={before}&mode={mode}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "limit": { "type": "integer", "description": "How many to return (1-200, default 50)." },
+      "before": { "type": "string", "description": "ISO-8601 timestamp; return only generations created before it." },
+      "mode": { "type": "string", "description": "Filter to 'text-to-image' or 'image-to-image'." }
+    }
+  },
+  "body_mapping": "none"
+}

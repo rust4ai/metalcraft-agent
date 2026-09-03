@@ -1,0 +1,14 @@
+{
+  "name": "mimg_list_models",
+  "description": "List the image models available for generating and editing, each with its per-image credit price. Call this FIRST: it is the only way to know a valid `model` id, what a generation will cost, and — via each entry's `modes` — which models can EDIT an existing image rather than only create one from text. Each entry is {model, provider, kind, modes, source_input_key, per_unit_credits, unit, notes}; `modes` contains 'text-to-image' and/or 'image-to-image', and `per_unit_credits` is in micro-credits (divide by 1000 for credits). Takes no parameters. Read-only and free.",
+  "method": "GET",
+  "url": "https://images.metalcraftai.com/api/v1/models",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "body_mapping": "none"
+}

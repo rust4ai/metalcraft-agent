@@ -246,6 +246,83 @@ async fn a_goal_lives_through_its_scratchpad() {
     assert_eq!(entries[0].tick, 1);
     assert!(entries[0].progressed);
 
+    // ── an audit goal keeps a ledger, and the cap is a rail not a hope ───────
+    let mut audit = a_goal(&goals::new_id());
+    audit.kind = GoalKind::Audit;
+    audit.title = "Audit".into();
+    audit.rails.max_open_prs = 2;
+    goals::save(&audit).unwrap();
+
+    let finding = goal_tools::GoalFindingTool::new(audit.id.clone());
+    let update = goal_tools::GoalFindingUpdateTool::new(audit.id.clone());
+
+    let first = finding
+        .call(serde_json::json!({
+            "title": "Unwrap on a None",
+            "file": "src/lib.rs:42",
+            "severity": "high",
+            "detail": "…"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(first["already_known"], false);
+    let id = first["id"].as_str().unwrap().to_string();
+
+    // The same thing, worded differently on a later sweep. This is the whole
+    // reason the ledger exists: two PRs for one bug is how a repo learns to
+    // ignore the sender.
+    let again = finding
+        .call(serde_json::json!({
+            "title": "  unwrap on a none.  ",
+            "file": "src/lib.rs:42",
+            "severity": "high"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(again["already_known"], true);
+    assert_eq!(again["id"], serde_json::json!(id));
+    assert_eq!(metalcraft_agent::goal_findings::list(&audit.id).len(), 1);
+
+    // Fill the PR slots, then be refused the third — in code, not in a prompt.
+    for (title, file) in [("Missing bound", "src/a.rs:1"), ("Dead branch", "src/b.rs:2")] {
+        finding
+            .call(serde_json::json!({ "title": title, "file": file, "severity": "low" }))
+            .await
+            .unwrap();
+    }
+    let ids: Vec<String> = metalcraft_agent::goal_findings::list(&audit.id)
+        .iter()
+        .map(|f| f.id.clone())
+        .collect();
+    for id in ids.iter().take(2) {
+        update
+            .call(serde_json::json!({ "id": id, "state": "pr_open", "link": "http://pr" }))
+            .await
+            .expect("within the cap");
+    }
+    let refused = update
+        .call(serde_json::json!({ "id": ids[2], "state": "pr_open" }))
+        .await
+        .expect_err("the cap holds");
+    assert!(format!("{refused}").contains("limit"), "{refused}");
+
+    // A merged PR gives its slot back; an issue never took one.
+    update
+        .call(serde_json::json!({ "id": &ids[0], "state": "merged" }))
+        .await
+        .unwrap();
+    update
+        .call(serde_json::json!({ "id": &ids[2], "state": "pr_open" }))
+        .await
+        .expect("a merged PR freed a slot");
+    assert_eq!(metalcraft_agent::goal_findings::open_prs(&audit.id), 2);
+
+    // And the agent can see all of it next tick.
+    let rendered = metalcraft_agent::goal_findings::render(&audit.id);
+    assert!(rendered.contains("Unwrap on a None"), "{rendered}");
+    assert!(rendered.contains("Merged"), "{rendered}");
+    goals::delete(&audit.id).unwrap();
+
     // ── deleted ──────────────────────────────────────────────────────────────
     goals::delete(&goal.id).expect("delete");
     assert!(goals::get(&goal.id).is_none());

@@ -430,3 +430,194 @@ impl metalcraft::Tool for GoalAwaitRunTool {
         }))
     }
 }
+
+// ── the audit ledger ─────────────────────────────────────────────────────────
+
+pub struct GoalFindingTool {
+    goal_id: String,
+}
+
+impl GoalFindingTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+fn severity_of(raw: &str) -> Result<crate::goal_findings::Severity, metalcraft::GraphError> {
+    use crate::goal_findings::Severity;
+    match raw {
+        "high" => Ok(Severity::High),
+        "medium" => Ok(Severity::Medium),
+        "low" => Ok(Severity::Low),
+        other => Err(err(
+            "goal_finding",
+            format!("Unknown severity '{other}'. One of: high, medium, low."),
+        )),
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for GoalFindingTool {
+    fn name(&self) -> &str {
+        "goal_finding"
+    }
+
+    fn description(&self) -> &str {
+        "Record something you found, in the goal's findings ledger. The ledger is what stops you \
+         re-reporting on tick 9 what you already opened a PR for on tick 4 — so record every \
+         finding here as you find it, even the ones you do not intend to fix. A finding you have \
+         already recorded comes back with its existing id and state instead of being added twice."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "One line: what is wrong. Specific enough that another sweep would recognise it as the same thing."
+                },
+                "file": {
+                    "type": "string",
+                    "description": "Where, as `path/to/file.rs:42`. Strongly preferred — it is half the dedupe key."
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                    "description": "high = wrong and will bite (bug, security, data loss). medium = worth fixing. low = tidying."
+                },
+                "detail": {
+                    "type": "string",
+                    "description": "The evidence: what the code does, and what it should do. This becomes the PR body, so write it for a reviewer who has not read the file."
+                }
+            },
+            "required": ["title", "severity"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let title = args["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| err("goal_finding", "Missing required parameter: title"))?;
+        let severity = severity_of(args["severity"].as_str().unwrap_or("medium"))?;
+        let file = args["file"].as_str().map(str::trim).filter(|f| !f.is_empty());
+        let detail = args["detail"].as_str().unwrap_or_default();
+
+        let (finding, already) =
+            crate::goal_findings::add(&self.goal_id, title, file, severity, detail)
+                .map_err(|e| err("goal_finding", e))?;
+
+        Ok(serde_json::json!({
+            "id": finding.id,
+            "already_known": already,
+            "state": finding.state,
+            "link": finding.link,
+            "note": if already {
+                "You already found this. Do not open a second PR for it."
+            } else {
+                "Recorded."
+            },
+        }))
+    }
+}
+
+pub struct GoalFindingUpdateTool {
+    goal_id: String,
+}
+
+impl GoalFindingUpdateTool {
+    pub fn new(goal_id: String) -> Self {
+        Self { goal_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for GoalFindingUpdateTool {
+    fn name(&self) -> &str {
+        "goal_finding_update"
+    }
+
+    fn description(&self) -> &str {
+        "Move a finding along: you opened a PR for it (`pr_open`, with the PR url), filed an issue \
+         instead (`issue_open`), it merged (`merged`), or it turned out not to be worth doing \
+         (`rejected`). Recording a rejection matters as much as recording a fix — without it the \
+         next sweep finds the same thing again and argues for it again."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "The finding id, e.g. 'f3'." },
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "pr_open", "issue_open", "merged", "rejected"],
+                    "description": "Where it has got to."
+                },
+                "link": {
+                    "type": "string",
+                    "description": "The PR or issue url, when there is one."
+                }
+            },
+            "required": ["id", "state"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        use crate::goal_findings::FindingState;
+
+        let id = args["id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|i| !i.is_empty())
+            .ok_or_else(|| err("goal_finding_update", "Missing required parameter: id"))?;
+        let state = match args["state"].as_str().unwrap_or("open") {
+            "open" => FindingState::Open,
+            "pr_open" => FindingState::PrOpen,
+            "issue_open" => FindingState::IssueOpen,
+            "merged" => FindingState::Merged,
+            "rejected" => FindingState::Rejected,
+            other => {
+                return Err(err(
+                    "goal_finding_update",
+                    format!("Unknown state '{other}'."),
+                ));
+            }
+        };
+        let link = args["link"].as_str().map(str::trim).filter(|l| !l.is_empty());
+
+        // The open-PR cap, enforced here rather than asked for in a prompt.
+        // Twenty simultaneous bot PRs is how a repo learns to ignore the bot,
+        // and a rail that only exists as advice is not a rail.
+        if state.holds_a_pr_slot() {
+            let goal = goals::get(&self.goal_id)
+                .ok_or_else(|| err("goal_finding_update", "this goal no longer exists"))?;
+            let already = crate::goal_findings::list(&self.goal_id)
+                .iter()
+                .filter(|f| f.id != id && f.state.holds_a_pr_slot())
+                .count();
+            if already >= goal.rails.max_open_prs as usize {
+                return Err(err(
+                    "goal_finding_update",
+                    format!(
+                        "{already} of this goal's PRs are already open, which is its limit. Keep \
+                         sweeping and recording findings; open the next PR once one of those is \
+                         merged or closed.",
+                    ),
+                ));
+            }
+        }
+
+        let finding = crate::goal_findings::set_state(&self.goal_id, id, state, link)
+            .map_err(|e| err("goal_finding_update", e))?;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "id": finding.id,
+            "state": finding.state,
+            "open_prs": crate::goal_findings::open_prs(&self.goal_id),
+        }))
+    }
+}

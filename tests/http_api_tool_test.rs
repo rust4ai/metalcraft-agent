@@ -309,3 +309,99 @@ fn seeded_read_only_api_tools_auto_approve() {
         gated.join("\n  - ")
     );
 }
+
+// ── Metalcraft Images ───────────────────────────────────────────────────────────
+//
+// This pack is the only seeded one whose tools spend the user's money, which makes
+// two of its properties worth nailing down rather than trusting to review.
+
+/// A tool that runs a *synchronous* generation must declare a real timeout.
+///
+/// The default is 30 seconds ([`HttpApiToolConfig::timeout`]), and image generation
+/// is a fal render plus a download plus an upload to storage, held open on one
+/// request. At 30s the tool returns an error while the server goes on to succeed and
+/// charge — and an agent's natural reaction to an error is to try again. That is a
+/// double charge for one image, which is the most expensive mistake this pack can
+/// make, so the timeout is asserted rather than assumed.
+#[test]
+fn image_generation_tools_declare_a_long_enough_timeout() {
+    const NEEDS_TIME: &[&str] = &[
+        "mimg_generate_image",
+        "mimg_edit_image",
+        "mimg_describe_image",
+        "mimg_upload_image",
+    ];
+    let mut checked = 0;
+    for (path, config) in seeded_api_tools() {
+        if !NEEDS_TIME.contains(&config.name.as_str()) {
+            continue;
+        }
+        checked += 1;
+        let secs = config.timeout_secs.unwrap_or(0);
+        assert!(
+            secs >= 120,
+            "{} declares timeout_secs={secs}; a synchronous generation needs at least 120 \
+             or it will time out on work that then completes and charges",
+            path.display()
+        );
+    }
+    assert_eq!(checked, NEEDS_TIME.len(), "a spending tool went missing from the pack");
+}
+
+/// The pack's whole safety story is that `METALCRAFT_TOKEN` — an account credential
+/// with the user's full reach — only ever travels to Metalcraft's own service. A tool
+/// pointed anywhere else, by typo or otherwise, would hand that token to a stranger.
+#[test]
+fn image_tools_only_send_the_account_token_to_images_metalcraftai() {
+    let mut checked = 0;
+    for (path, config) in seeded_api_tools() {
+        if !config.name.starts_with("mimg_") {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            config.url.starts_with("https://images.metalcraftai.com/"),
+            "{} points at {} — a mimg_ tool carries METALCRAFT_TOKEN and must only \
+             ever reach images.metalcraftai.com",
+            path.display(),
+            config.url
+        );
+    }
+    assert!(checked >= 8, "expected the full mimg_ toolset, found {checked}");
+}
+
+/// Reads auto-approve; anything that spends credits or hands out access asks first.
+/// Asserted by name because the classification is a policy decision, not a pattern:
+/// a future `mimg_*` tool inheriting the wrong arm silently is exactly the failure
+/// this pins down.
+#[test]
+fn image_tool_approval_matches_what_each_tool_costs() {
+    use metalcraft_agent::approval::{OperationKind, PermissionLevel};
+
+    let args = serde_json::json!({});
+    let level = |name: &str| OperationKind::classify(name, &args).default_permission();
+
+    for free in ["mimg_list_models", "mimg_list_generations", "mimg_get_generation"] {
+        assert_eq!(
+            level(free),
+            PermissionLevel::AutoApprove,
+            "{free} costs nothing and changes nothing — gating it is pure friction"
+        );
+    }
+    for spends in [
+        "mimg_generate_image",
+        "mimg_edit_image",
+        // A description is one inference call against the user's credits.
+        "mimg_describe_image",
+        // Spends nothing, but mints a link anyone holding it can open.
+        "mimg_share_image",
+        // Reads a local file and sends it off the machine.
+        "mimg_upload_image",
+    ] {
+        assert_ne!(
+            level(spends),
+            PermissionLevel::AutoApprove,
+            "{spends} spends money or discloses something — it must ask first"
+        );
+    }
+}

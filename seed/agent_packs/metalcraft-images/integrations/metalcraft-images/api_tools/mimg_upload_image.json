@@ -1,0 +1,25 @@
+{
+  "name": "mimg_upload_image",
+  "description": "Upload a LOCAL image file so it can be used as the source of an edit. Returns {upload_id, status: 'ready'}; pass that id to mimg_edit_image as `upload_id`. Only needed for a file on this machine — to edit an image that is already in the gallery, skip this and pass `source_image_id` to mimg_edit_image instead. The file must live under the agent's upload root (METALCRAFT_UPLOAD_ROOT, default <data>/uploads); files outside it are refused. Image content types only, 20MB limit. Uploading is free — it spends no credits.",
+  "method": "POST",
+  "url": "https://images.metalcraftai.com/api/v1/uploads/direct",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "Path to the local image file. Must resolve inside the configured upload root (METALCRAFT_UPLOAD_ROOT, default <data>/uploads)."
+      }
+    },
+    "required": ["file_path"]
+  },
+  "body_mapping": "multipart",
+  "multipart": {
+    "file_param": "file_path",
+    "file_field": "file"
+  },
+  "timeout_secs": 120
+}

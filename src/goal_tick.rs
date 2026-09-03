@@ -553,6 +553,20 @@ pub fn tick_frame(goal: &Goal, kind: TickKind, tick_number: u32) -> String {
         .map(|s| goals::trim_for_injection(&s))
         .unwrap_or_else(|| goals::seed_scratchpad(goal));
 
+    // The ledger, for an audit goal, injected the same way the scratchpad is —
+    // it is the dedupe key, and a sweep that cannot see it re-finds what it
+    // already opened a PR for.
+    let ledger = if goal.kind == crate::goals::GoalKind::Audit {
+        format!(
+            "\n\n## Findings ledger\n\n{}\n\n{} of {} PR slots in use.\n",
+            crate::goal_findings::render(&goal.id),
+            crate::goal_findings::open_prs(&goal.id),
+            goal.rails.max_open_prs,
+        )
+    } else {
+        String::new()
+    };
+
     let pending = goal
         .pending_run
         .as_ref()
@@ -565,7 +579,7 @@ pub fn tick_frame(goal: &Goal, kind: TickKind, tick_number: u32) -> String {
         })
         .unwrap_or_default();
 
-    format!("{common}{specific}{pending}\n\n---\n\n{scratchpad}")
+    format!("{common}{specific}{pending}\n\n---\n\n{scratchpad}{ledger}")
 }
 
 // ── running one ──────────────────────────────────────────────────────────────

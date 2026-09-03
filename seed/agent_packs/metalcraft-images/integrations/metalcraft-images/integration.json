@@ -1,0 +1,12 @@
+{
+  "id": "metalcraft-images",
+  "name": "Metalcraft Images",
+  "description": "Generate, edit, and inspect images via Metalcraft Images (images.metalcraftai.com), which runs fal.ai models through Metalcraft Inference and bills the caller's Metalcraft credits. List models and prices (mimg_list_models), text-to-image (mimg_generate_image), image-to-image edits (mimg_edit_image) from a gallery image, an uploaded file (mimg_upload_image), or a URL, ask a vision model what is in an image (mimg_describe_image), mint a shareable link (mimg_share_image), and browse history (mimg_list_generations, mimg_get_generation). Authenticated by METALCRAFT_TOKEN sent as Authorization: Bearer. Generating, editing, and describing are premium-only and spend credits.",
+  "version": "1.0.0",
+  "requires_env": [
+    "METALCRAFT_TOKEN"
+  ],
+  "tags": [
+    "metalcraft-ecosystem"
+  ]
+}

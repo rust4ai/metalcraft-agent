@@ -1,0 +1,51 @@
+{
+  "name": "mimg_generate_image",
+  "description": "Generate one or more images from a text prompt and save them to the user's Metalcraft Images gallery. Requires `model` (an id from mimg_list_models whose `modes` include 'text-to-image') and `prompt`. Optional: `negative_prompt` (what to avoid), `num_images` (1-8, default 1 — EACH is billed), `image_size` (a preset string like 'square_hd', 'portrait_16_9', 'landscape_16_9', or an object {width,height}), `seed` (integer — reuse a previous image's seed to vary a prompt around the same composition), and `guidance_scale`. Returns the generation with a per-image `id`, a `url`, the per-image `seed`, and the `credits` charged. This SPENDS the user's real credits and needs a premium account — if the model, prompt, or count is ambiguous, confirm with the user before calling. If this call ever TIMES OUT, do NOT call it again: the generation is likely still running or already saved, so recover it with mimg_list_generations. Calling again double-charges.",
+  "method": "POST",
+  "url": "https://images.metalcraftai.com/api/v1/generations",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "description": "Model id from mimg_list_models with 'text-to-image' in its modes."
+      },
+      "prompt": {
+        "type": "string",
+        "description": "The text prompt to render."
+      },
+      "negative_prompt": {
+        "type": "string",
+        "description": "Optional: content to avoid."
+      },
+      "num_images": {
+        "type": "integer",
+        "description": "How many images to generate (1-8, default 1). Each is billed."
+      },
+      "image_size": {
+        "description": "A preset string ('square_hd', 'square', 'portrait_4_3', 'portrait_16_9', 'landscape_4_3', 'landscape_16_9') or an object {\"width\":N,\"height\":N}."
+      },
+      "seed": {
+        "type": "integer",
+        "description": "Optional seed for reproducible/remixable results. Reuse a prior image's seed to vary a prompt around the same composition."
+      },
+      "guidance_scale": {
+        "type": "number",
+        "description": "Optional prompt-adherence strength (model-dependent)."
+      }
+    },
+    "required": [
+      "model",
+      "prompt"
+    ]
+  },
+  "body_mapping": "params_nested",
+  "timeout_secs": 300,
+  "body_defaults": {
+    "mode": "text-to-image"
+  }
+}

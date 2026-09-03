@@ -1,0 +1,24 @@
+{
+  "manifest_version": 2,
+  "slug": "metalcraft-images",
+  "name": "Metalcraft Images",
+  "tagline": "Generates and edits images with fal.ai through Metalcraft Images, billed in the user's Metalcraft credits — and looks at what it made before handing it over.",
+  "description": "Persona, skill, and HTTP API tools to generate, edit, and inspect images via Metalcraft Images (images.metalcraftai.com), billed in the user's Metalcraft credits. Picks a model and quotes its per-image price, generates from a prompt, edits an existing image (from the gallery, a local file, or a URL), checks the result against what was asked for by having a vision model describe it, mints shareable links, and browses history to remix earlier work by seed. Authenticated by a single Metalcraft account token — METALCRAFT_TOKEN, sent as Authorization: Bearer. Generating, editing, and describing are premium-only and spend real credits.",
+  "default_persona": "metalcraft-images-agent",
+  "personas": [
+    {
+      "slug": "metalcraft-images-agent",
+      "role": "default"
+    }
+  ],
+  "skills": [
+    "metalcraft-images"
+  ],
+  "integrations": [
+    "metalcraft-images"
+  ],
+  "requires_env": [
+    "METALCRAFT_TOKEN"
+  ],
+  "version": "1.0.0"
+}

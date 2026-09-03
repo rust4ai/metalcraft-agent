@@ -1,0 +1,22 @@
+{
+  "name": "mimg_get_generation",
+  "description": "Fetch one generation by id — its prompt, mode, params, status, the credits charged, and its images (each with `id`, `url`, and the per-image `seed`). Give `id`, a generation id returned by mimg_generate_image, mimg_edit_image, or mimg_list_generations. Read-only and free.",
+  "method": "GET",
+  "url": "https://images.metalcraftai.com/api/v1/generations/{id}",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "The generation id."
+      }
+    },
+    "required": [
+      "id"
+    ]
+  },
+  "body_mapping": "none"
+}

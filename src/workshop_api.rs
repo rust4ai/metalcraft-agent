@@ -629,7 +629,7 @@ async fn auth_middleware(
         gateway_metalcraft_unregister,
         post_factory_reset,
         list_goals, get_goal, post_goal, patch_goal, delete_goal,
-        get_goal_journal, put_goal_scratchpad,
+        get_goal_journal, put_goal_scratchpad, get_goal_findings,
     ),
     components(schemas(
         FactoryResetRequest, ResetReport, ResetScope, ResetFailure, RestartExpectation,
@@ -646,6 +646,8 @@ async fn auth_middleware(
         crate::goals::Rails, crate::goals::Counters, crate::goals::PendingRun,
         crate::goals::ModelTiers, crate::goals::Progress,
         crate::goal_tick::JournalEntry, crate::goal_tick::TickKind,
+        GoalFindings, crate::goal_findings::Finding, crate::goal_findings::Severity,
+        crate::goal_findings::FindingState,
         crate::scheduled_tasks::IoBinding,
         FlowList, FlowListItem, FlowValidation,
         // The graph itself, from `metalcraft-flows` (its `schema` feature). Without
@@ -878,6 +880,7 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/goals/{id}", delete(delete_goal))
         .route("/api/v1/goals/{id}/journal", get(get_goal_journal))
         .route("/api/v1/goals/{id}/scratchpad", put(put_goal_scratchpad))
+        .route("/api/v1/goals/{id}/findings", get(get_goal_findings))
         .route("/api/v1/scheduled-flows", get(list_scheduled_flows))
         .route("/api/v1/scheduled-flows", post(post_scheduled_flow))
         .route(
@@ -9824,6 +9827,37 @@ async fn get_goal_journal(Path(id): Path<String>, Query(q): Query<JournalQuery>)
     }
     Json(GoalJournal {
         entries: crate::goal_tick::read_journal(&id, q.limit.unwrap_or(50)),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+struct GoalFindings {
+    findings: Vec<crate::goal_findings::Finding>,
+    /// How many PRs this goal has open, against its own limit — the pair a
+    /// reviewer needs to know whether it is holding back on purpose.
+    open_prs: usize,
+    max_open_prs: u32,
+}
+
+/// `GET /api/v1/goals/{id}/findings` — what an audit goal has turned up.
+///
+/// Empty for a build goal, which keeps no ledger: its findings are its plan.
+#[utoipa::path(
+    get,
+    path = "/api/v1/goals/{id}/findings",
+    tag = "goals",
+    params(("id" = String, Path, description = "Goal id")),
+    responses((status = 200, body = GoalFindings), (status = 404, body = ErrorResponse)),
+)]
+async fn get_goal_findings(Path(id): Path<String>) -> Response {
+    let Some(goal) = crate::goals::get(&id) else {
+        return err_json(StatusCode::NOT_FOUND, format!("no goal '{id}'"));
+    };
+    Json(GoalFindings {
+        findings: crate::goal_findings::list(&id),
+        open_prs: crate::goal_findings::open_prs(&id),
+        max_open_prs: goal.rails.max_open_prs,
     })
     .into_response()
 }

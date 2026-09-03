@@ -1,0 +1,27 @@
+{
+  "manifest_version": 2,
+  "id": "metalcraft-images",
+  "name": "Metalcraft Images",
+  "description": "Persona, skill, and HTTP API tools to generate, edit, and inspect images via Metalcraft Images (images.metalcraftai.com), billed in the user's Metalcraft credits. List the image models and their per-image price (mimg_list_models), generate from a prompt (mimg_generate_image), edit an existing image (mimg_edit_image) using a gallery image, an uploaded local file (mimg_upload_image), or a URL, ask a vision model what is actually in an image (mimg_describe_image), mint a shareable link (mimg_share_image), and browse history (mimg_list_generations, mimg_get_generation). Authenticated by a single Metalcraft account token — METALCRAFT_TOKEN, sent as Authorization: Bearer — the same token that works across every Metalcraft ecosystem app. Generating, editing, and describing are premium-only and each spends the caller's Metalcraft credits.",
+  "version": "1.0.0",
+  "tags": [
+    "metalcraft-ecosystem"
+  ],
+  "presets": [
+    "metalcraft-images"
+  ],
+  "provides": {
+    "personas": [
+      "metalcraft-images-agent"
+    ],
+    "skills": [
+      "metalcraft-images"
+    ],
+    "integrations": [
+      {
+        "id": "metalcraft-images",
+        "version": "1.0.0"
+      }
+    ]
+  }
+}

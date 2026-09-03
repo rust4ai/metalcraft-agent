@@ -1,0 +1,20 @@
+{
+  "name": "mimg_describe_image",
+  "description": "Ask a vision model what is ACTUALLY in one of the user's images — the only way you can check your own work, since you cannot see the images you generate. Give `image_id` (an image id from mimg_generate_image, mimg_edit_image, or mimg_list_generations). Optionally give `expect`: what the image was supposed to be, ideally the user's own words — then the answer is a verdict against it. Returns {verdict: {result, evidence, model, credits}}: with `expect`, `result` is 'pass' | 'fail' | 'unsure'; without it, 'described'. `evidence` is what the model can see (subjects, arrangement, text and whether it is spelled right, artefacts like extra fingers) and is always written BEFORE the verdict — read the evidence, not just the verdict. 'unavailable' means no verdict could be produced (with a `reason`); it is never a pass. SPENDS credits (one vision call) and needs premium, so use it to check work that matters, not on every image in a gallery.",
+  "method": "POST",
+  "url": "https://images.metalcraftai.com/api/v1/images/{image_id}/describe",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "image_id": { "type": "string", "description": "The image id to look at." },
+      "expect": { "type": "string", "description": "Optional: what the image was supposed to be. Present → pass/fail verdict; absent → plain description." }
+    },
+    "required": ["image_id"]
+  },
+  "body_mapping": "params_nested",
+  "timeout_secs": 180
+}

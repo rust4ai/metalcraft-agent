@@ -20,6 +20,7 @@ pub mod flows;
 pub mod pod_settings;
 pub mod schedule_timing;
 pub mod gateway_activity;
+pub mod goal_findings;
 pub mod goal_tick;
 pub mod goals;
 pub mod guard;

@@ -1,6 +1,9 @@
 # Metalcraft Images — intrinsic pack, image editing, and letting the agent see
 
-**Status:** plan. Nothing here is built yet.
+**Status:** **built.** All five phases landed; see [As built](#as-built) at the
+bottom for where the plan was wrong and what was done instead. Two things remain
+external to the code: apply `metalcraft-inference` migration `007_image_modes.sql`
+on deploy, and confirm the seeded edit model's fal slug and price.
 
 Today an agent cannot generate an image at all. The capability is written and
 correct — `packs/metalcraft_images` in `metalcraft-agent-external-packs`, four
@@ -330,3 +333,75 @@ worth shipping on its own: it turns "no agent can generate an image" into
 - **Renaming the pack id** is free only because nothing installed it. Confirm
   the registry has no `metalcraft_images` slug before deleting the external
   copy.
+
+---
+
+## As built
+
+Everything above shipped. Three things turned out differently once the code was
+open, and one item the plan did not have.
+
+**The reach problem did not exist.** Phase 4 was written expecting a
+newly-shipped pack to install everywhere and enable nowhere. It does not:
+`integrations::is_enabled` is now `agent_packs::store::resolve(id).is_some()` —
+enable/disable was retired, and scoping is structural (installed **and** named by
+`Persona.packs` **and** the preset). `general-agent` carries
+`delegates_to_any_persona: true`, and a persona may reach an integration its
+preset never declared, so the orchestrator delegates to
+`metalcraft-images-agent` the moment the pack is installed. No marker change, no
+per-pack enable list. `ecosystem_pack_ids()` and
+`paths::ecosystem_packs_seeded_marker()` are still callerless leftovers of the
+old scheme; left alone as out of scope.
+
+**The dead guards were deleted, not rewired.** `seed::is_embedded_integration`
+and `seed::install_pack` both read `seed/integrations/<id>/`, a layout that no
+longer exists — so both answered for zero packs, and `install_pack` wrote into a
+directory `seed` retires on boot. Nothing called either. Repairing them had no
+call site to serve (the pack-id downgrade guard in `agent_packs::install`
+already prevents the collision the doc comment claimed to prevent, and two packs
+vendoring one integration id is a supported state), so they are gone, with a
+comment where they were. The `seed.rs` module doc now documents `agent_packs/`.
+
+**The catalog had a live bug in the way.** `images.metalcraftai.com/api/v1/models`
+passed inference's OpenAI-shaped entries straight through — `id`, `owned_by`,
+nested `pricing_micro_credits` — while both consumers read `model`. The SPA's
+picker was rendering a column of blank options, and the pack's tool descriptions
+would have inherited the same mismatch. `models::list` now normalizes to one
+shape named after how it is used, which is also what makes `modes` filterable by
+the SPA and by `mimg_list_models`.
+
+**New: the premium gate needed a UI follow-up.** Moving the 402 off the extractor
+(so a lapsed account keeps its gallery) broke the SPA's paywall screen, which
+detected non-premium *by* that 402 on `whoami`. The SPA now signs such a user in,
+shows their history, disables Generate, and says why.
+
+### Verification
+
+| Repo | State |
+|---|---|
+| `metalcraft-inference` | builds; 8 unit tests pass (3 new, on `supports_mode`) |
+| `metalcraft-images-web` | builds; 7 tests pass (all new, on the vision verdict parser); SPA typechecks |
+| `metalcraft-agent` | builds; 46 test binaries green, incl. 6 new: `timeout_secs` on spending tools, `mimg_*` host pinning, approval classification by name, pack coherence, and two that map the shipped `mimg_edit_image` / `mimg_generate_image` configs through `build_body` — the `param_paths` rename (`upload_id` → `source_upload_id`) and the `mode` default are config, and both fail silently as a 400 if wrong |
+| `metalcraft-front` | typechecks; 577 tests pass, incl. 4 new on image-link detection |
+| `metalcraft-agent-external-packs` | `packs/metalcraft_images` removed; 13 packs valid |
+
+The existing agent suite caught the approval gap on its own: adding the pack
+turned `seeded_read_only_api_tools_auto_approve` red until `mimg_` had an arm in
+`OperationKind::classify`. That test was written after three earlier packs
+shipped without one.
+
+### Not done
+
+- **The migration is not applied.** `007_image_modes.sql` runs on deploy
+  (`railway run ./migrate`). Until then `/v1/models` has no `modes` column and
+  editing has no model.
+- **The edit model is a placeholder.** `bytedance/seedream/v5/pro/edit` at 40
+  credits/image is seeded so the path is exercisable; the slug is used verbatim
+  as the fal URL, so a wrong one 404s and refunds rather than mis-billing, but
+  the price would silently be wrong. Confirm both against fal's catalog and fix
+  from the admin dashboard — no deploy needed.
+- **No end-to-end run.** Nothing here was exercised against live fal, live
+  credits, or a real pod; every check is a build, a unit test, or a typecheck.
+  The first real generation is also the first test of the seeded edit model's slug.
+- The images SPA does not surface `describe` or `share` yet — both are API-only,
+  which is what the agent needs. The gallery UI can follow.

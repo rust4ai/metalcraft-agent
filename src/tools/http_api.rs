@@ -722,6 +722,66 @@ mod tests {
         }
     }
 
+    /// The shipped `mimg_edit_image` config, so the mapping below is asserted
+    /// against what actually ships rather than a copy of it.
+    fn seeded_config(name: &str) -> HttpApiToolConfig {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("seed/agent_packs/metalcraft-images/integrations/metalcraft-images/api_tools")
+            .join(format!("{name}.json"));
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{name} does not parse: {e}"))
+    }
+
+    /// An edit is one endpoint away from a generation — same URL, different `mode`
+    /// and a source image — and the pack expresses that entirely in config: a
+    /// `body_defaults` mode, and a `param_paths` rename from the argument name a
+    /// model can be told about (`upload_id`) to the field the API wants
+    /// (`source_upload_id`). Both are silent when wrong: the request goes out
+    /// looking fine and comes back a 400 about a missing source.
+    #[test]
+    fn the_seeded_edit_tool_sends_an_edit() {
+        let tool = make_tool(seeded_config("mimg_edit_image"));
+
+        let body = tool
+            .build_body(&json!({
+                "model": "some/edit/model",
+                "prompt": "make it night",
+                "upload_id": "11111111-1111-1111-1111-111111111111",
+            }))
+            .expect("an edit has a body");
+        assert_eq!(body["mode"], "image-to-image", "without this it silently generates instead");
+        assert_eq!(body["source_upload_id"], "11111111-1111-1111-1111-111111111111");
+        assert!(body.get("upload_id").is_none(), "the argument name must not leak through");
+
+        // The gallery source needs no rename, and the optionals a model leaves
+        // empty must not travel — an empty `image_url` alongside a real
+        // `source_image_id` is the kind of thing that reads as an ambiguous request.
+        let body = tool
+            .build_body(&json!({
+                "model": "some/edit/model",
+                "prompt": "make it night",
+                "source_image_id": "22222222-2222-2222-2222-222222222222",
+                "image_url": "",
+                "seed": null,
+            }))
+            .expect("an edit has a body");
+        assert_eq!(body["source_image_id"], "22222222-2222-2222-2222-222222222222");
+        assert!(body.get("image_url").is_none());
+        assert!(body.get("seed").is_none());
+    }
+
+    /// The counterpart: a generation must never be mistaken for an edit.
+    #[test]
+    fn the_seeded_generate_tool_stays_text_to_image() {
+        let tool = make_tool(seeded_config("mimg_generate_image"));
+        let body = tool
+            .build_body(&json!({"model": "some/model", "prompt": "a red fox"}))
+            .expect("a generation has a body");
+        assert_eq!(body["mode"], "text-to-image");
+        assert_eq!(body["prompt"], "a red fox");
+    }
+
     // -- clean_unexpanded_placeholders --
 
     #[test]

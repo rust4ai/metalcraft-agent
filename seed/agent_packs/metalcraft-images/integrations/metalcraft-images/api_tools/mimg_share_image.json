@@ -1,0 +1,19 @@
+{
+  "name": "mimg_share_image",
+  "description": "Mint a link to one image that ANYONE can open, for handing to the user or pasting into a message. Give `image_id`, optionally `expires_in` (seconds, default 86400 = 24h, max 604800 = 7 days). Returns {url, expires_in}. Use this rather than the `url` field of a generation: that one is owner-authenticated and only opens for the signed-in owner in a browser. Say when the link expires whenever you give it out. Free — spends no credits.",
+  "method": "POST",
+  "url": "https://images.metalcraftai.com/api/v1/images/{image_id}/share",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "image_id": { "type": "string", "description": "The image id to share." },
+      "expires_in": { "type": "integer", "description": "Seconds the link stays valid (60 to 604800; default 86400)." }
+    },
+    "required": ["image_id"]
+  },
+  "body_mapping": "params_nested"
+}

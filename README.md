@@ -184,20 +184,30 @@ Daemon flow settings also read `STARKBOT_PERSONA` (default `coding-agent`),
 
 ## Integrations & packs
 
-Packs are versioned directories under `seed/integration_packs/<id>/`, seeded into
-the data dir on startup and enabled at runtime (`pack_enable`, or the Workshop's
-Packs tab). Shipped packs:
+A pack is a versioned bundle of personas, skills and tools. First-party ones ship
+**in the binary**, as agent packs under `seed/agent_packs/<id>/` (each vendoring its
+integration at `integrations/<id>/`), and are installed on every boot — gated on the
+`agent_pack.json` version, so a pack update reaches existing pods. Everything else
+is installed on demand from the registry at `packs.metalcraftai.com`.
 
-`calcom` · `cloudflare` · `digitalocean_spaces` · `discord` · `discord_admin` ·
+Shipped in the binary:
+
+`metalcraft-images` (generate/edit images, and *look* at the result — billed in
+Metalcraft credits) · `metalcraft-packs` (registry discovery)
+
+From the registry: `calcom` · `cloudflare` · `discord` · `discord_admin` ·
 `email` (IMAP, read-only) · `github` · `linear` · `metalcraft-calendar`
-(timezone-aware) · `metalcraft-contacts` (CRM) · `metalcraft-notes` (markdown
-notes) · `railway` · `render` · `sentry` · `solarabase` (RAG) · `sprite_builder`
-· `starflask` (media)
+(timezone-aware) · `metalcraft-contacts` (CRM) · `metalcraft-email` ·
+`metalcraft-notes` (markdown notes) · `railway` · `render` · `s3` · `sentry` ·
+`solarabase` (RAG) · `sprite_builder` · `starflask` (media)
 
 Most tools are declarative JSON (HTTP-API tools with `$SECRET` substitution); a
 few that need non-HTTP protocols or request signing ship as native Rust tools.
-First-party Metalcraft packs (calendar, contacts, notes, …) authenticate with a
-single `METALCRAFT_TOKEN`. `scripts/smoke_packs.py` runs the read-only tools of a
+First-party Metalcraft packs (images, calendar, contacts, notes, …) authenticate
+with a single `METALCRAFT_TOKEN`, which a managed pod is already given. Note that
+the images pack **spends the user's credits**: generating, editing and describing
+each cost money, so those tools require approval while its reads auto-approve
+(`approval.rs`). `scripts/smoke_packs.py` runs the read-only tools of a
 pack against the live API to catch query drift.
 
 ## Gateway channels

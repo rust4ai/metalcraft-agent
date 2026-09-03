@@ -1,0 +1,75 @@
+{
+  "name": "mimg_edit_image",
+  "description": "Edit an existing image with a text instruction (image-to-image) and save the result to the gallery as a new generation. Requires `model` — an id from mimg_list_models whose `modes` include 'image-to-image'; a text-to-image-only model is refused before anything is billed — plus `prompt` (what to change, e.g. 'make it night, keep the composition') and ONE source: `source_image_id` (an image id from mimg_generate_image / mimg_list_generations — the cheapest and most common case, no upload needed), `upload_id` (from mimg_upload_image, for a local file), or `image_url` (a publicly readable URL). Optional: `negative_prompt`, `num_images` (1-8, EACH billed), `image_size`, `seed`, `guidance_scale`. Returns the new generation with per-image `id`, `url`, `seed`, and the `credits` charged. SPENDS real credits, premium only. On a TIMEOUT do not retry — recover with mimg_list_generations.",
+  "method": "POST",
+  "url": "https://images.metalcraftai.com/api/v1/generations",
+  "headers": {
+    "Authorization": "Bearer $METALCRAFT_TOKEN",
+    "Content-Type": "application/json"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "model": {
+        "type": "string",
+        "description": "Model id from mimg_list_models with 'image-to-image' in its modes."
+      },
+      "prompt": {
+        "type": "string",
+        "description": "The edit instruction — what should change."
+      },
+      "source_image_id": {
+        "type": "string",
+        "description": "Id of an image already in the gallery to edit. Preferred: no upload, no URL."
+      },
+      "upload_id": {
+        "type": "string",
+        "description": "An upload id from mimg_upload_image, when the source is a local file."
+      },
+      "image_url": {
+        "type": "string",
+        "description": "A publicly readable image URL, when the source is neither of the above."
+      },
+      "negative_prompt": {
+        "type": "string",
+        "description": "Optional: content to avoid."
+      },
+      "num_images": {
+        "type": "integer",
+        "description": "How many variants to produce (1-8, default 1). Each is billed."
+      },
+      "image_size": {
+        "description": "A preset string ('square_hd', 'portrait_16_9', …) or {\"width\":N,\"height\":N}."
+      },
+      "seed": {
+        "type": "integer",
+        "description": "Optional seed for reproducible results."
+      },
+      "guidance_scale": {
+        "type": "number",
+        "description": "Optional prompt-adherence strength (model-dependent)."
+      }
+    },
+    "required": [
+      "model",
+      "prompt"
+    ]
+  },
+  "body_mapping": "params_nested",
+  "body_defaults": {
+    "mode": "image-to-image"
+  },
+  "param_paths": {
+    "model": "model",
+    "prompt": "prompt",
+    "source_image_id": "source_image_id",
+    "upload_id": "source_upload_id",
+    "image_url": "image_url",
+    "negative_prompt": "negative_prompt",
+    "num_images": "num_images",
+    "image_size": "image_size",
+    "seed": "seed",
+    "guidance_scale": "guidance_scale"
+  },
+  "timeout_secs": 300
+}

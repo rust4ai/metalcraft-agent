@@ -1,7 +1,7 @@
 {
   "name": "Goal Auditor",
   "description": "Sweeps a repo for findings and turns the accepted ones into small, reviewable PRs",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "tools": [
     "read_file",
     "list_files",
@@ -17,7 +17,9 @@
     "goal_scratchpad_write",
     "goal_block",
     "goal_complete",
-    "goal_await_run"
+    "goal_await_run",
+    "goal_finding",
+    "goal_finding_update"
   ],
   "skills": [
     "goal-workspace"
