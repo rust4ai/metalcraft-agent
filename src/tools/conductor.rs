@@ -162,3 +162,116 @@ impl metalcraft::Tool for ConductorNoteTool {
         Ok(serde_json::json!({ "ok": true, "section": section }))
     }
 }
+
+// ── pace ─────────────────────────────────────────────────────────────────────
+
+/// Back the project off to a slower heartbeat — and only ever slower.
+///
+/// The conductor can see what a person cannot from outside: that the thing this
+/// project is waiting on will not move today, that three ticks in a row have
+/// found nothing to do, that the work has gone quiet. Waking every fifteen
+/// minutes to confirm that is a cost with no return.
+///
+/// **It cannot speed up past what the person asked for.** That asymmetry is the
+/// whole reason this is safe to give a model: a model deciding how often to spend
+/// money is exactly the concern that got per-delegation model tiers deferred, and
+/// it disappears when the only direction it can move is cheaper. Coming back to
+/// the person's own pace is allowed — that is not spending more than was
+/// authorised, it is stopping economising.
+pub struct ConductorPaceTool {
+    project_id: String,
+}
+
+impl ConductorPaceTool {
+    pub fn new(project_id: String) -> Self {
+        Self { project_id }
+    }
+}
+
+#[async_trait]
+impl metalcraft::Tool for ConductorPaceTool {
+    fn name(&self) -> &str {
+        "project_pace"
+    }
+
+    fn description(&self) -> &str {
+        "Slow this project's heartbeat down, when waking as often as you do is buying nothing. \
+         Good reasons: what you are waiting on will not move today; several ticks in a row have \
+         found nothing to do; the work is genuinely paused on somebody else.\n\n\
+         You can only slow DOWN. The interval a person set is the fastest this project may wake, \
+         and passing that value (or a smaller one) simply returns to their pace, which is what to \
+         do the moment there is real work again. Say why — it goes in the log, and a project that \
+         quietly went hourly with no reason recorded looks broken."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "every_minutes": {
+                    "type": "integer",
+                    "description": "Minutes between ticks. Anything at or below the person's own setting means 'back to their pace'."
+                },
+                "why": {
+                    "type": "string",
+                    "description": "One line: what makes waking less often the right call now."
+                }
+            },
+            "required": ["every_minutes", "why"]
+        })
+    }
+
+    async fn call(&self, args: serde_json::Value) -> metalcraft::Result<serde_json::Value> {
+        let minutes = args["every_minutes"]
+            .as_u64()
+            .ok_or_else(|| err("project_pace", "Missing required parameter: every_minutes"))?
+            as u32;
+        let why = args["why"]
+            .as_str()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .ok_or_else(|| err("project_pace", "Missing required parameter: why"))?;
+
+        let mut project = crate::projects::get(&self.project_id)
+            .ok_or_else(|| err("project_pace", "this project no longer exists"))?;
+        let asked_for = project.heartbeat.every_minutes;
+
+        if minutes > crate::projects::MAX_CONDUCTOR_BACKOFF_MINUTES {
+            return Err(err(
+                "project_pace",
+                format!(
+                    "{minutes} minutes is slower than a day, which is not backing off — it is \
+                     stopping without saying so. If this project should not be running, \
+                     project_block and say what it is waiting for."
+                ),
+            ));
+        }
+
+        // At or below the person's pace means "stop economising", not "go
+        // faster": their number is the ceiling on frequency either way.
+        project.heartbeat.conductor_minutes = (minutes > asked_for).then_some(minutes);
+        crate::projects::save(&project).map_err(|e| err("project_pace", e))?;
+
+        let effective = project.tick_interval_minutes();
+        let line = if project.heartbeat.conductor_minutes.is_some() {
+            format!("- Slowed to every {effective} min: {why}")
+        } else {
+            format!("- Back to the {effective} min the project was set to: {why}")
+        };
+        let current = crate::projects::read_scratchpad(&self.project_id).unwrap_or_default();
+        let _ = crate::projects::write_scratchpad(
+            &self.project_id,
+            &crate::projects::append_to_section(&current, "Log", &line),
+        );
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "every_minutes": effective,
+            "note": if minutes > asked_for {
+                "Backed off. Pass the project's own interval to come back the moment there is work."
+            } else {
+                "Back to the pace the project was set to."
+            },
+        }))
+    }
+}

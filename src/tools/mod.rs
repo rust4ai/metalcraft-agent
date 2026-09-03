@@ -271,7 +271,7 @@ pub fn create_registry_for_with_config(
             "project_note" | "project_scratchpad_write" | "project_block" | "project_complete"
             | "project_await_run" | "project_finding" | "project_finding_update" | "task_add"
             | "task_update" | "task_done" | "task_block" | "task_drop" | "task_dispatch"
-            | "conductor_write" | "conductor_note" => {
+            | "conductor_write" | "conductor_note" | "project_pace" => {
                 // Bound to one project at registration. Outside a project tick there is
                 // no project to bind to, so the tools are absent rather than
                 // registered and failing at call time — the model is never shown
@@ -302,6 +302,9 @@ pub fn create_registry_for_with_config(
                         }
                         "conductor_note" => {
                             registry.register(conductor::ConductorNoteTool::new(project_id))
+                        }
+                        "project_pace" => {
+                            registry.register(conductor::ConductorPaceTool::new(project_id))
                         }
                         "task_dispatch" => {
                             // Needs the turn's credentials and roster: dispatch

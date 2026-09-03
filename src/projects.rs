@@ -78,8 +78,22 @@ impl ProjectStatus {
 /// How often the project wakes.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Heartbeat {
+    /// What the person asked for. The **fastest** this project may wake.
     #[serde(default = "default_every_minutes")]
     pub every_minutes: u32,
+    /// What the conductor has backed off to, when it has.
+    ///
+    /// The conductor may slow itself down and it may come back, but it can never
+    /// go faster than the person set. That asymmetry is the whole design: a model
+    /// deciding how often to spend money is exactly the concern that got
+    /// per-delegation model tiers deferred, and it disappears entirely if the
+    /// only direction it can move is *cheaper*. Backing off is judgement about
+    /// this project; spending more than was authorised is not its call.
+    ///
+    /// Cleared when a person edits the period — a new instruction supersedes an
+    /// old accommodation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conductor_minutes: Option<u32>,
     /// IANA name. Absent reads the pod's default, then UTC — the same rule
     /// scheduled flows follow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,10 +118,18 @@ fn default_every_minutes() -> u32 {
     DEFAULT_HEARTBEAT_MINUTES
 }
 
+/// The slowest a conductor may back off to: a day.
+///
+/// A project that wakes less often than daily is one a person would rather have
+/// paused, and it stops being visibly alive — a bound here is what keeps "slow
+/// down" from becoming "quietly stop".
+pub const MAX_CONDUCTOR_BACKOFF_MINUTES: u32 = 24 * 60;
+
 impl Default for Heartbeat {
     fn default() -> Self {
         Self {
             every_minutes: DEFAULT_HEARTBEAT_MINUTES,
+            conductor_minutes: None,
             timezone: None,
         }
     }
@@ -377,7 +399,13 @@ impl Project {
         if self.awaiting_a_run() {
             return MIN_HEARTBEAT_MINUTES;
         }
-        self.heartbeat.every_minutes.max(MIN_HEARTBEAT_MINUTES)
+        // `max`, so a conductor backing off always slows and never speeds up. If
+        // it ever wrote a smaller number than the person did, the person's would
+        // still win.
+        self.heartbeat
+            .every_minutes
+            .max(self.heartbeat.conductor_minutes.unwrap_or(0))
+            .max(MIN_HEARTBEAT_MINUTES)
     }
 }
 
@@ -705,6 +733,38 @@ mod tests {
     const DOC: &str = "## Goal\nShip billing\n\n## Plan\n- [x] one\n- [ ] two\n\n## Log\n- t1: did a thing\n\n## Blockers\n(none)\n";
 
     #[test]
+    fn a_conductor_can_slow_a_project_down_but_never_speed_it_up() {
+        // The asymmetry is what makes this safe to hand a model: the only
+        // direction it can move the cost is down.
+        let mut p = a_project();
+        p.heartbeat.every_minutes = 15;
+
+        p.heartbeat.conductor_minutes = Some(60);
+        assert_eq!(p.tick_interval_minutes(), 60, "it may back off");
+
+        p.heartbeat.conductor_minutes = Some(5);
+        assert_eq!(
+            p.tick_interval_minutes(),
+            15,
+            "and may not overtake the person who set the pace"
+        );
+
+        p.heartbeat.conductor_minutes = None;
+        assert_eq!(p.tick_interval_minutes(), 15, "clearing returns to their pace");
+
+        // A run in flight still wins: whatever anyone set, a project owed a
+        // build looks again soon.
+        p.heartbeat.conductor_minutes = Some(600);
+        p.pending_run = Some(PendingRun {
+            workspace_id: "ws".into(),
+            run_id: "r".into(),
+            what: "cargo test".into(),
+            started_at: String::new(),
+        });
+        assert_eq!(p.tick_interval_minutes(), MIN_HEARTBEAT_MINUTES);
+    }
+
+    #[test]
     fn a_models_own_wording_still_reads_as_a_placeholder() {
         // The seed says "(nothing yet)"; a model writing the same document says
         // "No attempts yet." Both mean the section is empty, and a placeholder
@@ -793,9 +853,8 @@ mod tests {
         assert_eq!(progress_of(&out), Progress { done: 0, total: 1 });
     }
 
-    #[test]
-    fn a_pending_run_shortens_the_interval() {
-        let mut g = Project {
+    fn a_project() -> Project {
+        Project {
             id: "g".into(),
             title: "t".into(),
             goal: "do".into(),
@@ -818,7 +877,12 @@ mod tests {
             models: ModelTiers::default(),
             created_at: String::new(),
             updated_at: String::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn a_pending_run_shortens_the_interval() {
+        let mut g = a_project();
         assert_eq!(g.tick_interval_minutes(), DEFAULT_HEARTBEAT_MINUTES);
         g.pending_run = Some(PendingRun {
             workspace_id: "ws".into(),
@@ -845,7 +909,7 @@ mod tests {
             workspace: Workspace::default(),
             status: ProjectStatus::Active,
             blocked_reason: None,
-            heartbeat: Heartbeat { every_minutes: 1, timezone: None },
+            heartbeat: Heartbeat { every_minutes: 1, conductor_minutes: None, timezone: None },
             io: crate::scheduled_tasks::IoBinding::Unbound,
             journal_chat_id: None,
             rails: Rails::default(),

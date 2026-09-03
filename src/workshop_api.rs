@@ -9897,6 +9897,7 @@ async fn post_project(Json(req): Json<CreateProjectRequest>) -> Response {
                 .every_minutes
                 .unwrap_or(crate::projects::DEFAULT_HEARTBEAT_MINUTES)
                 .max(crate::projects::MIN_HEARTBEAT_MINUTES),
+            conductor_minutes: None,
             timezone: req.timezone,
         },
         io: match req.chat_id {
@@ -9977,6 +9978,10 @@ async fn patch_project(Path(id): Path<String>, Json(req): Json<UpdateProjectRequ
     }
     if let Some(minutes) = req.every_minutes {
         project.heartbeat.every_minutes = minutes.max(crate::projects::MIN_HEARTBEAT_MINUTES);
+        // A person setting the period supersedes whatever the conductor had
+        // backed off to. Otherwise asking for every five minutes would silently
+        // do nothing because the conductor decided hourly was enough yesterday.
+        project.heartbeat.conductor_minutes = None;
     }
     if let Some(rails) = req.rails {
         project.rails = rails;
