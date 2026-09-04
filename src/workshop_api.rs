@@ -98,6 +98,84 @@ async fn chat_event_sender(chat_id: &str) -> tokio::sync::broadcast::Sender<Chat
         .clone()
 }
 
+/// Forget a chat's event bus.
+///
+/// The registry was append-only, so every chat id the process ever *touched* —
+/// each one a 64-slot ring of `ChatEvent`s, and a `ChatEvent` can carry a whole
+/// tool result — stayed for the life of the pod. On a pod that answers a
+/// messaging channel, chat ids churn, so that set only ever grew.
+///
+/// Dropping an entry with no subscribers costs nothing, because a broadcast
+/// channel with no receivers already discards what is sent into it: the sender
+/// that a later [`chat_event_sender`] mints is exactly as useful as the one
+/// removed here. What is *not* free is dropping a bus somebody is listening on,
+/// so unless `force` says the chat is gone for good, an entry with live
+/// receivers stays.
+async fn forget_chat_broadcaster(chat_id: &str, force: bool) {
+    let reg = chat_broadcasters();
+    let mut map = reg.lock().await;
+    let idle = map
+        .get(chat_id)
+        .is_some_and(|tx| tx.receiver_count() == 0);
+    if force || idle {
+        map.remove(chat_id);
+    }
+}
+
+/// Drop every event bus nobody is listening to. Returns how many went.
+///
+/// The backstop for the paths that never reach [`forget_chat_broadcaster`] — a
+/// follow-up that fired into a chat no client ever opened, a subscriber whose
+/// connection died in a way that skipped its own cleanup.
+async fn sweep_chat_broadcasters() -> usize {
+    let reg = chat_broadcasters();
+    let mut map = reg.lock().await;
+    let before = map.len();
+    map.retain(|_, tx| tx.receiver_count() > 0);
+    before - map.len()
+}
+
+/// How many event buses exist, and how many have a live subscriber. Reported by
+/// `GET /api/v1/metrics` so a registry that starts growing again is visible.
+async fn chat_broadcaster_counts() -> (usize, usize) {
+    let reg = chat_broadcasters();
+    let map = reg.lock().await;
+    let subscribed = map.values().filter(|tx| tx.receiver_count() > 0).count();
+    (map.len(), subscribed)
+}
+
+/// Sweeps idle event buses out of the registry on a timer.
+///
+/// Spawned once from [`build_router`]. Ten minutes because this is cleanup after
+/// the fact, not the mechanism: the SSE stream drops its own bus when the last
+/// subscriber leaves, and deleting a chat drops it outright. This only catches
+/// what those two miss.
+fn spawn_broadcaster_sweeper() {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+    // `build_router` is also called from tests, which build the router to assert
+    // on routes and never enter a runtime. A missing runtime means there is
+    // nothing to sweep either.
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(600));
+        // The first tick fires immediately; skip it so startup isn't a sweep of
+        // an empty registry.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let dropped = sweep_chat_broadcasters().await;
+            if dropped > 0 {
+                log::debug!("swept {dropped} idle chat event bus(es)");
+            }
+        }
+    });
+}
+
 // ── A flow firing's conversation ────────────────────────────────────────
 //
 // A scheduled flow already runs *as* an agent: `flow_bindings::arm` mints a
@@ -704,6 +782,7 @@ async fn auth_middleware(
         list_flow_runs, get_flow_run, post_resume_flow_run,
         list_flow_templates, get_flow_template,
         list_diagnostics, get_diagnostics_session, get_diagnostics_trace,
+        get_metrics,
         list_api_tools, get_api_tool, put_api_tool, delete_api_tool,
         list_keys, list_recommended_keys, put_key, delete_key, reveal_key,
         get_pod_settings, put_pod_settings, list_timezones,
@@ -729,6 +808,7 @@ async fn auth_middleware(
         ErrorResponse, PodSnapshot, PodLayout, ApiToolSummary,
         KeySummary, KeyEntry, KeyRevealResponse, RecommendedKey, KeyValueBody, KeyScopeQuery,
         InferenceStatus, ChatContext, ChatCompacted, ChatInterrupt, ChatQueued,
+        MemoryMetrics, ChatMemory, BroadcasterMemory, MemoryLimits, crate::resources::Counters,
         FlowTemplateSummary, FlowTemplate, RunFlowRequest, RunFlowResponse, RunFlowOutput, ResumeFlowRunRequest,
         InstallFlowRequest, InstallDependenciesResponse,
         crate::scheduled_flows::SchedulePreview,
@@ -873,6 +953,8 @@ pub fn build_router(api_key: String) -> Router {
         tokio::spawn(async move { inbound_pull_loop(state).await });
     }
 
+    spawn_broadcaster_sweeper();
+
     Router::new()
         .route("/api/v1/info", get(agent_info))
         .route("/api/v1/snapshot", get(get_snapshot))
@@ -1003,6 +1085,7 @@ pub fn build_router(api_key: String) -> Router {
         )
         .route("/api/v1/flow-templates", get(list_flow_templates))
         .route("/api/v1/flow-templates/{slug}", get(get_flow_template))
+        .route("/api/v1/metrics", get(get_metrics))
         .route("/api/v1/diagnostics", get(list_diagnostics))
         .route("/api/v1/diagnostics/{id}", get(get_diagnostics_session))
         .route("/api/v1/diagnostics/{id}/trace", get(get_diagnostics_trace))
@@ -1103,7 +1186,188 @@ pub fn build_router(api_key: String) -> Router {
         // Inbound gateway webhook — unauthenticated like /health; provenance is
         // verified by the per-channel HMAC signature on the request.
         .route("/webhook/gateway", post(handle_gateway_webhook))
+        // A ceiling on every request body, applied last so it covers the
+        // unauthenticated routes above as well as the API. Axum's own default is
+        // 2 MB, which pack installs and large flow `PUT`s legitimately exceed —
+        // and the way that was worked around elsewhere is by extractors that read
+        // a body of any size at all. This states the real number in one place
+        // instead: generous enough for the biggest honest payload, finite enough
+        // that an unauthenticated `POST /webhook/gateway` cannot ask the pod to
+        // hold an arbitrary amount of memory.
+        .layer(axum::extract::DefaultBodyLimit::max(
+            crate::resources::max_request_body_bytes(),
+        ))
         .with_state(state)
+}
+
+// ── What the process is holding ─────────────────────────────────────────
+//
+// A pod that dies of memory pressure restarts with nothing to say about why.
+// The chats, the diagnostics, and the event buses all grow, all in the same
+// process, and until now none of them was counted — so the first question an
+// operator asks after an OOM ("which one?") had no answer, and the second
+// ("since when?") had no way to get one either.
+//
+// These are measurements, not a second set of books. Every number here is read
+// off the structure it describes at the moment of the request, so it cannot
+// drift out of step with the thing it is counting — which is exactly what a
+// hand-maintained gauge alongside `hold_turn`/`release_turn` would eventually
+// do. The cost is that a session busy under its own lock can't be measured;
+// that is reported as `chats_unmeasured` rather than quietly counted as zero.
+
+/// The resident cost of one part of the process.
+#[derive(Serialize, utoipa::ToSchema)]
+struct ChatMemory {
+    /// Conversations held in memory right now.
+    resident: usize,
+    /// Sessions skipped because a turn held their lock. Their bytes are missing
+    /// from the totals below — a non-zero value here means the numbers are a
+    /// floor, not a total.
+    unmeasured: usize,
+    /// Turns in flight, counted as the sessions holding an in-flight snapshot.
+    turns_in_flight: usize,
+    /// Bytes of live context — what the model still sees.
+    context_bytes: u64,
+    /// Bytes of closed-off history kept beside the context. Append-only today:
+    /// a reset moves messages here and nothing ever moves them out, which is the
+    /// residency this endpoint exists to make visible.
+    archived_bytes: u64,
+    /// Bytes of the per-turn wire snapshot each running turn publishes so the
+    /// conversation stays readable while the executor owns its state.
+    in_flight_bytes: u64,
+    messages: usize,
+}
+
+/// Live event buses (`GET /chats/{id}/events`).
+#[derive(Serialize, utoipa::ToSchema)]
+struct BroadcasterMemory {
+    /// Buses in the registry.
+    count: usize,
+    /// Of those, how many have a subscriber. The gap between the two is what the
+    /// sweeper reclaims; a gap that keeps growing means a cleanup path is being
+    /// missed.
+    subscribed: usize,
+}
+
+/// The ceilings in force, echoed so an operator can see what a pod is actually
+/// running with rather than what the defaults say.
+#[derive(Serialize, utoipa::ToSchema)]
+struct MemoryLimits {
+    max_tool_result_bytes: usize,
+    max_request_body_bytes: usize,
+    max_diagnostic_file_bytes: usize,
+}
+
+/// Everything `GET /api/v1/metrics` reports.
+#[derive(Serialize, utoipa::ToSchema)]
+struct MemoryMetrics {
+    /// Resident set size of the process. `null` off Linux, where it can't be
+    /// read without a dependency this crate doesn't carry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rss_bytes: Option<u64>,
+    chats: ChatMemory,
+    broadcasters: BroadcasterMemory,
+    counters: crate::resources::Counters,
+    limits: MemoryLimits,
+}
+
+/// Roughly what a wire message costs in memory.
+///
+/// The string lengths plus a fixed allowance for the enum, its `String`
+/// headers, and the `Vec` slot. Deliberately not `serde_json::to_string().len()`
+/// — that would allocate a copy of the whole conversation to measure it, which
+/// is the opposite of what an endpoint watching for memory growth should do.
+fn wire_message_bytes(m: &ChatMessageWire) -> u64 {
+    const OVERHEAD: u64 = 64;
+    let payload = match m {
+        ChatMessageWire::User { content } | ChatMessageWire::Assistant { content } => content.len(),
+        ChatMessageWire::Reasoning { id, encrypted } => id.len() + encrypted.len(),
+        ChatMessageWire::ToolCall {
+            id,
+            call_id,
+            name,
+            args,
+        } => {
+            id.len()
+                + call_id.as_ref().map_or(0, |s| s.len())
+                + name.len()
+                // The only field with no length of its own. Serializing it is
+                // the honest measure and tool args are small next to results.
+                + serde_json::to_string(args).map_or(0, |s| s.len())
+        }
+        ChatMessageWire::ToolResult {
+            id,
+            call_id,
+            name,
+            result,
+        } => id.len() + call_id.as_ref().map_or(0, |s| s.len()) + name.len() + result.len(),
+        ChatMessageWire::Reset { at, reason } => at.len() + reason.len(),
+    };
+    payload as u64 + OVERHEAD
+}
+
+/// What this process is holding, and the ceilings bounding it.
+///
+/// Authenticated like the rest of `/api/v1` — it names conversations only by
+/// count, but a size profile of a pod's traffic is still the pod's business.
+#[utoipa::path(
+    get,
+    path = "/api/v1/metrics",
+    tag = "diagnostics",
+    responses((status = 200, description = "Resident memory and the limits bounding it", body = MemoryMetrics)),
+)]
+async fn get_metrics(State(state): State<Arc<ApiState>>) -> Response {
+    let sessions: Vec<Arc<Mutex<ChatSession>>> =
+        { state.chats.lock().await.values().cloned().collect() };
+
+    let mut chats = ChatMemory {
+        resident: sessions.len(),
+        unmeasured: 0,
+        turns_in_flight: 0,
+        context_bytes: 0,
+        archived_bytes: 0,
+        in_flight_bytes: 0,
+        messages: 0,
+    };
+
+    for session in &sessions {
+        // `try_lock`, never `lock`: a turn can hold its session for as long as
+        // the model takes, and a metrics read that waits on that is a metrics
+        // read that hangs exactly when someone is watching a pod struggle.
+        let Ok(s) = session.try_lock() else {
+            chats.unmeasured += 1;
+            continue;
+        };
+        for m in &s.archived {
+            chats.archived_bytes += wire_message_bytes(m);
+            chats.messages += 1;
+        }
+        for m in live_messages(&s) {
+            chats.context_bytes += wire_message_bytes(&m);
+            chats.messages += 1;
+        }
+        if let Some(running) = in_flight_messages(&s) {
+            chats.turns_in_flight += 1;
+            for m in &running {
+                chats.in_flight_bytes += wire_message_bytes(m);
+            }
+        }
+    }
+
+    let (count, subscribed) = chat_broadcaster_counts().await;
+
+    Json(MemoryMetrics {
+        rss_bytes: crate::resources::rss_bytes(),
+        chats,
+        broadcasters: BroadcasterMemory { count, subscribed },
+        counters: crate::resources::counters(),
+        limits: MemoryLimits {
+            max_tool_result_bytes: crate::resources::max_tool_result_bytes(),
+            max_request_body_bytes: crate::resources::max_request_body_bytes(),
+            max_diagnostic_file_bytes: crate::resources::max_diagnostic_file_bytes(),
+        },
+    })
+    .into_response()
 }
 
 /// Liveness/readiness probe. Returns 200 with a small JSON body. Not behind
@@ -5456,6 +5720,11 @@ async fn delete_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>)
     if chats.remove(&id).is_some() {
         drop(chats);
         remove_chat_file(&id);
+        // The chat is gone, so its event bus is too — forced, because a client
+        // still holding the SSE stream open is subscribed to a conversation that
+        // no longer exists, and keeping the bus for it would keep the deleted
+        // chat's id resident for as long as that connection lasts.
+        forget_chat_broadcaster(&id, true).await;
         if let Some(instance_id) = &owner {
             crate::memory::capture::record_session_end(instance_id, &id);
         }
@@ -6515,21 +6784,52 @@ async fn post_chat_turn(
 async fn get_chat_events(State(_state): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
     let sender = chat_event_sender(&id).await;
     let rx = sender.subscribe();
-    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|res| async move {
-        match res {
-            Ok(ev) => Some(Ok::<Event, Infallible>(
-                Event::default().json_data(&ev).unwrap_or_else(|_| {
-                    Event::default()
-                        .data("{\"kind\":\"done\",\"status\":\"failed\",\"reason\":\"serialize\"}")
-                }),
-            )),
-            // A lagged subscriber just skips missed events rather than erroring.
-            Err(_) => None,
+    // Dropped when the client disconnects — which is the only moment the process
+    // learns that this subscriber is gone, and so the only moment it can ask
+    // whether the bus still has anyone on it.
+    let unsubscribed = LastSubscriberGuard { chat_id: id };
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |res| {
+        // Moved into the stream so it lives exactly as long as the subscription,
+        // however that subscription ends.
+        let _keep = &unsubscribed;
+        async move {
+            match res {
+                Ok(ev) => Some(Ok::<Event, Infallible>(
+                    Event::default().json_data(&ev).unwrap_or_else(|_| {
+                        Event::default().data(
+                            "{\"kind\":\"done\",\"status\":\"failed\",\"reason\":\"serialize\"}",
+                        )
+                    }),
+                )),
+                // A lagged subscriber just skips missed events rather than erroring.
+                Err(_) => None,
+            }
         }
     });
     Sse::new(stream)
         .keep_alive(KeepAlive::new())
         .into_response()
+}
+
+/// Drops a chat's event bus when the last subscriber to it goes away.
+///
+/// A guard rather than a line at the end of the handler because an SSE stream
+/// does not *end*, it is dropped — the client closes the tab, the connection
+/// breaks, the server shuts down — and none of those run code the handler wrote.
+/// `Drop` is the only hook all three pass through.
+struct LastSubscriberGuard {
+    chat_id: String,
+}
+
+impl Drop for LastSubscriberGuard {
+    fn drop(&mut self) {
+        let chat_id = std::mem::take(&mut self.chat_id);
+        // The receiver this guard belongs to is dropped alongside it, but the
+        // ordering between the two is not something to rely on, so the check for
+        // "anyone left?" is deferred rather than made here. A stray tick of the
+        // sweeper would clean it up regardless; this just makes it prompt.
+        tokio::spawn(async move { forget_chat_broadcaster(&chat_id, false).await });
+    }
 }
 
 /// List scheduled follow-ups (pending + recently completed), newest first.

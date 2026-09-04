@@ -3,7 +3,14 @@
 //! Creates a timestamped session directory under
 //! `sessions/` and writes:
 //! - `session_info.json` — persona, model, tools, skills, system prompt, cwd
-//! - `turn_NNN.json` — full message array after each agent step
+//! - `turn_NNN.json` — the messages each agent step *added*, with `first_index`
+//!   placing them in the history. Concatenating the files in order rebuilds the
+//!   full message array; a file marked `rewritten` replaces what came before it
+//!   rather than extending it (that is compaction).
+//!
+//! Every file is written under [`crate::resources::max_diagnostic_file_bytes`],
+//! streamed rather than buffered, so a runaway context can't take the pod's
+//! memory or disk with it.
 
 use metalcraft::{AgentMessage, AgentState, LlmCallSnapshot};
 use serde_json::json;
@@ -14,6 +21,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub struct DiagnosticsLogger {
     session_dir: PathBuf,
     turn_counter: AtomicUsize,
+    /// How many messages of the current context have already been written out,
+    /// so [`DiagnosticsLogger::log_turn`] can record only what a step added.
+    /// Reset to the new length whenever compaction makes the list shorter.
+    logged_up_to: AtomicUsize,
 }
 
 /// What a session was started as.
@@ -39,13 +50,39 @@ pub struct SessionInfo<'a> {
 
 impl DiagnosticsLogger {
     /// Create a new diagnostics logger. Creates the session directory immediately.
+    ///
+    /// The directory is named for the second the session started, so two sessions
+    /// starting in the same second want the same name — and `create_dir_all`
+    /// succeeded on an existing directory, so both got it. They then wrote
+    /// `turn_001.json` over each other, and the operator reading that session
+    /// afterwards saw one run's turns interleaved with another's with nothing to
+    /// say so. Not hypothetical on a pod answering a messaging channel, where
+    /// several conversations open on the same inbound burst.
+    ///
+    /// So the first session in a second takes the plain timestamp and any other
+    /// takes a `-2`, `-3` suffix. `create_dir` rather than `create_dir_all` is
+    /// what makes that a claim rather than a check: it fails if the directory
+    /// already exists, so two threads racing here cannot both win.
     pub fn new() -> std::io::Result<Self> {
         let timestamp = chrono_timestamp();
-        let session_dir = crate::paths::sessions_dir().join(&timestamp);
-        std::fs::create_dir_all(&session_dir)?;
+        let sessions = crate::paths::sessions_dir();
+        std::fs::create_dir_all(&sessions)?;
+
+        let mut session_dir = sessions.join(&timestamp);
+        for attempt in 2.. {
+            match std::fs::create_dir(&session_dir) {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    session_dir = sessions.join(format!("{timestamp}-{attempt}"));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
         Ok(Self {
             session_dir,
             turn_counter: AtomicUsize::new(0),
+            logged_up_to: AtomicUsize::new(0),
         })
     }
 
@@ -76,37 +113,71 @@ impl DiagnosticsLogger {
             "instance_id": info.instance_id,
         });
         let path = self.session_dir.join("session_info.json");
-        if let Err(e) = write_json(&path, &doc) {
+        if let Err(e) = write_json_capped(&path, &doc) {
             eprintln!("diagnostics: failed to write session_info.json: {e}");
         }
     }
 
-    /// Log the full agent state after a step.
+    /// Log what a step *added* to the agent state.
+    ///
+    /// Called after every executor step, which is what makes the delta matter.
+    /// Writing the whole message list each time made a session's diagnostics
+    /// quadratic in its own length: step 500 of a long turn re-serialized the 499
+    /// messages already on disk to record the one new one, so a thousand-step run
+    /// wrote hundreds of megabytes to say a few hundred kilobytes' worth of
+    /// things. The cost was paid twice over — once in the transient `Vec<Value>`
+    /// and pretty-printed `String`, once on the pod's disk.
+    ///
+    /// So each file holds only the messages appended since the previous step,
+    /// plus `first_index` to place them. A reader concatenates the files in
+    /// order and has the full history back, exactly as before.
+    ///
+    /// The one case a delta can't describe is compaction, which *rewrites*
+    /// `messages` rather than appending to it. That is detectable — the list got
+    /// shorter — and handled by starting over: the file is marked `rewritten` and
+    /// carries the whole new list, so a reader knows to discard what it had
+    /// rather than append to it.
     pub fn log_turn(&self, state: &AgentState) {
         let turn = self.turn_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let messages: Vec<serde_json::Value> =
-            state.messages.iter().map(serialize_message).collect();
+        let total = state.messages.len();
+        let previous = self.logged_up_to.swap(total, Ordering::Relaxed);
+        let rewritten = previous > total;
+        let first_index = if rewritten { 0 } else { previous };
+
+        let messages: Vec<serde_json::Value> = state.messages[first_index.min(total)..]
+            .iter()
+            .map(serialize_message)
+            .collect();
 
         let turn_data = json!({
             "turn": turn,
-            "message_count": messages.len(),
+            "message_count": total,
+            "first_index": first_index,
+            "new_message_count": messages.len(),
+            // Only ever true after a compaction rewrote the list; `messages` is
+            // then the whole context rather than an addition to it.
+            "rewritten": rewritten,
             "messages": messages,
         });
 
         let filename = format!("turn_{:03}.json", turn);
         let path = self.session_dir.join(&filename);
-        if let Err(e) = write_json(&path, &turn_data) {
+        if let Err(e) = write_json_capped(&path, &turn_data) {
             eprintln!("diagnostics: failed to write {filename}: {e}");
         }
     }
 
     /// Log the raw LLM request context (system prompt + messages + tools).
+    ///
+    /// This one is unavoidably the whole context — that is what a request *is* —
+    /// so it is bounded rather than shrunk: [`write_json_capped`] serializes it
+    /// straight into the file and abandons it at the ceiling, so neither the disk
+    /// nor the heap sees the full size of a runaway context.
     pub fn log_llm_request(&self, snapshot: &LlmCallSnapshot) {
         let turn = self.turn_counter.load(Ordering::Relaxed) + 1;
         let filename = format!("llm_request_{:03}.json", turn);
         let path = self.session_dir.join(&filename);
-        let value = serde_json::to_value(snapshot).unwrap_or_default();
-        if let Err(e) = write_json(&path, &value) {
+        if let Err(e) = write_json_capped(&path, snapshot) {
             eprintln!("diagnostics: failed to write {filename}: {e}");
         }
     }
@@ -121,7 +192,7 @@ impl DiagnosticsLogger {
         });
         let filename = format!("{}_after_turn_{:03}.json", event, turn);
         let path = self.session_dir.join(&filename);
-        if let Err(e) = write_json(&path, &data) {
+        if let Err(e) = write_json_capped(&path, &data) {
             eprintln!("diagnostics: failed to write {filename}: {e}");
         }
     }
@@ -139,7 +210,7 @@ impl DiagnosticsLogger {
         });
         let filename = format!("error_after_turn_{:03}.json", after_turn);
         let path = self.session_dir.join(&filename);
-        if let Err(e) = write_json(&path, &data) {
+        if let Err(e) = write_json_capped(&path, &data) {
             eprintln!("diagnostics: failed to write {filename}: {e}");
         }
     }
@@ -155,7 +226,7 @@ impl DiagnosticsLogger {
         });
         let filename = format!("compaction_after_turn_{:03}.json", turn);
         let path = self.session_dir.join(&filename);
-        if let Err(e) = write_json(&path, &data) {
+        if let Err(e) = write_json_capped(&path, &data) {
             eprintln!("diagnostics: failed to write {filename}: {e}");
         }
     }
@@ -206,10 +277,99 @@ fn serialize_message(msg: &AgentMessage) -> serde_json::Value {
     }
 }
 
-fn write_json(path: &Path, value: &serde_json::Value) -> std::io::Result<()> {
-    let json_str = serde_json::to_string_pretty(value)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(path, json_str)
+/// Write a document to disk under a byte ceiling, streaming.
+///
+/// The ceiling is only half the point. The other half is *where* the bytes are
+/// counted: this serializes straight into the file through a limiting writer, so
+/// a payload that would blow the cap is abandoned at the cap rather than being
+/// built in full as a `String` first and measured afterwards. Measuring
+/// afterwards bounds the disk and leaves the memory spike exactly where it was,
+/// which for an LLM request snapshot — the whole context, on every call — is the
+/// spike that mattered.
+///
+/// A document that doesn't fit is replaced by a stub naming what was dropped, so
+/// the session timeline keeps an entry at that step instead of a hole.
+fn write_json_capped<T: serde::Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+    let limit = crate::resources::max_diagnostic_file_bytes();
+    let tmp = path.with_extension("json.partial");
+
+    let written = {
+        let file = std::fs::File::create(&tmp)?;
+        let mut writer = LimitWriter::new(std::io::BufWriter::new(file), limit);
+        match serde_json::to_writer_pretty(&mut writer, value) {
+            Ok(()) => {
+                use std::io::Write;
+                writer.flush()?;
+                Some(writer.written())
+            }
+            // Either the cap tripped or the value wasn't serializable. Both end
+            // the same way: no partial file, a stub in its place.
+            Err(_) => None,
+        }
+    };
+
+    match written {
+        Some(bytes) => {
+            std::fs::rename(&tmp, path)?;
+            crate::resources::record_diagnostic_write(bytes as u64);
+            Ok(())
+        }
+        None => {
+            let _ = std::fs::remove_file(&tmp);
+            let stub = json!({
+                "truncated": true,
+                "limit_bytes": limit,
+                "note": "This diagnostics record exceeded MAX_DIAGNOSTIC_FILE_BYTES and was \
+                         dropped rather than written. Raise that limit to capture it.",
+            });
+            let bytes = serde_json::to_vec_pretty(&stub).unwrap_or_default();
+            crate::resources::record_diagnostic_truncated(bytes.len() as u64);
+            std::fs::write(path, bytes)
+        }
+    }
+}
+
+/// A writer that gives up once it has passed `limit` bytes.
+///
+/// Returning an error is what makes the abandonment cheap: `serde_json` stops
+/// serializing the moment a write fails, so the rest of a huge value is never
+/// visited, let alone allocated.
+struct LimitWriter<W> {
+    inner: W,
+    written: usize,
+    limit: usize,
+}
+
+impl<W: std::io::Write> LimitWriter<W> {
+    fn new(inner: W, limit: usize) -> Self {
+        Self {
+            inner,
+            written: 0,
+            limit,
+        }
+    }
+
+    fn written(&self) -> usize {
+        self.written
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for LimitWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.written + buf.len() > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "diagnostics record exceeded its byte limit",
+            ));
+        }
+        let n = self.inner.write(buf)?;
+        self.written += n;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 fn chrono_timestamp() -> String {

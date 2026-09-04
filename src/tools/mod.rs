@@ -1,5 +1,6 @@
 pub mod ask_user;
 pub mod bash;
+pub mod capped;
 pub mod edit_file;
 pub mod email_imap;
 pub mod find_files;
@@ -28,6 +29,7 @@ pub mod update_plan;
 pub mod web_fetch;
 pub mod write_file;
 
+use crate::tools::capped::RegisterCapped as _;
 use futures_util::future::BoxFuture;
 use metalcraft::ToolRegistry;
 use std::path::PathBuf;
@@ -140,16 +142,16 @@ pub fn create_registry_for_with_config(
     let mut registry = ToolRegistry::new();
     for name in tool_names {
         registry = match name.as_str() {
-            "read_file" => registry.register(read_file::ReadFileTool),
-            "write_file" => registry.register(write_file::WriteFileTool),
-            "edit_file" => registry.register(edit_file::EditFileTool),
-            "bash" => registry.register(bash::BashTool),
-            "list_files" => registry.register(list_files::ListFilesTool),
-            "grep" => registry.register(grep::GrepTool),
-            "find_files" => registry.register(find_files::FindFilesTool),
+            "read_file" => registry.register_capped(read_file::ReadFileTool),
+            "write_file" => registry.register_capped(write_file::WriteFileTool),
+            "edit_file" => registry.register_capped(edit_file::EditFileTool),
+            "bash" => registry.register_capped(bash::BashTool),
+            "list_files" => registry.register_capped(list_files::ListFilesTool),
+            "grep" => registry.register_capped(grep::GrepTool),
+            "find_files" => registry.register_capped(find_files::FindFilesTool),
             "load_skill" => {
                 if let Some(cfg) = config {
-                    registry.register(load_skill::LoadSkillTool::new(
+                    registry.register_capped(load_skill::LoadSkillTool::new(
                         cfg.skills_dir.clone(),
                         cfg.available_skills.clone(),
                     ))
@@ -158,114 +160,114 @@ pub fn create_registry_for_with_config(
                     registry
                 }
             }
-            "web_fetch" => registry.register(web_fetch::WebFetchTool),
+            "web_fetch" => registry.register_capped(web_fetch::WebFetchTool),
             // Long-term memory. These operate on the process-global store via
             // `crate::memory`, so like the meta tools they need no ToolConfig.
-            "agentpack_list" => registry.register(crate::agent_packs::tools::AgentPackListTool),
-            "agentpack_read" => registry.register(crate::agent_packs::tools::AgentPackReadTool),
+            "agentpack_list" => registry.register_capped(crate::agent_packs::tools::AgentPackListTool),
+            "agentpack_read" => registry.register_capped(crate::agent_packs::tools::AgentPackReadTool),
             "agentpack_install" => {
-                registry.register(crate::agent_packs::tools::AgentPackInstallTool)
+                registry.register_capped(crate::agent_packs::tools::AgentPackInstallTool)
             }
-            "agentpack_update" => registry.register(crate::agent_packs::tools::AgentPackUpdateTool),
+            "agentpack_update" => registry.register_capped(crate::agent_packs::tools::AgentPackUpdateTool),
             "agentpack_uninstall" => {
-                registry.register(crate::agent_packs::tools::AgentPackUninstallTool)
+                registry.register_capped(crate::agent_packs::tools::AgentPackUninstallTool)
             }
-            "agentpack_export" => registry.register(crate::agent_packs::tools::AgentPackExportTool),
+            "agentpack_export" => registry.register_capped(crate::agent_packs::tools::AgentPackExportTool),
             // Memory belongs to an agent. A caller with no agent instance — the
             // CLI, a v1 flow — is given no memory tools at all, rather than tools
             // that would write somewhere nobody reads.
             "mem_remember" => match config.and_then(|c| c.instance_id.clone()) {
-                Some(id) => registry.register(crate::memory::tools::MemRememberTool::new(id)),
+                Some(id) => registry.register_capped(crate::memory::tools::MemRememberTool::new(id)),
                 None => registry,
             },
             "mem_search" => match config.and_then(|c| c.instance_id.clone()) {
-                Some(id) => registry.register(crate::memory::tools::MemSearchTool::new(id)),
+                Some(id) => registry.register_capped(crate::memory::tools::MemSearchTool::new(id)),
                 None => registry,
             },
             "mem_get" => match config.and_then(|c| c.instance_id.clone()) {
-                Some(id) => registry.register(crate::memory::tools::MemGetTool::new(id)),
+                Some(id) => registry.register_capped(crate::memory::tools::MemGetTool::new(id)),
                 None => registry,
             },
             "mem_forget" => match config.and_then(|c| c.instance_id.clone()) {
-                Some(id) => registry.register(crate::memory::tools::MemForgetTool::new(id)),
+                Some(id) => registry.register_capped(crate::memory::tools::MemForgetTool::new(id)),
                 None => registry,
             },
             "mem_stats" => match config.and_then(|c| c.instance_id.clone()) {
-                Some(id) => registry.register(crate::memory::tools::MemStatsTool::new(id)),
+                Some(id) => registry.register_capped(crate::memory::tools::MemStatsTool::new(id)),
                 None => registry,
             },
             "mem_dream_now" => match config.and_then(|c| c.instance_id.clone()) {
-                Some(id) => registry.register(crate::memory::tools::MemDreamNowTool::new(id)),
+                Some(id) => registry.register_capped(crate::memory::tools::MemDreamNowTool::new(id)),
                 None => registry,
             },
             // Meta tools: author/manage the metalcraft project itself (the
             // workshop's CRUD surface, by prompt). They operate on the global
             // `paths::*` dirs, so they need no ToolConfig.
-            "persona_list" => registry.register(meta_persona::PersonaListTool),
-            "persona_read" => registry.register(meta_persona::PersonaReadTool),
-            "persona_write" => registry.register(meta_persona::PersonaWriteTool),
-            "persona_delete" => registry.register(meta_persona::PersonaDeleteTool),
-            "skill_list" => registry.register(meta_skill::SkillListTool),
-            "skill_read" => registry.register(meta_skill::SkillReadTool),
-            "skill_write" => registry.register(meta_skill::SkillWriteTool),
-            "skill_delete" => registry.register(meta_skill::SkillDeleteTool),
-            "flow_list" => registry.register(meta_flow::FlowListTool),
-            "flow_read" => registry.register(meta_flow::FlowReadTool),
-            "flow_validate" => registry.register(meta_flow::FlowValidateTool),
-            "flow_write" => registry.register(meta_flow::FlowWriteTool),
-            "scheduled_flow_list" => registry.register(meta_flow::ScheduledFlowListTool),
-            "scheduled_flow_create" => registry.register(meta_flow::ScheduledFlowCreateTool),
-            "scheduled_flow_update" => registry.register(meta_flow::ScheduledFlowUpdateTool),
-            "scheduled_flow_delete" => registry.register(meta_flow::ScheduledFlowDeleteTool),
-            "flow_install" => registry.register(meta_flow::FlowInstallTool),
-            "flow_check_dependencies" => registry.register(meta_flow::FlowCheckDependenciesTool),
-            "flow_delete" => registry.register(meta_flow::FlowDeleteTool),
-            "flow_run" => registry.register(meta_flow::FlowRunTool),
-            "flow_resume" => registry.register(meta_flow::FlowResumeTool),
-            "flow_run_status" => registry.register(meta_flow::FlowRunStatusTool),
-            "flow_runs_list" => registry.register(meta_flow::FlowRunsListTool),
-            "flow_templates_list" => registry.register(meta_flow::FlowTemplatesListTool),
-            "flow_template_read" => registry.register(meta_flow::FlowTemplateReadTool),
-            "diagnostics_list" => registry.register(meta_diagnostics::DiagnosticsListTool),
-            "diagnostics_read" => registry.register(meta_diagnostics::DiagnosticsReadTool),
+            "persona_list" => registry.register_capped(meta_persona::PersonaListTool),
+            "persona_read" => registry.register_capped(meta_persona::PersonaReadTool),
+            "persona_write" => registry.register_capped(meta_persona::PersonaWriteTool),
+            "persona_delete" => registry.register_capped(meta_persona::PersonaDeleteTool),
+            "skill_list" => registry.register_capped(meta_skill::SkillListTool),
+            "skill_read" => registry.register_capped(meta_skill::SkillReadTool),
+            "skill_write" => registry.register_capped(meta_skill::SkillWriteTool),
+            "skill_delete" => registry.register_capped(meta_skill::SkillDeleteTool),
+            "flow_list" => registry.register_capped(meta_flow::FlowListTool),
+            "flow_read" => registry.register_capped(meta_flow::FlowReadTool),
+            "flow_validate" => registry.register_capped(meta_flow::FlowValidateTool),
+            "flow_write" => registry.register_capped(meta_flow::FlowWriteTool),
+            "scheduled_flow_list" => registry.register_capped(meta_flow::ScheduledFlowListTool),
+            "scheduled_flow_create" => registry.register_capped(meta_flow::ScheduledFlowCreateTool),
+            "scheduled_flow_update" => registry.register_capped(meta_flow::ScheduledFlowUpdateTool),
+            "scheduled_flow_delete" => registry.register_capped(meta_flow::ScheduledFlowDeleteTool),
+            "flow_install" => registry.register_capped(meta_flow::FlowInstallTool),
+            "flow_check_dependencies" => registry.register_capped(meta_flow::FlowCheckDependenciesTool),
+            "flow_delete" => registry.register_capped(meta_flow::FlowDeleteTool),
+            "flow_run" => registry.register_capped(meta_flow::FlowRunTool),
+            "flow_resume" => registry.register_capped(meta_flow::FlowResumeTool),
+            "flow_run_status" => registry.register_capped(meta_flow::FlowRunStatusTool),
+            "flow_runs_list" => registry.register_capped(meta_flow::FlowRunsListTool),
+            "flow_templates_list" => registry.register_capped(meta_flow::FlowTemplatesListTool),
+            "flow_template_read" => registry.register_capped(meta_flow::FlowTemplateReadTool),
+            "diagnostics_list" => registry.register_capped(meta_diagnostics::DiagnosticsListTool),
+            "diagnostics_read" => registry.register_capped(meta_diagnostics::DiagnosticsReadTool),
             // Integrations: install (enable/disable) capabilities for the
             // agent itself, and inspect what's available + which keys they need.
-            "integration_list" => registry.register(meta_integration::IntegrationListTool),
-            "integration_read" => registry.register(meta_integration::IntegrationReadTool),
+            "integration_list" => registry.register_capped(meta_integration::IntegrationListTool),
+            "integration_read" => registry.register_capped(meta_integration::IntegrationReadTool),
             // API key / secret store: the secrets HTTP-API tools reference via
             // `$NAME`. Setting a key here is what lets an enabled pack authenticate.
-            "key_list" => registry.register(meta_keys::KeyListTool),
-            "key_set" => registry.register(meta_keys::KeySetTool),
-            "key_delete" => registry.register(meta_keys::KeyDeleteTool),
+            "key_list" => registry.register_capped(meta_keys::KeyListTool),
+            "key_set" => registry.register_capped(meta_keys::KeySetTool),
+            "key_delete" => registry.register_capped(meta_keys::KeyDeleteTool),
             // S3-compatible object storage (AWS S3, R2, DO Spaces, MinIO, …) —
             // native tools because S3 requires per-request AWS SigV4 signing the
             // declarative HTTP-API tool can't produce. Shipped by the `s3` pack;
             // read S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_REGION/S3_ENDPOINT
             // from the key store.
-            "s3_list_buckets" => registry.register(s3::S3ListBucketsTool),
-            "s3_list_objects" => registry.register(s3::S3ListObjectsTool),
-            "s3_get_object" => registry.register(s3::S3GetObjectTool),
-            "s3_put_object" => registry.register(s3::S3PutObjectTool),
-            "s3_delete_object" => registry.register(s3::S3DeleteObjectTool),
+            "s3_list_buckets" => registry.register_capped(s3::S3ListBucketsTool),
+            "s3_list_objects" => registry.register_capped(s3::S3ListObjectsTool),
+            "s3_get_object" => registry.register_capped(s3::S3GetObjectTool),
+            "s3_put_object" => registry.register_capped(s3::S3PutObjectTool),
+            "s3_delete_object" => registry.register_capped(s3::S3DeleteObjectTool),
             // Read-only IMAP email — native tools because IMAP is not HTTP, so
             // the declarative HTTP-API tool can't speak it. Shipped by the
             // `email` pack; read IMAP_HOST/IMAP_USER/IMAP_PASSWORD(/IMAP_PORT)
             // from the key store. Every session uses EXAMINE (read-only).
-            "email_list_mailboxes" => registry.register(email_imap::EmailListMailboxesTool),
-            "email_search" => registry.register(email_imap::EmailSearchTool),
-            "email_list_recent" => registry.register(email_imap::EmailListRecentTool),
-            "email_get_message" => registry.register(email_imap::EmailGetMessageTool),
+            "email_list_mailboxes" => registry.register_capped(email_imap::EmailListMailboxesTool),
+            "email_search" => registry.register_capped(email_imap::EmailSearchTool),
+            "email_list_recent" => registry.register_capped(email_imap::EmailListRecentTool),
+            "email_get_message" => registry.register_capped(email_imap::EmailGetMessageTool),
             // Generic gateway send — replies on any gateway channel (WhatsApp
             // today). Native (not a declarative HTTP-API tool) because the
             // adapters use auth schemes `$VAR` header substitution can't express
             // (e.g. Twilio's HTTP Basic auth from two key-store secrets). It
             // dispatches by the channel type's `adapter`. See `tools::gateway`.
-            "gateway_send_message" => registry.register(gateway::GatewaySendMessageTool),
-            "say_to_user" => registry.register(
+            "gateway_send_message" => registry.register_capped(gateway::GatewaySendMessageTool),
+            "say_to_user" => registry.register_capped(
                 say_to_user::SayToUserTool::new(config.and_then(|c| c.reply_sink.clone()))
                     .with_turn_plan(config.and_then(|c| c.turn_plan.clone())),
             ),
-            "ask_user" => registry.register(ask_user::AskUserTool::new(
+            "ask_user" => registry.register_capped(ask_user::AskUserTool::new(
                 config.and_then(|c| c.reply_sink.clone()),
             )),
             "project_note" | "project_scratchpad_write" | "project_block" | "project_complete"
@@ -278,33 +280,33 @@ pub fn create_registry_for_with_config(
                 // an affordance it cannot use.
                 match config.and_then(|c| c.project_id.clone()) {
                     Some(project_id) => match name.as_str() {
-                        "project_note" => registry.register(project::ProjectNoteTool::new(project_id)),
+                        "project_note" => registry.register_capped(project::ProjectNoteTool::new(project_id)),
                         "project_scratchpad_write" => {
-                            registry.register(project::ProjectScratchpadWriteTool::new(project_id))
+                            registry.register_capped(project::ProjectScratchpadWriteTool::new(project_id))
                         }
-                        "project_block" => registry.register(project::ProjectBlockTool::new(project_id)),
+                        "project_block" => registry.register_capped(project::ProjectBlockTool::new(project_id)),
                         "project_await_run" => {
-                            registry.register(project::ProjectAwaitRunTool::new(project_id))
+                            registry.register_capped(project::ProjectAwaitRunTool::new(project_id))
                         }
-                        "project_finding" => registry.register(project::ProjectFindingTool::new(project_id)),
+                        "project_finding" => registry.register_capped(project::ProjectFindingTool::new(project_id)),
                         "project_finding_update" => {
-                            registry.register(project::ProjectFindingUpdateTool::new(project_id))
+                            registry.register_capped(project::ProjectFindingUpdateTool::new(project_id))
                         }
-                        "task_add" => registry.register(task::TaskAddTool::new(project_id)),
+                        "task_add" => registry.register_capped(task::TaskAddTool::new(project_id)),
                         "task_update" => {
-                            registry.register(task::TaskUpdateTool::new(project_id))
+                            registry.register_capped(task::TaskUpdateTool::new(project_id))
                         }
-                        "task_done" => registry.register(task::TaskDoneTool::new(project_id)),
-                        "task_block" => registry.register(task::TaskBlockTool::new(project_id)),
-                        "task_drop" => registry.register(task::TaskDropTool::new(project_id)),
+                        "task_done" => registry.register_capped(task::TaskDoneTool::new(project_id)),
+                        "task_block" => registry.register_capped(task::TaskBlockTool::new(project_id)),
+                        "task_drop" => registry.register_capped(task::TaskDropTool::new(project_id)),
                         "conductor_write" => {
-                            registry.register(conductor::ConductorWriteTool::new(project_id))
+                            registry.register_capped(conductor::ConductorWriteTool::new(project_id))
                         }
                         "conductor_note" => {
-                            registry.register(conductor::ConductorNoteTool::new(project_id))
+                            registry.register_capped(conductor::ConductorNoteTool::new(project_id))
                         }
                         "project_pace" => {
-                            registry.register(conductor::ConductorPaceTool::new(project_id))
+                            registry.register_capped(conductor::ConductorPaceTool::new(project_id))
                         }
                         "task_dispatch" => {
                             // Needs the turn's credentials and roster: dispatch
@@ -316,7 +318,7 @@ pub fn create_registry_for_with_config(
                                 None => registry,
                             }
                         }
-                        _ => registry.register(project::ProjectCompleteTool::new(project_id)),
+                        _ => registry.register_capped(project::ProjectCompleteTool::new(project_id)),
                     },
                     None => {
                         log::debug!("{name} requires a project, skipping");
@@ -326,7 +328,7 @@ pub fn create_registry_for_with_config(
             }
             "update_plan" => {
                 if let Some(plan) = config.and_then(|c| c.turn_plan.clone()) {
-                    registry.register(update_plan::UpdatePlanTool::new(plan))
+                    registry.register_capped(update_plan::UpdatePlanTool::new(plan))
                 } else {
                     // No shared plan means nothing would read what this tool
                     // wrote — a sub-agent, a flow node, a one-shot run. Dropping
@@ -337,7 +339,7 @@ pub fn create_registry_for_with_config(
             }
             "schedule_followup" => {
                 if let Some(cfg) = config {
-                    registry.register(schedule_followup::ScheduleFollowupTool::new(
+                    registry.register_capped(schedule_followup::ScheduleFollowupTool::new(
                         cfg.session_binding.clone(),
                         cfg.reschedule_depth,
                     ))
@@ -348,7 +350,7 @@ pub fn create_registry_for_with_config(
             }
             "sub_agent" => {
                 if let Some(cfg) = config {
-                    registry.register(
+                    registry.register_capped(
                         sub_agent::SubAgentTool::new(
                             cfg.api_key.clone(),
                             cfg.model_name.clone(),
@@ -368,7 +370,7 @@ pub fn create_registry_for_with_config(
             unknown => {
                 // Try loading as a user-defined HTTP API tool
                 if let Some(api_tool) = http_api::HttpApiTool::try_load(unknown) {
-                    registry.register(api_tool)
+                    registry.register_capped(api_tool)
                 } else {
                     log::warn!("Unknown tool '{}' in persona, skipping", unknown);
                     registry

@@ -67,6 +67,23 @@ impl metalcraft::Tool for ReadFileTool {
             }));
         }
 
+        // A backwards range is a `lines[start..end]` panic, and a panic inside a
+        // tool takes the turn down rather than being answered — the model has no
+        // way to learn it asked for something impossible. Seen in the wild: a
+        // model that had `start_line` and `end_line` the wrong way round.
+        if end < start {
+            return Ok(serde_json::json!({
+                "path": path_str,
+                "content": "",
+                "total_lines": lines.len(),
+                "note": format!(
+                    "end_line {} is before start_line {}; nothing to read. Pass the range in \
+                     ascending order.",
+                    end, start + 1
+                )
+            }));
+        }
+
         let selected: String = lines[start..end]
             .iter()
             .enumerate()
@@ -82,5 +99,56 @@ impl metalcraft::Tool for ReadFileTool {
             "lines_shown": format!("{}-{}", start + 1, end),
             "total_lines": lines.len()
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use metalcraft::Tool;
+
+    /// A range given backwards used to index a slice backwards, which panics —
+    /// and a panic in a tool ends the turn instead of telling the model what it
+    /// got wrong.
+    #[tokio::test]
+    async fn a_backwards_range_is_answered_not_a_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sample.txt");
+        std::fs::write(&path, "a\nb\nc\nd\n").expect("write");
+
+        let result = ReadFileTool
+            .call(serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "start_line": 150,
+                "end_line": 120,
+            }))
+            .await
+            .expect("a backwards range is an answer, not a failure");
+
+        assert_eq!(result["content"], "");
+        assert!(
+            result["note"].as_str().unwrap().contains("start_line"),
+            "the note should say what to pass instead, got {:?}",
+            result["note"]
+        );
+    }
+
+    /// The same shape, but with a start inside the file — the case that panicked.
+    #[tokio::test]
+    async fn a_backwards_range_inside_the_file_is_answered_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sample.txt");
+        std::fs::write(&path, "a\nb\nc\nd\ne\n").expect("write");
+
+        let result = ReadFileTool
+            .call(serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "start_line": 4,
+                "end_line": 2,
+            }))
+            .await
+            .expect("a backwards range is an answer, not a failure");
+
+        assert_eq!(result["content"], "");
     }
 }

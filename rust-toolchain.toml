@@ -1,0 +1,11 @@
+# Pinned so every machine that builds this agent resolves the same compiler.
+#
+# 1.91 is a floor, not a preference: `metalcraft-flows` 0.6 and
+# `metalcraft-packs` 0.2 both declare `rust-version = "1.91"`, so a 1.90
+# toolchain fails resolution before it ever reaches this crate's code — which is
+# exactly how a CI box with a slightly older Rust reports a dependency problem as
+# a mystery. Matching `rust-version` in Cargo.toml states the same floor to
+# cargo; this states it to rustup.
+[toolchain]
+channel = "1.91"
+components = ["rustfmt", "clippy"]

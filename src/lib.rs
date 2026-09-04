@@ -37,6 +37,7 @@ pub mod octaweave;
 pub mod paths;
 pub mod persona;
 pub mod registry;
+pub mod resources;
 pub mod runtime;
 pub mod scheduled_flows;
 pub mod scheduled_tasks;
