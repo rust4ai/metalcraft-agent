@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.41.0"
+    "version": "0.42.0"
   },
   "paths": {
     "/api/v1/agent-packs": {
@@ -2880,6 +2880,28 @@
         }
       }
     },
+    "/api/v1/metrics": {
+      "get": {
+        "tags": [
+          "diagnostics"
+        ],
+        "summary": "What this process is holding, and the ceilings bounding it.",
+        "description": "Authenticated like the rest of `/api/v1` — it names conversations only by\ncount, but a size profile of a pod's traffic is still the pod's business.",
+        "operationId": "get_metrics",
+        "responses": {
+          "200": {
+            "description": "Resident memory and the limits bounding it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryMetrics"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/personas": {
       "get": {
         "tags": [
@@ -4545,6 +4567,26 @@
           }
         }
       },
+      "BroadcasterMemory": {
+        "type": "object",
+        "description": "Live event buses (`GET /chats/{id}/events`).",
+        "required": [
+          "count",
+          "subscribed"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "description": "Buses in the registry.",
+            "minimum": 0
+          },
+          "subscribed": {
+            "type": "integer",
+            "description": "Of those, how many have a subscriber. The gap between the two is what the\nsweeper reclaims; a gap that keeps growing means a cleanup path is being\nmissed.",
+            "minimum": 0
+          }
+        }
+      },
       "Channel": {
         "type": "object",
         "description": "A channel as surfaced to callers/UI: a named connection. `managed` marks the\nbuilt-in `metalcraft` channel (secret is the pod token; not user-editable).\nThe secret value itself is never included here.",
@@ -5067,6 +5109,58 @@
           "stopping": {
             "type": "boolean",
             "description": "True when a turn was running and has been asked to stop. False when the\nchat was already idle — the turn finished on its own between the press\nand this request, which is not a failure and must not be shown as one."
+          }
+        }
+      },
+      "ChatMemory": {
+        "type": "object",
+        "description": "The resident cost of one part of the process.",
+        "required": [
+          "resident",
+          "unmeasured",
+          "turns_in_flight",
+          "context_bytes",
+          "archived_bytes",
+          "in_flight_bytes",
+          "messages"
+        ],
+        "properties": {
+          "archived_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes of closed-off history kept beside the context. Append-only today:\na reset moves messages here and nothing ever moves them out, which is the\nresidency this endpoint exists to make visible.",
+            "minimum": 0
+          },
+          "context_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes of live context — what the model still sees.",
+            "minimum": 0
+          },
+          "in_flight_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes of the per-turn wire snapshot each running turn publishes so the\nconversation stays readable while the executor owns its state.",
+            "minimum": 0
+          },
+          "messages": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "resident": {
+            "type": "integer",
+            "description": "Conversations held in memory right now.",
+            "minimum": 0
+          },
+          "turns_in_flight": {
+            "type": "integer",
+            "description": "Turns in flight, counted as the sessions holding an in-flight snapshot.",
+            "minimum": 0
+          },
+          "unmeasured": {
+            "type": "integer",
+            "description": "Sessions skipped because a turn held their lock. Their bytes are missing\nfrom the totals below — a non-zero value here means the numbers are a\nfloor, not a total.",
+            "minimum": 0
           }
         }
       },
@@ -7815,6 +7909,62 @@
           },
           "file": {
             "type": "string"
+          }
+        }
+      },
+      "MemoryLimits": {
+        "type": "object",
+        "description": "The ceilings in force, echoed so an operator can see what a pod is actually\nrunning with rather than what the defaults say.",
+        "required": [
+          "max_tool_result_bytes",
+          "max_request_body_bytes",
+          "max_diagnostic_file_bytes"
+        ],
+        "properties": {
+          "max_diagnostic_file_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max_request_body_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max_tool_result_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "MemoryMetrics": {
+        "type": "object",
+        "description": "Everything `GET /api/v1/metrics` reports.",
+        "required": [
+          "chats",
+          "broadcasters",
+          "counters",
+          "limits"
+        ],
+        "properties": {
+          "broadcasters": {
+            "$ref": "#/components/schemas/BroadcasterMemory"
+          },
+          "chats": {
+            "$ref": "#/components/schemas/ChatMemory"
+          },
+          "counters": {
+            "$ref": "#/components/schemas/Counters"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/MemoryLimits"
+          },
+          "rss_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Resident set size of the process. `null` off Linux, where it can't be\nread without a dependency this crate doesn't carry.",
+            "minimum": 0
           }
         }
       },
