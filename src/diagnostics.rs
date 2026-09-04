@@ -144,21 +144,13 @@ impl DiagnosticsLogger {
         let rewritten = previous > total;
         let first_index = if rewritten { 0 } else { previous };
 
-        let messages: Vec<serde_json::Value> = state.messages[first_index.min(total)..]
-            .iter()
-            .map(serialize_message)
-            .collect();
-
-        let turn_data = json!({
-            "turn": turn,
-            "message_count": total,
-            "first_index": first_index,
-            "new_message_count": messages.len(),
-            // Only ever true after a compaction rewrote the list; `messages` is
-            // then the whole context rather than an addition to it.
-            "rewritten": rewritten,
-            "messages": messages,
-        });
+        let turn_data = TurnDelta {
+            turn,
+            message_count: total,
+            first_index,
+            rewritten,
+            messages: &state.messages[first_index.min(total)..],
+        };
 
         let filename = format!("turn_{:03}.json", turn);
         let path = self.session_dir.join(&filename);
@@ -232,48 +224,110 @@ impl DiagnosticsLogger {
     }
 }
 
-fn serialize_message(msg: &AgentMessage) -> serde_json::Value {
-    match msg {
-        AgentMessage::User(text) => json!({
-            "role": "user",
-            "content": text,
-        }),
-        AgentMessage::Assistant(text) => json!({
-            "role": "assistant",
-            "content": text,
-        }),
-        AgentMessage::ToolCall {
-            id,
-            call_id,
-            name,
-            args,
-        } => json!({
-            "role": "tool_call",
-            "id": id,
-            "call_id": call_id,
-            "name": name,
-            "args": args,
-        }),
-        AgentMessage::ToolResult {
-            id,
-            call_id,
-            name,
-            result,
-        } => json!({
-            "role": "tool_result",
-            "id": id,
-            "call_id": call_id,
-            "name": name,
-            "result": result,
-            "is_error": result.starts_with("ERROR:"),
-        }),
-        AgentMessage::Reasoning { id, .. } => json!({
-            "role": "reasoning",
-            "id": id,
-            // The encrypted payload is large and opaque; record only its
-            // presence, not its contents.
-            "encrypted": true,
-        }),
+/// One message, written straight into the output stream.
+///
+/// Borrows rather than building a `serde_json::Value` first, which is not a
+/// micro-optimisation: the `Value` would own a *copy* of every string in the
+/// message, so a single huge tool result existed twice — once in the agent
+/// state, once in the tree waiting to be printed — before the byte ceiling ever
+/// got to look at it. Streaming from the borrow means the ceiling bounds the
+/// heap as well as the file, which is the whole claim
+/// [`write_json_capped`] makes.
+///
+/// The JSON shape here is a contract: `diagnostics_browse` and the
+/// `diagnostics_*` meta tools read these files, so a field renamed here is a
+/// field that disappears from the Sessions timeline.
+struct MessageRef<'a>(&'a AgentMessage);
+
+impl serde::Serialize for MessageRef<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut m = serializer.serialize_map(None)?;
+        match self.0 {
+            AgentMessage::User(text) => {
+                m.serialize_entry("role", "user")?;
+                m.serialize_entry("content", text)?;
+            }
+            AgentMessage::Assistant(text) => {
+                m.serialize_entry("role", "assistant")?;
+                m.serialize_entry("content", text)?;
+            }
+            AgentMessage::ToolCall {
+                id,
+                call_id,
+                name,
+                args,
+            } => {
+                m.serialize_entry("role", "tool_call")?;
+                m.serialize_entry("id", id)?;
+                m.serialize_entry("call_id", call_id)?;
+                m.serialize_entry("name", name)?;
+                m.serialize_entry("args", args)?;
+            }
+            AgentMessage::ToolResult {
+                id,
+                call_id,
+                name,
+                result,
+            } => {
+                m.serialize_entry("role", "tool_result")?;
+                m.serialize_entry("id", id)?;
+                m.serialize_entry("call_id", call_id)?;
+                m.serialize_entry("name", name)?;
+                m.serialize_entry("result", result)?;
+                m.serialize_entry("is_error", &result.starts_with("ERROR:"))?;
+            }
+            AgentMessage::Reasoning { id, .. } => {
+                m.serialize_entry("role", "reasoning")?;
+                m.serialize_entry("id", id)?;
+                // The encrypted payload is large and opaque; record only its
+                // presence, not its contents.
+                m.serialize_entry("encrypted", &true)?;
+            }
+        }
+        m.end()
+    }
+}
+
+/// What one step appended, ready to be streamed to disk.
+///
+/// A hand-written `Serialize` rather than a `json!` document for the reason
+/// [`MessageRef`] exists: `json!` would collect every message into a tree first,
+/// and the tree is the copy this is trying not to make.
+struct TurnDelta<'a> {
+    turn: usize,
+    /// Length of the whole context, not of `messages`.
+    message_count: usize,
+    first_index: usize,
+    rewritten: bool,
+    messages: &'a [AgentMessage],
+}
+
+impl serde::Serialize for TurnDelta<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+
+        struct Messages<'a>(&'a [AgentMessage]);
+        impl serde::Serialize for Messages<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+                for msg in self.0 {
+                    seq.serialize_element(&MessageRef(msg))?;
+                }
+                seq.end()
+            }
+        }
+
+        let mut m = serializer.serialize_map(None)?;
+        m.serialize_entry("turn", &self.turn)?;
+        m.serialize_entry("message_count", &self.message_count)?;
+        m.serialize_entry("first_index", &self.first_index)?;
+        m.serialize_entry("new_message_count", &self.messages.len())?;
+        // Only ever true after a compaction rewrote the list; `messages` is then
+        // the whole context rather than an addition to it.
+        m.serialize_entry("rewritten", &self.rewritten)?;
+        m.serialize_entry("messages", &Messages(self.messages))?;
+        m.end()
     }
 }
 
