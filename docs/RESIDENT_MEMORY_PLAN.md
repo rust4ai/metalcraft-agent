@@ -29,6 +29,14 @@ Measured on the synthetic harness (`tests/memory_bounds_test.rs`), a 1 000-step
 session wrote **~1 030 MB** of diagnostics under the old full-history writer.
 The same session now writes **~2.4 MB**.
 
+The harness measures the **allocator**, not the session directory. Weighing the
+disk is a proxy that cannot see a transient built and dropped without being
+written — and on this codebase that transient was most of the cost. Two
+conventions hold there: assert a ratio or a slope rather than an absolute byte
+count, and mutation-check anything that matters. Disabling the broadcaster
+cleanup, the body limit, or the delta logging each has to produce exactly one
+failure; a test never seen to fail has not been written yet.
+
 ## PR 1 — stop the bleeding (done)
 
 Deliberately the smallest change that removes the unbounded growth, with no
@@ -40,10 +48,17 @@ either a ceiling or a measurement.
   full history exactly as before. Compaction rewrites the list rather than
   appending, so a shorter list resets the cursor and the file is marked
   `rewritten` — a reader discards what it had rather than appending to it.
-- **Diagnostics are bounded.** Every file is streamed through a limiting writer
-  under `MAX_DIAGNOSTIC_FILE_BYTES` (512 KiB). Streaming is the point:
-  serializing first and measuring afterwards would bound the disk and leave the
-  memory spike where it was.
+- **Diagnostics are bounded, in the heap as well as on disk.** Every file is
+  streamed through a limiting writer under `MAX_DIAGNOSTIC_FILE_BYTES` (512 KiB),
+  serialized from borrowed messages (`MessageRef`, `TurnDelta`) so no
+  `serde_json::Value` tree is ever built. That distinction is the whole point and
+  it is easy to half-do: 0.42.0 shipped the limiting writer but still collected
+  the messages into a `Vec<Value>` first, so the ceiling bounded the file and not
+  the heap. 0.43.0 fixed it, and the harness is what found it.
+
+  Measured per `log_turn` call: allocation scales 4.00× for 4× the steps, the
+  transient peak is flat (8 498 bytes at 50 steps, 8 504 at 200), and a message
+  three times the ceiling peaks at 8 634 bytes — it is never copied.
 - **Session directories no longer collide.** They are named for the second the
   session started, and `create_dir_all` succeeded on an existing one — so two
   chats opening in the same second shared a directory and overwrote each other's
