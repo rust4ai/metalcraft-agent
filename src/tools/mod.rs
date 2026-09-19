@@ -24,10 +24,13 @@ pub mod s3;
 pub mod say_to_user;
 pub mod schedule_followup;
 pub mod sub_agent;
+pub mod sub_agent_lifecycle;
+pub mod sub_agent_registry;
 pub mod twilio;
 pub mod update_plan;
 pub mod web_fetch;
 pub mod write_file;
+pub mod yield_result;
 
 use crate::tools::capped::RegisterCapped as _;
 use futures_util::future::BoxFuture;
@@ -350,23 +353,38 @@ pub fn create_registry_for_with_config(
             }
             "sub_agent" => {
                 if let Some(cfg) = config {
-                    registry.register_capped(
-                        sub_agent::SubAgentTool::new(
-                            cfg.api_key.clone(),
-                            cfg.model_name.clone(),
-                            cfg.system_prompt.clone(),
-                        )
-                        .with_depth(cfg.sub_agent_depth)
-                        .with_preset_personas(cfg.preset_personas.clone())
-                        .with_instance(cfg.instance_id.clone())
-                        .with_interrupt(cfg.interrupt.clone())
-                        .with_turn_plan(cfg.turn_plan.clone()),
-                    )
+                    let registry = registry.register_capped(delegate_tool(cfg));
+                    // The lifecycle tools ship with `sub_agent`, not as things a
+                    // persona has to remember to list. A delegate id the model
+                    // is handed but cannot act on is worse than no id at all:
+                    // it re-delegates, and re-pays for every read the first
+                    // child already did. Gated on the same depth rule
+                    // `sub_agent` enforces — an agent at the bottom of the tree
+                    // has no delegates of its own to list or revive.
+                    register_delegate_lifecycle(registry, cfg)
                 } else {
                     log::warn!("sub_agent tool requires ToolConfig, skipping");
                     registry
                 }
             }
+            // A supervisor that inspects and steers delegates without spawning
+            // any of its own can name these directly.
+            "sub_agent_list" | "sub_agent_read" | "sub_agent_send" => match config {
+                Some(cfg) if cfg.sub_agent_depth < sub_agent::MAX_SUB_AGENT_DEPTH => {
+                    match name.as_str() {
+                        "sub_agent_list" => registry.register_capped(
+                            sub_agent_lifecycle::SubAgentListTool::new(cfg.instance_id.clone()),
+                        ),
+                        "sub_agent_read" => registry.register_capped(
+                            sub_agent_lifecycle::SubAgentReadTool::new(cfg.instance_id.clone()),
+                        ),
+                        _ => registry.register_capped(
+                            sub_agent_lifecycle::SubAgentSendTool::new(delegate_tool(cfg)),
+                        ),
+                    }
+                }
+                _ => registry,
+            },
             unknown => {
                 // Try loading as a user-defined HTTP API tool
                 if let Some(api_tool) = http_api::HttpApiTool::try_load(unknown) {
@@ -379,6 +397,45 @@ pub fn create_registry_for_with_config(
         };
     }
     registry
+}
+
+/// The delegation tool, wired to this turn's credentials, roster, identity,
+/// stop flag and plan.
+///
+/// Built in one place because two tools need the same one: `sub_agent` spawns
+/// children with it, and `sub_agent_send` revives them with it. A follow-up
+/// that rebuilt the child from anything else would be a second, quietly
+/// divergent definition of what a delegate is allowed to be.
+fn delegate_tool(cfg: &ToolConfig) -> sub_agent::SubAgentTool {
+    sub_agent::SubAgentTool::new(
+        cfg.api_key.clone(),
+        cfg.model_name.clone(),
+        cfg.system_prompt.clone(),
+    )
+    .with_depth(cfg.sub_agent_depth)
+    .with_preset_personas(cfg.preset_personas.clone())
+    .with_instance(cfg.instance_id.clone())
+    .with_interrupt(cfg.interrupt.clone())
+    .with_turn_plan(cfg.turn_plan.clone())
+}
+
+/// Add the list/read/send tools that make a delegate addressable after it
+/// finishes. Skipped at the bottom of the delegation tree, where there are no
+/// delegates to address.
+fn register_delegate_lifecycle(registry: ToolRegistry, cfg: &ToolConfig) -> ToolRegistry {
+    if cfg.sub_agent_depth >= sub_agent::MAX_SUB_AGENT_DEPTH {
+        return registry;
+    }
+    registry
+        .register_capped(sub_agent_lifecycle::SubAgentListTool::new(
+            cfg.instance_id.clone(),
+        ))
+        .register_capped(sub_agent_lifecycle::SubAgentReadTool::new(
+            cfg.instance_id.clone(),
+        ))
+        .register_capped(sub_agent_lifecycle::SubAgentSendTool::new(delegate_tool(
+            cfg,
+        )))
 }
 
 /// Register all available tools.

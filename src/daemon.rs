@@ -464,6 +464,13 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                                     log::warn!("Flow '{}' prompt interrupted: {}", flow.id, reason);
                                     break;
                                 }
+                                Ok(metalcraft::RunOutcome::Cancelled { resume_from, .. }) => {
+                                    log::warn!(
+                                        "Flow '{}' prompt cancelled at {resume_from}",
+                                        flow.id
+                                    );
+                                    break;
+                                }
                                 Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
                                     log::error!(
                                         "Flow '{}' prompt failed at {node}: {error}",

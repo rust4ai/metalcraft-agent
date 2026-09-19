@@ -61,6 +61,11 @@ impl OperationKind {
             "bash" => Self::Execute,
             "web_fetch" => Self::NetworkFetch,
             "sub_agent" => Self::SubAgent,
+            // Reviving a delegate starts a whole agent run, exactly as spawning
+            // one does, so it is gated the same way. Listing and reading are
+            // inspection of runs that already happened.
+            "sub_agent_send" => Self::SubAgent,
+            "sub_agent_list" | "sub_agent_read" => Self::ReadFile,
             "load_skill" => Self::LoadSkill,
             // Long-term memory: reads auto-approve. Writes (mem_remember,
             // mem_forget) fall through to the default Execute arm and require

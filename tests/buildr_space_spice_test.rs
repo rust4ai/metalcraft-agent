@@ -910,6 +910,7 @@ impl AgentUnderTest for MetalcraftPresetAgent {
             RunOutcome::Interrupted { state, reason, .. } => {
                 (state, Some(format!("interrupted: {reason}")))
             }
+            RunOutcome::Cancelled { state, .. } => (state, Some("cancelled".to_string())),
             RunOutcome::Failed { state, node, error } => {
                 (state, Some(format!("node `{node}` failed: {error}")))
             }

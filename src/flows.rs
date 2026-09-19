@@ -339,6 +339,12 @@ pub async fn run_flow(
                 answer: None,
                 error: Some(reason),
             },
+            Ok(RunOutcome::Cancelled { resume_from, .. }) => FlowPromptResult {
+                prompt_index: i,
+                status: "cancelled".into(),
+                answer: None,
+                error: Some(format!("cancelled at {resume_from}")),
+            },
             Ok(RunOutcome::Failed { node, error, .. }) => FlowPromptResult {
                 prompt_index: i,
                 status: "failed".into(),

@@ -9,10 +9,13 @@ license = "MIT"
 repository = "https://github.com/rust4ai/metalcraft-agent"
 
 [dependencies]
-metalcraft = { version = "0.11.0", features = ["rig"] }
+metalcraft = { version = "1.0", features = ["rig"] }
 metalcraft-flows = { version = "0.6.0", features = ["schema"] }
 metalcraft-packs = "0.2"
-rig = "0.37"
+# Must match the `rig-core` the `metalcraft` crate links (0.42): the pod hands a
+# rig `CompletionModel` straight into metalcraft's graph, and two versions of
+# `rig-core` in one tree are two unrelated traits to the compiler.
+rig = "0.42"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -64,3 +67,9 @@ tempfile = "3"
 # Drives `workshop_api::build_router` directly in tests via `ServiceExt::oneshot`,
 # so handler behaviour is testable without binding a port.
 tower = { version = "0.5", features = ["util"] }
+
+# metalcraft 1.0.0 is not on crates.io yet. Until it is published, build
+# against the working copy — the dependency line above stays a normal version
+# requirement so publishing is the only change needed to drop this.
+[patch.crates-io]
+metalcraft = { path = "../metalcraft" }

@@ -122,6 +122,13 @@ pub fn chats_dir() -> PathBuf {
     data_dir().join("chats")
 }
 
+/// Images attached to chat messages — one subdirectory per chat, deleted with
+/// it. Beside `chats_dir()` rather than inside it, so a chat stays one readable
+/// JSON file and a listing of conversations is still a list of conversations.
+pub fn attachments_dir() -> PathBuf {
+    data_dir().join("attachments")
+}
+
 pub fn integrations_dir() -> PathBuf {
     data_dir().join("integrations")
 }

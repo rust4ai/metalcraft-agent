@@ -244,9 +244,15 @@ impl serde::Serialize for MessageRef<'_> {
         use serde::ser::SerializeMap;
         let mut m = serializer.serialize_map(None)?;
         match self.0 {
-            AgentMessage::User(text) => {
+            AgentMessage::User(input) => {
                 m.serialize_entry("role", "user")?;
-                m.serialize_entry("content", text)?;
+                m.serialize_entry("content", &input.text)?;
+                // The bytes are never written here — a diagnostics file is read
+                // as text and one photo would dwarf the whole session. The
+                // count is what answers "did the model actually get the image?"
+                if !input.images.is_empty() {
+                    m.serialize_entry("images", &input.images.len())?;
+                }
             }
             AgentMessage::Assistant(text) => {
                 m.serialize_entry("role", "assistant")?;

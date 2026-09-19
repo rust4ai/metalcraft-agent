@@ -281,11 +281,11 @@ async fn memory_store_round_trip() {
     );
     assert_eq!(state.messages.len(), before + 1);
 
-    let blocks: Vec<&String> = state
+    let blocks: Vec<&str> = state
         .messages
         .iter()
         .filter_map(|m| match m {
-            AgentMessage::User(t) if t.starts_with(inject::SENTINEL) => Some(t),
+            AgentMessage::User(t) if t.text.starts_with(inject::SENTINEL) => Some(t.text.as_str()),
             _ => None,
         })
         .collect();
@@ -297,7 +297,7 @@ async fn memory_store_round_trip() {
     match state.messages.last() {
         Some(AgentMessage::User(t)) => {
             assert!(
-                t.starts_with("what do you know"),
+                t.text.starts_with("what do you know"),
                 "the real question must remain last"
             );
         }
@@ -312,7 +312,7 @@ async fn memory_store_round_trip() {
         !state
             .messages
             .iter()
-            .any(|m| matches!(m, AgentMessage::User(t) if t.contains(inject::SENTINEL))),
+            .any(|m| matches!(m, AgentMessage::User(t) if t.text.contains(inject::SENTINEL))),
         "no trace of the injection survives"
     );
 

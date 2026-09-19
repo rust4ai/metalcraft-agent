@@ -263,6 +263,7 @@ pub async fn flow_conversation(
         pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         plan: Arc::new(std::sync::Mutex::new(Vec::new())),
         running: Arc::new(std::sync::Mutex::new(None)),
+        compaction: Default::default(),
     };
     chat_store()
         .lock()
@@ -318,6 +319,7 @@ pub async fn project_conversation(
         pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         plan: Arc::new(std::sync::Mutex::new(Vec::new())),
         running: Arc::new(std::sync::Mutex::new(None)),
+        compaction: Default::default(),
     };
     let session = Arc::new(Mutex::new(session));
     chat_store().lock().await.insert(id.clone(), session.clone());
@@ -574,6 +576,15 @@ struct ChatSession {
     /// lock. Not persisted — a turn does not survive a restart, and
     /// [`persist_chat`] runs after the state is back.
     running: Arc<std::sync::Mutex<Option<Vec<ChatMessageWire>>>>,
+    /// This context's compaction records: which prefix of the live context the
+    /// model is no longer shown, and the summary standing in for it.
+    ///
+    /// Persisted, unlike [`Self::plan`], because the boundary has to survive a
+    /// restart — a reloaded chat whose records were dropped would show the model
+    /// the whole journal again and immediately pay for a fresh summary of it.
+    /// Sync-locked and shared for the same reason as [`Self::plan`]: the turn
+    /// that appends a record runs with the state taken out of the session.
+    compaction: crate::context::CompactionLog,
 }
 
 /// Build a [`TraceLogger`] keyed to a diagnostics logger's session-dir name, so
@@ -788,6 +799,7 @@ async fn auth_middleware(
         get_pod_settings, put_pod_settings, list_timezones,
         get_inference_status,
         list_chats, post_create_chat, get_chat, delete_chat, post_chat_turn, get_chat_events,
+        post_chat_attachment, get_chat_attachment,
         post_chat_reset,
         get_chat_context, post_chat_compact, post_chat_interrupt,
         list_scheduled_tasks, delete_scheduled_task,
@@ -842,6 +854,7 @@ async fn auth_middleware(
         IntegrationSummary, IntegrationDetail, SetEnabledRequest,
         MgRegisterRequest, MgConnectRequest,
         crate::channels::Channel, CreateChannelRequest, UpdateChannelRequest,
+        crate::attachments::Attachment,
         crate::persona::Persona, crate::persona::PersonaSummary,
         crate::agent_preset::AgentPreset, crate::agent_preset::PresetSummary,
         crate::agent_preset::PresetPersona, crate::agent_preset::PersonaRole,
@@ -1107,6 +1120,14 @@ pub fn build_router(api_key: String) -> Router {
         .route("/api/v1/chats", get(list_chats).post(post_create_chat))
         .route("/api/v1/chats/{id}", get(get_chat).delete(delete_chat))
         .route("/api/v1/chats/{id}/turn", post(post_chat_turn))
+        .route(
+            "/api/v1/chats/{id}/attachments",
+            post(post_chat_attachment),
+        )
+        .route(
+            "/api/v1/chats/{id}/attachments/{attachment_id}",
+            get(get_chat_attachment),
+        )
         .route("/api/v1/chats/{id}/context", get(get_chat_context))
         .route("/api/v1/chats/{id}/compact", post(post_chat_compact))
         .route("/api/v1/chats/{id}/reset", post(post_chat_reset))
@@ -4147,6 +4168,11 @@ struct InferenceStatus {
     base_url: Option<String>,
     /// Routed at the Metalcraft gateway — so turns bill the account's credits.
     gateway: bool,
+    /// Whether this pod's model can be shown an image, so a client knows
+    /// whether to offer an attach button at all. An older pod omits the field,
+    /// which decodes to `false` — the right default, because a pod that cannot
+    /// say is a pod that cannot take attachments either.
+    vision: bool,
 }
 
 #[utoipa::path(
@@ -4163,6 +4189,7 @@ async fn get_inference_status() -> Json<InferenceStatus> {
             .map(|(_, c)| c.as_str().to_string())
             .unwrap_or_else(|| "none".into()),
         base_url: crate::runtime::inference_base_url(),
+        vision: crate::runtime::model_reads_images(&crate::runtime::configured_default_model()),
         gateway: crate::runtime::inference_at_gateway(),
     })
 }
@@ -4969,9 +4996,16 @@ impl ChatMessageWire {
     /// would have had to invent a message for a divider.
     fn into_agent_message(self) -> Option<AgentMessage> {
         Some(match self {
-            Self::User { content } => AgentMessage::User(content),
+            Self::User { content } => AgentMessage::User(content.into()),
             Self::Assistant { content } => AgentMessage::Assistant(content),
-            Self::Reasoning { id, encrypted } => AgentMessage::Reasoning { id, encrypted },
+            // No summaries: they are display text the provider generated, never
+            // persisted and never replayed. The encrypted payload is the half a
+            // reload has to bring back.
+            Self::Reasoning { id, encrypted } => AgentMessage::Reasoning {
+                id,
+                encrypted,
+                summary: Vec::new(),
+            },
             Self::ToolCall {
                 id,
                 call_id,
@@ -5002,9 +5036,11 @@ impl ChatMessageWire {
 impl From<&AgentMessage> for ChatMessageWire {
     fn from(m: &AgentMessage) -> Self {
         match m {
-            AgentMessage::User(s) => Self::User { content: s.clone() },
+            AgentMessage::User(input) => Self::User {
+                content: input.text.clone(),
+            },
             AgentMessage::Assistant(s) => Self::Assistant { content: s.clone() },
-            AgentMessage::Reasoning { id, encrypted } => Self::Reasoning {
+            AgentMessage::Reasoning { id, encrypted, .. } => Self::Reasoning {
                 id: id.clone(),
                 encrypted: encrypted.clone(),
             },
@@ -5037,11 +5073,15 @@ impl From<&AgentMessage> for ChatMessageWire {
 /// The whole conversation: the segments that have been closed off by a reset,
 /// then whatever the live context holds now.
 ///
-/// There is deliberately **no index** relating the two halves. Compaction
-/// rewrites `state.messages` wholesale from inside a running turn
-/// (`runtime::…::compact_if_needed`), so any cursor into it is stale the moment
-/// a long conversation crosses the threshold — and the messages a stale cursor
-/// drops are the newest ones. Concatenation cannot go wrong that way.
+/// There is deliberately **no index** relating the two halves. The live context
+/// is appended to from inside a running turn, so any cursor into it is stale the
+/// moment a turn adds a message — and the messages a stale cursor drops are the
+/// newest ones. Concatenation cannot go wrong that way.
+///
+/// The live half is the conversation's whole message journal, including the
+/// messages a compaction has folded into a summary: compaction records a
+/// boundary (see [`crate::context`]) instead of rewriting the list, so what gets
+/// written here is still everything that was said.
 fn transcript_of(s: &ChatSession) -> Vec<ChatMessageWire> {
     let mut out = s.archived.clone();
     match in_flight_messages(s) {
@@ -5088,8 +5128,13 @@ fn release_turn(s: &ChatSession) {
 /// The same shape as [`stoppable`], and for the same reason: the executor's
 /// guard is the only thing that runs *inside* a turn, so it is the only place
 /// that can see the messages as they are appended. Refreshing wholesale rather
-/// than diffing keeps this honest through compaction, which rewrites the list
-/// rather than appending to it.
+/// than diffing costs nothing and cannot drift.
+///
+/// What it sees mid-turn is the *derived* context of a compacted chat — summary
+/// plus kept tail — because that is what the executor runs on. The journal comes
+/// back in the outcome (see [`crate::context::HeldJournal`]), which is why
+/// [`release_turn`] has to run before [`persist_chat`]: the file is written from
+/// the restored state, never from this snapshot.
 fn snapshotting(
     guard: StepGuard<AgentState>,
     running: Arc<std::sync::Mutex<Option<Vec<ChatMessageWire>>>>,
@@ -5122,6 +5167,14 @@ fn mark_reset(s: &mut ChatSession, reason: &str) -> ChatMessageWire {
     };
     s.archived.push(mark.clone());
     s.state = None;
+    // The records index the context that just ended. Keeping them would point a
+    // boundary at a journal that no longer exists, and the next turn would
+    // derive its context from a summary of a conversation the model has been
+    // told to forget.
+    s.compaction
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     mark
 }
 
@@ -5180,6 +5233,15 @@ struct PersistedChat {
     preset: SessionPreset,
     #[serde(default)]
     messages: Vec<ChatMessageWire>,
+    /// Where the model's view of the live context starts, and the summaries
+    /// standing in for what is behind it.
+    ///
+    /// `#[serde(default)]`, so every chat written before compaction became a
+    /// record loads as a conversation with no compactions — which is exactly
+    /// what it is, its summaries having been folded into its messages by the
+    /// version that rewrote history in place.
+    #[serde(default)]
+    compaction: Vec<crate::context::CompactionRecord>,
 }
 
 fn chat_file_path(id: &str) -> std::path::PathBuf {
@@ -5205,6 +5267,11 @@ async fn persist_chat(session: &Arc<Mutex<ChatSession>>) {
             cwd: s.cwd.clone(),
             created_at: s.created_at.clone(),
             preset: s.preset.clone(),
+            compaction: s
+                .compaction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             messages: transcript_of(&s),
         }
     };
@@ -5338,6 +5405,7 @@ fn load_persisted_chats() -> HashMap<String, Arc<Mutex<ChatSession>>> {
             pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             plan: Arc::new(std::sync::Mutex::new(Vec::new())),
             running: Arc::new(std::sync::Mutex::new(None)),
+            compaction: Arc::new(std::sync::Mutex::new(pc.compaction)),
         };
         out.insert(pc.id.clone(), Arc::new(Mutex::new(session)));
     }
@@ -5630,6 +5698,7 @@ async fn post_create_chat(
         pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         plan: Arc::new(std::sync::Mutex::new(Vec::new())),
         running: Arc::new(std::sync::Mutex::new(None)),
+        compaction: Default::default(),
     };
     let session_arc = Arc::new(Mutex::new(session));
     {
@@ -5720,6 +5789,9 @@ async fn delete_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>)
     if chats.remove(&id).is_some() {
         drop(chats);
         remove_chat_file(&id);
+        // The images the conversation was holding have no other owner and
+        // nothing left that could reach them.
+        crate::attachments::delete_chat(&id);
         // The chat is gone, so its event bus is too — forced, because a client
         // still holding the SSE stream open is subscribed to a conversation that
         // no longer exists, and keeping the bus for it would keep the deleted
@@ -5732,6 +5804,104 @@ async fn delete_chat(State(state): State<Arc<ApiState>>, Path(id): Path<String>)
     } else {
         err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"))
     }
+}
+
+// ── Attachments: the images a message carries ───────────────────────────
+//
+// Addressed under their chat, not in a global namespace, so "may this caller
+// read this image" is the same question as "may this caller read this chat" —
+// already answered by the auth layer and the chat's existence.
+
+/// Store an image for a later turn to attach.
+///
+/// Uploaded before the message is sent rather than inside it: a photo takes as
+/// long as the network takes, and doing it at send time would make the composer
+/// wait, with no way to show progress or to retry the upload alone.
+#[utoipa::path(
+    post,
+    path = "/api/v1/chats/{id}/attachments",
+    tag = "chats",
+    params(("id" = String, Path, description = "Chat id")),
+    request_body(
+        content = Vec<u8>,
+        description = "The image itself. Its media type is sniffed from the bytes — `Content-Type` is a claim by the caller and this one ends up inside the `data:` URL the provider is sent, so it is not taken on trust.",
+        content_type = "application/octet-stream",
+    ),
+    responses(
+        (status = 201, description = "Stored; reference it by id in the next turn", body = crate::attachments::Attachment),
+        (status = 404, description = "No such chat", body = ErrorResponse),
+        (status = 413, description = "Larger than this pod accepts, or than this conversation has room for", body = ErrorResponse),
+        (status = 415, description = "Not an image the model can read", body = ErrorResponse),
+    ),
+)]
+async fn post_chat_attachment(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    if !state.chats.lock().await.contains_key(&id) {
+        return err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"));
+    }
+    match crate::attachments::store(&id, &body) {
+        Ok(attachment) => (StatusCode::CREATED, Json(attachment)).into_response(),
+        Err(e) => {
+            use crate::attachments::StoreError::*;
+            let status = match e {
+                Empty | Unsupported { .. } => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                TooLarge { .. } | ChatFull { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+                Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            err_json(status, e.to_string())
+        }
+    }
+}
+
+/// The image itself.
+///
+/// Immutable by construction — an attachment id names one set of bytes that
+/// never changes — so it is served with a long private cache lifetime and an
+/// ETag, and a client that has drawn it once never asks again.
+#[utoipa::path(
+    get,
+    path = "/api/v1/chats/{id}/attachments/{attachment_id}",
+    tag = "chats",
+    params(
+        ("id" = String, Path, description = "Chat id"),
+        ("attachment_id" = String, Path, description = "Attachment id"),
+    ),
+    responses(
+        (status = 200, description = "The image bytes, with the media type they were sniffed as", content_type = "application/octet-stream"),
+        (status = 404, description = "No such chat, or no such attachment on it", body = ErrorResponse),
+    ),
+)]
+async fn get_chat_attachment(
+    State(state): State<Arc<ApiState>>,
+    Path((id, attachment_id)): Path<(String, String)>,
+) -> Response {
+    if !state.chats.lock().await.contains_key(&id) {
+        return err_json(StatusCode::NOT_FOUND, format!("chat '{id}' not found"));
+    }
+    let Some((meta, bytes)) = crate::attachments::read(&id, &attachment_id) else {
+        return err_json(
+            StatusCode::NOT_FOUND,
+            format!("attachment '{attachment_id}' not found"),
+        );
+    };
+    // Inline, deliberately: this is a picture to draw in a transcript, not a
+    // download. (The Drive app forces an attachment disposition for the
+    // opposite reason — there the file is the thing being fetched.)
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, meta.mime),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "private, immutable, max-age=31536000".to_string(),
+            ),
+            (axum::http::header::ETAG, format!("\"{}\"", meta.id)),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 // ── Chat context: what a slash command acts on ──────────────────────────
@@ -5762,22 +5932,37 @@ struct ChatCompacted {
     /// False when there was nothing old enough to summarize — not an error, and
     /// the honest answer for a short conversation.
     compacted: bool,
+    /// Sizes of the context the model is sent — before and after the record
+    /// landed. The stored conversation does not shrink; only the view does.
     tokens_before: usize,
     tokens_after: usize,
     messages_before: usize,
     messages_after: usize,
-    /// The summary that replaced the old half, when one was produced.
+    /// The summary now standing in for the old half, when one was produced.
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
 }
 
-fn chat_context_of(state: Option<&AgentState>) -> ChatContext {
+/// Sized against the context a turn would actually be sent, not the stored
+/// journal: after a compaction the journal keeps growing while the model's view
+/// shrinks, and a client shown the journal would report a conversation as nearly
+/// full immediately after it was compacted.
+fn chat_context_of(
+    state: Option<&AgentState>,
+    records: &[crate::context::CompactionRecord],
+) -> ChatContext {
     let config = crate::context::CompactionConfig::default();
-    let estimated_tokens = state.map(crate::context::estimate_tokens).unwrap_or(0);
+    let messages = state.map(|s| s.messages.as_slice()).unwrap_or(&[]);
+    let estimated_tokens = crate::context::effective_tokens(messages, records);
     let threshold = (config.context_window as f64 * config.compact_threshold) as usize;
     ChatContext {
         estimated_tokens,
-        message_count: state.map(|s| s.messages.len()).unwrap_or(0),
+        // The derived view is one summary message plus the kept tail; counted
+        // rather than built, because nobody needs the copy.
+        message_count: match records.last() {
+            Some(record) => messages.len() - record.first_kept_index.min(messages.len()) + 1,
+            None => messages.len(),
+        },
         context_window: config.context_window,
         compact_threshold_tokens: threshold,
         would_compact: estimated_tokens >= threshold,
@@ -5800,7 +5985,12 @@ async fn get_chat_context(State(state): State<Arc<ApiState>>, Path(id): Path<Str
     };
     drop(chats);
     let s = session.lock().await;
-    Json(chat_context_of(s.state.as_ref())).into_response()
+    let records = s
+        .compaction
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    Json(chat_context_of(s.state.as_ref(), &records)).into_response()
 }
 
 /// Compact this chat's context now — `/compact`.
@@ -5811,9 +6001,9 @@ async fn get_chat_context(State(state): State<Arc<ApiState>>, Path(id): Path<Str
 /// compaction that dropped it would quietly be worth less than one that happened
 /// by itself.
 ///
-/// Refuses mid-turn. Compaction rewrites the message list the running turn is
-/// reading, and "your context changed under you" is not a failure mode worth
-/// having.
+/// Refuses mid-turn. The boundary it records is an index into the message list a
+/// running turn is still appending to, and "your context changed under you" is
+/// not a failure mode worth having.
 #[utoipa::path(
     post,
     path = "/api/v1/chats/{id}/compact",
@@ -5832,7 +6022,7 @@ async fn post_chat_compact(State(state): State<Arc<ApiState>>, Path(id): Path<St
     drop(chats);
 
     // Claim the session the same way a turn does, so the two can never interleave.
-    let (mut agent_state, model_name, persona_slug, instance_id) = {
+    let (agent_state, mut records, model_name, persona_slug, instance_id) = {
         let mut s = session.lock().await;
         if s.busy {
             return err_json(StatusCode::CONFLICT, "chat is already mid-turn");
@@ -5852,6 +6042,10 @@ async fn post_chat_compact(State(state): State<Arc<ApiState>>, Path(id): Path<St
         s.busy = true;
         (
             agent_state,
+            s.compaction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             s.model_name.clone(),
             s.persona_slug.clone(),
             s.instance_id.clone(),
@@ -5891,30 +6085,37 @@ async fn post_chat_compact(State(state): State<Arc<ApiState>>, Path(id): Path<St
     // import cannot collide with the turn path's own model construction.
     use rig::client::CompletionClient as _;
 
-    let tokens_before = crate::context::estimate_tokens(&agent_state);
-    let messages_before = agent_state.messages.len();
+    let tokens_before = crate::context::effective_tokens(&agent_state.messages, &records);
+    let messages_before = crate::context::effective_context(&agent_state.messages, &records).len();
     let outcome = crate::context::compact_now(
-        &mut agent_state,
+        &agent_state.messages,
         &client.completion_model(&model_name),
         &crate::context::CompactionConfig::default(),
+        &mut records,
     )
     .await;
 
-    let summary = match outcome {
-        Ok(summary) => summary,
+    let record = match outcome {
+        Ok(record) => record,
         Err(msg) => {
             release(&session).await;
             return err_json(StatusCode::BAD_GATEWAY, format!("could not compact: {msg}"));
         }
     };
 
-    let tokens_after = crate::context::estimate_tokens(&agent_state);
-    let messages_after = agent_state.messages.len();
+    let tokens_after = crate::context::effective_tokens(&agent_state.messages, &records);
+    let messages_after = crate::context::effective_context(&agent_state.messages, &records).len();
+    let summary = record.as_ref().map(|r| r.rendered_summary());
     {
         let mut s = session.lock().await;
-        // Only on success: a failed summary must not truncate anyone's history.
-        if summary.is_some() {
-            s.state = Some(agent_state);
+        // The messages are untouched either way — a compaction only appends a
+        // record — so nothing here can truncate anyone's history. A failed
+        // summary leaves the conversation exactly as it was.
+        if let Some(record) = record {
+            s.compaction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(record);
         }
         s.busy = false;
     }
@@ -5975,7 +6176,8 @@ async fn post_chat_reset(State(state): State<Arc<ApiState>>, Path(id): Path<Stri
         reset_context(&mut s, "reset").await;
     }
     persist_chat(&session).await;
-    Json(chat_context_of(None)).into_response()
+    // A reset ends the context, so there is nothing left to derive from.
+    Json(chat_context_of(None, &[])).into_response()
 }
 
 /// Reset a conversation's context and tell anyone watching.
@@ -6687,6 +6889,23 @@ async fn post_chat_turn(
                         })
                         .await;
                 }
+                // A cancelled run is a stop that took effect: the state is
+                // intact and the conversation continues from it. It reports as
+                // `interrupted` because that is what it is to whoever pressed
+                // the button — the distinction the library draws (nothing is
+                // coming back on its own) is not one a transcript can show.
+                Ok(RunOutcome::Cancelled { state, .. }) => {
+                    s.state = Some(state);
+                    if let Some(t) = &trace {
+                        t.end_turn(true);
+                    }
+                    let _ = tx
+                        .send(ChatEvent::Done {
+                            status: "interrupted".into(),
+                            reason: Some("cancelled".into()),
+                        })
+                        .await;
+                }
                 Ok(RunOutcome::Failed { state, node, error }) => {
                     // metalcraft >=0.6.0 hands back the partial state on a node
                     // failure. Keep it (rather than rolling back) so the failed
@@ -6924,7 +7143,7 @@ fn chat_mailbox(
                 announce(ChatEvent::Injected {
                     message: message.clone(),
                 });
-                metalcraft::AgentUpdate::UserMessage(message)
+                metalcraft::AgentUpdate::UserMessage(message.into())
             })
             .collect()
     })
@@ -7117,6 +7336,7 @@ pub async fn drain_queued_turns(context: &AgentRuntimeContext, chat_id: &str) {
             s.state = Some(match outcome {
                 Ok(RunOutcome::Completed(state))
                 | Ok(RunOutcome::Interrupted { state, .. })
+                | Ok(RunOutcome::Cancelled { state, .. })
                 | Ok(RunOutcome::Failed { state, .. }) => state,
                 Err(_) => state_before_turn,
             });
@@ -7296,6 +7516,7 @@ pub async fn deliver_followup_to_chat(
         s.state = Some(match outcome {
             Ok(RunOutcome::Completed(state))
             | Ok(RunOutcome::Interrupted { state, .. })
+            | Ok(RunOutcome::Cancelled { state, .. })
             | Ok(RunOutcome::Failed { state, .. }) => state,
             Err(_) => state_before_turn,
         });
@@ -7337,20 +7558,33 @@ async fn run_chat_turn(
     use crate::runtime::build_agent_runtime;
     use rig::client::CompletionClient;
 
-    // Which agent is this? Resolved from the conversation rather than plumbed
-    // through every caller — the chat record already names its instance, and every
-    // turn path funnels through here.
-    let instance_id = match (&options.instance_id, chat_id) {
-        (Some(id), _) => Some(id.clone()),
-        (None, Some(cid)) => {
-            let store = chat_store();
-            let session = { store.lock().await.get(cid).cloned() };
+    // Which agent is this, and where do this conversation's compaction records
+    // live? Both are resolved from the conversation rather than plumbed through
+    // every caller — the chat record already names its instance, and every turn
+    // path funnels through here.
+    //
+    // The records have to come from the session rather than the runner: a runner
+    // is built per turn here, so runner-local records would be empty again next
+    // turn, the derived context would widen back out to the whole journal, and
+    // the conversation would pay for a fresh summary of all of it every time.
+    // A turn with no chat — a flow step, a one-shot task — has nowhere to keep
+    // them and uses the runner's own log for as long as it lives.
+    let (chat_instance, compaction_log) = match chat_id {
+        Some(cid) => {
+            let session = { chat_store().lock().await.get(cid).cloned() };
             match session {
-                Some(s) => s.lock().await.instance_id.clone(),
-                None => None,
+                Some(session) => {
+                    let s = session.lock().await;
+                    (s.instance_id.clone(), s.compaction.clone())
+                }
+                None => (None, crate::context::CompactionLog::default()),
             }
         }
-        _ => None,
+        None => (None, crate::context::CompactionLog::default()),
+    };
+    let instance_id = match &options.instance_id {
+        Some(id) => Some(id.clone()),
+        None => chat_instance,
     };
 
     // The memory profile is the agent's, so it can only be built once the agent is
@@ -7391,6 +7625,7 @@ async fn run_chat_turn(
         .with_capture_context(chat_id.map(str::to_string), Some(persona_slug.to_string()))
         .with_instance(instance_id)
         .with_phase_sink(phase_sink)
+        .with_compaction_log(compaction_log)
         .with_mailbox(mailbox)
         .run(initial_state, step_guard)
         .await;
@@ -8657,6 +8892,7 @@ async fn get_or_create_gateway_session(
         pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         plan: Arc::new(std::sync::Mutex::new(Vec::new())),
         running: Arc::new(std::sync::Mutex::new(None)),
+        compaction: Default::default(),
     };
     let arc = Arc::new(Mutex::new(session));
     {
@@ -8800,7 +9036,11 @@ async fn run_one_gateway_turn(
                 s.state = Some(st);
                 None
             }
-            Ok(RunOutcome::Interrupted { state: st, .. }) => {
+            // Stopped, and not an error: keep the state and say nothing to the
+            // sender. A cancellation is something this side did, and a message
+            // explaining it to somebody on WhatsApp would be noise.
+            Ok(RunOutcome::Interrupted { state: st, .. })
+            | Ok(RunOutcome::Cancelled { state: st, .. }) => {
                 s.state = Some(st);
                 None
             }
@@ -9099,6 +9339,67 @@ mod summary_tests {
     }
 }
 
+/// What a chat file on disk has to keep meaning across releases.
+#[cfg(test)]
+mod persisted_chat_tests {
+    use super::*;
+
+    /// A chat written before compaction became a record: no `compaction` key at
+    /// all, and an older version's summary inlined into the messages.
+    const LEGACY: &str = r#"{
+        "id": "c-legacy",
+        "persona_slug": "general",
+        "model_name": "default",
+        "cwd": "/tmp",
+        "created_at": "2025-01-01T00:00:00Z",
+        "messages": [
+            { "role": "user", "content": "hello" },
+            { "role": "assistant", "content": "[Summary of earlier conversation]: we talked" }
+        ]
+    }"#;
+
+    #[test]
+    fn a_chat_written_before_compaction_records_still_loads() {
+        let chat: PersistedChat =
+            serde_json::from_str(LEGACY).expect("a file with no compaction key must still load");
+        assert_eq!(chat.id, "c-legacy");
+        assert_eq!(chat.messages.len(), 2);
+        assert!(chat.compaction.is_empty());
+
+        // With no records the context is the stored messages, exactly as this
+        // file has always behaved — including the summary an older version
+        // inlined, which is now just another message in the conversation.
+        let state = context_from_transcript(&chat.messages).expect("two messages are a context");
+        assert_eq!(
+            crate::context::effective_context(&state.messages, &chat.compaction).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_recorded_compaction_survives_the_chat_file() {
+        let raw = LEGACY.replace(
+            "\"messages\": [",
+            "\"compaction\": [{ \"summary\": \"earlier\", \"first_kept_index\": 1, \
+             \"files_modified\": [\"src/a.rs\"] }],\n        \"messages\": [",
+        );
+        let chat: PersistedChat = serde_json::from_str(&raw).expect("records must parse");
+        assert_eq!(chat.compaction.len(), 1);
+        assert_eq!(chat.compaction[0].first_kept_index, 1);
+        assert_eq!(chat.compaction[0].files_modified, vec!["src/a.rs"]);
+        assert!(
+            chat.compaction[0].files_read.is_empty(),
+            "a field the writer left out defaults rather than failing the load"
+        );
+
+        // The boundary is what the next turn derives its context from, so it has
+        // to come back out of the file the same way it went in.
+        let written = serde_json::to_string(&chat).expect("a chat serializes");
+        let reloaded: PersistedChat = serde_json::from_str(&written).expect("and reloads");
+        assert_eq!(reloaded.compaction, chat.compaction);
+    }
+}
+
 #[cfg(test)]
 mod transcript_tests {
     use super::{
@@ -9128,6 +9429,7 @@ mod transcript_tests {
             pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             plan: Arc::new(std::sync::Mutex::new(Vec::new())),
             running: Arc::new(std::sync::Mutex::new(None)),
+            compaction: Default::default(),
         }
     }
 
@@ -9204,7 +9506,7 @@ mod transcript_tests {
         let file = transcript_of(&s);
         let reloaded = context_from_transcript(&file).expect("a context");
         assert_eq!(reloaded.messages.len(), 2, "only the post-reset turn");
-        assert!(matches!(&reloaded.messages[0], AgentMessage::User(u) if u == "who am i"));
+        assert!(matches!(&reloaded.messages[0], AgentMessage::User(u) if u.text == "who am i"));
         // Replaying the pre-reset messages here would quietly undo every reset on
         // the next restart, which is the failure this guards.
     }
@@ -9230,31 +9532,69 @@ mod transcript_tests {
         turn(&mut s, "three", "3");
         let reloaded = context_from_transcript(&transcript_of(&s)).expect("a context");
         assert_eq!(reloaded.messages.len(), 2);
-        assert!(matches!(&reloaded.messages[0], AgentMessage::User(u) if u == "three"));
+        assert!(matches!(&reloaded.messages[0], AgentMessage::User(u) if u.text == "three"));
     }
 
     #[test]
-    fn compaction_cannot_reach_what_a_reset_closed_off() {
+    fn a_compaction_narrows_the_context_and_keeps_the_conversation() {
         let mut s = session();
         turn(&mut s, "one", "1");
         mark_reset(&mut s, "reset");
         turn(&mut s, "two", "2");
+        turn(&mut s, "three", "3");
 
-        // What compaction does, from inside a running turn: replace the live
-        // messages with a shorter summary. Only the current segment is its to
-        // rewrite — everything a reset closed off is frozen.
-        let mut compacted = AgentState::new("summary of the above");
-        compacted.is_done = true;
-        s.state = Some(compacted);
+        // What a compaction does now: append a record whose boundary indexes the
+        // live segment. It used to replace those messages with the summary, and
+        // the transcript lost the half the summary stood in for.
+        let record = crate::context::CompactionRecord {
+            summary: "summary of the above".into(),
+            first_kept_index: 2,
+            ..Default::default()
+        };
+        s.compaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(record.clone());
 
-        // The archived segment survives untouched; the live one is whatever the
-        // context now holds. Compaction collapsing the *current* segment is not
-        // fixed here — but it can no longer reach across a reset, and it can no
-        // longer drop the newest messages, which an index into the message list
-        // did whenever compaction ran mid-turn.
+        // Nothing on disk moves: the archived segment is frozen and the live one
+        // is still every message of it.
         assert_eq!(
             said(&transcript_of(&s)),
-            ["u:one", "a:1", "reset:reset", "u:summary of the above"]
+            ["u:one", "a:1", "reset:reset", "u:two", "a:2", "u:three", "a:3"]
+        );
+
+        // The model's view is narrower — and a boundary indexes the live segment
+        // only, so it cannot reach across the reset into what was closed off.
+        let live = s.state.as_ref().expect("a live context").messages.clone();
+        let effective = crate::context::effective_context(&live, &[record]);
+        assert_eq!(effective.len(), 3, "the summary plus the kept two");
+        assert!(matches!(&effective[1], AgentMessage::User(u) if u.text == "three"));
+        assert!(matches!(&effective[2], AgentMessage::Assistant(a) if a == "3"));
+    }
+
+    #[test]
+    fn a_reset_drops_the_boundary_with_the_context_it_indexed() {
+        let mut s = session();
+        turn(&mut s, "one", "1");
+        s.compaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(crate::context::CompactionRecord {
+                summary: "earlier".into(),
+                first_kept_index: 1,
+                ..Default::default()
+            });
+        mark_reset(&mut s, "reset");
+
+        // A record left behind would point into a context that no longer exists,
+        // and the next turn would open with a summary of a conversation the
+        // model has just been told to forget — with the new question clamped off
+        // the end of it.
+        assert!(
+            s.compaction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
         );
     }
 
@@ -9390,6 +9730,7 @@ mod gateway_tests {
                     pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
                     plan: Arc::new(std::sync::Mutex::new(Vec::new())),
                     running: Arc::new(std::sync::Mutex::new(None)),
+                    compaction: Default::default(),
                 };
                 ((*id).to_string(), Arc::new(Mutex::new(s)))
             })
@@ -9546,7 +9887,7 @@ mod queue_tests {
         let updates = mailbox(&state, &step_to("agent"));
         assert_eq!(updates.len(), 1);
         assert!(
-            matches!(&updates[0], AgentUpdate::UserMessage(m) if m == "actually, do X instead")
+            matches!(&updates[0], AgentUpdate::UserMessage(m) if m.text == "actually, do X instead")
         );
         assert!(
             pending.lock().unwrap().is_empty(),

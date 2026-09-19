@@ -13,10 +13,11 @@
 //!   extract a *procedural* memory ("to check DNS here, use `cloudflare_list`
 //!   then …") rather than only facts.
 //! * **Every compaction** — [`crate::context::compact_if_needed`] already pays
-//!   an LLM call to summarize the history it is about to discard, then buries the
-//!   result in one `Assistant` message and forgets it. That summary is the
-//!   highest-value memory material in the system and would otherwise evaporate.
-//!   Capturing it costs nothing extra.
+//!   an LLM call to summarize the history the model is about to stop being
+//!   shown, then leaves the result in a compaction record that only the next
+//!   request reads. That summary is the highest-value memory material in the
+//!   system and would otherwise never be read by anything else. Capturing it
+//!   costs nothing extra.
 //!
 //! There is deliberately **no episode state machine**. An episode is derived at
 //! dream time by grouping captures on `chat_id` and time gaps, plus the explicit

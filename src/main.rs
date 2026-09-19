@@ -62,6 +62,22 @@ fn build_prompt_str(persona_slug: &str, cwd: &str) -> String {
     format!("[{} {}]> ", persona_slug, basename)
 }
 
+/// Drop a runner's compaction records.
+///
+/// For the two places the REPL throws its conversation away — `/clear`, and an
+/// executor error that leaves no state worth continuing from. A record whose
+/// messages are gone points at a boundary that no longer exists, and the next
+/// turn would derive its context from that summary instead of the new question.
+fn clear_compaction<M: rig::completion::CompletionModel + Clone + 'static>(
+    runner: &runtime::TurnRunner<M>,
+) {
+    runner
+        .compaction_log()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
 fn print_usage(personas_dir: &std::path::Path) {
     eprintln!(
         "{} {}",
@@ -372,6 +388,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             RunOutcome::Interrupted { reason, .. } => {
                 println!("\n{} {reason}", ui::warning("Interrupted:"));
             }
+            RunOutcome::Cancelled { resume_from, .. } => {
+                println!("\n{} at {resume_from}", ui::warning("Cancelled:"));
+            }
             RunOutcome::Failed { node, error, .. } => {
                 println!("\n{} {node}: {error}", ui::warning("Failed:"));
             }
@@ -424,17 +443,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if input == "/clear" {
             state = None;
+            // The records index the conversation that just went away. Left in
+            // place, the next turn would derive its context from that summary
+            // and hand the model a stale boundary instead of the new question.
+            clear_compaction(&turn_runner);
             println!("{}\n", ui::dim("Conversation cleared."));
             continue;
         }
         if input == "/tokens" {
             match &state {
-                Some(s) => println!(
-                    "{} ~{} tokens, {} messages\n",
-                    ui::label("Context:"),
-                    context::estimate_tokens(s),
-                    s.messages.len()
-                ),
+                // The derived context, not the journal: after a compaction the
+                // journal keeps growing while what the model is sent shrinks,
+                // and reporting the journal would say a just-compacted
+                // conversation is as full as it was a moment ago.
+                Some(s) => {
+                    let records = turn_runner
+                        .compaction_log()
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    println!(
+                        "{} ~{} tokens, {} messages\n",
+                        ui::label("Context:"),
+                        context::effective_tokens(&s.messages, &records),
+                        context::effective_context(&s.messages, &records).len()
+                    )
+                }
                 None => println!("{}\n", ui::dim("No conversation yet.")),
             }
             continue;
@@ -746,6 +780,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\n{} {reason}", ui::warning("Interrupted:"));
                 state = Some(s);
             }
+            Ok(RunOutcome::Cancelled {
+                state: s,
+                resume_from,
+            }) => {
+                println!("\n{} at {resume_from}", ui::warning("Cancelled:"));
+                // A cancelled turn keeps its state: the next REPL turn
+                // continues the conversation rather than starting over.
+                state = Some(s);
+            }
             Ok(RunOutcome::Failed {
                 state: s,
                 node,
@@ -758,6 +801,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => {
                 eprintln!("\n{} {}", ui::error("Error:"), e);
                 state = None;
+                clear_compaction(&turn_runner);
             }
         }
         println!();

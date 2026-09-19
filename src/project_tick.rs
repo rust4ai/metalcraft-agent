@@ -1004,6 +1004,9 @@ pub async fn run_tick(
             Ok(metalcraft::RunOutcome::Interrupted { reason, .. }) => {
                 format!("Tick stopped early: {reason}")
             }
+            Ok(metalcraft::RunOutcome::Cancelled { resume_from, .. }) => {
+                format!("Tick cancelled at {resume_from}")
+            }
             Ok(metalcraft::RunOutcome::Failed { node, error, .. }) => {
                 format!("Tick failed in {node}: {error}")
             }

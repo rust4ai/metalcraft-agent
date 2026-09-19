@@ -63,7 +63,7 @@ pub fn render(results: &[Scored]) -> String {
 /// Extract the query for this turn: the most recent user message.
 fn latest_user_message(state: &AgentState) -> Option<String> {
     state.messages.iter().rev().find_map(|m| match m {
-        AgentMessage::User(text) if !is_injected(text) => Some(text.clone()),
+        AgentMessage::User(input) if !is_injected(&input.text) => Some(input.text.clone()),
         _ => None,
     })
 }
@@ -93,11 +93,11 @@ pub async fn inject(state: &mut AgentState, instance_id: &str, opts: RecallOptio
     let Some(pos) = state
         .messages
         .iter()
-        .rposition(|m| matches!(m, AgentMessage::User(t) if !is_injected(t)))
+        .rposition(|m| matches!(m, AgentMessage::User(u) if !is_injected(&u.text)))
     else {
         return false;
     };
-    state.messages.insert(pos, AgentMessage::User(block));
+    state.messages.insert(pos, AgentMessage::User(block.into()));
     log::debug!(
         "memory: injected {} recalled memory/memories",
         results.len()
@@ -107,41 +107,18 @@ pub async fn inject(state: &mut AgentState, instance_id: &str, opts: RecallOptio
 
 /// Remove every injected block from a message list.
 pub fn strip_messages(messages: &mut Vec<AgentMessage>) {
-    messages.retain(|m| !matches!(m, AgentMessage::User(t) if is_injected(t)));
+    messages.retain(|m| !matches!(m, AgentMessage::User(u) if is_injected(&u.text)));
 }
 
 /// Remove injected blocks from a turn outcome, whatever shape it ended in.
 ///
-/// All three variants carry state, and all three get persisted somewhere — a
+/// Every variant carries state, and every variant gets persisted somewhere — a
 /// failed turn's partial state is written back just like a completed one — so
-/// every variant has to be cleaned.
+/// every variant has to be cleaned. That per-variant walk lives in
+/// [`crate::runtime::map_outcome_state`], because the compaction journal needs
+/// the same walk and two copies of it would drift.
 pub fn strip(outcome: RunOutcome<AgentState>) -> RunOutcome<AgentState> {
-    match outcome {
-        RunOutcome::Completed(mut s) => {
-            strip_messages(&mut s.messages);
-            RunOutcome::Completed(s)
-        }
-        RunOutcome::Interrupted {
-            mut state,
-            reason,
-            resume_from,
-        } => {
-            strip_messages(&mut state.messages);
-            RunOutcome::Interrupted {
-                state,
-                reason,
-                resume_from,
-            }
-        }
-        RunOutcome::Failed {
-            mut state,
-            node,
-            error,
-        } => {
-            strip_messages(&mut state.messages);
-            RunOutcome::Failed { state, node, error }
-        }
-    }
+    crate::runtime::map_outcome_state(outcome, |state| strip_messages(&mut state.messages))
 }
 
 #[cfg(test)]
@@ -202,10 +179,9 @@ mod tests {
 
         // An injected block must never be mistaken for the user's question, or
         // the next turn would recall against its own recall.
-        state.messages.push(AgentMessage::User(render(&[scored(
-            "x",
-            MemoryKind::Semantic,
-        )])));
+        state
+            .messages
+            .push(AgentMessage::User(render(&[scored("x", MemoryKind::Semantic)]).into()));
         assert_eq!(
             latest_user_message(&state).as_deref(),
             Some("second question")
@@ -216,12 +192,12 @@ mod tests {
     fn strip_removes_injected_blocks_and_nothing_else() {
         let mut messages = vec![
             AgentMessage::User("real question".into()),
-            AgentMessage::User(render(&[scored("remembered thing", MemoryKind::Semantic)])),
+            AgentMessage::User(render(&[scored("remembered thing", MemoryKind::Semantic)]).into()),
             AgentMessage::Assistant("real answer".into()),
         ];
         strip_messages(&mut messages);
         assert_eq!(messages.len(), 2);
-        assert!(matches!(&messages[0], AgentMessage::User(t) if t == "real question"));
+        assert!(matches!(&messages[0], AgentMessage::User(u) if u.text == "real question"));
         assert!(matches!(&messages[1], AgentMessage::Assistant(t) if t == "real answer"));
     }
 
@@ -230,7 +206,7 @@ mod tests {
         let block = render(&[scored("remembered", MemoryKind::Semantic)]);
         let make = || {
             let mut s = AgentState::new("question");
-            s.messages.insert(0, AgentMessage::User(block.clone()));
+            s.messages.insert(0, AgentMessage::User(block.clone().into()));
             s
         };
 

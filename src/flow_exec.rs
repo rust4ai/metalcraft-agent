@@ -804,6 +804,14 @@ impl<'a> FlowExecutor<'a> {
                 self.variables.set_last(Value::String(reason.clone()));
                 Ok(Route::Handle(Some("error".into())))
             }
+            // A cancelled prompt routes like an interruption: the flow did
+            // not get its answer, and the reason is operational, not a node
+            // failure the flow author should debug.
+            Ok(RunOutcome::Cancelled { resume_from, .. }) => {
+                self.variables
+                    .set_last(Value::String(format!("cancelled at {resume_from}")));
+                Ok(Route::Handle(Some("error".into())))
+            }
             Ok(RunOutcome::Failed { node: n, error, .. }) => {
                 self.variables
                     .set_last(Value::String(format!("{n}: {error}")));
@@ -1039,13 +1047,12 @@ impl<'a> FlowExecutor<'a> {
             &system_prompt,
             AgentOptions {
                 before_tool_call: hook,
-                llm_call_hook: None,
-                llm_response_hook: None,
                 tool_choice: ToolChoice::Required,
                 terminal_tools: handle_names.clone(),
+                model_name: Some(model_name.clone()),
                 // Reasoning is driven per-model by the inference server; the pod
                 // leaves it unset (see the note in runtime.rs::build_agent_runtime).
-                reasoning_effort: None,
+                ..Default::default()
             },
         )
         .map_err(|e| format!("branch node '{}': build agent: {e}", node.id))?
@@ -1064,6 +1071,9 @@ impl<'a> FlowExecutor<'a> {
                 }),
             Ok(RunOutcome::Interrupted { reason, .. }) => {
                 Err(format!("branch agent interrupted: {reason}"))
+            }
+            Ok(RunOutcome::Cancelled { resume_from, .. }) => {
+                Err(format!("branch agent cancelled at {resume_from}"))
             }
             Ok(RunOutcome::Failed { node: n, error, .. }) => {
                 Err(format!("branch agent failed at {n}: {error}"))

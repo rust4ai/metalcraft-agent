@@ -146,7 +146,7 @@ pub mod phase {
     pub const RECALLING: &str = "recalling";
 }
 
-pub struct TurnRunner<M: CompletionModel + 'static> {
+pub struct TurnRunner<M: CompletionModel + Clone + 'static> {
     graph: SharedAgentGraph,
     compaction_model: M,
     compaction_config: CompactionConfig,
@@ -170,9 +170,20 @@ pub struct TurnRunner<M: CompletionModel + 'static> {
     /// Where messages sent *during* this turn come from. `None` for a run
     /// nobody can talk to — a flow node, a one-shot task, a sub-agent.
     mailbox: Option<metalcraft::Mailbox<AgentState>>,
+    /// This conversation's compaction records — what the model is *not* being
+    /// shown, and why.
+    ///
+    /// Shared rather than owned because the records have to outlive the runner:
+    /// the daemon builds one runner per turn, so a runner-local log would be
+    /// empty on the next turn, the derived context would widen back out to the
+    /// whole journal, and the conversation would pay for a fresh summarization
+    /// call every single turn. A caller with nowhere to keep them (the CLI, a
+    /// one-shot task) gets the default and reuses it for as long as it keeps the
+    /// runner.
+    compaction_log: crate::context::CompactionLog,
 }
 
-impl<M: CompletionModel + 'static> TurnRunner<M> {
+impl<M: CompletionModel + Clone + 'static> TurnRunner<M> {
     /// Wrap a freshly built runtime with default per-turn knobs
     /// ([`CompactionConfig::default`], [`MAX_TURN_STEPS`]).
     pub fn new(runtime: BuiltAgentRuntime<M>) -> Self {
@@ -187,6 +198,7 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
             instance_id: None,
             phase_sink: None,
             mailbox: None,
+            compaction_log: crate::context::CompactionLog::default(),
         }
     }
 
@@ -208,6 +220,25 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
     pub fn with_mailbox(mut self, mailbox: Option<metalcraft::Mailbox<AgentState>>) -> Self {
         self.mailbox = mailbox;
         self
+    }
+
+    /// Read and append this conversation's compaction records here, so they
+    /// outlive the turn that made them.
+    ///
+    /// A caller that persists conversations MUST supply its own log: a
+    /// compaction whose record is dropped is a summarization call paid for and
+    /// thrown away, and the next turn starts over from the full journal.
+    pub fn with_compaction_log(mut self, log: crate::context::CompactionLog) -> Self {
+        self.compaction_log = log;
+        self
+    }
+
+    /// This runner's compaction records, for a caller that has to report how
+    /// full the context is: the stored journal answers a different question
+    /// (how much was said) than the one a headroom readout asks (how much the
+    /// model is being sent).
+    pub fn compaction_log(&self) -> &crate::context::CompactionLog {
+        &self.compaction_log
     }
 
     pub fn with_instance(mut self, instance_id: Option<String>) -> Self {
@@ -239,11 +270,17 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
         self
     }
 
-    /// Compact `state` if it exceeds the window, then run one turn to completion
-    /// under `step_guard`.
+    /// Record a compaction if the context exceeds the window, then run one turn
+    /// to completion under `step_guard` on the context that follows from it.
+    ///
+    /// The state handed back carries the **whole journal**: compaction narrows
+    /// what the model is sent, not what the caller stores. That is the property
+    /// the previous version did not have — it rewrote `state.messages` down to a
+    /// single summary message, so a caller that persisted the result had no way
+    /// back to the conversation that summary described.
     ///
     /// Compaction is best-effort: a failure is logged and the turn proceeds with
-    /// the uncompacted state rather than being dropped. Returns whether
+    /// the uncompacted context rather than being dropped. Returns whether
     /// compaction ran alongside the outcome so an interactive caller (the CLI)
     /// can surface it; daemon callers ignore the flag and rely on the log line.
     pub async fn run(
@@ -255,30 +292,40 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
         // older than this turn, so last turn's steps must not gate this one.
         crate::turn_plan::lock(&self.turn_plan).reset();
 
+        let mut records = self.records();
         // Asked before announcing: compaction is the expensive silent phase, but
         // it only runs on the turns that cross the threshold, and a phase frame
         // that fires on every turn is one nobody reads.
-        if context::needs_compaction(&state, &self.compaction_config) {
+        if context::needs_compaction(&state.messages, &records, &self.compaction_config) {
             self.announce(phase::COMPACTING);
         }
         let compacted = match context::compact_if_needed(
-            &mut state,
+            &state.messages,
             &self.compaction_model,
             &self.compaction_config,
+            &mut records,
         )
         .await
         {
-            Ok(Some(summary)) => {
+            Ok(Some(record)) => {
                 log::info!(
-                    "Context compacted before turn -> ~{} tokens, {} messages",
-                    context::estimate_tokens(&state),
+                    "Context compaction recorded -> ~{} tokens, {} of {} messages shown",
+                    context::effective_tokens(&state.messages, &records),
+                    state.messages.len() - record.first_kept_index + 1,
                     state.messages.len()
                 );
-                // The summary is about to be buried in a single `Assistant`
-                // message and forgotten. It is the most concentrated account of
-                // this conversation that will ever exist, and the LLM call for it
-                // is already paid — so hand it to memory on the way past.
-                crate::memory::capture::record_compaction(&self.capture_ctx, &summary);
+                // The summary is the most concentrated account of this
+                // conversation that will ever exist, and the LLM call for it is
+                // already paid — so hand it to memory on the way past. Rendered,
+                // so the file ledger travels with it.
+                crate::memory::capture::record_compaction(
+                    &self.capture_ctx,
+                    &record.rendered_summary(),
+                );
+                // The shared log is the durable copy: without this the record
+                // dies with the runner, and the next turn pays for the same
+                // summary again.
+                self.log_record(record);
                 true
             }
             Ok(None) => false,
@@ -288,9 +335,14 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
             }
         };
 
+        // From here the model sees `summary + tail`. The journal is held aside
+        // and comes back under the turn's new messages below.
+        let held = context::HeldJournal::derive(&mut state, &records);
+
         // Where this turn's messages begin, so capture can tell what was said now
         // from what was already history. Taken before injection so the synthetic
-        // block does not shift the boundary.
+        // block does not shift the boundary, and measured on the derived context
+        // because that is the list the turn appends to.
         let turn_start = state.messages.len().saturating_sub(1);
 
         // Recall is spliced in AFTER compaction, so the summarizer never sees
@@ -330,16 +382,96 @@ impl<M: CompletionModel + 'static> TurnRunner<M> {
             capture_turn(&self.capture_ctx, turn_start, o);
         }
 
+        // The journal goes back before anyone else sees the outcome: what the
+        // caller persists is the conversation, not the narrowed view this turn
+        // happened to run on.
+        let outcome = match held {
+            Some(held) => outcome.map(|o| map_outcome_state(o, |s| held.restore(s))),
+            None => outcome,
+        };
+
         (compacted, outcome)
     }
 }
 
-impl<M: CompletionModel + 'static> TurnRunner<M> {
+impl<M: CompletionModel + Clone + 'static> TurnRunner<M> {
     /// Tell whoever is watching what this turn is doing now. A no-op when nobody
     /// is — which is every path but a live chat.
     fn announce(&self, phase: &str) {
         if let Some(sink) = &self.phase_sink {
             sink(phase);
+        }
+    }
+
+    /// This conversation's compaction records, copied out of the shared log.
+    ///
+    /// Copied rather than borrowed because the summarization call awaits, and a
+    /// sync lock must never be held across a yield point.
+    fn records(&self) -> Vec<crate::context::CompactionRecord> {
+        self.compaction_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn log_record(&self, record: crate::context::CompactionRecord) {
+        self.compaction_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(record);
+    }
+}
+
+/// Apply `f` to the state that every [`RunOutcome`] variant carries.
+///
+/// One implementation instead of one match arm per variant per post-turn fixup
+/// (stripping the recall block, putting the compaction journal back). Every
+/// variant gets persisted somewhere — a failed turn's partial state is written
+/// back just like a completed one — so a fixup that quietly skipped a variant
+/// would lose exactly the history that variant carries. Exhaustive on purpose:
+/// a new variant must be answered here, not defaulted past.
+pub(crate) fn map_outcome_state(
+    outcome: RunOutcome<AgentState>,
+    f: impl FnOnce(&mut AgentState),
+) -> RunOutcome<AgentState> {
+    match outcome {
+        RunOutcome::Completed(mut state) => {
+            f(&mut state);
+            RunOutcome::Completed(state)
+        }
+        RunOutcome::Interrupted {
+            mut state,
+            reason,
+            resume_from,
+        } => {
+            f(&mut state);
+            RunOutcome::Interrupted {
+                state,
+                reason,
+                resume_from,
+            }
+        }
+        // A cancelled run stopped on an external token with its state intact and
+        // resumable, so it is persisted like any other — and a resumable state
+        // whose journal was left narrowed would resume against a summary of
+        // itself.
+        RunOutcome::Cancelled {
+            mut state,
+            resume_from,
+        } => {
+            f(&mut state);
+            RunOutcome::Cancelled {
+                state,
+                resume_from,
+            }
+        }
+        RunOutcome::Failed {
+            mut state,
+            node,
+            error,
+        } => {
+            f(&mut state);
+            RunOutcome::Failed { state, node, error }
         }
     }
 }
@@ -355,13 +487,10 @@ fn capture_turn(
     turn_start: usize,
     outcome: &RunOutcome<AgentState>,
 ) {
-    let state = match outcome {
-        RunOutcome::Completed(s) => s,
-        RunOutcome::Interrupted { state, .. } => state,
-        // A failed turn still taught us what was asked and what broke, which is
-        // exactly the kind of thing worth remembering.
-        RunOutcome::Failed { state, .. } => state,
-    };
+    // Every disposition carries the state it reached, and all four are worth
+    // remembering: a cancelled turn said something and did some of it, which is
+    // exactly what the next turn needs to know.
+    let state = outcome.state();
 
     let recent = state.messages.get(turn_start..).unwrap_or(&[]);
     let mut user_text = String::new();
@@ -373,7 +502,7 @@ fn capture_turn(
                 if !user_text.is_empty() {
                     user_text.push('\n');
                 }
-                user_text.push_str(t);
+                user_text.push_str(&t.text);
             }
             AgentMessage::Assistant(t) => {
                 if !agent_text.is_empty() {
@@ -416,7 +545,7 @@ mod capture_tests {
                     if !user_text.is_empty() {
                         user_text.push('\n');
                     }
-                    user_text.push_str(t);
+                    user_text.push_str(&t.text);
                 }
                 AgentMessage::Assistant(t) => {
                     if !agent_text.is_empty() {
@@ -661,6 +790,24 @@ pub fn inference_base_url() -> Option<String> {
     crate::key_store::lookup_present("OPENAI_BASE_URL").map(|base| redact_url(&base))
 }
 
+/// Whether the model this pod will use can be shown an image.
+///
+/// Nothing on the wire declares model modality — not the provider, not the
+/// gateway's catalogue — so this is an allowlist, and it exists because the
+/// alternative is worse: a client that offers an attach button against a
+/// text-only model gets a provider 400 *after* the person has picked a photo
+/// and written a message.
+///
+/// The `default` sentinel is the managed-pod case: `METALCRAFT_MODEL=default`
+/// means the gateway picks, and every model in its chat catalogue reads images.
+/// Treating it as capable is therefore true today and fails the same way an
+/// unknown model name does — at the provider, with its own error — if that ever
+/// stops being true.
+pub fn model_reads_images(model: &str) -> bool {
+    const SEES: &[&str] = &["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "default"];
+    SEES.contains(&model)
+}
+
 fn redact_url(base: &str) -> String {
     let (head, rest) = match base.split_once("://") {
         Some((scheme, rest)) => (format!("{scheme}://"), rest),
@@ -890,6 +1037,11 @@ where
             // ReAct loop replays it. Set this only for direct-to-OpenAI use
             // without the inference gateway.
             reasoning_effort: None,
+            // Same reason: the gateway owns the provider-specific parameters.
+            additional_params: None,
+            // Named so a trace can attribute its cost to a model; without it
+            // every model call is reported as "unknown".
+            model_name: Some(model_name.to_string()),
         },
     )?
     .into_arc();

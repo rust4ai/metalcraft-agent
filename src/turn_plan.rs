@@ -85,8 +85,10 @@ pub struct PlanStep {
 /// to say what is left, so it says so and this is where that lands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Handoff {
-    /// The persona (or tool set) the delegation ran as, for the message the gate
-    /// shows the model.
+    /// The delegate id the delegation ran under, for the message the gate shows
+    /// the model. An id rather than a bare persona slug because the delegate is
+    /// still addressable: the gate can point at the cheapest way to finish the
+    /// work — asking the agent that already did the reading.
     pub from: String,
     pub not_done: Vec<String>,
     /// Which persona the sub-agent thinks should pick the work up.
@@ -210,7 +212,7 @@ impl TurnPlan {
                         .map(|p| format!(" It suggests delegating the rest to `{p}`."))
                         .unwrap_or_default();
                     format!(
-                        "- `{}` reported it did NOT finish: {}.{}",
+                        "- delegate `{}` reported it did NOT finish: {}.{}",
                         h.from,
                         h.not_done.join("; "),
                         next
@@ -220,10 +222,12 @@ impl TurnPlan {
                 .join("\n");
             return Some(format!(
                 "Not delivered — the last delegation came back unfinished:\n{detail}\n\n\
-                 Do NOT answer yet. Either delegate the remaining work (a persona that only \
-                 investigated cannot also have made the changes), or call `update_plan` to \
-                 record what you are doing about it. If you genuinely cannot proceed without \
-                 the user, use `ask_user` instead of `say_to_user`."
+                 Do NOT answer yet. Three ways forward, cheapest first: send the delegate a \
+                 follow-up with `sub_agent_send` (it still holds everything it read, so it does \
+                 not re-discover any of it); delegate the remainder to a persona that can \
+                 actually do it (one that only investigated cannot also have made the changes); \
+                 or call `update_plan` to record what you are doing about it. If you genuinely \
+                 cannot proceed without the user, use `ask_user` instead of `say_to_user`."
             ));
         }
 

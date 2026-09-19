@@ -18,7 +18,7 @@
 //! Nothing here is on a hot path in a way that matters: the counters are
 //! relaxed atomics, and the limits are `OnceLock` reads.
 
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── Limits ──────────────────────────────────────────────────────────────
@@ -41,6 +41,24 @@ const DEFAULT_MAX_TOOL_RESULT_BYTES: usize = 256 * 1024;
 /// limit means on the pack-install and webhook routes.
 const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+/// Default ceiling on one chat attachment.
+///
+/// A photo, after the client has scaled it for a model that reads it at about
+/// 1536px on the long side. Ten megabytes is several times what that produces,
+/// so it refuses only the unscaled original and the file that is not really a
+/// photo — and it leaves room under the 16 MB request ceiling for the base64
+/// expansion that happens later, on the way to the provider.
+const DEFAULT_MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Default ceiling on everything one conversation is holding.
+///
+/// Attachments live as long as their chat does — an old message must still be
+/// able to draw its thumbnail — so there is no sweep to fall back on and this
+/// is the only thing bounding a conversation's disk. Refusing the upload is the
+/// deliberate failure mode: deleting an older image to make room would break a
+/// transcript that is otherwise permanent.
+const DEFAULT_MAX_CHAT_ATTACHMENT_BYTES: usize = 200 * 1024 * 1024;
+
 /// Default ceiling on any one file the diagnostics logger writes.
 ///
 /// A diagnostics file is written *per executor step*, so its size is multiplied
@@ -60,6 +78,25 @@ pub fn max_tool_result_bytes() -> usize {
 pub fn max_request_body_bytes() -> usize {
     static V: OnceLock<usize> = OnceLock::new();
     *V.get_or_init(|| env_bytes("MAX_REQUEST_BODY_BYTES", DEFAULT_MAX_REQUEST_BODY_BYTES))
+}
+
+/// Ceiling on one chat attachment. Override with `MAX_ATTACHMENT_BYTES`.
+pub fn max_attachment_bytes() -> usize {
+    static V: LazyLock<usize> =
+        LazyLock::new(|| env_bytes("MAX_ATTACHMENT_BYTES", DEFAULT_MAX_ATTACHMENT_BYTES));
+    *V
+}
+
+/// Ceiling on everything one chat is holding. Override with
+/// `MAX_CHAT_ATTACHMENT_BYTES`.
+pub fn max_chat_attachment_bytes() -> usize {
+    static V: LazyLock<usize> = LazyLock::new(|| {
+        env_bytes(
+            "MAX_CHAT_ATTACHMENT_BYTES",
+            DEFAULT_MAX_CHAT_ATTACHMENT_BYTES,
+        )
+    });
+    *V
 }
 
 /// Ceiling on one diagnostics file. Override with `MAX_DIAGNOSTIC_FILE_BYTES`.
