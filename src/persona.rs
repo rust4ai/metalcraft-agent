@@ -175,13 +175,27 @@ impl Persona {
             .collect()
     }
 
-    /// The persona's full tool list: the explicitly named `tools` plus every
-    /// HTTP-API tool provided by the enabled packs it declares in `packs`
-    /// (deduplicated, explicit tools first). This is what the registry and the
-    /// step guard should be built from — not the raw `tools` field. A persona
-    /// with no `integrations` resolves to exactly its `tools`.
+    /// The persona's full tool list: the explicitly named `tools`, the delegate
+    /// lifecycle tools that ship with `sub_agent`, plus every HTTP-API tool
+    /// provided by the enabled packs it declares in `packs` (deduplicated,
+    /// explicit tools first). This is what the registry and the step guard
+    /// should be built from — not the raw `tools` field. A persona with no
+    /// `integrations` and no `sub_agent` resolves to exactly its `tools`.
     pub fn resolved_tool_names(&self) -> Vec<String> {
         let mut names = self.tools.clone();
+        // `sub_agent` installs the lifecycle tools with it (see
+        // `tools::create_registry_for_with_config`), so a persona that declares
+        // delegation has them whether or not it listed them. Resolving them
+        // here keeps the declared surface equal to the registered one; when it
+        // is not, an allowlist built from the persona rejects a call the agent
+        // was legitimately given.
+        if names.iter().any(|t| t == "sub_agent") {
+            for tool in crate::tools::sub_agent_lifecycle::DELEGATE_LIFECYCLE_TOOLS {
+                if !names.iter().any(|n| n == tool) {
+                    names.push(tool.to_string());
+                }
+            }
+        }
         for id in &self.integrations {
             for tool in
                 crate::tools::http_api::HttpApiTool::installed_tool_names_for_integration(id)
@@ -467,5 +481,53 @@ mod tests {
         assert!(template_uses("{{cwd}}", "cwd"));
         assert!(!template_uses("{{cwdx}}", "cwd"));
         assert!(!template_uses("no placeholders here", "cwd"));
+    }
+
+    fn persona_with_tools(tools: &[&str]) -> Persona {
+        Persona {
+            name: "test".into(),
+            description: String::new(),
+            tools: tools.iter().map(|t| t.to_string()).collect(),
+            integrations: Vec::new(),
+            skills: Vec::new(),
+            version: None,
+            max_run_secs: None,
+            system_prompt: String::new(),
+        }
+    }
+
+    /// The registry installs the delegate lifecycle tools alongside
+    /// `sub_agent`, so the persona has to resolve them too. When it did not,
+    /// an allowlist built from the persona failed the agent for calling
+    /// `sub_agent_send` — a tool it genuinely had — and only when the model
+    /// happened to choose a follow-up, which made the failure look like flake.
+    #[test]
+    fn declaring_sub_agent_resolves_the_lifecycle_tools_with_it() {
+        let resolved = persona_with_tools(&["read_file", "sub_agent"]).resolved_tool_names();
+        for tool in crate::tools::sub_agent_lifecycle::DELEGATE_LIFECYCLE_TOOLS {
+            assert!(
+                resolved.iter().any(|n| n == tool),
+                "{tool} missing from {resolved:?}"
+            );
+        }
+        assert_eq!(resolved[0], "read_file", "explicit tools stay first");
+    }
+
+    #[test]
+    fn a_persona_without_delegation_resolves_exactly_its_tools() {
+        let resolved = persona_with_tools(&["read_file", "bash"]).resolved_tool_names();
+        assert_eq!(resolved, vec!["read_file", "bash"]);
+    }
+
+    /// A supervisor that names a lifecycle tool directly must not have it
+    /// listed twice — duplicates would double-register and read as two tools.
+    #[test]
+    fn naming_a_lifecycle_tool_explicitly_does_not_duplicate_it() {
+        let resolved =
+            persona_with_tools(&["sub_agent", "sub_agent_send"]).resolved_tool_names();
+        assert_eq!(
+            resolved.iter().filter(|n| *n == "sub_agent_send").count(),
+            1
+        );
     }
 }

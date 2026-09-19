@@ -216,10 +216,17 @@ Three pieces make the plan checkable instead:
 - **`update_plan`** writes this turn's steps into a shared `TurnPlan` (`src/turn_plan.rs`),
   created per runtime by `build_agent_runtime` and cleared by `TurnRunner::run` at the start
   of every turn — the CLI reuses one runtime for a whole session, so the plan must not.
-- **`sub_agent`** asks every delegate to end its report with a ```` ```handoff ```` block
-  (`{completed, not_done, suggest_persona}`), strips it from the prose, and records a
-  `Handoff` in the plan when a delegation comes back unfinished. An absent or unparseable
-  block reads as complete, so a model that ignores the protocol behaves exactly as before.
+- **`sub_agent`** makes every delegate finish through a hidden terminal tool, `yield_result`
+  (`{completed, not_done, suggest_persona?}` — see `src/tools/yield_result.rs`). The child
+  runs with `tool_choice: Required` and `yield_result` as its only terminal tool, so free
+  text is not a way its turn can end; the handoff contract is the tool's JSON Schema rather
+  than a fence parsed out of prose. A child that ends a turn without calling it is reminded
+  and re-run up to `MAX_YIELD_ATTEMPTS = 3` times, the last with every other tool withdrawn
+  from its registry. Only if that fails is its trailing prose reconciled, and the result is
+  then flagged `unreconciled` — the parent is told the contract was not met instead of
+  reading a guess as a report. When a delegate reports outstanding work, `sub_agent` records
+  a `Handoff` in the plan under the delegate's **id**, so the gate can point at the cheapest
+  way to finish it: `sub_agent_send`.
 - **`say_to_user`** asks `TurnPlan::blocking_reason()` before delivering. Open steps or an
   unacknowledged handoff mean the call returns an **error** listing what is still owed.
 
@@ -302,6 +309,7 @@ The persona's `tools` array selects which tools are registered, by name, in
 | `web_fetch` | Fetch a URL (HTML→markdown via `htmd`). |
 | `load_skill` | Load a skill markdown body on demand (enum-restricted to the persona's skills). |
 | `sub_agent` | Spawn a nested agent for a delegated subtask. |
+| `sub_agent_list` / `sub_agent_read` / `sub_agent_send` | List, read and follow up with delegates that already ran (§ below). |
 | `update_plan` | Record this turn's steps; the reply tool is held to them (§4). |
 | `ask_user` | Ask one clarifying question and end the turn waiting for the answer. |
 
@@ -320,10 +328,20 @@ skills dir, available skills, plus `reply_sink`, `session_binding`, `reschedule_
 - **`sub_agent`** — needs the api key/model/system prompt to build a child agent. It accepts
   a `task`, a `tool_set` (`read_only` default, `full`, or `all`, with an optional `pack`
   scope and a `persona` mode), builds its own registry and ReAct graph, runs it with a
-  **120-second timeout** and `max_steps(90)`, and returns the child's final answer plus which
-  tools it used and how many turns it took — and a `completed` flag (plus `not_done` /
-  `suggest_persona`) parsed out of the delegate's handoff block, which it also records in the
-  turn plan.
+  **120-second timeout** (a persona may raise it via `max_run_secs`, capped at 30 min) and
+  `max_steps(90)`, and returns the child's report — `completed` / `not_done` /
+  `suggest_persona` from the `yield_result` contract above, plus which tools it used, how
+  many turns it took, and the `delegate_id` it was filed under.
+- **`sub_agent_list` / `sub_agent_read` / `sub_agent_send`** — the delegate lifecycle, ported
+  from pi (`src/tools/sub_agent_registry.rs`). A finished child is not thrown away: it is
+  kept as `idle` (verbatim history retained), parked after 15 minutes (history released,
+  transcript and spawn arguments kept), or `aborted` (a timeout or a user stop — terminal,
+  and revival is refused because there is nothing behind it to resume). `sub_agent_send`
+  revives an `idle`/`parked` delegate with a follow-up, so it answers with everything it
+  already read instead of re-paying for discovery. The parent's tool result carries only a
+  bounded preview plus the id; `sub_agent_read` pages the full transcript. The three are
+  registered alongside `sub_agent` and gated on the same depth rule. **The directory is
+  process-local: a restart loses every delegate id, transcript and history.**
 - **`say_to_user`** — routes a reply through the session's `reply_sink` (SSE for workshop
   chat, adapter send for gateway); it's the terminal tool for tool-only sessions, and the
   one the turn plan gates (§4).
@@ -374,13 +392,13 @@ Default policy:
 
 | OperationKind | Tools | Default |
 |---------------|-------|---------|
-| ReadFile / ListFiles / Search / LoadSkill | read_file, list_files, grep, find_files, load_skill | **auto** |
+| ReadFile / ListFiles / Search / LoadSkill | read_file, list_files, grep, find_files, load_skill, sub_agent_list, sub_agent_read | **auto** |
 | WriteNewFile | write_file (path doesn't exist) | **auto** |
 | OverwriteFile | write_file (path exists) | prompt |
 | EditFile | edit_file | prompt |
 | Execute | bash, **and any unknown tool** | prompt |
 | NetworkFetch | web_fetch | prompt |
-| SubAgent | sub_agent | prompt |
+| SubAgent | sub_agent, sub_agent_send | prompt |
 | MetaRead | read-only meta tools (`persona_get`, `flow_list`, `diagnostics_*`, …) | **auto** |
 | MetaWrite | mutating meta tools (`persona_save`, `key_set`, `pack_enable`, …) | prompt |
 | DiscordAction | discord_send/edit/add_reaction | prompt |

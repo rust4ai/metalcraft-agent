@@ -27,6 +27,17 @@ use metalcraft::AgentState;
 use crate::tools::sub_agent::SubAgentTool;
 use crate::tools::sub_agent_registry as delegates;
 
+/// The tools registration installs alongside `sub_agent`.
+///
+/// Exported because two places have to agree on this list: the registry that
+/// installs them, and [`crate::persona::Persona::resolved_tool_names`], which
+/// is what everything *else* asks for the agent's tool surface — the step
+/// guard, tool disclosure, and the eval harness's allowlist. When those two
+/// disagree the model calls a tool it genuinely has and an allowlist check
+/// fails it for going out of bounds.
+pub const DELEGATE_LIFECYCLE_TOOLS: [&str; 3] =
+    ["sub_agent_list", "sub_agent_read", "sub_agent_send"];
+
 /// Wraps the delegation machinery so a follow-up rebuilds the child exactly the
 /// way the original `sub_agent` call did — same credentials, same roster, same
 /// depth, same stop flag.

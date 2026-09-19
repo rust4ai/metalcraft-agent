@@ -323,6 +323,7 @@ pub async fn run_flow(
                 preset_personas: None,
                 project_brief: None,
                 project_id: None,
+                recorder: None,
             },
         )
         .await;

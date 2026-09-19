@@ -377,6 +377,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|p| p.delegation_roster(&metalcraft_agent::paths::personas_dir())),
             project_brief: None,
             project_id: None,
+            recorder: None,
             },
         )
         .await?

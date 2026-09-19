@@ -62,7 +62,7 @@ name = "metalcraft-daemon"
 path = "src/bin/metalcraft-daemon.rs"
 
 [dev-dependencies]
-spice-framework = "0.1"
+spice-framework = "0.2"
 tempfile = "3"
 # Drives `workshop_api::build_router` directly in tests via `ServiceExt::oneshot`,
 # so handler behaviour is testable without binding a port.

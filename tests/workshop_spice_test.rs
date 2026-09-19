@@ -346,6 +346,10 @@ impl AgentUnderTest for MetalcraftPersonaAgent {
     ) -> Result<AgentOutput, SpiceError> {
         let start = std::time::Instant::now();
 
+        // Spice 0.2 reports per-case token spend; hand the run a recorder
+        // and read the total back instead of leaving `usage` empty.
+        let recorder =
+            metalcraft::Recorder::new(None, metalcraft::RunId::new("spice"), "spice");
         let request = RunOneShotRequest {
             persona_slug: &self.persona_slug,
             cwd: &self.cwd,
@@ -357,6 +361,7 @@ impl AgentUnderTest for MetalcraftPersonaAgent {
             preset_personas: None,
         project_brief: None,
         project_id: None,
+        recorder: Some(recorder.clone()),
         };
 
         let outcome = run_one_shot_task(&self.context, request)
@@ -405,6 +410,7 @@ impl AgentUnderTest for MetalcraftPersonaAgent {
             tools_called: state.tools_called(),
             duration: start.elapsed(),
             error,
+            usage: spice_usage(&recorder),
         })
     }
 
@@ -476,4 +482,22 @@ async fn live_workshop_authors_a_skill() {
         "{}/{} workshop spice tests failed",
         report.failed, report.total
     );
+}
+
+/// Map metalcraft's accumulated run usage onto Spice's per-run accounting.
+///
+/// Spice 0.2 aggregates token spend across a suite; metalcraft accumulates it
+/// on the `Recorder` the run was given. `None` when nothing was spent, because
+/// reporting `0/0` would claim a measurement that never happened.
+fn spice_usage(recorder: &metalcraft::Recorder) -> Option<spice_framework::Usage> {
+    let used = recorder.total_usage();
+    if used.total_tokens == 0 && used.input_tokens == 0 && used.output_tokens == 0 {
+        return None;
+    }
+    Some(spice_framework::Usage {
+        input_tokens: Some(used.input_tokens),
+        output_tokens: Some(used.output_tokens),
+        total_tokens: Some(used.total_tokens),
+        cost_usd: None,
+    })
 }

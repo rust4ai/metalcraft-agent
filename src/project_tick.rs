@@ -992,6 +992,7 @@ pub async fn run_tick(
                 instance_id: Some(project.instance_id.clone()),
                 preset_personas: None,
                 project_id: Some(project.id.clone()),
+                recorder: None,
             },
         )
         .await;

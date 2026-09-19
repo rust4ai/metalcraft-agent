@@ -448,6 +448,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DynError> {
                                     preset_personas: None,
                                     project_brief: None,
                                     project_id: None,
+                                    recorder: None,
                                 },
                             )
                             .await;
@@ -680,6 +681,7 @@ async fn run_due_scheduled_tasks(
                         preset_personas: None,
                         project_brief: None,
                         project_id: None,
+                        recorder: None,
                     },
                 )
                 .await;

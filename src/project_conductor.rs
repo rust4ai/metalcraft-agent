@@ -249,6 +249,7 @@ pub async fn compose_worker_brief(
             preset_personas: None,
             project_brief: None,
             project_id: None,
+            recorder: None,
         },
     )
     .await;
@@ -399,6 +400,7 @@ pub async fn conduct(
             preset_personas: None,
             project_brief: None,
             project_id: Some(project.id.clone()),
+            recorder: None,
         },
     )
     .await;

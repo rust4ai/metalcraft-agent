@@ -181,6 +181,12 @@ pub struct TurnRunner<M: CompletionModel + Clone + 'static> {
     /// one-shot task) gets the default and reuses it for as long as it keeps the
     /// runner.
     compaction_log: crate::context::CompactionLog,
+    /// Where this turn's model/tool usage and trace events accumulate. `None`
+    /// allocates a fresh one per turn inside the executor, which is fine for a
+    /// caller that never reads it back; a caller that wants the turn's token
+    /// spend — an eval harness reporting cost per case — supplies its own and
+    /// reads [`metalcraft::Recorder::total_usage`] afterwards.
+    recorder: Option<metalcraft::Recorder>,
 }
 
 impl<M: CompletionModel + Clone + 'static> TurnRunner<M> {
@@ -199,6 +205,7 @@ impl<M: CompletionModel + Clone + 'static> TurnRunner<M> {
             phase_sink: None,
             mailbox: None,
             compaction_log: crate::context::CompactionLog::default(),
+            recorder: None,
         }
     }
 
@@ -219,6 +226,13 @@ impl<M: CompletionModel + Clone + 'static> TurnRunner<M> {
     /// call and its result is the orphaned history the Responses API rejects.
     pub fn with_mailbox(mut self, mailbox: Option<metalcraft::Mailbox<AgentState>>) -> Self {
         self.mailbox = mailbox;
+        self
+    }
+
+    /// Accumulate this turn's usage and trace events on a recorder the caller
+    /// keeps, so the spend is readable after the run.
+    pub fn with_recorder(mut self, recorder: Option<metalcraft::Recorder>) -> Self {
+        self.recorder = recorder;
         self
     }
 
@@ -365,6 +379,9 @@ impl<M: CompletionModel + Clone + 'static> TurnRunner<M> {
             .with_step_guard(step_guard);
         if let Some(mailbox) = &self.mailbox {
             executor = executor.with_mailbox(mailbox.clone());
+        }
+        if let Some(recorder) = &self.recorder {
+            executor = executor.with_recorder(recorder.clone());
         }
         let outcome = executor.run(state, "agent").await;
 
@@ -903,6 +920,10 @@ pub struct RunOneShotRequest<'a> {
     /// run — and the tools are then absent rather than inert, because a tool
     /// whose writes land nowhere is worse than one that isn't offered.
     pub project_id: Option<String>,
+    /// Accumulate the run's usage and trace events here. `None` for callers
+    /// that never read it back; an eval harness supplies one and reports the
+    /// case's token spend from [`metalcraft::Recorder::total_usage`].
+    pub recorder: Option<metalcraft::Recorder>,
 }
 
 impl<'a> RunOneShotRequest<'a> {
@@ -919,6 +940,7 @@ impl<'a> RunOneShotRequest<'a> {
             preset_personas: None,
             project_brief: None,
             project_id: None,
+            recorder: None,
         }
     }
 }
@@ -1104,6 +1126,7 @@ pub async fn run_one_shot_task(
     let (_compacted, outcome) = TurnRunner::new(runtime)
         .with_instance(request.instance_id.clone())
         .with_capture_context(None, Some(request.persona_slug.to_string()))
+        .with_recorder(request.recorder.clone())
         .run(AgentState::new(request.task), step_guard)
         .await;
     outcome.map_err(|e| -> Box<dyn std::error::Error> {
