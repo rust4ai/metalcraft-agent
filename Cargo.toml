@@ -1,6 +1,6 @@
 [package]
 name = "metalcraft-agent"
-version = "0.43.0"
+version = "0.44.0"
 edition = "2024"
 rust-version = "1.91"
 default-run = "metalcraft-agent"
@@ -67,9 +67,3 @@ tempfile = "3"
 # Drives `workshop_api::build_router` directly in tests via `ServiceExt::oneshot`,
 # so handler behaviour is testable without binding a port.
 tower = { version = "0.5", features = ["util"] }
-
-# metalcraft 1.0.0 is not on crates.io yet. Until it is published, build
-# against the working copy — the dependency line above stays a normal version
-# requirement so publishing is the only change needed to drop this.
-[patch.crates-io]
-metalcraft = { path = "../metalcraft" }

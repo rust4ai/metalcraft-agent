@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.43.0"
+    "version": "0.44.0"
   },
   "paths": {
     "/api/v1/agent-packs": {
@@ -1438,13 +1438,140 @@
         }
       }
     },
+    "/api/v1/chats/{id}/attachments": {
+      "post": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "Store an image for a later turn to attach.",
+        "description": "Uploaded before the message is sent rather than inside it: a photo takes as\nlong as the network takes, and doing it at send time would make the composer\nwait, with no way to show progress or to retry the upload alone.",
+        "operationId": "post_chat_attachment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The image itself. Its media type is sniffed from the bytes — `Content-Type` is a claim by the caller and this one ends up inside the `data:` URL the provider is sent, so it is not taken on trust.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Stored; reference it by id in the next turn",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Attachment"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such chat",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Larger than this pod accepts, or than this conversation has room for",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Not an image the model can read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/chats/{id}/attachments/{attachment_id}": {
+      "get": {
+        "tags": [
+          "chats"
+        ],
+        "summary": "The image itself.",
+        "description": "Immutable by construction — an attachment id names one set of bytes that\nnever changes — so it is served with a long private cache lifetime and an\nETag, and a client that has drawn it once never asks again.",
+        "operationId": "get_chat_attachment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chat id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attachment_id",
+            "in": "path",
+            "description": "Attachment id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The image bytes, with the media type they were sniffed as",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "404": {
+            "description": "No such chat, or no such attachment on it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/chats/{id}/compact": {
       "post": {
         "tags": [
           "chats"
         ],
         "summary": "Compact this chat's context now — `/compact`.",
-        "description": "Deliberately does everything an automatic compaction does, including handing\nthe summary to memory: it is the most concentrated account of the conversation\nthat will ever exist and the LLM call is already paid for, so a forced\ncompaction that dropped it would quietly be worth less than one that happened\nby itself.\n\nRefuses mid-turn. Compaction rewrites the message list the running turn is\nreading, and \"your context changed under you\" is not a failure mode worth\nhaving.",
+        "description": "Deliberately does everything an automatic compaction does, including handing\nthe summary to memory: it is the most concentrated account of the conversation\nthat will ever exist and the LLM call is already paid for, so a forced\ncompaction that dropped it would quietly be worth less than one that happened\nby itself.\n\nRefuses mid-turn. The boundary it records is an index into the message list a\nrunning turn is still appending to, and \"your context changed under you\" is\nnot a failure mode worth having.",
         "operationId": "post_chat_compact",
         "parameters": [
           {
@@ -4531,6 +4658,33 @@
           }
         }
       },
+      "Attachment": {
+        "type": "object",
+        "description": "One stored attachment: what it is, and which conversation owns it.",
+        "required": [
+          "id",
+          "mime",
+          "size_bytes",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mime": {
+            "type": "string",
+            "description": "The image's media type, sniffed from the bytes. Always one of the four\nthe provider accepts."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "Author": {
         "type": "object",
         "required": [
@@ -4681,7 +4835,7 @@
               "string",
               "null"
             ],
-            "description": "The summary that replaced the old half, when one was produced."
+            "description": "The summary now standing in for the old half, when one was produced."
           },
           "tokens_after": {
             "type": "integer",
@@ -4689,6 +4843,7 @@
           },
           "tokens_before": {
             "type": "integer",
+            "description": "Sizes of the context the model is sent — before and after the record\nlanded. The stored conversation does not shrink; only the view does.",
             "minimum": 0
           }
         }
@@ -6996,7 +7151,8 @@
         "required": [
           "ready",
           "credential",
-          "gateway"
+          "gateway",
+          "vision"
         ],
         "properties": {
           "base_url": {
@@ -7017,6 +7173,10 @@
           "ready": {
             "type": "boolean",
             "description": "A credential resolves, so a turn has something to authenticate with. This\nis not a promise the turn *succeeds*: the gateway still meters credits and\nrequires the account's premium, which the pod cannot see."
+          },
+          "vision": {
+            "type": "boolean",
+            "description": "Whether this pod's model can be shown an image, so a client knows\nwhether to offer an attach button at all. An older pod omits the field,\nwhich decodes to `false` — the right default, because a pod that cannot\nsay is a pod that cannot take attachments either."
           }
         }
       },
